@@ -2,6 +2,7 @@ import cupy as cp
 import numpy as np
 import allel
 import tskit
+
 class HaplotypeMatrix:
     """
     Represents a haplotype matrix, which is a matrix of haplotypes across multiple variants.
@@ -17,8 +18,8 @@ class HaplotypeMatrix:
         positions (cp.ndarray): The array of variant positions.
     """
     def __init__(self, 
-                 genotypes: cp.ndarray, 
-                 positions: cp.ndarray,
+                 genotypes, # either a numpy array or a cupy array
+                 positions, # either a numpy array or a cupy array
                  chrom_start: int = None,
                  chrom_end: int = None,
                  ):
@@ -28,10 +29,47 @@ class HaplotypeMatrix:
         # test for empty positions
         if positions.size == 0:
             raise ValueError("positions cannot be empty")
+        # make sure genotypes and positions are either numpy or cupy arrays
+        if not isinstance(genotypes, np.ndarray) and not isinstance(genotypes, cp.ndarray):
+            raise ValueError("genotypes must be a numpy or cupy array")
+        if not isinstance(positions, np.ndarray) and not isinstance(positions, cp.ndarray):
+            raise ValueError("positions must be a numpy or cupy array")
+        
+        # Determine device based on genotypes.
+        # transfer positions if necessary
+        if isinstance(genotypes, cp.ndarray):
+            self._device = 'GPU'
+            if isinstance(positions, np.ndarray):
+                positions = cp.array(positions)
+        else:
+            self._device = 'CPU'
+            if isinstance(positions, cp.ndarray):
+                positions = positions.get()
+       
+        # set attributes
         self.haplotypes = genotypes
         self.positions = positions
         self.chrom_start = chrom_start
         self.chrom_end = chrom_end
+
+    @property
+    def device(self):
+        """Returns the current device (CPU or GPU)."""
+        return self._device
+
+    def transfer_to_gpu(self):
+        """Transfer data from CPU to GPU."""
+        if self.device == 'CPU':
+            self.haplotypes = cp.array(self.haplotypes)
+            self.positions = cp.array(self.positions)
+            self._device = 'GPU'
+
+    def transfer_to_cpu(self):
+        """Transfer data from GPU to CPU."""
+        if self.device == 'GPU':
+            self.haplotypes = cp.asnumpy(self.haplotypes)
+            self.positions = cp.asnumpy(self.positions)
+            self._device = 'CPU'
 
     @classmethod
     def from_vcf(cls, path: str):
@@ -139,24 +177,43 @@ class HaplotypeMatrix:
         return (f"HaplotypeMatrix(shape={self.shape}, "
                 f"first_position={first_pos}, last_position={last_pos})")
     
-    def get_subset(self, positions: cp.ndarray) -> "HaplotypeMatrix":
+    def get_subset(self, positions) -> "HaplotypeMatrix":
         """
         Get a subset of the haplotype matrix based on the provided positions.
         
         Parameters:
-            positions (cp.ndarray): An array of indices to select from the haplotype matrix.
+            positions: A one-dimensional array of indices to select from the haplotype matrix.
+                       This can be either a NumPy array or a CuPy array.
             
         Returns:
             HaplotypeMatrix: A new instance containing the subset of the haplotype matrix.
         """
-        # Ensure positions are valid indices
-        if positions.ndim != 1 or not cp.all((positions >= 0) & (positions < self.haplotypes.shape[0])):
-            raise ValueError("Positions must be valid indices within the haplotype matrix.")
+        # Ensure positions is one-dimensional
+        if positions.ndim != 1:
+            raise ValueError("Positions must be a one-dimensional array.")
         
-        # Create new arrays with the subset
-        subset_haplotypes = cp.array(self.haplotypes[:, positions])
-        subset_positions = cp.array(self.positions[positions])
+        # Convert positions to match the device of the haplotype matrix.
+        if self.device == 'CPU' and isinstance(positions, cp.ndarray):
+            positions = cp.asnumpy(positions)
+        elif self.device == 'GPU' and isinstance(positions, np.ndarray):
+            positions = cp.array(positions)
+       
+        # Validate that positions are valid indices.
+        if self.device == 'CPU':
+            if not np.all((positions >= 0) & (positions < self.haplotypes.shape[1])):
+                raise ValueError("Positions must be valid indices within the haplotype matrix.")
+            # Index using NumPy arrays
+            subset_haplotypes = self.haplotypes[:, positions]
+            subset_positions = self.positions[positions]
+        else:
+            # Validate using CuPy
+            if not cp.all((positions >= 0) & (positions < self.haplotypes.shape[1])):
+                raise ValueError("Positions must be valid indices within the haplotype matrix.")
+            # Index using CuPy arrays
+            subset_haplotypes = self.haplotypes[:, positions]
+            subset_positions = self.positions[positions]
         
+        # Create and return a new instance, maintaining the device state.
         return HaplotypeMatrix(subset_haplotypes, subset_positions)
     
     def get_subset_from_range(self, low: int, high: int) -> "HaplotypeMatrix":
@@ -174,15 +231,19 @@ class HaplotypeMatrix:
         if low < 0 or high > self.positions.size or low >= high:
             raise ValueError("Invalid range specified")
         
-        # Find indices of positions within the specified range
-        indices = cp.where((self.positions >= low) & (self.positions < high))[0]
+        # Check device and find indices of positions within the specified range
+        if self.device == 'CPU':
+            indices = np.where((self.positions >= low) & (self.positions < high))[0]
+        else:
+            indices = cp.where((self.positions >= low) & (self.positions < high))[0]
         
         # Create the subset of haplotypes based on the found indices
         return HaplotypeMatrix(
             self.haplotypes[:, indices], 
             self.positions[indices], 
-            self.chrom_start, 
-            self.chrom_end)
+            chrom_start=low, 
+            chrom_end=high
+            )
         
         
         
@@ -276,6 +337,10 @@ class HaplotypeMatrix:
             cp.ndarray: A square matrix where element (i,j) represents the D statistic
                        between variants i and j. The matrix is symmetric.
         """
+        # Ensure data is on GPU
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+            
         n_variants = self.num_variants
         n_haplotypes = self.num_haplotypes
         
@@ -300,12 +365,15 @@ class HaplotypeMatrix:
         
         return D
 
-
     def pairwise_LD_v(self) -> cp.ndarray:
         """
         Optimized pairwise linkage disequilibrium (D statistic) computation 
         using matrix multiplication for CuPy acceleration.
         """
+        # Ensure data is on GPU
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+
         n_haplotypes = self.num_haplotypes
         
         # Compute allele frequencies for all variants
@@ -328,6 +396,10 @@ class HaplotypeMatrix:
         Calculate the pairwise r2 (correlation coefficient) for all pairs of variants
         in the haplotype matrix.
         """
+        # Ensure data is on GPU
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        
         n_haplotypes = self.num_haplotypes
         
         # Compute allele frequencies for all variants
