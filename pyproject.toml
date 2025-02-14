@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pg_gpu"
+version = "0.1.0"
+authors = [
+    { name = "Your Name" },
+]
+description = "A package for computing linkage disequilibrium statistics using CuPy"
+requires-python = ">=3.12"
+dependencies = [
+    "scikit-allel",
+    "msprime",
+    "pytest",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [
+    "pg_gpu"
+] 

@@ -1,0 +1,15 @@
+
+# pixi environments
+.pixi
+*.egg-info
+
+# conda environments
+.conda
+
+# python
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+
