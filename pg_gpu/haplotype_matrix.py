@@ -16,13 +16,16 @@ class HaplotypeMatrix:
     Attributes:
         haplotypes (cp.ndarray): The genotype/haplotype matrix.
         positions (cp.ndarray): The array of variant positions.
+        chrom_start (int): Chromosome start position.
+        chrom_end (int): Chromosome end position.
     """
     def __init__(self, 
                  genotypes, # either a numpy array or a cupy array
                  positions, # either a numpy array or a cupy array
                  chrom_start: int = None,
                  chrom_end: int = None,
-                 ):
+                 sample_sets: dict = None  # new optional parameter for population sample sets
+                ):
         # test for empty genotypes
         if genotypes.size == 0:
             raise ValueError("genotypes cannot be empty")
@@ -51,11 +54,27 @@ class HaplotypeMatrix:
         self.positions = positions
         self.chrom_start = chrom_start
         self.chrom_end = chrom_end
+        self._sample_sets = sample_sets  # store the sample set info (optional)
 
     @property
     def device(self):
         """Returns the current device (CPU or GPU)."""
         return self._device
+
+    @property
+    def sample_sets(self):
+        """
+        Defines groups of haplotypes that belong to populations.
+
+        Returns:
+            dict: A dictionary mapping population names to sets of haplotype indices.
+                  If _sample_sets was not specified at construction, returns a default 
+                  dictionary with a single key 'all' containing all haplotype indices.
+        """
+        if self._sample_sets is None:
+            # All haplotypes belong to a single population labeled "all"
+            return {"all": set(range(self.haplotypes.shape[0]))}
+        return self._sample_sets
 
     def transfer_to_gpu(self):
         """Transfer data from CPU to GPU."""
@@ -317,49 +336,6 @@ class HaplotypeMatrix:
         V = cp.sqrt((e1 * S) + (e2 * S * (S - 1)))
         return float((pi - theta) / V) if V != 0 else float("nan")
 
-    def pairwise_LD(self) -> cp.ndarray:
-        """
-        Calculate the pairwise linkage disequilibrium (D statistic) for all pairs of variants
-        in the haplotype matrix.
-        
-        The D statistic is calculated as:
-        D = p_AB - p_A * p_B
-        where:
-        - p_AB is the frequency of haplotypes with both variants
-        - p_A is the frequency of the first variant
-        - p_B is the frequency of the second variant
-        
-        Returns:
-            cp.ndarray: A square matrix where element (i,j) represents the D statistic
-                       between variants i and j. The matrix is symmetric.
-        """
-        # Ensure data is on GPU
-        if self.device == 'CPU':
-            self.transfer_to_gpu()
-            
-        n_variants = self.num_variants
-        n_haplotypes = self.num_haplotypes
-        
-        # Calculate allele frequencies for all variants (p_A, p_B, etc.)
-        p = cp.sum(self.haplotypes, axis=0) / n_haplotypes
-        
-        # Initialize the D matrix
-        D = cp.zeros((n_variants, n_variants))
-        
-        # Calculate pairwise LD
-        for i in range(n_variants):
-            # We only need to calculate upper triangle due to symmetry
-            for j in range(i+1, n_variants):
-                # Get haplotypes with both variants (p_AB)
-                p_AB = cp.sum((self.haplotypes[:, i] == 1) & 
-                            (self.haplotypes[:, j] == 1)) / n_haplotypes
-                
-                # Calculate D = p_AB - p_A * p_B
-                D[i, j] = p_AB - (p[i] * p[j])
-                # Copy to lower triangle due to symmetry
-                D[j, i] = D[i, j]
-        
-        return D
 
     def pairwise_LD_v(self) -> cp.ndarray:
         """
@@ -418,3 +394,234 @@ class HaplotypeMatrix:
         cp.fill_diagonal(r2, 0)
 
         return r2
+
+
+    def tally_gpu_haplotypes(self, missing: bool = False) -> cp.ndarray:
+        """
+        GPU version of tallying haplotype counts between all pairs of variants.
+        
+        For each pair (i, j) of variants (with i < j), it computes:
+            n11: the number of haplotypes with allele 1 at both i and j.
+            n10: the number with allele 1 at i and allele 0 at j.
+            n01: the number with allele 0 at i and allele 1 at j.
+            n00: the number with allele 0 at both i and j.
+        
+        Returns:
+            cp.ndarray: A matrix with shape (#pairs, 4) where each row is (n11, n10, n01, n00).
+        
+        Note:
+            This implementation does not yet support missing data.
+        """
+        import cupy as cp
+        
+        if missing:
+            raise NotImplementedError("Missing data support is not implemented in GPU tallying.")
+        
+        # Ensure data is on the GPU.
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        
+        # X is the haplotype matrix of shape (n_haplotypes, num_variants)
+        X = self.haplotypes
+        n = self.num_haplotypes
+        m = self.num_variants
+        
+        # Count of ones (allele=1) per variant – shape: (m,)
+        ones_per_variant = cp.sum(X, axis=0)
+        
+        # Compute n11 for all variant pairs using matrix multiplication.
+        # The (i,j) element of this matrix is the number of haplotypes with 1 at both variants.
+        n11_mat = X.T @ X  # shape (m, m)
+        
+        # Get the indices for the upper triangle (excluding the diagonal)
+        idx_i, idx_j = cp.triu_indices(m, k=1)
+        
+        n11_pairs = n11_mat[idx_i, idx_j]
+        n10_pairs = ones_per_variant[idx_i] - n11_pairs
+        n01_pairs = ones_per_variant[idx_j] - n11_pairs
+        n00_pairs = n - (n11_pairs + n10_pairs + n01_pairs)
+        
+        # Stack the results into one matrix of shape (#pairs, 4)
+        counts = cp.stack([n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1)
+        return counts
+
+    def count_haplotypes_between_populations_gpu(self, missing: bool = False) -> dict:
+        """
+        GPU implementation of counting haplotype tallies between different populations defined
+        in self.sample_sets. The haplotype matrix is assumed to contain data for multiple populations
+        (i.e. sample_sets is a dict mapping population names to sets of haplotype indices).
+
+        For each unique pair of populations (pop1, pop2), let:
+            subX1 = haplotype data for pop1 with shape (n1, m)
+            subX2 = haplotype data for pop2 with shape (n2, m)
+            ones1   = count of allele 1 in subX1, for each of the m variants
+            ones2   = count of allele 1 in subX2, for each of the m variants
+
+        Then, for every variant pair (i, j) the tallies for the 2x2 table are computed as:
+            - n11 = ones1[i] * ones2[j]
+            - n10 = ones1[i] * (n2 - ones2[j])
+            - n01 = (n1 - ones1[i]) * ones2[j]
+            - n00 = (n1 - ones1[i]) * (n2 - ones2[j])
+            
+        The tallies for each population pair are returned in a dictionary, with keys given by
+        (pop1, pop2) tuples and values a CuPy array of shape (m*m, 4) (one row per variant pair).
+        
+        Missing data is not supported.
+
+        Parameters:
+            missing (bool): If True, raises NotImplementedError (missing data not implemented).
+
+        Returns:
+            dict: A dictionary mapping (pop1, pop2) to a CuPy array of tallies.
+        """
+        if missing:
+            raise NotImplementedError("Missing data support is not implemented in this function.")
+        
+        # Ensure the haplotype data is on the GPU.
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        
+        X = self.haplotypes  # Shape: (n_total, m)
+        m = self.num_variants
+        pops = self.sample_sets
+        
+        if len(pops) < 2:
+            raise ValueError("At least two populations are required in sample_sets for between-population tallies.")
+        
+        results = {}
+        pop_keys = sorted(pops.keys())
+        for i in range(len(pop_keys)):
+            for j in range(i + 1, len(pop_keys)):
+                pop1, pop2 = pop_keys[i], pop_keys[j]
+                
+                # Get haplotype indices for each population.
+                indices1 = sorted(list(pops[pop1]))
+                indices2 = sorted(list(pops[pop2]))
+                if len(indices1) == 0 or len(indices2) == 0:
+                    continue  # Skip if one of the populations has no samples.
+                
+                # Extract the submatrices: rows corresponding to each population.
+                subX1 = X[indices1, :]  # shape: (n1, m)
+                subX2 = X[indices2, :]  # shape: (n2, m)
+                n1 = subX1.shape[0]
+                n2 = subX2.shape[0]
+                
+                # Compute the number of ones for each variant.
+                ones1 = cp.sum(subX1, axis=0).astype(cp.int32)  # shape: (m,)
+                ones2 = cp.sum(subX2, axis=0).astype(cp.int32)  # shape: (m,)
+                
+                # Compute cross-population tallies using outer products:
+                n11_matrix = ones1.reshape(m, 1) * ones2.reshape(1, m)
+                n10_matrix = ones1.reshape(m, 1) * ((n2 - ones2).reshape(1, m))
+                n01_matrix = ( (n1 - ones1).reshape(m, 1) ) * ones2.reshape(1, m)
+                n00_matrix = (n1 - ones1).reshape(m, 1) * ((n2 - ones2).reshape(1, m))
+                
+                # Stack the tallies along a new third axis and reshape into a 2D array.
+                tallies = cp.stack([n11_matrix, n10_matrix, n01_matrix, n00_matrix], axis=2).reshape(-1, 4)
+                results[(pop1, pop2)] = tallies
+        
+        return results
+
+    def compute_ld_statistics_gpu(self, bp_bins, missing=False, raw=False):
+        """
+        GPU-based implementation of computing LD statistics for a single population using tallies
+        from tally_gpu_haplotypes, followed by binning by base-pair distance.
+        
+        Steps:
+          1. Compute pairwise haplotype tallies using tally_gpu_haplotypes. Each row in the resulting 
+             CuPy array represents the 2x2 haplotype count table [n11, n10, n01, n00] for a variant pair.
+          2. Compute the positions for each variant pair from the upper-triangle indices (using cp.triu_indices)
+             so that distance = pos[j] - pos[i].
+          3. Using the GPU stats module (stats_from_haplotype_counts_gpu), compute for each pair: D, D^2, Dz, and π₂.
+          4. Bin the variant pairs by distance using the provided bp_bins.
+          5. Depending on the `raw` flag:
+               * If raw is False (default), return the mean (averaged over all pairs in the bin) of each statistic.
+               * If raw is True, return the raw sums for each statistic (which should match the Moments aggregation).
+        
+        Parameters:
+            bp_bins (array-like): Array of bin boundaries in base pairs (e.g. [0, 50, 100, ...]).
+            missing (bool): If True, raises NotImplementedError (missing data not implemented).
+            raw (bool): If True, return the raw sums aggregated in each bin, rather than mean values.
+        
+        Returns:
+            dict: A dictionary mapping each bin (tuple: (bin_start, bin_end)) to a tuple:
+                  (D2, Dz, pi2, D). If raw is False these values are averaged over pairs; if raw is True
+                  they are the raw sums.
+        """
+        if missing:
+            raise NotImplementedError("Missing data support is not implemented.")
+
+        # Ensure the matrix (and positions) are on the GPU.
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+
+        # Get the haplotype data and positions.
+        X = self.haplotypes  # shape: (n_haplotypes, num_variants)
+        pos = self.positions  # assumed to be sorted; shape: (num_variants,)
+        m = self.num_variants
+
+        # Ensure positions are on the GPU.
+        import cupy as cp
+        if not isinstance(pos, cp.ndarray):
+            pos = cp.array(pos)
+
+        # Compute pairwise tallies for all variant pairs using our efficient GPU routine.
+        # "counts" is a CuPy array of shape (#pairs, 4) with columns: [n11, n10, n01, n00].
+        counts = self.tally_gpu_haplotypes(missing=missing)
+
+        # Get the variant-pair indices corresponding to the tallies.
+        idx_i, idx_j = cp.triu_indices(m, k=1)
+        # Compute the physical distance between variant pairs.
+        distances = pos[idx_j] - pos[idx_i]  # shape: (#pairs,)
+
+        # Import the GPU stats module.
+        from pg_gpu import stats_from_haplotype_counts_gpu as stats
+
+        # Compute the LD statistics for all variant pairs.
+        # D_vals   = stats.D(counts)    # shape: (#pairs,)
+        DD_vals  = stats.DD(counts)   # shape: (#pairs,)
+        Dz_vals  = stats.Dz(counts)   # shape: (#pairs,)
+        pi2_vals = stats.pi2(counts)  # shape: (#pairs,)
+
+        # Convert bp_bins to a CuPy array.
+        bp_bins_cp = cp.array(bp_bins)
+        # Define bins as intervals [bp_bins[i], bp_bins[i+1]); use cp.digitize.
+        # cp.digitize returns an index in [0, len(bp_bins_cp)] so subtract one.
+        bin_inds = cp.digitize(distances, bp_bins_cp) - 1
+        
+        # Only consider pairs that fall into a valid bin interval.
+        n_bins = len(bp_bins_cp) - 1
+        valid_mask = (bin_inds >= 0) & (bin_inds < n_bins)
+        bin_inds = bin_inds[valid_mask]
+        # D_vals   = D_vals[valid_mask]
+        DD_vals  = DD_vals[valid_mask]
+        Dz_vals  = Dz_vals[valid_mask]
+        pi2_vals = pi2_vals[valid_mask]
+
+        # Initialize output dictionary.
+        out = {}
+        # Loop over each bin index.
+        for i in range(n_bins):
+            bin_start = float(bp_bins_cp[i].get())
+            bin_end   = float(bp_bins_cp[i+1].get())
+            # Get indices within this bin.
+            mask = (bin_inds == i)
+            count_pairs = int(cp.sum(mask).get())
+            if count_pairs > 0:
+                if raw:
+                    sum_D2  = float(cp.sum(DD_vals[mask]).get())
+                    sum_Dz  = float(cp.sum(Dz_vals[mask]).get())
+                    sum_pi2 = float(cp.sum(pi2_vals[mask]).get())
+                    # sum_D   = float(cp.sum(D_vals[mask]).get())
+                    out[(bin_start, bin_end)] = (sum_D2, sum_Dz, sum_pi2)
+                else:
+                    mean_D2  = float(cp.mean(DD_vals[mask]).get())
+                    mean_Dz  = float(cp.mean(Dz_vals[mask]).get())
+                    mean_pi2 = float(cp.mean(pi2_vals[mask]).get())
+                    # mean_D   = float(cp.mean(D_vals[mask]).get())
+                    out[(bin_start, bin_end)] = (mean_D2, mean_Dz, mean_pi2)
+            else:
+                # For an empty bin, return zeros.
+                out[(bin_start, bin_end)] = (0.0, 0.0, 0.0)
+
+        return out
