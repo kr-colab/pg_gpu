@@ -120,4 +120,3 @@ def pi2(counts):
     pi2_val = numer / (n * (n - 1) * (n - 2) * (n - 3))
     return cp.squeeze(pi2_val)
 
-# (Additional GPU-optimized functions could be added here as needed) 
