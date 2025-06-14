@@ -33,6 +33,21 @@ This directory contains the test suite for the pg_gpu package. All tests are des
   - Compares aggregated statistics against moments
   - Tests both raw sums and averaged statistics
 
+### Validation Tests
+
+- **`test_ld_validation_synthetic.py`**: Fast validation using synthetic data
+  - Uses msprime to generate test data
+  - Tests all 15 two-population LD statistics
+  - Provides quick validation without external data files
+  - Good for continuous integration
+
+- **`test_ld_validation_full.py`**: Full validation against IM model dataset
+  - Requires `data/im-parsing-example.vcf` and `data/im_pop.txt`
+  - Tests against the same dataset used in `validate_two_pop_ld.py`
+  - Parametrized tests for each statistic
+  - Tests overall correlation and mean relative error
+  - Caches moments results for faster repeated runs
+
 ## Running Tests
 
 Run all tests:
@@ -53,6 +68,15 @@ pytest tests/ -v
 Run specific test class or method:
 ```bash
 pytest tests/test_ld_statistics_gpu.py::TestLDStatisticsGPU::test_gpu_ld_statistics_between_populations
+```
+
+Run validation tests only:
+```bash
+# Fast synthetic validation
+pytest tests/test_ld_validation_synthetic.py -v
+
+# Full validation (if IM data available)
+pytest tests/test_ld_validation_full.py -v
 ```
 
 ## Test Data
