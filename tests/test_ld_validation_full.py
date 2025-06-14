@@ -201,6 +201,293 @@ class TestLDValidationFull:
         
         # Mean relative error should be low
         assert mean_rel_error < 0.05, f"Mean relative error too high: {mean_rel_error}"
+    
+    def test_debug_dz_discrepancies(self, moments_results, gpu_results):
+        """Debug test to understand Dz discrepancies with IM model data."""
+        print("\n" + "=" * 60)
+        print("DEBUGGING DZ DISCREPANCIES - IM MODEL")
+        print("=" * 60)
+        
+        stat_names = moments_results['stats'][0]
+        dz_indices = [(i, name) for i, name in enumerate(stat_names) if name.startswith('Dz')]
+        
+        # Track errors by bin
+        errors_by_bin = {}
+        
+        for bin_idx, (bin_range, moments_sums) in enumerate(zip(moments_results['bins'], moments_results['sums'])):
+            print(f"\nBin {bin_idx}: {bin_range}")
+            print("-" * 50)
+            
+            gpu_bin = gpu_results[bin_range]
+            errors_by_bin[bin_idx] = []
+            
+            # Check all statistics but focus on Dz
+            for stat_idx, stat_name in dz_indices:
+                mom_val = moments_sums[stat_idx]
+                gpu_val = gpu_bin[stat_name]
+                
+                if abs(mom_val) > 1e-10:
+                    rel_error = abs(gpu_val - mom_val) / abs(mom_val)
+                else:
+                    rel_error = 0.0 if abs(gpu_val) < 1e-10 else float('inf')
+                
+                errors_by_bin[bin_idx].append((stat_name, rel_error))
+                
+                # Print details for high errors
+                if rel_error > 0.05:  # 5% threshold
+                    print(f"  {stat_name:10s}: moments={mom_val:10.6f}, gpu={gpu_val:10.6f}, rel_err={rel_error:6.3f} ***")
+                else:
+                    print(f"  {stat_name:10s}: moments={mom_val:10.6f}, gpu={gpu_val:10.6f}, rel_err={rel_error:6.3f}")
+        
+        # Summary of errors
+        print("\n" + "=" * 60)
+        print("ERROR SUMMARY")
+        print("=" * 60)
+        
+        for bin_idx, errors in errors_by_bin.items():
+            high_errors = [(name, err) for name, err in errors if err > 0.05]
+            if high_errors:
+                print(f"\nBin {bin_idx} - High error statistics:")
+                for name, err in high_errors:
+                    print(f"  {name}: {err:.3f}")
+        
+        # Check if errors are systematic
+        print("\n" + "=" * 60)
+        print("CHECKING FOR SYSTEMATIC PATTERNS")
+        print("=" * 60)
+        
+        # Group errors by statistic type
+        errors_by_stat = {}
+        for bin_idx, errors in errors_by_bin.items():
+            for stat_name, err in errors:
+                if stat_name not in errors_by_stat:
+                    errors_by_stat[stat_name] = []
+                errors_by_stat[stat_name].append((bin_idx, err))
+        
+        # Print patterns
+        for stat_name, bin_errors in errors_by_stat.items():
+            max_err = max(err for _, err in bin_errors)
+            if max_err > 0.05:
+                print(f"\n{stat_name}:")
+                for bin_idx, err in bin_errors:
+                    print(f"  Bin {bin_idx}: {err:.3f}")
+        
+        # Additional debugging info
+        print("\n" + "=" * 60)
+        print("ADDITIONAL INFO")
+        print("=" * 60)
+        
+        # Check if we have counts info
+        if 'counts' in moments_results:
+            print("\nPair counts per bin from moments:")
+            for i, count in enumerate(moments_results.get('counts', [])):
+                print(f"  Bin {i}: {count}")
+        
+        # Check heterozygosity
+        if len(moments_results['sums']) > 0 and len(moments_results['stats']) > 1:
+            print(f"\nHeterozygosity stats: {moments_results['stats'][1]}")
+            for i, h_vals in enumerate(moments_results['sums']):
+                if i < len(moments_results['bins']):
+                    print(f"  Bin {i}: H values = {h_vals[-3:] if len(h_vals) > 15 else 'N/A'}")
+    
+    def test_debug_pair_counts(self, im_model_data, moments_results):
+        """Debug test to check pair counts per bin."""
+        vcf_path, pop_file = im_model_data
+        
+        print("\n" + "=" * 60)
+        print("DEBUGGING PAIR COUNTS PER BIN")
+        print("=" * 60)
+        
+        # Get bins from moments
+        bp_bins = [b[1] for b in moments_results['bins']]
+        bp_bins = [moments_results['bins'][0][0]] + bp_bins
+        
+        # Load VCF data
+        import allel
+        vcf = allel.read_vcf(vcf_path)
+        positions = vcf['variants/POS']
+        n_variants = len(positions)
+        
+        print(f"\nTotal variants: {n_variants}")
+        print(f"Total possible pairs: {n_variants * (n_variants - 1) // 2}")
+        print(f"\nBins: {bp_bins}")
+        
+        # Count pairs per bin manually
+        import numpy as np
+        pair_counts = np.zeros(len(bp_bins) - 1)
+        
+        for i in range(n_variants):
+            for j in range(i + 1, n_variants):
+                dist = positions[j] - positions[i]
+                bin_idx = np.digitize(dist, bp_bins) - 1
+                if 0 <= bin_idx < len(pair_counts):
+                    pair_counts[bin_idx] += 1
+        
+        print("\nPair counts per bin (manual calculation):")
+        for i, count in enumerate(pair_counts):
+            print(f"  Bin {i} {moments_results['bins'][i]}: {int(count)} pairs")
+        
+        # Check if moments provides pair counts
+        print("\nChecking moments internal data...")
+        for key in moments_results.keys():
+            if 'count' in key.lower() or 'pair' in key.lower():
+                print(f"  Found key: {key} = {moments_results[key]}")
+    
+    def test_debug_population_assignment(self, im_model_data, gpu_results):
+        """Debug test to check population assignments."""
+        vcf_path, pop_file = im_model_data
+        
+        print("\n" + "=" * 60)
+        print("DEBUGGING POPULATION ASSIGNMENTS")
+        print("=" * 60)
+        
+        # Load VCF data
+        import allel
+        vcf = allel.read_vcf(vcf_path)
+        n_samples = vcf['samples'].shape[0]
+        
+        # Read population file
+        pop_assignments = {}
+        with open(pop_file, 'r') as f:
+            next(f)  # Skip header
+            for line in f:
+                sample, pop = line.strip().split()
+                pop_assignments[sample] = pop
+        
+        # Count samples per population
+        pop_counts = {}
+        for sample in vcf['samples']:
+            pop = pop_assignments.get(sample, 'unknown')
+            pop_counts[pop] = pop_counts.get(pop, 0) + 1
+        
+        print(f"\nTotal samples: {n_samples}")
+        print("\nPopulation counts:")
+        for pop, count in sorted(pop_counts.items()):
+            print(f"  {pop}: {count} samples ({count * 2} haplotypes)")
+        
+        # Check GPU haplotype matrix setup
+        from pg_gpu.haplotype_matrix import HaplotypeMatrix
+        h_gpu = HaplotypeMatrix.from_vcf(vcf_path)
+        
+        # Set up populations as in the main test
+        pop_sets = {"deme0": [], "deme1": []}
+        for i, sample_name in enumerate(vcf['samples']):
+            pop = pop_assignments.get(sample_name, None)
+            if pop in pop_sets:
+                pop_sets[pop].append(i)
+                pop_sets[pop].append(i + n_samples)
+        
+        h_gpu.sample_sets = pop_sets
+        
+        print("\nGPU population setup:")
+        for pop, indices in pop_sets.items():
+            print(f"  {pop}: {len(indices)} haplotype indices")
+            print(f"    Sample indices: {sorted(set(i % n_samples for i in indices))}")
+        
+        # Test with a simple case - just count haplotypes
+        print("\nTesting haplotype counts for first few variants...")
+        for var_idx in range(min(3, h_gpu.num_variants)):
+            print(f"\nVariant {var_idx}:")
+            for pop in ["deme0", "deme1"]:
+                counts = h_gpu.tally_gpu_haplotypes(pop=pop)
+                if var_idx < len(counts):
+                    print(f"  {pop}: counts = {counts[var_idx].get() if hasattr(counts[var_idx], 'get') else counts[var_idx]}")
+    
+    def test_debug_specific_dz_calculation(self, im_model_data):
+        """Debug a specific Dz calculation to understand the discrepancy."""
+        vcf_path, pop_file = im_model_data
+        
+        print("\n" + "=" * 60)
+        print("DEBUGGING SPECIFIC DZ CALCULATION")
+        print("=" * 60)
+        
+        # Import what we need
+        import numpy as np
+        from pg_gpu.haplotype_matrix import HaplotypeMatrix
+        import allel
+        
+        # Load data
+        vcf = allel.read_vcf(vcf_path)
+        h_gpu = HaplotypeMatrix.from_vcf(vcf_path)
+        
+        # Set up populations
+        pop_assignments = {}
+        with open(pop_file, 'r') as f:
+            next(f)  # Skip header
+            for line in f:
+                sample, pop = line.strip().split()
+                pop_assignments[sample] = pop
+        
+        pop_sets = {"deme0": [], "deme1": []}
+        n_samples = vcf['samples'].shape[0]
+        for i, sample_name in enumerate(vcf['samples']):
+            pop = pop_assignments.get(sample_name, None)
+            if pop in pop_sets:
+                pop_sets[pop].append(i)
+                pop_sets[pop].append(i + n_samples)
+        
+        h_gpu.sample_sets = pop_sets
+        
+        # Get counts for a specific pair of variants
+        print("\nChecking first variant pair (0, 1):")
+        
+        # Get within-pop counts
+        counts_pop0 = h_gpu.tally_gpu_haplotypes(pop="deme0")
+        counts_pop1 = h_gpu.tally_gpu_haplotypes(pop="deme1")
+        
+        # Get the first pair's counts
+        if hasattr(counts_pop0[0], 'get'):
+            c0 = counts_pop0[0].get()
+            c1 = counts_pop1[0].get()
+        else:
+            c0 = counts_pop0[0]
+            c1 = counts_pop1[0]
+        
+        print(f"  deme0 counts: {c0} (sum={np.sum(c0)})")
+        print(f"  deme1 counts: {c1} (sum={np.sum(c1)})")
+        
+        # Manually calculate Dz(0,0,1) using moments formula
+        print("\nManual Dz calculations:")
+        
+        # For Dz(0,0,1) - D computed for pop0, z between pop0 and pop1
+        c11, c12, c13, c14 = c0[0], c0[1], c0[2], c0[3]
+        c21, c22, c23, c24 = c1[0], c1[1], c1[2], c1[3]
+        n1 = np.sum(c0)
+        n2 = np.sum(c1)
+        
+        # From moments Dz(i,i,j) formula
+        numer = (
+            (-c11 - c12 + c13 + c14)
+            * (-(c12 * c13) + c11 * c14)
+            * (-c21 + c22 - c23 + c24)
+        )
+        denom = n2 * n1 * (n1 - 1) * (n1 - 2)
+        dz_001 = numer / denom if denom != 0 else 0
+        
+        print(f"  Dz(0,0,1) = {dz_001:.6f}")
+        
+        # For Dz(0,1,0) - D computed for pop0, z between pop1 and pop0  
+        # This uses the Dz(i,j,i) formula
+        numer2 = (
+            (-c11 + c12 - c13 + c14)
+            * (-(c12 * c13) + c11 * c14)
+            * (-c21 - c22 + c23 + c24)
+        )
+        denom2 = n2 * n1 * (n1 - 1) * (n1 - 2)
+        dz_010 = numer2 / denom2 if denom2 != 0 else 0
+        
+        print(f"  Dz(0,1,0) = {dz_010:.6f}")
+        print(f"  Average (Dz_0_0_1) = {0.5 * (dz_001 + dz_010):.6f}")
+        
+        # Also check what moments package would compute
+        print("\nComparing with moments package calculation...")
+        try:
+            import moments.LD
+            # Create dummy data for moments
+            # This is just to verify our manual calculation
+            print("  (Would need to set up moments data structure for exact comparison)")
+        except:
+            print("  (Moments comparison skipped)")
 
 
 if __name__ == "__main__":

@@ -160,6 +160,103 @@ class TestLDValidationSynthetic:
             f"First few errors:\n" + "\n".join(errors[:5])
         )
     
+    def test_debug_dz_errors(self, synthetic_data):
+        """Debug test to understand Dz errors."""
+        vcf_path, pop_file, ts = synthetic_data
+        
+        # Define distance bins - including larger distances where errors occur
+        bp_bins = np.array([0, 1000, 5000, 20000, 50000])
+        
+        # Compute moments LD statistics
+        import moments.LD.Parsing as mParsing
+        moments_stats = mParsing.compute_ld_statistics(
+            vcf_path,
+            pop_file=pop_file,
+            pops=["pop0", "pop1"],
+            bp_bins=bp_bins,
+            use_genotypes=False,
+            report=False
+        )
+        
+        # Compute GPU statistics
+        h_gpu = HaplotypeMatrix.from_vcf(vcf_path)
+        
+        # Set up population sample sets based on VCF samples
+        import allel
+        vcf = allel.read_vcf(vcf_path)
+        n_samples = vcf['samples'].shape[0]
+        
+        # Read population assignments
+        pop_assignments = {}
+        with open(pop_file, 'r') as f:
+            next(f)  # Skip header
+            for line in f:
+                sample, pop = line.strip().split()
+                pop_assignments[sample] = pop
+        
+        # Create sample sets
+        pop_sets = {"pop0": [], "pop1": []}
+        for i, sample_name in enumerate(vcf['samples']):
+            pop = pop_assignments.get(sample_name, None)
+            if pop in pop_sets:
+                pop_sets[pop].append(i)
+                pop_sets[pop].append(i + n_samples)
+        
+        h_gpu.sample_sets = pop_sets
+        
+        # Compute GPU LD statistics
+        gpu_results = h_gpu.compute_ld_statistics_gpu_two_pops(
+            bp_bins=bp_bins,
+            pop1="pop0",
+            pop2="pop1",
+            missing=False,
+            raw=True
+        )
+        
+        # Focus on Dz statistics
+        stat_names = moments_stats['stats'][0]
+        dz_indices = [(i, name) for i, name in enumerate(stat_names) if name.startswith('Dz')]
+        
+        print("\n" + "=" * 60)
+        print("DZ STATISTICS COMPARISON")
+        print("=" * 60)
+        
+        # Analyze each bin
+        for bin_idx, (bin_range, moments_sums) in enumerate(zip(moments_stats['bins'], moments_stats['sums'])):
+            print(f"\nBin {bin_idx}: {bin_range}")
+            print("-" * 40)
+            
+            gpu_bin = gpu_results[bin_range]
+            
+            # Check Dz statistics
+            for stat_idx, stat_name in dz_indices:
+                mom_val = moments_sums[stat_idx]
+                gpu_val = gpu_bin[stat_name]
+                
+                if abs(mom_val) > 1e-10:
+                    rel_error = abs(gpu_val - mom_val) / abs(mom_val)
+                else:
+                    rel_error = 0.0 if abs(gpu_val) < 1e-10 else float('inf')
+                
+                print(f"  {stat_name:10s}: moments={mom_val:10.6f}, gpu={gpu_val:10.6f}, rel_err={rel_error:6.3f}")
+        
+        # Also check the counts and normalization
+        print("\n" + "=" * 60)
+        print("CHECKING COUNTS AND NORMALIZATION")
+        print("=" * 60)
+        
+        # Get the number of pairs per bin
+        print("\nNumber of variant pairs per bin (from moments):")
+        if hasattr(moments_stats, 'num_pairs_per_bin'):
+            for i, n_pairs in enumerate(moments_stats.get('num_pairs_per_bin', [])):
+                print(f"  Bin {i}: {n_pairs} pairs")
+        
+        # Check heterozygosity stats if available
+        if 'H' in moments_stats:
+            print("\nHeterozygosity stats from moments:")
+            for i, h_val in enumerate(moments_stats['H']):
+                print(f"  H[{i}]: {h_val}")
+    
     def test_simple_two_variant_case(self):
         """Test a very simple case with just two variants."""
         # Create simple test data

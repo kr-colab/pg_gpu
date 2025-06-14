@@ -271,6 +271,70 @@ class HaplotypeMatrix:
             chrom_start=low, 
             chrom_end=high
             )
+    
+    def apply_biallelic_filter(self) -> "HaplotypeMatrix":
+        """
+        Apply biallelic filter to remove variants that are not strictly biallelic.
+        
+        This filter matches the behavior of moments' get_genotypes function, which uses
+        is_biallelic_01() to remove variants that:
+        1. Have more than 2 alleles present in the data
+        2. Don't have both reference (0) and alternate (1) alleles present
+        
+        This is the actual filtering that moments does by default, not an AC filter.
+        
+        Returns:
+            HaplotypeMatrix: A new HaplotypeMatrix instance with filtered variants.
+        
+        Note:
+            This replicates moments' is_biallelic_01() filtering behavior.
+        """
+        if self.device == 'GPU':
+            xp = cp
+        else:
+            xp = np
+            
+        # For biallelic filtering, we need to check across ALL haplotypes
+        # Count alleles for each variant across all samples
+        n_variants = self.num_variants
+        
+        # Count occurrences of each allele value
+        alt_count = xp.sum(self.haplotypes == 1, axis=0)  # Count of allele 1
+        ref_count = xp.sum(self.haplotypes == 0, axis=0)  # Count of allele 0  
+        other_count = xp.sum(self.haplotypes >= 2, axis=0) + xp.sum(self.haplotypes < 0, axis=0)  # Count of other alleles (2+, -1, etc.)
+        
+        # A variant is biallelic if:
+        # 1. No other alleles (> 1 or < 0) are present
+        # 2. Both reference (0) and alternate (1) alleles are present
+        is_biallelic = (other_count == 0) & (ref_count > 0) & (alt_count > 0)
+        
+        keep_mask = is_biallelic
+        
+        # Get indices of variants to keep
+        keep_indices = xp.where(keep_mask)[0]
+        
+        # Create filtered HaplotypeMatrix
+        filtered_haplotypes = self.haplotypes[:, keep_indices]
+        filtered_positions = self.positions[keep_indices]
+        
+        # Update chromosome boundaries if needed
+        if len(keep_indices) > 0:
+            new_chrom_start = int(filtered_positions[0].get()) if self.device == 'GPU' else int(filtered_positions[0])
+            new_chrom_end = int(filtered_positions[-1].get()) if self.device == 'GPU' else int(filtered_positions[-1])
+        else:
+            new_chrom_start = self.chrom_start
+            new_chrom_end = self.chrom_end
+        
+        # Create new instance with same sample sets
+        filtered_matrix = HaplotypeMatrix(
+            filtered_haplotypes,
+            filtered_positions,
+            chrom_start=new_chrom_start,
+            chrom_end=new_chrom_end,
+            sample_sets=self._sample_sets
+        )
+        
+        return filtered_matrix
         
         
         
@@ -593,7 +657,7 @@ class HaplotypeMatrix:
         
         return results
 
-    def compute_ld_statistics_gpu(self, bp_bins, missing=False, raw=False):
+    def compute_ld_statistics_gpu(self, bp_bins, missing=False, raw=False, ac_filter=True):
         """
         GPU-based implementation of computing LD statistics for a single population using tallies
         from tally_gpu_haplotypes, followed by binning by base-pair distance.
@@ -613,6 +677,7 @@ class HaplotypeMatrix:
             bp_bins (array-like): Array of bin boundaries in base pairs (e.g. [0, 50, 100, ...]).
             missing (bool): If True, raises NotImplementedError (missing data not implemented).
             raw (bool): If True, return the raw sums aggregated in each bin, rather than mean values.
+            ac_filter (bool): If True, apply biallelic filtering (matching moments' is_biallelic_01 behavior).
         
         Returns:
             dict: A dictionary mapping each bin (tuple: (bin_start, bin_end)) to a tuple:
@@ -621,6 +686,15 @@ class HaplotypeMatrix:
         """
         if missing:
             raise NotImplementedError("Missing data support is not implemented.")
+        
+        # Apply biallelic filter if requested (matches moments' default behavior)
+        if ac_filter:
+            # Apply biallelic filtering to match moments' is_biallelic_01() behavior
+            filtered_self = self.apply_biallelic_filter()
+            # Use the filtered matrix for computation
+            return filtered_self.compute_ld_statistics_gpu(
+                bp_bins=bp_bins, missing=missing, raw=raw, ac_filter=False
+            )
 
         # Ensure the matrix (and positions) are on the GPU.
         if self.device == 'CPU':
@@ -717,15 +791,32 @@ class HaplotypeMatrix:
         from .compute_ld_moments_compatible import compute_ld_statistics_moments_compatible
         return compute_ld_statistics_moments_compatible(self, bp_bins, pop1, pop2, raw=raw)
     
-    def compute_ld_statistics_gpu_two_pops(self, bp_bins, pop1: str, pop2: str, missing=False, raw=False):
+    def compute_ld_statistics_gpu_two_pops(self, bp_bins, pop1: str, pop2: str, missing=False, raw=False, ac_filter=True):
         """GPU-based implementation of computing LD statistics for two populations.
         
         This method computes statistics for each variant pair and then sums them,
         matching the moments implementation approach.
+        
+        Parameters:
+            bp_bins: Array of bin boundaries in base pairs
+            pop1: Name of first population
+            pop2: Name of second population
+            missing: If True, raises NotImplementedError
+            raw: If True, return raw sums; if False, return means
+            ac_filter: If True, apply biallelic filtering (matching moments' is_biallelic_01 behavior)
         """
         if missing:
             raise NotImplementedError("Missing data support is not implemented.")
 
+        # Apply biallelic filter if requested (matches moments' default behavior)
+        if ac_filter:
+            # Apply biallelic filtering to match moments' is_biallelic_01() behavior
+            filtered_self = self.apply_biallelic_filter()
+            # Use the filtered matrix for computation
+            return filtered_self.compute_ld_statistics_gpu_two_pops(
+                bp_bins=bp_bins, pop1=pop1, pop2=pop2, missing=missing, raw=raw, ac_filter=False
+            )
+        
         # Ensure GPU setup
         if self.device == 'CPU':
             self.transfer_to_gpu()
