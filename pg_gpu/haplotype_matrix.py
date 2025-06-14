@@ -2,6 +2,7 @@ import cupy as cp
 import numpy as np
 import allel
 import tskit
+from collections import Counter
 
 class HaplotypeMatrix:
     """
@@ -67,14 +68,27 @@ class HaplotypeMatrix:
         Defines groups of haplotypes that belong to populations.
 
         Returns:
-            dict: A dictionary mapping population names to sets of haplotype indices.
+            dict: A dictionary mapping population names to lists of haplotype indices.
                   If _sample_sets was not specified at construction, returns a default 
                   dictionary with a single key 'all' containing all haplotype indices.
         """
         if self._sample_sets is None:
             # All haplotypes belong to a single population labeled "all"
-            return {"all": set(range(self.haplotypes.shape[0]))}
+            return {"all": list(range(self.haplotypes.shape[0]))}
         return self._sample_sets
+    
+    @sample_sets.setter
+    def sample_sets(self, sample_sets: dict):
+        """
+        Set the sample sets.
+        """
+        if not isinstance(sample_sets, dict):
+            raise ValueError("sample_sets must be a dictionary")
+        # check that the values are lists
+        for key, value in sample_sets.items():
+            if not isinstance(value, list):
+                raise ValueError("values in sample_sets must be lists")
+        self._sample_sets = sample_sets
 
     def transfer_to_gpu(self):
         """Transfer data from CPU to GPU."""
@@ -396,55 +410,112 @@ class HaplotypeMatrix:
         return r2
 
 
-    def tally_gpu_haplotypes(self, missing: bool = False) -> cp.ndarray:
+    def tally_gpu_haplotypes(self, pop=None, missing=False):
         """
-        GPU version of tallying haplotype counts between all pairs of variants.
+        GPU implementation of computing pairwise haplotype tallies.
         
-        For each pair (i, j) of variants (with i < j), it computes:
-            n11: the number of haplotypes with allele 1 at both i and j.
-            n10: the number with allele 1 at i and allele 0 at j.
-            n01: the number with allele 0 at i and allele 1 at j.
-            n00: the number with allele 0 at both i and j.
+        Parameters:
+            pop (str, optional): Population key from sample_sets to use. If None, uses all samples.
+            missing (bool): If True, raises NotImplementedError (missing data not implemented).
         
         Returns:
-            cp.ndarray: A matrix with shape (#pairs, 4) where each row is (n11, n10, n01, n00).
-        
-        Note:
-            This implementation does not yet support missing data.
+            cp.ndarray: Array of shape (#pairs, 4) containing [n11, n10, n01, n00] for each variant pair.
         """
-        import cupy as cp
-        
         if missing:
-            raise NotImplementedError("Missing data support is not implemented in GPU tallying.")
-        
-        # Ensure data is on the GPU.
+            raise NotImplementedError("Missing data support is not implemented.")
+
+        # Ensure data is on the GPU
         if self.device == 'CPU':
             self.transfer_to_gpu()
+
+        # Get the appropriate subset of haplotypes
+        if pop is not None:
+            if self._sample_sets is None:
+                raise ValueError("sample_sets must be defined to use pop parameter")
+            if pop not in self._sample_sets:
+                raise KeyError(f"Population key {pop} must exist in sample_sets")
+            X = self.haplotypes[self._sample_sets[pop], :]
+        else:
+            X = self.haplotypes
+
+        m = X.shape[1]  # number of variants
         
-        # X is the haplotype matrix of shape (n_haplotypes, num_variants)
-        X = self.haplotypes
-        n = self.num_haplotypes
-        m = self.num_variants
-        
-        # Count of ones (allele=1) per variant – shape: (m,)
+        # Count ones per variant
         ones_per_variant = cp.sum(X, axis=0)
         
-        # Compute n11 for all variant pairs using matrix multiplication.
-        # The (i,j) element of this matrix is the number of haplotypes with 1 at both variants.
-        n11_mat = X.T @ X  # shape (m, m)
+        # Compute n11 matrix
+        n11_mat = X.T @ X
         
-        # Get the indices for the upper triangle (excluding the diagonal)
+        # Get indices for upper triangle
         idx_i, idx_j = cp.triu_indices(m, k=1)
         
+        # Compute counts
         n11_pairs = n11_mat[idx_i, idx_j]
         n10_pairs = ones_per_variant[idx_i] - n11_pairs
         n01_pairs = ones_per_variant[idx_j] - n11_pairs
-        n00_pairs = n - (n11_pairs + n10_pairs + n01_pairs)
+        n00_pairs = X.shape[0] - (n11_pairs + n10_pairs + n01_pairs)
         
-        # Stack the results into one matrix of shape (#pairs, 4)
+        # Stack all results
         counts = cp.stack([n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1)
+        
         return counts
 
+    def tally_gpu_haplotypes_two_pops(self, pop1: str, pop2: str) -> cp.ndarray:
+        """GPU version of tallying haplotype counts between all pairs of variants for two populations."""
+        import cupy as cp
+        
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        
+        # Check populations
+        if self._sample_sets is None:
+            raise ValueError("sample_sets must be defined to use this function")
+        if pop1 not in self._sample_sets or pop2 not in self._sample_sets:
+            raise KeyError(f"Population keys {pop1} and {pop2} must exist in sample_sets")
+        
+        # Get indices for each population
+        idx1 = self._sample_sets[pop1]
+        idx2 = self._sample_sets[pop2]
+        
+        # Extract submatrices for each population
+        X1 = self.haplotypes[idx1, :]
+        X2 = self.haplotypes[idx2, :]
+        n1 = len(idx1)
+        n2 = len(idx2)
+        m = self.num_variants
+        
+        # Count ones per variant for each population
+        ones_per_variant1 = cp.sum(X1, axis=0)
+        ones_per_variant2 = cp.sum(X2, axis=0)
+        
+        # Compute n11 matrices for each population
+        n11_mat1 = X1.T @ X1
+        n11_mat2 = X2.T @ X2
+        
+        # Get indices for upper triangle only
+        idx_i, idx_j = cp.triu_indices(m, k=1)
+        
+        # Compute counts for population 1
+        n11_pairs1 = n11_mat1[idx_i, idx_j]
+        n10_pairs1 = ones_per_variant1[idx_i] - n11_pairs1
+        n01_pairs1 = ones_per_variant1[idx_j] - n11_pairs1
+        n00_pairs1 = n1 - (n11_pairs1 + n10_pairs1 + n01_pairs1)
+        
+        # Compute counts for population 2
+        n11_pairs2 = n11_mat2[idx_i, idx_j]
+        n10_pairs2 = ones_per_variant2[idx_i] - n11_pairs2
+        n01_pairs2 = ones_per_variant2[idx_j] - n11_pairs2
+        n00_pairs2 = n2 - (n11_pairs2 + n10_pairs2 + n01_pairs2)
+        
+        # Stack all results
+        counts = cp.stack([
+            n11_pairs1, n10_pairs1, n01_pairs1, n00_pairs1,
+            n11_pairs2, n10_pairs2, n01_pairs2, n00_pairs2
+        ], axis=1)
+        
+        return counts
+
+    # TODO: this is not correct
     def count_haplotypes_between_populations_gpu(self, missing: bool = False) -> dict:
         """
         GPU implementation of counting haplotype tallies between different populations defined
@@ -623,5 +694,191 @@ class HaplotypeMatrix:
             else:
                 # For an empty bin, return zeros.
                 out[(bin_start, bin_end)] = (0.0, 0.0, 0.0)
+
+        return out
+    def compute_ld_statistics_gpu_moments_compatible(self, bp_bins, pop1: str, pop2: str, missing=False, raw=False):
+        """
+        GPU-based LD statistics computation that exactly matches moments output format.
+        
+        This method computes all statistics in the order expected by moments:
+        DD_0_0, DD_0_1, DD_1_1, Dz_0_0_0, Dz_0_0_1, Dz_0_1_1, Dz_1_0_0, Dz_1_0_1, Dz_1_1_1,
+        pi2_0_0_0_0, pi2_0_0_0_1, pi2_0_0_1_1, pi2_0_1_0_1, pi2_0_1_1_1, pi2_1_1_1_1
+        
+        Parameters:
+            bp_bins: Array of bin boundaries
+            pop1: Name of first population (maps to index 0 in moments)
+            pop2: Name of second population (maps to index 1 in moments)
+            missing: If True, raises NotImplementedError
+            raw: If True, return raw sums; if False, return means
+            
+        Returns:
+            dict: Dictionary mapping bin ranges to tuples of statistics
+        """
+        from .compute_ld_moments_compatible import compute_ld_statistics_moments_compatible
+        return compute_ld_statistics_moments_compatible(self, bp_bins, pop1, pop2, raw=raw)
+    
+    def compute_ld_statistics_gpu_two_pops(self, bp_bins, pop1: str, pop2: str, missing=False, raw=False):
+        """GPU-based implementation of computing LD statistics for two populations.
+        
+        This method computes statistics for each variant pair and then sums them,
+        matching the moments implementation approach.
+        """
+        if missing:
+            raise NotImplementedError("Missing data support is not implemented.")
+
+        # Ensure GPU setup
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+
+        import cupy as cp
+        from pg_gpu import stats_from_haplotype_counts_gpu as stats
+        from collections import OrderedDict
+
+        # Get positions and ensure they're on GPU
+        pos = self.positions
+        m = self.num_variants
+        if not isinstance(pos, cp.ndarray):
+            pos = cp.array(pos)
+
+        # Get indices for upper triangle
+        idx_i, idx_j = cp.triu_indices(m, k=1)
+        distances = pos[idx_j] - pos[idx_i]
+
+        # Get within-population counts
+        counts_pop1 = self.tally_gpu_haplotypes(pop=pop1)
+        counts_pop2 = self.tally_gpu_haplotypes(pop=pop2)
+        
+        # Get between-population counts
+        counts_between = self.tally_gpu_haplotypes_two_pops(pop1, pop2)
+        counts1_between = counts_between[:, :4]
+        counts2_between = counts_between[:, 4:]
+
+        # Bin the pairs
+        bp_bins_cp = cp.array(bp_bins)
+        bin_inds = cp.digitize(distances, bp_bins_cp) - 1
+        n_bins = len(bp_bins_cp) - 1
+        valid_mask = (bin_inds >= 0) & (bin_inds < n_bins)
+
+        # Initialize output dictionary
+        out = {}
+        
+        # Process each bin
+        for i in range(n_bins):
+            bin_start = float(bp_bins[i])
+            bin_end = float(bp_bins[i+1])
+            
+            # Get mask for this bin
+            mask = (bin_inds == i) & valid_mask
+            
+            # Get counts for pairs in this bin
+            pairs_counts_pop1 = counts_pop1[mask]
+            pairs_counts_pop2 = counts_pop2[mask]
+            pairs_counts1_between = counts1_between[mask]
+            pairs_counts2_between = counts2_between[mask]
+            
+            # Compute statistics for each pair and sum them
+            # This matches the moments approach: sum(statistic(counts_i))
+            if pairs_counts_pop1.shape[0] == 0:
+                # No pairs in this bin
+                stats_dict = OrderedDict([
+                    ('DD_0_0', 0.0),
+                    ('DD_0_1', 0.0),
+                    ('DD_1_1', 0.0),
+                    ('Dz_0_0_0', 0.0),
+                    ('Dz_0_0_1', 0.0),
+                    ('Dz_0_1_1', 0.0),
+                    ('Dz_1_0_0', 0.0),
+                    ('Dz_1_0_1', 0.0),
+                    ('Dz_1_1_1', 0.0),
+                    ('pi2_0_0_0_0', 0.0),
+                    ('pi2_0_0_0_1', 0.0),
+                    ('pi2_0_0_1_1', 0.0),
+                    ('pi2_0_1_0_1', 0.0),
+                    ('pi2_0_1_1_1', 0.0),
+                    ('pi2_1_1_1_1', 0.0)
+                ])
+            else:
+                # Use vectorized operations - the stats functions handle arrays
+                # Compute all statistics at once for all pairs
+                # Map population indices: 0 = pop1, 1 = pop2
+                
+                # DD statistics
+                DD_0_0_vec = stats.DD(pairs_counts_pop1)
+                DD_0_1_vec = stats.DD_two_pops(pairs_counts1_between, pairs_counts2_between)
+                DD_1_1_vec = stats.DD(pairs_counts_pop2)
+                
+                # Dz statistics - use the new moments-compatible function
+                # Create counts list for Dz_moments function
+                counts_list = [pairs_counts_pop1, pairs_counts_pop2]
+                
+                # Compute all Dz statistics with proper population ordering
+                # Note: When second and third indices differ, moments averages two permutations
+                Dz_0_0_0_vec = stats.Dz_moments(counts_list, (0, 0, 0))
+                
+                # Dz_0_0_1: average of Dz(0,0,1) and Dz(0,1,0)
+                Dz_0_0_1_part1 = stats.Dz_moments(counts_list, (0, 0, 1))
+                Dz_0_0_1_part2 = stats.Dz_moments(counts_list, (0, 1, 0))
+                Dz_0_0_1_vec = 0.5 * Dz_0_0_1_part1 + 0.5 * Dz_0_0_1_part2
+                
+                Dz_0_1_1_vec = stats.Dz_moments(counts_list, (0, 1, 1))
+                
+                # Dz_1_0_0 is already correct (1,0,0)
+                Dz_1_0_0_vec = stats.Dz_moments(counts_list, (1, 0, 0))
+                
+                # Dz_1_0_1: average of Dz(1,0,1) and Dz(1,1,0)
+                Dz_1_0_1_part1 = stats.Dz_moments(counts_list, (1, 0, 1))
+                Dz_1_0_1_part2 = stats.Dz_moments(counts_list, (1, 1, 0))
+                Dz_1_0_1_vec = 0.5 * Dz_1_0_1_part1 + 0.5 * Dz_1_0_1_part2
+                
+                Dz_1_1_1_vec = stats.Dz_moments(counts_list, (1, 1, 1))
+                
+                # pi2 statistics - use counts_list for consistency with Dz
+                pi2_0_0_0_0_vec = stats.pi2(pairs_counts_pop1)
+                pi2_0_0_0_1_vec = stats.pi2_moments(counts_list, (0, 0, 0, 1))
+                pi2_0_0_1_1_vec = stats.pi2_moments(counts_list, (0, 0, 1, 1))
+                pi2_0_1_0_1_vec = stats.pi2_moments(counts_list, (0, 1, 0, 1))
+                pi2_0_1_1_1_vec = stats.pi2_moments(counts_list, (0, 1, 1, 1))
+                pi2_1_1_1_1_vec = stats.pi2(pairs_counts_pop2)
+                
+                if raw:
+                    # Sum the statistics for all pairs
+                    stats_dict = OrderedDict([
+                        ('DD_0_0', float(cp.sum(DD_0_0_vec).get())),
+                        ('DD_0_1', float(cp.sum(DD_0_1_vec).get())),
+                        ('DD_1_1', float(cp.sum(DD_1_1_vec).get())),
+                        ('Dz_0_0_0', float(cp.sum(Dz_0_0_0_vec).get())),
+                        ('Dz_0_0_1', float(cp.sum(Dz_0_0_1_vec).get())),
+                        ('Dz_0_1_1', float(cp.sum(Dz_0_1_1_vec).get())),
+                        ('Dz_1_0_0', float(cp.sum(Dz_1_0_0_vec).get())),
+                        ('Dz_1_0_1', float(cp.sum(Dz_1_0_1_vec).get())),
+                        ('Dz_1_1_1', float(cp.sum(Dz_1_1_1_vec).get())),
+                        ('pi2_0_0_0_0', float(cp.sum(pi2_0_0_0_0_vec).get())),
+                        ('pi2_0_0_0_1', float(cp.sum(pi2_0_0_0_1_vec).get())),
+                        ('pi2_0_0_1_1', float(cp.sum(pi2_0_0_1_1_vec).get())),
+                        ('pi2_0_1_0_1', float(cp.sum(pi2_0_1_0_1_vec).get())),
+                        ('pi2_0_1_1_1', float(cp.sum(pi2_0_1_1_1_vec).get())),
+                        ('pi2_1_1_1_1', float(cp.sum(pi2_1_1_1_1_vec).get()))
+                    ])
+                else:
+                    # Average the statistics
+                    stats_dict = OrderedDict([
+                        ('DD_0_0', float(cp.mean(DD_0_0_vec).get())),
+                        ('DD_0_1', float(cp.mean(DD_0_1_vec).get())),
+                        ('DD_1_1', float(cp.mean(DD_1_1_vec).get())),
+                        ('Dz_0_0_0', float(cp.mean(Dz_0_0_0_vec).get())),
+                        ('Dz_0_0_1', float(cp.mean(Dz_0_0_1_vec).get())),
+                        ('Dz_0_1_1', float(cp.mean(Dz_0_1_1_vec).get())),
+                        ('Dz_1_0_0', float(cp.mean(Dz_1_0_0_vec).get())),
+                        ('Dz_1_0_1', float(cp.mean(Dz_1_0_1_vec).get())),
+                        ('Dz_1_1_1', float(cp.mean(Dz_1_1_1_vec).get())),
+                        ('pi2_0_0_0_0', float(cp.mean(pi2_0_0_0_0_vec).get())),
+                        ('pi2_0_0_0_1', float(cp.mean(pi2_0_0_0_1_vec).get())),
+                        ('pi2_0_0_1_1', float(cp.mean(pi2_0_0_1_1_vec).get())),
+                        ('pi2_0_1_0_1', float(cp.mean(pi2_0_1_0_1_vec).get())),
+                        ('pi2_0_1_1_1', float(cp.mean(pi2_0_1_1_1_vec).get())),
+                        ('pi2_1_1_1_1', float(cp.mean(pi2_1_1_1_1_vec).get()))
+                    ])
+            
+            out[(bin_start, bin_end)] = stats_dict
 
         return out
