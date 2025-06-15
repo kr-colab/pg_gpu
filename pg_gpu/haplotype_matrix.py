@@ -882,19 +882,13 @@ class HaplotypeMatrix:
         distances = pos[idx_j] - pos[idx_i]  # shape: (#pairs,)
 
         # Import the GPU stats module.
-        from pg_gpu import stats_from_haplotype_counts_gpu as stats
+        from pg_gpu import stats_from_haplotype_counts_gpu_unified as stats
 
         # Compute the LD statistics for all variant pairs.
-        if n_valid is not None:
-            # Use missing data versions with variable sample sizes
-            DD_vals  = stats.DD_missing(counts, n_valid)   # shape: (#pairs,)
-            Dz_vals  = stats.Dz_missing(counts, n_valid)   # shape: (#pairs,)
-            pi2_vals = stats.pi2_missing(counts, n_valid)  # shape: (#pairs,)
-        else:
-            # D_vals   = stats.D(counts)    # shape: (#pairs,)
-            DD_vals  = stats.DD(counts)   # shape: (#pairs,)
-            Dz_vals  = stats.Dz(counts)   # shape: (#pairs,)
-            pi2_vals = stats.pi2(counts)  # shape: (#pairs,)
+        # Unified functions handle missing data automatically
+        DD_vals  = stats.DD(counts, n_valid)   # shape: (#pairs,)
+        Dz_vals  = stats.Dz(counts, n_valid)   # shape: (#pairs,)
+        pi2_vals = stats.pi2(counts, n_valid)  # shape: (#pairs,)
 
         # Convert bp_bins to a CuPy array.
         bp_bins_cp = cp.array(bp_bins)
@@ -985,7 +979,7 @@ class HaplotypeMatrix:
             self.transfer_to_gpu()
 
         import cupy as cp
-        from pg_gpu import stats_from_haplotype_counts_gpu as stats
+        from pg_gpu import stats_from_haplotype_counts_gpu_unified as stats
         from collections import OrderedDict
 
         # Get positions and ensure they're on GPU
@@ -1031,12 +1025,12 @@ class HaplotypeMatrix:
             pairs_counts1_between = counts1_between[mask]
             pairs_counts2_between = counts2_between[mask]
             
-            if n_valid_pop1 is not None:
+            if n_valid_pop1 is not None or n_valid_pop2 is not None:
                 # Also get valid sample sizes for missing data
-                pairs_n_valid_pop1 = n_valid_pop1[mask]
-                pairs_n_valid_pop2 = n_valid_pop2[mask]
-                pairs_n_valid1_between = n_valid1_between[mask]
-                pairs_n_valid2_between = n_valid2_between[mask]
+                pairs_n_valid_pop1 = n_valid_pop1[mask] if n_valid_pop1 is not None else None
+                pairs_n_valid_pop2 = n_valid_pop2[mask] if n_valid_pop2 is not None else None
+                pairs_n_valid1_between = n_valid1_between[mask] if n_valid1_between is not None else None
+                pairs_n_valid2_between = n_valid2_between[mask] if n_valid2_between is not None else None
             
             # Compute statistics for each pair and sum them
             # This matches the moments approach: sum(statistic(counts_i))
@@ -1064,77 +1058,44 @@ class HaplotypeMatrix:
                 # Compute all statistics at once for all pairs
                 # Map population indices: 0 = pop1, 1 = pop2
                 
-                if n_valid_pop1 is not None:
-                    # Import missing data stats
-                    from pg_gpu import stats_from_haplotype_counts_gpu_twopop_missing as stats_missing
-                    
-                    # DD statistics with missing data
-                    DD_0_0_vec = stats.DD_missing(pairs_counts_pop1, pairs_n_valid_pop1)
-                    DD_0_1_vec = stats_missing.DD_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, 0, 1)
-                    DD_1_1_vec = stats.DD_missing(pairs_counts_pop2, pairs_n_valid_pop2)
-                    
-                    # Dz statistics with missing data
-                    Dz_0_0_0_vec = stats.Dz_missing(pairs_counts_pop1, pairs_n_valid_pop1)
-                    
-                    # For two-pop Dz with missing data
-                    Dz_0_0_1_part1 = stats_missing.Dz_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (0, 0, 1))
-                    Dz_0_0_1_part2 = stats_missing.Dz_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (0, 1, 0))
-                    Dz_0_0_1_vec = 0.5 * Dz_0_0_1_part1 + 0.5 * Dz_0_0_1_part2
-                    
-                    Dz_0_1_1_vec = stats_missing.Dz_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (0, 1, 1))
-                    Dz_1_0_0_vec = stats_missing.Dz_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (1, 0, 0))
-                    
-                    Dz_1_0_1_part1 = stats_missing.Dz_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (1, 0, 1))
-                    Dz_1_0_1_part2 = stats_missing.Dz_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (1, 1, 0))
-                    Dz_1_0_1_vec = 0.5 * Dz_1_0_1_part1 + 0.5 * Dz_1_0_1_part2
-                    
-                    Dz_1_1_1_vec = stats.Dz_missing(pairs_counts_pop2, pairs_n_valid_pop2)
-                    
-                    # pi2 statistics with missing data
-                    pi2_0_0_0_0_vec = stats.pi2_missing(pairs_counts_pop1, pairs_n_valid_pop1)
-                    pi2_0_0_0_1_vec = stats_missing.pi2_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (0, 0, 0, 1))
-                    pi2_0_0_1_1_vec = stats_missing.pi2_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (0, 0, 1, 1))
-                    pi2_0_1_0_1_vec = stats_missing.pi2_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (0, 1, 0, 1))
-                    pi2_0_1_1_1_vec = stats_missing.pi2_two_pops_missing(counts_between[mask], pairs_n_valid1_between, pairs_n_valid2_between, (0, 1, 1, 1))
-                    pi2_1_1_1_1_vec = stats.pi2_missing(pairs_counts_pop2, pairs_n_valid_pop2)
-                else:
-                    # DD statistics
-                    DD_0_0_vec = stats.DD(pairs_counts_pop1)
-                    DD_0_1_vec = stats.DD_two_pops(pairs_counts1_between, pairs_counts2_between)
-                    DD_1_1_vec = stats.DD(pairs_counts_pop2)
-                    
-                    # Dz statistics - use the new moments-compatible function
-                    # Create counts list for Dz_moments function
-                    counts_list = [pairs_counts_pop1, pairs_counts_pop2]
-                    
-                    # Compute all Dz statistics with proper population ordering
-                    # Note: When second and third indices differ, moments averages two permutations
-                    Dz_0_0_0_vec = stats.Dz_moments(counts_list, (0, 0, 0))
-                    
-                    # Dz_0_0_1: average of Dz(0,0,1) and Dz(0,1,0)
-                    Dz_0_0_1_part1 = stats.Dz_moments(counts_list, (0, 0, 1))
-                    Dz_0_0_1_part2 = stats.Dz_moments(counts_list, (0, 1, 0))
-                    Dz_0_0_1_vec = 0.5 * Dz_0_0_1_part1 + 0.5 * Dz_0_0_1_part2
-                    
-                    Dz_0_1_1_vec = stats.Dz_moments(counts_list, (0, 1, 1))
-                    
-                    # Dz_1_0_0 is already correct (1,0,0)
-                    Dz_1_0_0_vec = stats.Dz_moments(counts_list, (1, 0, 0))
-                    
-                    # Dz_1_0_1: average of Dz(1,0,1) and Dz(1,1,0)
-                    Dz_1_0_1_part1 = stats.Dz_moments(counts_list, (1, 0, 1))
-                    Dz_1_0_1_part2 = stats.Dz_moments(counts_list, (1, 1, 0))
-                    Dz_1_0_1_vec = 0.5 * Dz_1_0_1_part1 + 0.5 * Dz_1_0_1_part2
-                    
-                    Dz_1_1_1_vec = stats.Dz_moments(counts_list, (1, 1, 1))
-                    
-                    # pi2 statistics - use counts_list for consistency with Dz
-                    pi2_0_0_0_0_vec = stats.pi2(pairs_counts_pop1)
-                    pi2_0_0_0_1_vec = stats.pi2_moments(counts_list, (0, 0, 0, 1))
-                    pi2_0_0_1_1_vec = stats.pi2_moments(counts_list, (0, 0, 1, 1))
-                    pi2_0_1_0_1_vec = stats.pi2_moments(counts_list, (0, 1, 0, 1))
-                    pi2_0_1_1_1_vec = stats.pi2_moments(counts_list, (0, 1, 1, 1))
-                    pi2_1_1_1_1_vec = stats.pi2(pairs_counts_pop2)
+                # Use the masked valid sample sizes directly (don't reassign the original variables)
+                n_valid1 = pairs_n_valid_pop1 if n_valid_pop1 is not None else None
+                n_valid2 = pairs_n_valid_pop2 if n_valid_pop2 is not None else None
+                n_valid1_between_masked = pairs_n_valid1_between if n_valid1_between is not None else None
+                n_valid2_between_masked = pairs_n_valid2_between if n_valid2_between is not None else None
+                
+                # DD statistics - unified functions handle missing data automatically
+                # For single population stats, use the single-pop functions
+                DD_0_0_vec = stats.DD(pairs_counts_pop1, n_valid1)
+                DD_0_1_vec = stats.DD_two_pops(counts_between[mask], 0, 1, n_valid1_between_masked, n_valid2_between_masked)
+                DD_1_1_vec = stats.DD(pairs_counts_pop2, n_valid2)
+                
+                # Dz statistics - unified functions handle missing data automatically
+                # For single population stats, use the single-pop functions
+                Dz_0_0_0_vec = stats.Dz(pairs_counts_pop1, n_valid1)
+                
+                # Dz_0_0_1: average of Dz(0,0,1) and Dz(0,1,0)
+                Dz_0_0_1_part1 = stats.Dz_two_pops(counts_between[mask], (0, 0, 1), n_valid1_between_masked, n_valid2_between_masked)
+                Dz_0_0_1_part2 = stats.Dz_two_pops(counts_between[mask], (0, 1, 0), n_valid1_between_masked, n_valid2_between_masked)
+                Dz_0_0_1_vec = 0.5 * Dz_0_0_1_part1 + 0.5 * Dz_0_0_1_part2
+                
+                Dz_0_1_1_vec = stats.Dz_two_pops(counts_between[mask], (0, 1, 1), n_valid1_between_masked, n_valid2_between_masked)
+                Dz_1_0_0_vec = stats.Dz_two_pops(counts_between[mask], (1, 0, 0), n_valid1_between_masked, n_valid2_between_masked)
+                
+                # Dz_1_0_1: average of Dz(1,0,1) and Dz(1,1,0)
+                Dz_1_0_1_part1 = stats.Dz_two_pops(counts_between[mask], (1, 0, 1), n_valid1_between_masked, n_valid2_between_masked)
+                Dz_1_0_1_part2 = stats.Dz_two_pops(counts_between[mask], (1, 1, 0), n_valid1_between_masked, n_valid2_between_masked)
+                Dz_1_0_1_vec = 0.5 * Dz_1_0_1_part1 + 0.5 * Dz_1_0_1_part2
+                
+                Dz_1_1_1_vec = stats.Dz(pairs_counts_pop2, n_valid2)
+                
+                # pi2 statistics - unified functions handle missing data automatically
+                pi2_0_0_0_0_vec = stats.pi2(pairs_counts_pop1, n_valid1)
+                pi2_0_0_0_1_vec = stats.pi2_two_pops(counts_between[mask], (0, 0, 0, 1), n_valid1_between_masked, n_valid2_between_masked)
+                pi2_0_0_1_1_vec = stats.pi2_two_pops(counts_between[mask], (0, 0, 1, 1), n_valid1_between_masked, n_valid2_between_masked)
+                pi2_0_1_0_1_vec = stats.pi2_two_pops(counts_between[mask], (0, 1, 0, 1), n_valid1_between_masked, n_valid2_between_masked)
+                pi2_0_1_1_1_vec = stats.pi2_two_pops(counts_between[mask], (0, 1, 1, 1), n_valid1_between_masked, n_valid2_between_masked)
+                pi2_1_1_1_1_vec = stats.pi2(pairs_counts_pop2, n_valid2)
                 
                 if raw:
                     # Sum the statistics for all pairs
