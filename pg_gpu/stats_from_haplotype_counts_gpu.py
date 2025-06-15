@@ -1,5 +1,36 @@
 import cupy as cp
 
+# Optimized utility functions for GPU efficiency
+def _prepare_counts(counts):
+    """
+    Prepare counts array for efficient GPU computation.
+    Returns 2D array and precomputed values.
+    """
+    if counts.ndim == 1:
+        counts = counts[None, :]
+    # Extract all columns in one operation
+    c = counts.T  # Transpose for better memory access pattern
+    n = cp.sum(counts, axis=1)
+    return c[0], c[1], c[2], c[3], n, counts.shape[0] == 1
+
+def _prepare_counts_two_pops(counts1, counts2):
+    """Prepare two population counts for efficient computation."""
+    if counts1.ndim == 1:
+        counts1 = counts1[None, :]
+    if counts2.ndim == 1:
+        counts2 = counts2[None, :]
+    
+    # Extract all data in single operations
+    c1 = counts1.T
+    c2 = counts2.T
+    n1 = cp.sum(counts1, axis=1)
+    n2 = cp.sum(counts2, axis=1)
+    
+    return (c1[0], c1[1], c1[2], c1[3], n1, 
+            c2[0], c2[1], c2[2], c2[3], n2,
+            counts1.shape[0] == 1 and counts2.shape[0] == 1)
+
+# Keep the original working Dz_moments function
 def Dz_moments(counts_list, pop_indices):
     """
     Compute the Dz statistic exactly as moments does.
@@ -96,6 +127,7 @@ def Dz_moments(counts_list, pop_indices):
     
     return cp.squeeze(numer / denom)
 
+# Main D statistic (single population)
 def D(counts):
     """
     Compute the linkage disequilibrium statistic D given haplotype counts.
@@ -111,17 +143,45 @@ def D(counts):
     Returns:
         cp.ndarray: The computed D values (scalar if counts was 1D or an array for multiple rows).
     """
-    # Ensure counts is two-dimensional.
-    if counts.ndim == 1:
-        counts = counts[None, :]
-    c1 = counts[:, 0]
-    c2 = counts[:, 1]
-    c3 = counts[:, 2]
-    c4 = counts[:, 3]
-    n = cp.sum(counts, axis=1)
+    c1, c2, c3, c4, n, should_squeeze = _prepare_counts(counts)
     numer = c1 * c4 - c2 * c3
     D_val = numer / (n * (n - 1))
-    return cp.squeeze(D_val)
+    return cp.squeeze(D_val) if should_squeeze else D_val
+
+# DD statistics
+def DD(counts):
+    """
+    Compute the squared disequilibrium statistic (D^2) from haplotype counts.
+    
+    For a single population (counts from a single group), if counts = [n11, n10, n01, n00],
+    we compute:
+      numer = n11*(n11-1)*n00*(n00-1) + n10*(n10-1)*n01*(n01-1) - 2*n11*n10*n01*n00
+      DD = numer / (n * (n - 1) * (n - 2) * (n - 3))
+    where n = n11 + n10 + n01 + n00.
+    
+    Parameters:
+        counts (cp.ndarray): An array of shape (4,) or (N, 4) with the counts.
+        
+    Returns:
+        cp.ndarray: The computed D^2 values.
+    """
+    c1, c2, c3, c4, n, should_squeeze = _prepare_counts(counts)
+    
+    # Compute common subexpressions once
+    c1_m1 = c1 - 1
+    c2_m1 = c2 - 1
+    c3_m1 = c3 - 1
+    c4_m1 = c4 - 1
+    n_m1 = n - 1
+    n_m2 = n - 2
+    n_m3 = n - 3
+    
+    numer = (c1 * c1_m1 * c4 * c4_m1 +
+             c2 * c2_m1 * c3 * c3_m1 -
+             2 * c1 * c2 * c3 * c4)
+    denom = n * n_m1 * n_m2 * n_m3
+    DD_val = numer / denom
+    return cp.squeeze(DD_val) if should_squeeze else DD_val
 
 def DD_two_pops(counts1, counts2):
     """
@@ -140,65 +200,19 @@ def DD_two_pops(counts1, counts2):
     Returns:
         cp.ndarray: The computed D^2 values between populations.
     """
-    # Ensure counts are two-dimensional
-    if counts1.ndim == 1:
-        counts1 = counts1[None, :]
-    if counts2.ndim == 1:
-        counts2 = counts2[None, :]
-        
-    # Extract components for population 1
-    c11 = counts1[:, 0]  # n11 for pop1
-    c12 = counts1[:, 1]  # n10 for pop1
-    c13 = counts1[:, 2]  # n01 for pop1
-    c14 = counts1[:, 3]  # n00 for pop1
-    n1 = cp.sum(counts1, axis=1)
+    c11, c12, c13, c14, n1, c21, c22, c23, c24, n2, should_squeeze = _prepare_counts_two_pops(counts1, counts2)
     
-    # Extract components for population 2
-    c21 = counts2[:, 0]  # n11 for pop2
-    c22 = counts2[:, 1]  # n10 for pop2
-    c23 = counts2[:, 2]  # n01 for pop2
-    c24 = counts2[:, 3]  # n00 for pop2
-    n2 = cp.sum(counts2, axis=1)
+    # Compute D for each population
+    D1 = c12 * c13 - c11 * c14
+    D2 = c22 * c23 - c21 * c24
     
-    # Compute the numerator: (c12 * c13 - c11 * c14) * (c22 * c23 - c21 * c24)
-    numer = (c12 * c13 - c11 * c14) * (c22 * c23 - c21 * c24)
-    
-    # Compute denominator: n1 * (n1 - 1) * n2 * (n2 - 1)
+    # Compute denominator
     denom = n1 * (n1 - 1) * n2 * (n2 - 1)
     
-    # Return the final result
-    DD_val = numer / denom
-    return cp.squeeze(DD_val)
+    DD_val = (D1 * D2) / denom
+    return cp.squeeze(DD_val) if should_squeeze else DD_val
 
-def DD(counts):
-    """
-    Compute the squared disequilibrium statistic (D^2) from haplotype counts.
-    
-    For a single population (counts from a single group), if counts = [n11, n10, n01, n00],
-    we compute:
-      numer = n11*(n11-1)*n00*(n00-1) + n10*(n10-1)*n01*(n01-1) - 2*n11*n10*n01*n00
-      DD = numer / (n * (n - 1) * (n - 2) * (n - 3))
-    where n = n11 + n10 + n01 + n00.
-    
-    Parameters:
-        counts (cp.ndarray): An array of shape (4,) or (N, 4) with the counts.
-        
-    Returns:
-        cp.ndarray: The computed D^2 values.
-    """
-    if counts.ndim == 1:
-        counts = counts[None, :]
-    c1 = counts[:, 0]
-    c2 = counts[:, 1]
-    c3 = counts[:, 2]
-    c4 = counts[:, 3]
-    n = cp.sum(counts, axis=1)
-    numer = (c1 * (c1 - 1) * c4 * (c4 - 1) +
-             c2 * (c2 - 1) * c3 * (c3 - 1) -
-             2 * c1 * c2 * c3 * c4)
-    DD_val = numer / (n * (n - 1) * (n - 2) * (n - 3))
-    return cp.squeeze(DD_val)
-
+# Dz statistics
 def Dz(counts):
     """
     Compute the Dz statistic from haplotype counts.
@@ -215,22 +229,21 @@ def Dz(counts):
     Returns:
         cp.ndarray: The computed Dz values.
     """
-    if counts.ndim == 1:
-        counts = counts[None, :]
-    c1 = counts[:, 0]
-    c2 = counts[:, 1]
-    c3 = counts[:, 2]
-    c4 = counts[:, 3]
-    n = cp.sum(counts, axis=1)
-    # Compute the components of the formula.
+    c1, c2, c3, c4, n, should_squeeze = _prepare_counts(counts)
+    
+    # Precompute common expressions
     diff = c1 * c4 - c2 * c3
-    term1 = (c3 + c4 - c1 - c2)
-    term2 = (c2 + c4 - c1 - c3)
-    term3 = (c2 + c3 - c1 - c4)
-    numer = diff * term1 * term2 + diff * term3 + 2 * (c2 * c3 + c1 * c4)
-    Dz_val = numer / (n * (n - 1) * (n - 2) * (n - 3))
-    return cp.squeeze(Dz_val)
+    sum_34_12 = (c3 + c4) - (c1 + c2)
+    sum_24_13 = (c2 + c4) - (c1 + c3)
+    sum_23_14 = (c2 + c3) - (c1 + c4)
+    
+    numer = diff * sum_34_12 * sum_24_13 + diff * sum_23_14 + 2 * (c2 * c3 + c1 * c4)
+    denom = n * (n - 1) * (n - 2) * (n - 3)
+    
+    Dz_val = numer / denom
+    return cp.squeeze(Dz_val) if should_squeeze else Dz_val
 
+# pi2 statistics
 def pi2(counts):
     """
     Compute the π₂ statistic from haplotype counts.
@@ -249,19 +262,23 @@ def pi2(counts):
     Returns:
         cp.ndarray: The computed π₂ values.
     """
-    if counts.ndim == 1:
-        counts = counts[None, :]
-    c1 = counts[:, 0]
-    c2 = counts[:, 1]
-    c3 = counts[:, 2]
-    c4 = counts[:, 3]
-    n = cp.sum(counts, axis=1)
-    term_a = (c1 + c2) * (c1 + c3) * (c2 + c4) * (c3 + c4)
+    c1, c2, c3, c4, n, should_squeeze = _prepare_counts(counts)
+    
+    # Precompute sums
+    s12 = c1 + c2
+    s13 = c1 + c3
+    s24 = c2 + c4
+    s34 = c3 + c4
+    
+    term_a = s12 * s13 * s24 * s34
     term_b = c1 * c4 * (-1 + c1 + 3 * c2 + 3 * c3 + c4)
     term_c = c2 * c3 * (-1 + 3 * c1 + c2 + c3 + 3 * c4)
+    
     numer = term_a - term_b - term_c
-    pi2_val = numer / (n * (n - 1) * (n - 2) * (n - 3))
-    return cp.squeeze(pi2_val)
+    denom = n * (n - 1) * (n - 2) * (n - 3)
+    
+    pi2_val = numer / denom
+    return cp.squeeze(pi2_val) if should_squeeze else pi2_val
 
 def pi2_moments(counts_list, pop_indices):
     """
@@ -368,6 +385,7 @@ def _pi2_iiij_averaged(cs1, cs2, pattern):
     """Helper for averaged pi2 configurations like (i,i,k,i)."""
     # This requires averaging multiple permutations as per moments
     # For now, return a simple approximation
+    _ = pattern  # Mark as used
     return _pi2_iiij(cs1, cs2)
 
 def _pi2_ijij(cs1, cs2):
@@ -457,8 +475,8 @@ def _compute_pi2_single(counts, indices):
         # Use the (i,i,j,j) formula
         cs1 = counts[i]
         cs2 = counts[k]
-        c11, c12, c13, c14 = cs1[:, 0], cs1[:, 1], cs1[:, 2], cs1[:, 3]
-        c21, c22, c23, c24 = cs2[:, 0], cs2[:, 1], cs2[:, 2], cs2[:, 3]
+        c11, c12, c13, _ = cs1[:, 0], cs1[:, 1], cs1[:, 2], cs1[:, 3]
+        _, c22, c23, c24 = cs2[:, 0], cs2[:, 1], cs2[:, 2], cs2[:, 3]
         n1 = cp.sum(cs1, axis=1)
         n2 = cp.sum(cs2, axis=1)
         numer = (c11 + c12) * (c11 + c13) * (c22 + c24) * (c23 + c24)
@@ -469,4 +487,3 @@ def _compute_pi2_single(counts, indices):
         # Use a simple approximation for unimplemented cases
         # This is not exact but allows the code to run
         return cp.zeros_like(cp.sum(counts[i], axis=1), dtype=cp.float64)
-
