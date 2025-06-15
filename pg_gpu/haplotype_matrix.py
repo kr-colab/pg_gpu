@@ -833,7 +833,7 @@ class HaplotypeMatrix:
              CuPy array represents the 2x2 haplotype count table [n11, n10, n01, n00] for a variant pair.
           2. Compute the positions for each variant pair from the upper-triangle indices (using cp.triu_indices)
              so that distance = pos[j] - pos[i].
-          3. Using the GPU stats module (stats_from_haplotype_counts_gpu), compute for each pair: D, D^2, Dz, and π₂.
+          3. Using the GPU stats module (ld_statistics), compute for each pair: D, D^2, Dz, and π₂.
           4. Bin the variant pairs by distance using the provided bp_bins.
           5. Depending on the `raw` flag:
                * If raw is False (default), return the mean (averaged over all pairs in the bin) of each statistic.
