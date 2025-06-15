@@ -1,6 +1,8 @@
 # pg_gpu
 
-A package for computing population genetics statistics using CuPy.
+GPU-accelerated population genetics statistics using CuPy.
+
+[![Documentation Status](https://readthedocs.org/projects/pg-gpu/badge/?version=latest)](https://pg-gpu.readthedocs.io/en/latest/?badge=latest)
 
 ## Installation
 
@@ -10,12 +12,33 @@ the conda environment is specified in `environment.yml`.
 conda env create -f environment.yml
 ```
 
+## Documentation
+
+Full documentation is available at [https://pg-gpu.readthedocs.io/](https://pg-gpu.readthedocs.io/)
+
+## Quick Start
+
+```python
+from pg_gpu import HaplotypeMatrix, ld_statistics
+
+# Load data
+h = HaplotypeMatrix.from_vcf("data.vcf")
+
+# Compute LD statistics
+result = h.tally_gpu_haplotypes()
+if isinstance(result, tuple):
+    counts, n_valid = result
+else:
+    counts, n_valid = result, None
+dd_vals = ld_statistics.dd(counts, n_valid=n_valid)
+```
+
 ## Development
 
 tests can be run with `pytest`.
 
 ```bash
-pytest tests/test_haplotype_matrix.py
+pytest tests/
 ```
 
 
