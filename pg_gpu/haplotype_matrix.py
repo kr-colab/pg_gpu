@@ -657,7 +657,7 @@ class HaplotypeMatrix:
         
         return results
 
-    def compute_ld_statistics_gpu(self, bp_bins, missing=False, raw=False, ac_filter=True):
+    def compute_ld_statistics_gpu_single_pop(self, bp_bins, missing=False, raw=False, ac_filter=True):
         """
         GPU-based implementation of computing LD statistics for a single population using tallies
         from tally_gpu_haplotypes, followed by binning by base-pair distance.
@@ -692,7 +692,7 @@ class HaplotypeMatrix:
             # Apply biallelic filtering to match moments' is_biallelic_01() behavior
             filtered_self = self.apply_biallelic_filter()
             # Use the filtered matrix for computation
-            return filtered_self.compute_ld_statistics_gpu(
+            return filtered_self.compute_ld_statistics_gpu_single_pop(
                 bp_bins=bp_bins, missing=missing, raw=raw, ac_filter=False
             )
 
