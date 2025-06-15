@@ -151,7 +151,6 @@ def run_gpu_ld(h_gpu, bp_bins):
             bp_bins=bp_bins,
             pop1=pop,
             pop2=pop,
-            missing=False,
             raw=True
         )
     
@@ -160,7 +159,6 @@ def run_gpu_ld(h_gpu, bp_bins):
         bp_bins=bp_bins,
         pop1="deme0",
         pop2="deme1",
-        missing=False,
         raw=True
     )
     
@@ -169,7 +167,6 @@ def run_gpu_ld(h_gpu, bp_bins):
         bp_bins=bp_bins,
         pop1="deme1",
         pop2="deme0",
-        missing=False,
         raw=True
     )
     

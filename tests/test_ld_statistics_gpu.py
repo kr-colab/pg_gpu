@@ -160,7 +160,6 @@ class TestLDStatisticsGPU:
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop0",
-            missing=False,
             raw=True
         )
         
@@ -234,7 +233,6 @@ class TestLDStatisticsGPU:
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop1",
-            missing=False,
             raw=True
         )
         
@@ -295,7 +293,6 @@ class TestLDStatisticsGPU:
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop1",
-            missing=False,
             raw=True
         )
         
@@ -304,7 +301,6 @@ class TestLDStatisticsGPU:
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop1",
-            missing=False,
             raw=False
         )
         

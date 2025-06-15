@@ -116,8 +116,7 @@ class TestLDValidationSynthetic:
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop1",
-            missing=False,
-            raw=True
+                        raw=True
         )
         
         # Compare results
@@ -209,8 +208,7 @@ class TestLDValidationSynthetic:
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop1",
-            missing=False,
-            raw=True
+                        raw=True
         )
         
         # Focus on Dz statistics
@@ -290,8 +288,7 @@ class TestLDValidationSynthetic:
                 bp_bins=bp_bins,
                 pop1="pop0",
                 pop2="pop1",
-                missing=False,
-                raw=True
+                                raw=True
             )
             
             # Check that we got results

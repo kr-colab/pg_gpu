@@ -173,7 +173,6 @@ ind3\tpop1
         # This should work once missing data is implemented
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=True,  # Enable missing data handling
             raw=True,
             ac_filter=False
         )
@@ -218,7 +217,6 @@ ind3\tpop1
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop1",
-            missing=True,
             raw=True,
             ac_filter=False
         )
@@ -245,7 +243,6 @@ ind3\tpop1
         h_gpu = HaplotypeMatrix.from_vcf(vcf_with_missing_data)
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=True,
             raw=True,
             ac_filter=False
         )

@@ -40,7 +40,7 @@ class TestHaplotypeCounting:
             # Count haplotypes for variant pair (0,1)
             # Expected: ind0_hap0=(1,1), ind0_hap1=(1,0), ind1_hap0=(0,1), ind1_hap1=(1,0)
             # Counts: n11=1, n10=2, n01=1, n00=0
-            counts = h_gpu.tally_gpu_haplotypes()
+            counts, n_valid = h_gpu.tally_gpu_haplotypes()
             
             assert counts.shape == (1, 4)  # 1 pair, 4 count types
             counts_cpu = counts[0].get()
@@ -76,8 +76,10 @@ class TestHaplotypeCounting:
             h_gpu.sample_sets = pop_sets
             
             # Test within-population counts
-            counts_pop0 = h_gpu.tally_gpu_haplotypes(pop="pop0")[0].get()
-            counts_pop1 = h_gpu.tally_gpu_haplotypes(pop="pop1")[0].get()
+            counts_pop0, _ = h_gpu.tally_gpu_haplotypes(pop="pop0")
+            counts_pop1, _ = h_gpu.tally_gpu_haplotypes(pop="pop1")
+            counts_pop0 = counts_pop0[0].get()
+            counts_pop1 = counts_pop1[0].get()
             
             # Pop0: ind0=(1,1)|(1,0), ind1=(0,1)|(1,0)
             # Haplotypes: (1,1), (1,0), (0,1), (1,0)
@@ -90,7 +92,8 @@ class TestHaplotypeCounting:
             np.testing.assert_array_equal(counts_pop1, [1, 0, 1, 2])
             
             # Test between-population counts
-            counts_between = h_gpu.tally_gpu_haplotypes_two_pops("pop0", "pop1")[0].get()
+            counts_between, _, _ = h_gpu.tally_gpu_haplotypes_two_pops("pop0", "pop1")
+            counts_between = counts_between[0].get()
             
             # Should contain 8 values: [counts_pop0, counts_pop1]
             expected_between = np.array([1, 2, 1, 0, 1, 0, 1, 2])
@@ -116,7 +119,7 @@ class TestHaplotypeCounting:
         
         try:
             h_gpu = HaplotypeMatrix.from_vcf(vcf_path)
-            counts = h_gpu.tally_gpu_haplotypes()
+            counts, n_valid = h_gpu.tally_gpu_haplotypes()
             
             # Should have 3 pairs: (0,1), (0,2), (1,2)
             assert counts.shape == (3, 4)

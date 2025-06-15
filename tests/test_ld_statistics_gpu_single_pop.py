@@ -66,7 +66,6 @@ class TestLDStatisticsGPUSinglePop:
         # Compute LD statistics using single-population GPU function
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=False,
             raw=True,
             ac_filter=False  # No filtering for this test
         )
@@ -94,7 +93,6 @@ class TestLDStatisticsGPUSinglePop:
         # Compute with averaging
         gpu_stats_avg = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=False,
             raw=False,
             ac_filter=False
         )
@@ -102,7 +100,6 @@ class TestLDStatisticsGPUSinglePop:
         # Compute raw sums for comparison
         gpu_stats_raw = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=False,
             raw=True,
             ac_filter=False
         )
@@ -130,7 +127,6 @@ class TestLDStatisticsGPUSinglePop:
         # Compute with AC filter (default)
         gpu_stats_filtered = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=False,
             raw=True,
             ac_filter=True
         )
@@ -138,7 +134,6 @@ class TestLDStatisticsGPUSinglePop:
         # Compute without AC filter
         gpu_stats_unfiltered = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=False,
             raw=True,
             ac_filter=False
         )
@@ -156,7 +151,6 @@ class TestLDStatisticsGPUSinglePop:
         
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=False,
             raw=False,
             ac_filter=False
         )
@@ -185,7 +179,6 @@ class TestLDStatisticsGPUSinglePop:
         # Compute using single-population function
         single_pop_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=False,
             raw=True,
             ac_filter=False
         )
@@ -195,7 +188,6 @@ class TestLDStatisticsGPUSinglePop:
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop0",
-            missing=False,
             raw=True,
             ac_filter=False
         )
@@ -234,7 +226,6 @@ class TestLDStatisticsGPUSinglePop:
         # Should automatically transfer to GPU
         gpu_stats = h_cpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=False,
             raw=True,
             ac_filter=False
         )
@@ -245,16 +236,15 @@ class TestLDStatisticsGPUSinglePop:
         # Matrix should now be on GPU
         assert h_cpu.device == 'GPU'
     
-    def test_single_population_missing_data_support(self, single_pop_vcf):
-        """Test that missing data is now supported."""
+    def test_single_population_missing_data_auto_detection(self, single_pop_vcf):
+        """Test that missing data is automatically detected and handled."""
         h_gpu = HaplotypeMatrix.from_vcf(single_pop_vcf)
         
         bp_bins = np.array([0, 500, 2000])
         
-        # Should now work with missing=True
+        # No missing parameter needed - auto-detects missing data
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
-            missing=True,
             raw=True,
             ac_filter=False
         )

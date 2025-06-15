@@ -88,12 +88,11 @@ class TestLDMissingDataDetailed:
         # Use moments internal functions to get counts
         from moments.LD import Parsing
         
-        # Load genotypes
-        genotypes, positions, _, _ = Parsing.get_genotypes(
-            simple_missing_vcf, 
-            use_h5=False, 
-            report=False
-        )
+        # Load genotypes using allel instead
+        import allel
+        vcf_data = allel.read_vcf(simple_missing_vcf)
+        genotypes = vcf_data['calldata/GT']
+        positions = vcf_data['variants/POS']
         
         # Convert to haplotypes
         haplotypes = genotypes[:, :, 0].T  # First haplotype of each individual
