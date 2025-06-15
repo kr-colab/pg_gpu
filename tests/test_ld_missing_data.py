@@ -165,7 +165,6 @@ ind3\tpop1
         for bin_sums in moments_stats['sums']:
             assert any(s != 0 for s in bin_sums)
     
-    @pytest.mark.xfail(reason="Missing data not yet implemented in pg_gpu")
     def test_pg_gpu_missing_data_single_pop(self, vcf_with_missing_data):
         """Test pg_gpu single population LD with missing data."""
         h_gpu = HaplotypeMatrix.from_vcf(vcf_with_missing_data)
@@ -184,7 +183,6 @@ ind3\tpop1
         for bin_range, stats in gpu_stats.items():
             assert len(stats) == 3  # DD, Dz, pi2
     
-    @pytest.mark.xfail(reason="Missing data not yet implemented in pg_gpu")
     def test_pg_gpu_missing_data_two_pops(self, vcf_with_missing_data_two_pops):
         """Test pg_gpu two population LD with missing data."""
         vcf_path, pop_path = vcf_with_missing_data_two_pops
@@ -215,19 +213,20 @@ ind3\tpop1
         bp_bins = np.array([0, 500, 2000, 5000])
         
         # This should work once missing data is implemented
+        # Note: ac_filter=False is required when using missing=True
         gpu_stats = h_gpu.compute_ld_statistics_gpu_two_pops(
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop1",
             missing=True,
-            raw=True
+            raw=True,
+            ac_filter=False
         )
         
         # Check we have all statistics
         for bin_range, stats in gpu_stats.items():
             assert len(stats) == 15
     
-    @pytest.mark.xfail(reason="Missing data not yet implemented in pg_gpu")
     def test_missing_data_correspondence(self, vcf_with_missing_data):
         """Test that pg_gpu matches moments for missing data."""
         bp_bins = np.array([0, 500, 2000, 5000])
