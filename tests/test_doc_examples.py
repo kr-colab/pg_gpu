@@ -149,6 +149,7 @@ class TestDocExamples:
                 # Replace file paths
                 code_fixed = code.replace('"example.vcf"', f'"{example_namespace["data.vcf"]}"')
                 code_fixed = code_fixed.replace('"data.vcf"', f'"{example_namespace["data.vcf"]}"')
+                code_fixed = code_fixed.replace('"data_missing.vcf"', f'"{example_namespace["data.vcf"]}"')
                 
                 # Skip examples with undefined sample_sets
                 if 'CEU' in code or 'YRI' in code:

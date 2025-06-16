@@ -2,6 +2,8 @@ name: pg_gpu
 channels:
   - conda-forge
 dependencies:
+  - pandas
+  - scipy
   - _libgcc_mutex=0.1
   - _openmp_mutex=4.5
   - bzip2=1.0.8
@@ -108,3 +110,6 @@ dependencies:
       - tskit==0.6.0
       - typing-extensions==4.12.2
       - wcwidth==0.2.13
+      - tqdm
+      - moments-popgen
+      - h5py

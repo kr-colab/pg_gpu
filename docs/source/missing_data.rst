@@ -61,7 +61,7 @@ The HaplotypeMatrix class provides several utilities for working with missing da
    
    # Get summary statistics
    summary = h.summarize_missing_data()
-   print(f"Total missing: {summary['fraction_missing']:.1%}")
+   print(f"Total missing: {summary['missing_freq_overall']:.1%}")
 
 Statistics with Missing Data
 ----------------------------

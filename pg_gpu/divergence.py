@@ -116,8 +116,12 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
         pop2_n = cp.sum(pop2_mask, axis=0)
         
         # Avoid division by zero
-        pop1_freqs = cp.divide(pop1_counts, pop1_n, out=cp.zeros_like(pop1_counts, dtype=float), where=pop1_n > 0)
-        pop2_freqs = cp.divide(pop2_counts, pop2_n, out=cp.zeros_like(pop2_counts, dtype=float), where=pop2_n > 0)
+        pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
+        pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
+        valid1 = pop1_n > 0
+        valid2 = pop2_n > 0
+        pop1_freqs[valid1] = pop1_counts[valid1] / pop1_n[valid1]
+        pop2_freqs[valid2] = pop2_counts[valid2] / pop2_n[valid2]
         
         # Use actual sample sizes per site
         n1 = pop1_n
@@ -137,7 +141,9 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
         valid2 = n2 > 1
         hw1[valid1] = 2.0 * pop1_freqs[valid1] * (1 - pop1_freqs[valid1]) * n1[valid1] / (n1[valid1] - 1)
         hw2[valid2] = 2.0 * pop2_freqs[valid2] * (1 - pop2_freqs[valid2]) * n2[valid2] / (n2[valid2] - 1)
-        hw = cp.divide(hw1 * n1 + hw2 * n2, n1 + n2, out=cp.zeros_like(hw1), where=(n1 + n2) > 0)
+        hw = cp.zeros_like(hw1)
+        valid = (n1 + n2) > 0
+        hw[valid] = (hw1[valid] * n1[valid] + hw2[valid] * n2[valid]) / (n1[valid] + n2[valid])
     else:
         hw1 = 2.0 * pop1_freqs * (1 - pop1_freqs) * n1 / (n1 - 1)
         hw2 = 2.0 * pop2_freqs * (1 - pop2_freqs) * n2 / (n2 - 1)
@@ -145,8 +151,9 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     
     # Calculate between-population heterozygosity
     if missing_data == 'include':
-        p_avg = cp.divide(pop1_freqs * n1 + pop2_freqs * n2, n1 + n2, 
-                         out=cp.zeros_like(pop1_freqs), where=(n1 + n2) > 0)
+        p_avg = cp.zeros_like(pop1_freqs)
+        valid = (n1 + n2) > 0
+        p_avg[valid] = (pop1_freqs[valid] * n1[valid] + pop2_freqs[valid] * n2[valid]) / (n1[valid] + n2[valid])
     else:
         p_avg = (pop1_freqs * n1 + pop2_freqs * n2) / (n1 + n2)
     hb = 2.0 * p_avg * (1 - p_avg)
@@ -233,8 +240,16 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
         n1 = cp.sum(pop1_mask, axis=0).astype(float)
         n2 = cp.sum(pop2_mask, axis=0).astype(float)
         
-        pop1_freqs = cp.divide(pop1_counts, n1, out=cp.zeros_like(pop1_counts), where=n1 > 0)
-        pop2_freqs = cp.divide(pop2_counts, n2, out=cp.zeros_like(pop2_counts), where=n2 > 0)
+        pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
+        pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
+        if missing_data == 'include':
+            valid1 = n1 > 0
+            valid2 = n2 > 0
+            pop1_freqs[valid1] = pop1_counts[valid1] / n1[valid1]
+            pop2_freqs[valid2] = pop2_counts[valid2] / n2[valid2]
+        else:
+            pop1_freqs = pop1_counts / n1
+            pop2_freqs = pop2_counts / n2
     else:
         pop1_counts = cp.sum(pop1_haps, axis=0).astype(float)
         pop2_counts = cp.sum(pop2_haps, axis=0).astype(float)
@@ -254,8 +269,9 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
         nc[valid] = (n_total[valid] - (n1[valid]**2 + n2[valid]**2) / n_total[valid]) / 1.0
         
         # Average allele frequency
-        p_bar = cp.divide(n1 * pop1_freqs + n2 * pop2_freqs, n_total, 
-                         out=cp.zeros_like(pop1_freqs), where=n_total > 0)
+        p_bar = cp.zeros_like(pop1_freqs)
+        valid = n_total > 0
+        p_bar[valid] = (n1[valid] * pop1_freqs[valid] + n2[valid] * pop2_freqs[valid]) / n_total[valid]
     else:
         n_total = n1 + n2
         n_bar = n_total / 2.0  # For two populations
@@ -264,8 +280,10 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
     
     # Sample variance of allele frequencies
     if missing_data == 'include':
-        s_squared = cp.divide(n1 * (pop1_freqs - p_bar)**2 + n2 * (pop2_freqs - p_bar)**2, 
-                             n_bar, out=cp.zeros_like(p_bar), where=n_bar > 0)
+        s_squared = cp.zeros_like(p_bar)
+        valid = n_bar > 0
+        s_squared[valid] = (n1[valid] * (pop1_freqs[valid] - p_bar[valid])**2 + 
+                           n2[valid] * (pop2_freqs[valid] - p_bar[valid])**2) / n_bar[valid]
     else:
         s_squared = (n1 * (pop1_freqs - p_bar)**2 + 
                      n2 * (pop2_freqs - p_bar)**2) / (1 * n_bar)
@@ -376,8 +394,12 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
         n1 = cp.sum(pop1_mask, axis=0)
         n2 = cp.sum(pop2_mask, axis=0)
         
-        pop1_freqs = cp.divide(pop1_counts, n1, out=cp.zeros_like(pop1_counts, dtype=float), where=n1 > 0)
-        pop2_freqs = cp.divide(pop2_counts, n2, out=cp.zeros_like(pop2_counts, dtype=float), where=n2 > 0)
+        pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
+        pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
+        valid1 = n1 > 0
+        valid2 = n2 > 0
+        pop1_freqs[valid1] = pop1_counts[valid1] / n1[valid1]
+        pop2_freqs[valid2] = pop2_counts[valid2] / n2[valid2]
     else:
         pop1_freqs = cp.mean(pop1_haps, axis=0)
         pop2_freqs = cp.mean(pop2_haps, axis=0)
@@ -389,10 +411,11 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     hs2 = 2.0 * pop2_freqs * (1 - pop2_freqs)
     
     if missing_data == 'include':
-        hs = cp.divide(hs1 * n1 + hs2 * n2, n1 + n2, 
-                      out=cp.zeros_like(hs1), where=(n1 + n2) > 0)
-        p_total = cp.divide(pop1_freqs * n1 + pop2_freqs * n2, n1 + n2, 
-                           out=cp.zeros_like(pop1_freqs), where=(n1 + n2) > 0)
+        hs = cp.zeros_like(hs1)
+        p_total = cp.zeros_like(pop1_freqs)
+        valid = (n1 + n2) > 0
+        hs[valid] = (hs1[valid] * n1[valid] + hs2[valid] * n2[valid]) / (n1[valid] + n2[valid])
+        p_total[valid] = (pop1_freqs[valid] * n1[valid] + pop2_freqs[valid] * n2[valid]) / (n1[valid] + n2[valid])
     else:
         hs = (hs1 * n1 + hs2 * n2) / (n1 + n2)
         p_total = (pop1_freqs * n1 + pop2_freqs * n2) / (n1 + n2)
@@ -471,7 +494,7 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
             return 0.0 if not per_site else cp.zeros(total_sites)
         pop1_haps = pop1_haps[:, valid_sites]
         pop2_haps = pop2_haps[:, valid_sites]
-        n_sites = cp.sum(valid_sites)
+        n_sites = int(cp.sum(valid_sites).get())
     elif missing_data == 'include':
         # Will handle missing data per site below
         n_sites = total_sites
@@ -491,8 +514,12 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         pop1_n = cp.sum(pop1_mask, axis=0)
         pop2_n = cp.sum(pop2_mask, axis=0)
         
-        pop1_freqs = cp.divide(pop1_counts, pop1_n, out=cp.zeros_like(pop1_counts, dtype=float), where=pop1_n > 0)
-        pop2_freqs = cp.divide(pop2_counts, pop2_n, out=cp.zeros_like(pop2_counts, dtype=float), where=pop2_n > 0)
+        pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
+        pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
+        valid1 = pop1_n > 0
+        valid2 = pop2_n > 0
+        pop1_freqs[valid1] = pop1_counts[valid1] / pop1_n[valid1]
+        pop2_freqs[valid2] = pop2_counts[valid2] / pop2_n[valid2]
         
         # Calculate Dxy only for sites with data
         valid_mask = (pop1_n > 0) & (pop2_n > 0)
@@ -502,7 +529,7 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         
         # Count sites with data for normalization
         if not span_denominator:
-            n_sites = cp.sum(valid_mask)
+            n_sites = int(cp.sum(valid_mask).get())
     else:
         pop1_freqs = cp.mean(pop1_haps, axis=0)
         pop2_freqs = cp.mean(pop2_haps, axis=0)
@@ -620,7 +647,7 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
         if not cp.any(valid_sites):
             return 0.0
         pop_haplotypes = pop_haplotypes[:, valid_sites]
-        n_sites = cp.sum(valid_sites)
+        n_sites = int(cp.sum(valid_sites).get())
     elif missing_data == 'include':
         # Will handle missing data per site below
         n_sites = total_sites
@@ -635,7 +662,9 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
         pop_counts = cp.sum(cp.where(pop_mask, pop_haplotypes, 0), axis=0)
         n = cp.sum(pop_mask, axis=0)
         
-        pop_freq = cp.divide(pop_counts, n, out=cp.zeros_like(pop_counts, dtype=float), where=n > 0)
+        pop_freq = cp.zeros_like(pop_counts, dtype=float)
+        valid = n > 0
+        pop_freq[valid] = pop_counts[valid] / n[valid]
         
         # Pi = 2 * p * (1 - p) * n / (n - 1) for sites with n > 1
         pi_per_site = cp.zeros(total_sites)
@@ -645,7 +674,7 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
         
         # Count sites with sufficient data for normalization
         if not span_denominator:
-            n_sites = cp.sum(valid_mask)
+            n_sites = int(cp.sum(valid_mask).get())
         
         if span_denominator:
             # Normalize by total sites

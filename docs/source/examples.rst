@@ -85,8 +85,8 @@ Basic Missing Data Handling
    
    # Check missing data
    summary = h.summarize_missing_data()
-   print(f"Missing: {summary['fraction_missing']:.1%}")
-   print(f"Sites with missing: {summary['sites_with_missing']}")
+   print(f"Missing: {summary['missing_freq_overall']:.1%}")
+   print(f"Variants with no missing: {summary['variants_with_no_missing']}")
    
    # Filter high-missing sites
    h_clean = h.filter_variants_by_missing(max_missing_freq=0.1)

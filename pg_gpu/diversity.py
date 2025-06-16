@@ -396,9 +396,14 @@ def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
             
             if n_valid > 0:
                 # Count derived alleles among valid samples
-                derived_count = int(cp.sum(variant_data[valid_mask]).get())
-                # Add to AFS at the appropriate bin
-                afs[derived_count] += 1
+                # Note: variant_data should be 0/1 for biallelic sites
+                valid_data = variant_data[valid_mask]
+                # Only count if all values are 0 or 1 (biallelic)
+                if cp.all(valid_data <= 1):
+                    derived_count = int(cp.sum(valid_data).get())
+                    # Add to AFS at the appropriate bin
+                    if derived_count <= max_n:  # Safety check
+                        afs[derived_count] += 1
         
         return afs
     
