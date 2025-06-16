@@ -109,23 +109,10 @@ class StatisticsComputer:
     """Computes population genetics statistics for windows."""
     
     # Built-in single population statistics
-    SINGLE_POP_STATS = {
-        'pi': lambda w: diversity.pi(w.matrix, span_normalize=True),
-        'theta_w': lambda w: diversity.theta_w(w.matrix, span_normalize=True), 
-        'tajimas_d': lambda w: diversity.tajimas_d(w.matrix),
-        'n_variants': lambda w: w.n_variants,
-        'n_singletons': lambda w: diversity.singleton_count(w.matrix),
-        'segregating_sites': lambda w: diversity.segregating_sites(w.matrix),
-    }
+    # Note: These are now created dynamically to use instance parameters
     
     # Built-in two population statistics  
-    TWO_POP_STATS = {
-        'dxy': lambda w, p1, p2: divergence.dxy(w.matrix, p1, p2),
-        'fst': lambda w, p1, p2: divergence.fst(w.matrix, p1, p2),
-        'fst_hudson': lambda w, p1, p2: divergence.fst_hudson(w.matrix, p1, p2),
-        'fst_wc': lambda w, p1, p2: divergence.fst_weir_cockerham(w.matrix, p1, p2),
-        'da': lambda w, p1, p2: divergence.da(w.matrix, p1, p2),
-    }
+    # Note: These are now created dynamically to use instance parameters
     
     # LD-based statistics
     LD_STATS = {
@@ -136,17 +123,47 @@ class StatisticsComputer:
     def __init__(self, statistics: List[Union[str, Callable]], 
                  populations: Optional[List[str]] = None,
                  custom_stat_kwargs: Optional[Dict] = None,
-                 ld_bins: Optional[List[int]] = None):
+                 ld_bins: Optional[List[int]] = None,
+                 missing_data: str = 'include',
+                 span_denominator: str = 'total'):
         self.statistics = statistics
         self.populations = populations or []
         self.custom_stat_kwargs = custom_stat_kwargs or {}
         self.ld_bins = ld_bins or [0, 1000, 5000, 10000, 50000]
+        self.missing_data = missing_data
+        self.span_denominator = span_denominator
         
         # Categorize statistics
         self._categorize_statistics()
         
     def _categorize_statistics(self):
         """Categorize statistics by type for efficient computation."""
+        # Create statistics dictionaries with current parameters
+        self.SINGLE_POP_STATS = {
+            'pi': lambda w: diversity.pi(w.matrix, span_normalize=True, 
+                                       missing_data=self.missing_data, 
+                                       span_denominator=self.span_denominator),
+            'theta_w': lambda w: diversity.theta_w(w.matrix, span_normalize=True,
+                                                 missing_data=self.missing_data,
+                                                 span_denominator=self.span_denominator), 
+            'tajimas_d': lambda w: diversity.tajimas_d(w.matrix, missing_data=self.missing_data),
+            'n_variants': lambda w: w.n_variants,
+            'n_singletons': lambda w: diversity.singleton_count(w.matrix, missing_data=self.missing_data),
+            'segregating_sites': lambda w: diversity.segregating_sites(w.matrix, missing_data=self.missing_data),
+        }
+        
+        self.TWO_POP_STATS = {
+            'dxy': lambda w, p1, p2: divergence.dxy(w.matrix, p1, p2, 
+                                                  missing_data=self.missing_data,
+                                                  span_denominator=self.span_denominator == 'total'),
+            'fst': lambda w, p1, p2: divergence.fst(w.matrix, p1, p2, missing_data=self.missing_data),
+            'fst_hudson': lambda w, p1, p2: divergence.fst_hudson(w.matrix, p1, p2, missing_data=self.missing_data),
+            'fst_wc': lambda w, p1, p2: divergence.fst_weir_cockerham(w.matrix, p1, p2, missing_data=self.missing_data),
+            'da': lambda w, p1, p2: divergence.da(w.matrix, p1, p2,
+                                                missing_data=self.missing_data,
+                                                span_denominator=self.span_denominator == 'total'),
+        }
+        
         self.single_pop_stats = []
         self.two_pop_stats = []
         self.ld_stats = []
@@ -400,7 +417,9 @@ class WindowedAnalyzer:
                  chunk_size: Union[str, int] = 'auto',
                  n_jobs: int = 1,
                  progress_bar: bool = True,
-                 custom_stat_kwargs: Optional[Dict] = None):
+                 custom_stat_kwargs: Optional[Dict] = None,
+                 missing_data: str = 'include',
+                 span_denominator: str = 'total'):
         """
         Initialize windowed analyzer.
         
@@ -432,6 +451,14 @@ class WindowedAnalyzer:
             Show progress bar
         custom_stat_kwargs : dict
             Keyword arguments for custom statistics
+        missing_data : str
+            'include' - Use all sites, calculate from available data per site
+            'exclude' - Only use sites with no missing data
+            'ignore' - Treat missing as reference allele (original behavior)
+        span_denominator : str
+            'total' - Use total genomic span (chrom_end - chrom_start)
+            'sites' - Use number of sites analyzed
+            'callable' - Use span from first to last site included in analysis
         """
         self.window_params = WindowParams(
             window_type=window_type,
@@ -448,11 +475,14 @@ class WindowedAnalyzer:
         self.chunk_size = chunk_size
         self.n_jobs = n_jobs
         self.progress_bar = progress_bar
+        self.missing_data = missing_data
+        self.span_denominator = span_denominator
         
         # Initialize components
         self.memory_manager = MemoryManager(gpu_memory_limit)
         self.stats_computer = StatisticsComputer(
-            statistics, populations, custom_stat_kwargs, ld_bins=self.ld_bins
+            statistics, populations, custom_stat_kwargs, ld_bins=self.ld_bins,
+            missing_data=missing_data, span_denominator=span_denominator
         )
         
     def compute(self, haplotype_matrix: HaplotypeMatrix) -> pd.DataFrame:
@@ -560,6 +590,8 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      step_size: Optional[int] = None,
                      statistics: List[str] = ['pi'],
                      populations: Optional[List[str]] = None,
+                     missing_data: str = 'include',
+                     span_denominator: str = 'total',
                      **kwargs) -> pd.DataFrame:
     """
     Convenience function for windowed analysis.
@@ -576,6 +608,14 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         Statistics to compute
     populations : list, optional
         Population names
+    missing_data : str
+        'include' - Use all sites, calculate from available data per site
+        'exclude' - Only use sites with no missing data
+        'ignore' - Treat missing as reference allele (original behavior)
+    span_denominator : str
+        'total' - Use total genomic span (chrom_end - chrom_start)
+        'sites' - Use number of sites analyzed
+        'callable' - Use span from first to last site included in analysis
     **kwargs
         Additional arguments passed to WindowedAnalyzer
         
@@ -590,6 +630,8 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         step_size=step_size,
         statistics=statistics,
         populations=populations,
+        missing_data=missing_data,
+        span_denominator=span_denominator,
         **kwargs
     )
     return analyzer.compute(haplotype_matrix)

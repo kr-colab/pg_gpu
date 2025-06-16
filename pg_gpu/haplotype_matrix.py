@@ -363,7 +363,190 @@ class HaplotypeMatrix:
         
         return filtered_matrix
         
+    ####### Missing data methods #######
+    def is_missing(self, axis=None):
+        """
+        Detect missing calls (-1 values).
         
+        Parameters
+        ----------
+        axis : int, optional
+            Axis along which to compute. If None, returns boolean array same shape as haplotypes.
+            If 0, returns missing per variant. If 1, returns missing per sample.
+            
+        Returns
+        -------
+        missing : array
+            Boolean array indicating missing data
+        """
+        if self.device == 'GPU':
+            missing = self.haplotypes < 0
+            if axis is not None:
+                return cp.any(missing, axis=axis)
+            return missing
+        else:
+            missing = self.haplotypes < 0
+            if axis is not None:
+                return np.any(missing, axis=axis)
+            return missing
+    
+    def is_called(self, axis=None):
+        """
+        Detect valid (non-missing) calls.
+        
+        Parameters
+        ----------
+        axis : int, optional
+            Axis along which to compute. If None, returns boolean array same shape as haplotypes.
+            If 0, returns called per variant. If 1, returns called per sample.
+            
+        Returns
+        -------
+        called : array
+            Boolean array indicating valid data
+        """
+        return ~self.is_missing(axis=axis)
+    
+    def count_missing(self, axis=None):
+        """
+        Count missing calls per variant or sample.
+        
+        Parameters
+        ----------
+        axis : int, optional
+            Axis along which to count. If None, returns total count.
+            If 0, returns count per variant. If 1, returns count per sample.
+            
+        Returns
+        -------
+        count : int or array
+            Count of missing calls
+        """
+        missing = self.is_missing()
+        if self.device == 'GPU':
+            return cp.sum(missing, axis=axis)
+        else:
+            return np.sum(missing, axis=axis)
+    
+    def count_called(self, axis=None):
+        """
+        Count valid calls per variant or sample.
+        
+        Parameters
+        ----------
+        axis : int, optional
+            Axis along which to count. If None, returns total count.
+            If 0, returns count per variant. If 1, returns count per sample.
+            
+        Returns
+        -------
+        count : int or array
+            Count of valid calls
+        """
+        called = self.is_called()
+        if self.device == 'GPU':
+            return cp.sum(called, axis=axis)
+        else:
+            return np.sum(called, axis=axis)
+    
+    def get_span(self, span_denominator='total'):
+        """
+        Get the genomic span for normalization calculations.
+        
+        Parameters
+        ----------
+        span_denominator : str
+            'total' - Use total genomic span (chrom_end - chrom_start)
+            'sites' - Use number of variant sites
+            'callable' - Use span from first to last variant position
+            
+        Returns
+        -------
+        span : int
+            The span to use for normalization
+        """
+        if span_denominator == 'total':
+            if self.chrom_start is not None and self.chrom_end is not None:
+                return self.chrom_end - self.chrom_start
+            else:
+                # Fall back to callable span
+                span_denominator = 'callable'
+        
+        if span_denominator == 'sites':
+            return self.num_variants
+        
+        if span_denominator == 'callable':
+            if self.device == 'GPU':
+                if len(self.positions) > 0:
+                    return int((cp.max(self.positions) - cp.min(self.positions)).get()) + 1
+                else:
+                    return 0
+            else:
+                if len(self.positions) > 0:
+                    return int(np.max(self.positions) - np.min(self.positions)) + 1
+                else:
+                    return 0
+        
+        raise ValueError(f"Invalid span_denominator: {span_denominator}")
+    
+    def filter_variants_by_missing(self, max_missing_freq=0.1):
+        """
+        Return a new HaplotypeMatrix with variants filtered by missing data frequency.
+        
+        Parameters
+        ----------
+        max_missing_freq : float
+            Maximum allowed frequency of missing data per variant
+            
+        Returns
+        -------
+        filtered : HaplotypeMatrix
+            New HaplotypeMatrix with filtered variants
+        """
+        missing_freq = self.count_missing(axis=0) / self.num_haplotypes
+        if self.device == 'GPU':
+            valid_mask = missing_freq <= max_missing_freq
+            valid_indices = cp.where(valid_mask)[0]
+            return self.get_subset(valid_indices)
+        else:
+            valid_mask = missing_freq <= max_missing_freq
+            valid_indices = np.where(valid_mask)[0]
+            return self.get_subset(valid_indices)
+    
+    def summarize_missing_data(self):
+        """
+        Get summary statistics about missing data patterns.
+        
+        Returns
+        -------
+        summary : dict
+            Dictionary with missing data statistics
+        """
+        total_missing = self.count_missing()
+        total_calls = self.num_haplotypes * self.num_variants
+        missing_per_variant = self.count_missing(axis=0)
+        missing_per_sample = self.count_missing(axis=1)
+        
+        if self.device == 'GPU':
+            return {
+                'total_missing_calls': int(total_missing.get()),
+                'total_calls': total_calls,
+                'missing_freq_overall': float((total_missing / total_calls).get()),
+                'variants_with_no_missing': int(cp.sum(missing_per_variant == 0).get()),
+                'samples_with_no_missing': int(cp.sum(missing_per_sample == 0).get()),
+                'max_missing_per_variant': int(cp.max(missing_per_variant).get()),
+                'max_missing_per_sample': int(cp.max(missing_per_sample).get())
+            }
+        else:
+            return {
+                'total_missing_calls': int(total_missing),
+                'total_calls': total_calls,
+                'missing_freq_overall': float(total_missing / total_calls),
+                'variants_with_no_missing': int(np.sum(missing_per_variant == 0)),
+                'samples_with_no_missing': int(np.sum(missing_per_sample == 0)),
+                'max_missing_per_variant': int(np.max(missing_per_variant)),
+                'max_missing_per_sample': int(np.max(missing_per_sample))
+            }
         
     ####### some polymorphism statistics #######
     def allele_frequency_spectrum(self) -> cp.ndarray:
