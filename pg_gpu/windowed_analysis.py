@@ -110,8 +110,8 @@ class StatisticsComputer:
     
     # Built-in single population statistics
     SINGLE_POP_STATS = {
-        'pi': lambda w: diversity.pi(w.matrix, span_normalize=False),
-        'theta_w': lambda w: diversity.theta_w(w.matrix, span_normalize=False), 
+        'pi': lambda w: diversity.pi(w.matrix, span_normalize=True),
+        'theta_w': lambda w: diversity.theta_w(w.matrix, span_normalize=True), 
         'tajimas_d': lambda w: diversity.tajimas_d(w.matrix),
         'n_variants': lambda w: w.n_variants,
         'n_singletons': lambda w: diversity.singleton_count(w.matrix),
@@ -288,6 +288,9 @@ class WindowIterator:
             if len(variant_indices) > 0:
                 # Extract window matrix
                 window_matrix = self.matrix.get_subset(variant_indices)
+                # Set correct chromosome coordinates for span normalization
+                window_matrix.chrom_start = start
+                window_matrix.chrom_end = end - 1  # end is exclusive in our window definition
                 
                 yield WindowData(
                     chrom=1,  # TODO: Handle multiple chromosomes
@@ -319,6 +322,9 @@ class WindowIterator:
             # Extract window matrix
             variant_indices = np.arange(start_idx, end_idx)
             window_matrix = self.matrix.get_subset(variant_indices)
+            # Set correct chromosome coordinates for span normalization
+            window_matrix.chrom_start = window_start
+            window_matrix.chrom_end = window_end
             
             yield WindowData(
                 chrom=1,  # TODO: Handle multiple chromosomes
