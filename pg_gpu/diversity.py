@@ -77,37 +77,46 @@ def pi(haplotype_matrix: HaplotypeMatrix,
         pi_value = cp.sum((weight * afs[1:n_haplotypes]).astype(cp.float64))
         
     else:  # missing_data == 'include'
-        # Calculate pi per site using only non-missing data at each site
-        pi_value = cp.float64(0.0)
+        # Calculate pi per site using only non-missing data at each site (vectorized)
+        haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
         
-        for variant_idx in range(matrix.num_variants):
-            variant_data = matrix.haplotypes[:, variant_idx]
-            valid_mask = variant_data >= 0
-            n_valid = int(cp.sum(valid_mask).get())
+        # Create mask for valid (non-missing) data
+        valid_mask = haplotypes >= 0  # shape: (n_haplotypes, n_variants)
+        
+        # Count valid samples per site
+        n_valid_per_site = cp.sum(valid_mask, axis=0)  # shape: (n_variants,)
+        
+        # Only consider sites with at least 2 valid samples
+        sites_with_data = n_valid_per_site >= 2
+        
+        if not cp.any(sites_with_data):
+            pi_value = cp.float64(0.0)
+        else:
+            # For each site, count derived alleles among valid samples
+            # Set missing data to 0 for counting, but use valid_mask to exclude from counts
+            hap_clean = cp.where(valid_mask, haplotypes, 0)
             
-            if n_valid > 1:  # Need at least 2 samples to calculate diversity
-                valid_data = variant_data[valid_mask]
-                
-                # Count alleles for this site
-                allele_counts = cp.zeros(2, dtype=cp.int32)  # Assuming biallelic
-                unique_alleles = cp.unique(valid_data)
-                
-                for i, allele in enumerate(unique_alleles):
-                    if i < 2:  # Safety check for biallelic assumption
-                        allele_counts[allele] = cp.sum(valid_data == allele)
-                
-                # Calculate pi for this site using the standard formula
-                site_pi = cp.float64(0.0)
-                total = cp.float64(n_valid)
-                
-                for i in range(len(allele_counts)):
-                    freq_i = allele_counts[i] / total
-                    for j in range(i + 1, len(allele_counts)):
-                        freq_j = allele_counts[j] / total
-                        # Nei's correction for finite sample size
-                        site_pi += 2 * freq_i * freq_j * total / (total - 1)
-                
-                pi_value += site_pi
+            # Count derived alleles per site (only among valid samples)
+            derived_counts = cp.sum(hap_clean, axis=0)  # shape: (n_variants,)
+            
+            # Calculate allele frequencies and pi for each site
+            # For biallelic sites: freq_0 = (n_valid - derived) / n_valid, freq_1 = derived / n_valid
+            # pi = 2 * freq_0 * freq_1 * n_valid / (n_valid - 1)
+            
+            # Only compute for sites with valid data
+            valid_sites = cp.where(sites_with_data)[0]
+            n_valid = n_valid_per_site[valid_sites].astype(cp.float64)
+            derived = derived_counts[valid_sites].astype(cp.float64)
+            
+            # Calculate frequencies
+            freq_derived = derived / n_valid
+            freq_ancestral = (n_valid - derived) / n_valid
+            
+            # Calculate pi per site with Nei's correction
+            site_pi = 2 * freq_ancestral * freq_derived * n_valid / (n_valid - 1)
+            
+            # Sum across all valid sites
+            pi_value = cp.sum(site_pi)
     
     # Apply span normalization
     if span_normalize:
@@ -185,26 +194,54 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
         seg_sites = segregating_sites(matrix, missing_data='ignore')
         
     else:  # missing_data == 'include'
-        # Calculate theta using site-specific sample sizes
-        theta_sum = cp.float64(0.0)
+        # Calculate theta using site-specific sample sizes (vectorized)
+        haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
         
-        for variant_idx in range(matrix.num_variants):
-            variant_data = matrix.haplotypes[:, variant_idx]
-            valid_mask = variant_data >= 0
-            n_valid = int(cp.sum(valid_mask).get())
+        # Create mask for valid (non-missing) data
+        valid_mask = haplotypes >= 0  # shape: (n_haplotypes, n_variants)
+        
+        # Count valid samples per site
+        n_valid_per_site = cp.sum(valid_mask, axis=0)  # shape: (n_variants,)
+        
+        # Only consider sites with at least 2 valid samples
+        sites_with_data = n_valid_per_site >= 2
+        
+        if not cp.any(sites_with_data):
+            theta = cp.float64(0.0)
+        else:
+            # For each site, check if it's segregating among valid samples
+            # Count derived alleles among valid samples
+            hap_clean = cp.where(valid_mask, haplotypes, 0)
+            derived_counts = cp.sum(hap_clean, axis=0)
             
-            if n_valid > 1:  # Need at least 2 samples
-                valid_data = variant_data[valid_mask]
+            # A site is segregating if 0 < derived_count < n_valid
+            valid_sites = cp.where(sites_with_data)[0]
+            n_valid_sites = n_valid_per_site[valid_sites]
+            derived_sites = derived_counts[valid_sites]
+            
+            # Check which sites are segregating (not monomorphic)
+            segregating_mask = (derived_sites > 0) & (derived_sites < n_valid_sites)
+            
+            if not cp.any(segregating_mask):
+                theta = cp.float64(0.0)
+            else:
+                # For each segregating site, compute 1/a1 where a1 is harmonic number
+                seg_n_valid = n_valid_sites[segregating_mask]
                 
-                # Check if site is segregating among valid samples
-                unique_alleles = cp.unique(valid_data)
-                if len(unique_alleles) > 1:
-                    # This site is segregating - add its contribution to theta
-                    # Use harmonic number for the actual sample size at this site
-                    a1_site = cp.sum(1.0 / cp.arange(1, n_valid, dtype=cp.float64))
-                    theta_sum += 1.0 / a1_site
-        
-        theta = theta_sum
+                # Compute harmonic numbers for each sample size
+                # This is the most complex part to vectorize efficiently
+                unique_n = cp.unique(seg_n_valid)
+                theta_sum = cp.float64(0.0)
+                
+                for n in unique_n:
+                    # Count how many sites have this sample size
+                    count_with_n = cp.sum(seg_n_valid == n)
+                    # Compute harmonic number for this sample size
+                    a1 = cp.sum(1.0 / cp.arange(1, int(n), dtype=cp.float64))
+                    # Add contribution
+                    theta_sum += count_with_n / a1
+                
+                theta = theta_sum
         
     # For exclude and ignore modes, compute theta the standard way
     if missing_data in ['exclude', 'ignore']:
@@ -285,15 +322,29 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
         n_haplotypes = float(len(n_valid_per_site[valid_site_mask]) / 
                            cp.sum(1.0 / n_valid_per_site[valid_site_mask]).get())
         
-        # Count segregating sites considering missing data
-        S = 0
-        for i in range(matrix.num_variants):
-            variant_data = matrix.haplotypes[:, i]
-            valid_mask = variant_data >= 0
-            if cp.sum(valid_mask) >= 2:
-                valid_data = variant_data[valid_mask]
-                if len(cp.unique(valid_data)) > 1:
-                    S += 1
+        # Count segregating sites considering missing data (vectorized)
+        haplotypes = matrix.haplotypes
+        valid_mask = haplotypes >= 0
+        n_valid_per_site = cp.sum(valid_mask, axis=0)
+        
+        # Only consider sites with at least 2 valid samples
+        sites_with_data = n_valid_per_site >= 2
+        
+        if not cp.any(sites_with_data):
+            S = 0
+        else:
+            # Check which sites are segregating among valid samples
+            hap_clean = cp.where(valid_mask, haplotypes, 0)
+            derived_counts = cp.sum(hap_clean, axis=0)
+            
+            # Filter to sites with valid data
+            valid_sites = cp.where(sites_with_data)[0]
+            n_valid_sites = n_valid_per_site[valid_sites]
+            derived_sites = derived_counts[valid_sites]
+            
+            # A site is segregating if 0 < derived_count < n_valid
+            segregating_mask = (derived_sites > 0) & (derived_sites < n_valid_sites)
+            S = int(cp.sum(segregating_mask).get())
     else:
         # For 'exclude' and 'ignore' modes
         n_haplotypes = matrix.num_haplotypes
@@ -382,28 +433,53 @@ def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
         freqs = cp.sum(cp.nan_to_num(matrix.haplotypes, nan=0).astype(cp.int32), axis=0)
         
     else:  # missing_data == 'include'
-        # Build AFS considering variable sample sizes per site
-        # Maximum possible sample size
+        # Build AFS considering variable sample sizes per site (vectorized)
+        haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
         max_n = matrix.num_haplotypes
         
-        # Initialize AFS array with size for maximum possible allele count
-        afs = cp.zeros(max_n + 1, dtype=cp.int64)
+        # Create mask for valid (non-missing) data
+        valid_mask = haplotypes >= 0  # shape: (n_haplotypes, n_variants)
         
-        for i in range(matrix.num_variants):
-            variant_data = matrix.haplotypes[:, i]
-            valid_mask = variant_data >= 0
-            n_valid = int(cp.sum(valid_mask).get())
-            
-            if n_valid > 0:
-                # Count derived alleles among valid samples
-                # Note: variant_data should be 0/1 for biallelic sites
-                valid_data = variant_data[valid_mask]
-                # Only count if all values are 0 or 1 (biallelic)
-                if cp.all(valid_data <= 1):
-                    derived_count = int(cp.sum(valid_data).get())
-                    # Add to AFS at the appropriate bin
-                    if derived_count <= max_n:  # Safety check
-                        afs[derived_count] += 1
+        # Count valid samples per site
+        n_valid_per_site = cp.sum(valid_mask, axis=0)  # shape: (n_variants,)
+        
+        # Only consider sites with valid data
+        sites_with_data = n_valid_per_site > 0
+        
+        if not cp.any(sites_with_data):
+            return cp.zeros(max_n + 1, dtype=cp.int64)
+        
+        # For sites with valid data, count derived alleles among valid samples
+        # Set missing data to 0 for counting, but only count where valid
+        hap_clean = cp.where(valid_mask, haplotypes, 0)
+        
+        # Count derived alleles per site (only among valid samples)
+        derived_counts = cp.sum(hap_clean, axis=0)  # shape: (n_variants,)
+        
+        # Filter to sites with valid data and check they're biallelic
+        valid_sites = cp.where(sites_with_data)[0]
+        derived_at_valid = derived_counts[valid_sites]
+        n_valid_at_valid = n_valid_per_site[valid_sites]
+        
+        # Check biallelic assumption: derived count should be <= n_valid
+        biallelic_mask = derived_at_valid <= n_valid_at_valid
+        final_derived = derived_at_valid[biallelic_mask]
+        
+        # Create AFS histogram
+        # Use bincount which is more efficient than a loop
+        if len(final_derived) > 0:
+            # Ensure derived counts don't exceed max_n
+            final_derived = cp.minimum(final_derived, max_n)
+            afs = cp.bincount(final_derived, minlength=max_n + 1)
+            # Ensure correct size and type
+            if len(afs) < max_n + 1:
+                afs_full = cp.zeros(max_n + 1, dtype=cp.int64)
+                afs_full[:len(afs)] = afs
+                afs = afs_full
+            else:
+                afs = afs[:max_n + 1].astype(cp.int64)
+        else:
+            afs = cp.zeros(max_n + 1, dtype=cp.int64)
         
         return afs
     
@@ -465,21 +541,35 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
         segregating = (allele_counts > 0) & (allele_counts < n_haplotypes)
         
     else:  # missing_data == 'include'
-        # Count each site as segregating based on non-missing data only
-        seg_count = 0
+        # Count segregating sites based on non-missing data only (vectorized)
+        haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
         
-        for i in range(matrix.num_variants):
-            variant_data = matrix.haplotypes[:, i]
-            valid_mask = variant_data >= 0
-            n_valid = cp.sum(valid_mask)
-            
-            if n_valid >= 2:  # Need at least 2 samples
-                valid_data = variant_data[valid_mask]
-                unique_alleles = cp.unique(valid_data)
-                if len(unique_alleles) > 1:
-                    seg_count += 1
+        # Create mask for valid (non-missing) data
+        valid_mask = haplotypes >= 0  # shape: (n_haplotypes, n_variants)
         
-        return seg_count
+        # Count valid samples per site
+        n_valid_per_site = cp.sum(valid_mask, axis=0)  # shape: (n_variants,)
+        
+        # Only consider sites with at least 2 valid samples
+        sites_with_data = n_valid_per_site >= 2
+        
+        if not cp.any(sites_with_data):
+            return 0
+        
+        # For each site, check if it's segregating among valid samples
+        # Count derived alleles among valid samples
+        hap_clean = cp.where(valid_mask, haplotypes, 0)
+        derived_counts = cp.sum(hap_clean, axis=0)
+        
+        # Filter to sites with valid data
+        valid_sites = cp.where(sites_with_data)[0]
+        n_valid_sites = n_valid_per_site[valid_sites]
+        derived_sites = derived_counts[valid_sites]
+        
+        # A site is segregating if 0 < derived_count < n_valid
+        segregating_mask = (derived_sites > 0) & (derived_sites < n_valid_sites)
+        
+        return int(cp.sum(segregating_mask).get())
     
     return int(cp.sum(segregating).get())
 
@@ -535,20 +625,33 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
         allele_counts = cp.sum(matrix.haplotypes, axis=0)
         
     else:  # missing_data == 'include'
-        # Count singletons based on non-missing data at each site
-        singleton_count = 0
+        # Count singletons based on non-missing data at each site (vectorized)
+        haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
         
-        for i in range(matrix.num_variants):
-            variant_data = matrix.haplotypes[:, i]
-            valid_mask = variant_data >= 0
-            
-            if cp.any(valid_mask):
-                # Count derived alleles among valid samples
-                derived_count = cp.sum(variant_data[valid_mask])
-                if derived_count == 1:
-                    singleton_count += 1
+        # Create mask for valid (non-missing) data
+        valid_mask = haplotypes >= 0  # shape: (n_haplotypes, n_variants)
         
-        return singleton_count
+        # Count valid samples per site
+        n_valid_per_site = cp.sum(valid_mask, axis=0)  # shape: (n_variants,)
+        
+        # Only consider sites with at least 1 valid sample
+        sites_with_data = n_valid_per_site >= 1
+        
+        if not cp.any(sites_with_data):
+            return 0
+        
+        # For each site, count derived alleles among valid samples
+        hap_clean = cp.where(valid_mask, haplotypes, 0)
+        derived_counts = cp.sum(hap_clean, axis=0)
+        
+        # Filter to sites with valid data
+        valid_sites = cp.where(sites_with_data)[0]
+        derived_at_valid = derived_counts[valid_sites]
+        
+        # Count sites where exactly 1 derived allele is present
+        singleton_mask = derived_at_valid == 1
+        
+        return int(cp.sum(singleton_mask).get())
     
     # For exclude and ignore modes
     return int(cp.sum(allele_counts == 1).get())
@@ -667,31 +770,58 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
         # Get allele frequencies
         allele_counts = cp.sum(matrix.haplotypes, axis=0)
         
-        # Calculate theta_H (uses squared frequencies)
-        theta_h = 0.0
-        for i in range(1, n):
-            count_i = cp.sum(allele_counts == i)
-            if count_i > 0:
-                theta_h += 2.0 * i * i * float(count_i.get()) / (n * (n - 1))
+        # Calculate theta_H (uses squared frequencies) - fully vectorized
+        # theta_H = sum over sites of 2 * i^2 / (n * (n-1)) where i is the derived allele count
+        # This is equivalent to: sum over i of 2 * i^2 * count(i) / (n * (n-1))
+        
+        # Direct vectorized computation: sum over all sites of 2 * count^2 / (n * (n-1))
+        # Only include segregating sites (0 < count < n)
+        segregating_mask = (allele_counts > 0) & (allele_counts < n)
+        segregating_counts = allele_counts[segregating_mask].astype(cp.float64)
+        
+        if len(segregating_counts) > 0:
+            # Calculate theta_H: sum of 2 * i^2 / (n * (n-1)) for all segregating sites
+            theta_h = float(cp.sum(2.0 * segregating_counts * segregating_counts / (n * (n - 1))).get())
+        else:
+            theta_h = 0.0
     
     else:  # missing_data == 'include'
-        # Calculate theta_H considering variable sample sizes per site
-        theta_h = 0.0
+        # Calculate theta_H considering variable sample sizes per site (vectorized)
+        haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
         
-        for variant_idx in range(matrix.num_variants):
-            variant_data = matrix.haplotypes[:, variant_idx]
-            valid_mask = variant_data >= 0
-            n_valid = int(cp.sum(valid_mask).get())
+        # Create mask for valid (non-missing) data
+        valid_mask = haplotypes >= 0  # shape: (n_haplotypes, n_variants)
+        
+        # Count valid samples per site
+        n_valid_per_site = cp.sum(valid_mask, axis=0)  # shape: (n_variants,)
+        
+        # Only consider sites with at least 2 valid samples
+        sites_with_data = n_valid_per_site > 1
+        
+        if not cp.any(sites_with_data):
+            theta_h = 0.0
+        else:
+            # For each site, count derived alleles among valid samples
+            hap_clean = cp.where(valid_mask, haplotypes, 0)
+            derived_counts = cp.sum(hap_clean, axis=0)
             
-            if n_valid > 1:  # Need at least 2 samples
-                # Count derived alleles at this site
-                derived_count = int(cp.sum(variant_data[valid_mask]).get())
+            # Filter to sites with valid data
+            valid_sites = cp.where(sites_with_data)[0]
+            n_valid_sites = n_valid_per_site[valid_sites].astype(cp.float64)
+            derived_sites = derived_counts[valid_sites].astype(cp.float64)
+            
+            # Filter to sites with at least one derived allele
+            has_derived = derived_sites > 0
+            if cp.any(has_derived):
+                n_valid_final = n_valid_sites[has_derived]
+                derived_final = derived_sites[has_derived]
                 
-                # Add contribution to theta_H
+                # Calculate theta_H contribution for each site
                 # theta_H = sum over sites of 2 * i^2 / (n * (n-1))
-                # where i is the derived allele count
-                if derived_count > 0:
-                    theta_h += 2.0 * derived_count * derived_count / (n_valid * (n_valid - 1))
+                site_contributions = 2.0 * derived_final * derived_final / (n_valid_final * (n_valid_final - 1))
+                theta_h = float(cp.sum(site_contributions).get())
+            else:
+                theta_h = 0.0
     
     # Get pi with consistent missing data handling
     pi_value = pi(matrix, span_normalize=False, missing_data=missing_data)
