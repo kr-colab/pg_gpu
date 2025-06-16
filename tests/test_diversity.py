@@ -479,3 +479,126 @@ class TestBackwardCompatibility:
         assert abs(pi_old - pi_new) < 1e-10
         assert abs(theta_old - theta_new) < 1e-10
         assert abs(d_old - d_new) < 1e-10
+
+
+class TestHaplotypeDiversity:
+    """Test haplotype diversity calculations against scikit-allel."""
+    
+    def test_haplotype_diversity_simple(self):
+        """Test haplotype diversity with simple known data."""
+        # Create simple test case with known haplotype patterns
+        haplotypes = np.array([
+            [0, 0, 0, 0],  # haplotype 1: 0000
+            [0, 0, 0, 0],  # haplotype 2: 0000 (same as 1)
+            [1, 1, 1, 1],  # haplotype 3: 1111
+            [1, 1, 1, 1],  # haplotype 4: 1111 (same as 3)
+            [0, 1, 0, 1],  # haplotype 5: 0101 (unique)
+            [1, 0, 1, 0],  # haplotype 6: 1010 (unique)
+        ], dtype=np.int8)
+        
+        positions = np.array([1000, 2000, 3000, 4000])
+        matrix = HaplotypeMatrix(haplotypes, positions, positions[0], positions[-1])
+        
+        # Calculate using our implementation
+        h_div_pg = diversity.haplotype_diversity(matrix)
+        
+        # Calculate using scikit-allel
+        import allel
+        h_allel = allel.HaplotypeArray(haplotypes.T)
+        h_div_allel = allel.haplotype_diversity(h_allel)
+        
+        # Should match within numerical precision
+        assert abs(h_div_pg - h_div_allel) < 1e-10
+        
+        # Manual calculation: 4 unique haplotypes out of 6 total
+        # Expected diversity = (1 - sum(p_i^2)) * n/(n-1) where p_i are frequencies (Nei's correction)
+        # Frequencies: [2/6, 2/6, 1/6, 1/6] = [1/3, 1/3, 1/6, 1/6]
+        # Uncorrected = 1 - ((1/3)^2 + (1/3)^2 + (1/6)^2 + (1/6)^2) = 1 - (1/9 + 1/9 + 1/36 + 1/36) = 1 - 10/36 = 26/36 = 13/18
+        # Corrected = (13/18) * 6/5 = 13/15
+        expected = 13/15
+        assert abs(h_div_pg - expected) < 1e-10
+    
+    def test_haplotype_diversity_random_data(self):
+        """Test haplotype diversity with random data against scikit-allel."""
+        np.random.seed(42)
+        n_haplotypes = 50
+        n_variants = 20
+        
+        # Generate random haplotypes
+        haplotypes = np.random.randint(0, 2, size=(n_haplotypes, n_variants), dtype=np.int8)
+        positions = np.arange(n_variants) * 1000 + 1000
+        
+        matrix = HaplotypeMatrix(haplotypes, positions, positions[0], positions[-1])
+        
+        # Calculate using our implementation
+        h_div_pg = diversity.haplotype_diversity(matrix)
+        
+        # Calculate using scikit-allel
+        import allel
+        h_allel = allel.HaplotypeArray(haplotypes.T)
+        h_div_allel = allel.haplotype_diversity(h_allel)
+        
+        # Should match within numerical precision
+        assert abs(h_div_pg - h_div_allel) < 1e-10
+    
+    def test_haplotype_diversity_edge_cases(self):
+        """Test edge cases for haplotype diversity."""
+        # Case 1: All haplotypes identical
+        haplotypes = np.ones((10, 5), dtype=np.int8)
+        positions = np.arange(5) * 1000 + 1000
+        matrix = HaplotypeMatrix(haplotypes, positions, positions[0], positions[-1])
+        
+        h_div = diversity.haplotype_diversity(matrix)
+        assert h_div == 0.0  # No diversity when all identical
+        
+        # Case 2: All haplotypes unique
+        n_variants = 4
+        haplotypes = np.array([
+            [0, 0, 0, 0],
+            [0, 0, 0, 1],
+            [0, 0, 1, 0],
+            [0, 0, 1, 1],
+            [0, 1, 0, 0],
+            [0, 1, 0, 1],
+            [0, 1, 1, 0],
+            [0, 1, 1, 1],
+        ], dtype=np.int8)
+        positions = np.arange(n_variants) * 1000 + 1000
+        matrix = HaplotypeMatrix(haplotypes, positions, positions[0], positions[-1])
+        
+        h_div = diversity.haplotype_diversity(matrix)
+        # All unique: diversity = (1 - sum(1/n)^2) * n/(n-1) = (1 - n*(1/n)^2) * n/(n-1) = (1 - 1/n) * n/(n-1) = ((n-1)/n) * n/(n-1) = 1
+        expected = 1.0
+        assert abs(h_div - expected) < 1e-10
+    
+    def test_haplotype_diversity_with_population(self):
+        """Test haplotype diversity with population subset."""
+        np.random.seed(123)
+        n_haplotypes = 30
+        n_variants = 15
+        
+        haplotypes = np.random.randint(0, 2, size=(n_haplotypes, n_variants), dtype=np.int8)
+        positions = np.arange(n_variants) * 1000 + 1000
+        
+        # Set up populations
+        pop1_indices = list(range(10))
+        pop2_indices = list(range(10, 20))
+        
+        matrix = HaplotypeMatrix(haplotypes, positions, positions[0], positions[-1])
+        matrix.sample_sets = {'pop1': pop1_indices, 'pop2': pop2_indices}
+        
+        # Test population-specific haplotype diversity
+        h_div_pop1 = diversity.haplotype_diversity(matrix, 'pop1')
+        h_div_pop2 = diversity.haplotype_diversity(matrix, 'pop2')
+        h_div_all = diversity.haplotype_diversity(matrix)
+        
+        # Compare with scikit-allel
+        import allel
+        h_allel = allel.HaplotypeArray(haplotypes.T)
+        h_div_allel_pop1 = allel.haplotype_diversity(h_allel.subset(sel1=pop1_indices))
+        h_div_allel_pop2 = allel.haplotype_diversity(h_allel.subset(sel1=pop2_indices))
+        h_div_allel_all = allel.haplotype_diversity(h_allel)
+        
+        assert abs(h_div_pop1 - h_div_allel_pop1) < 1e-10
+        assert abs(h_div_pop2 - h_div_allel_pop2) < 1e-10
+        assert abs(h_div_all - h_div_allel_all) < 1e-10
