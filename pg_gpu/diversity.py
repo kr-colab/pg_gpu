@@ -15,7 +15,7 @@ from .haplotype_matrix import HaplotypeMatrix
 def pi(haplotype_matrix: HaplotypeMatrix,
        population: Optional[Union[str, list]] = None,
        span_normalize: bool = True,
-       missing_data: str = 'include',
+       missing_data: str = 'ignore',
        span_denominator: str = 'total') -> float:
     """
     Calculate nucleotide diversity (π) for a population.
@@ -69,7 +69,7 @@ def pi(haplotype_matrix: HaplotypeMatrix,
     
     if missing_data == 'ignore':
         # Original behavior - use standard AFS calculation
-        afs = allele_frequency_spectrum(matrix)
+        afs = allele_frequency_spectrum(matrix, missing_data='ignore')
         n_haplotypes = matrix.num_haplotypes
         
         i = cp.arange(1, n_haplotypes, dtype=cp.float64)
@@ -123,7 +123,7 @@ def pi(haplotype_matrix: HaplotypeMatrix,
 def theta_w(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
             span_normalize: bool = True,
-            missing_data: str = 'include',
+            missing_data: str = 'ignore',
             span_denominator: str = 'total') -> float:
     """
     Calculate Watterson's theta for a population.
@@ -177,12 +177,12 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
         n_haplotypes = matrix.num_haplotypes
         
         # Count segregating sites in the filtered data
-        seg_sites = segregating_sites(matrix)
+        seg_sites = segregating_sites(matrix, missing_data='exclude')
         
     elif missing_data == 'ignore':
         # Original behavior
         n_haplotypes = matrix.num_haplotypes
-        seg_sites = segregating_sites(matrix)
+        seg_sites = segregating_sites(matrix, missing_data='ignore')
         
     else:  # missing_data == 'include'
         # Calculate theta using site-specific sample sizes
@@ -224,7 +224,7 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
 
 def tajimas_d(haplotype_matrix: HaplotypeMatrix,
               population: Optional[Union[str, list]] = None,
-              missing_data: str = 'include') -> float:
+              missing_data: str = 'ignore') -> float:
     """
     Calculate Tajima's D statistic.
     
