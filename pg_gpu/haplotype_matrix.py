@@ -242,8 +242,12 @@ class HaplotypeMatrix:
         subset_haplotypes = self.haplotypes[:, positions]
         subset_positions = self.positions[positions]
         
-        # Create and return a new instance, maintaining the device state.
-        return HaplotypeMatrix(subset_haplotypes, subset_positions)
+        # Create and return a new instance, maintaining the device state and sample sets.
+        return HaplotypeMatrix(
+            subset_haplotypes, 
+            subset_positions,
+            sample_sets=self._sample_sets
+        )
     
     def get_subset_from_range(self, low: int, high: int) -> "HaplotypeMatrix":
         """
@@ -269,8 +273,9 @@ class HaplotypeMatrix:
             self.haplotypes[:, indices], 
             self.positions[indices], 
             chrom_start=low, 
-            chrom_end=high
-            )
+            chrom_end=high,
+            sample_sets=self._sample_sets
+        )
     
     def apply_biallelic_filter(self) -> "HaplotypeMatrix":
         """
