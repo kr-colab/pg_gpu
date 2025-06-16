@@ -332,6 +332,8 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                 results['n_variants'] = matrix.num_variants
             else:
                 results['n_variants'] = haplotype_matrix.num_variants
+        elif stat == 'haplotype_diversity':
+            results['haplotype_diversity'] = haplotype_diversity(haplotype_matrix, population)
         else:
             raise ValueError(f"Unknown statistic: {stat}")
     
@@ -385,6 +387,68 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
     
     # H = pi - theta_H
     return pi_value - theta_h
+
+
+def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
+                       population: Optional[Union[str, list]] = None) -> float:
+    """
+    Calculate haplotype diversity for a population.
+    
+    Haplotype diversity is defined as 1 - sum(p_i^2) where p_i is the 
+    frequency of the i-th unique haplotype in the population.
+    
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+        The haplotype data
+    population : str or list, optional
+        Population name or list of sample indices. If None, uses all samples
+        
+    Returns
+    -------
+    float
+        Haplotype diversity value
+    """
+    # Get population subset if specified
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+    
+    # Ensure on GPU for efficient computation
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    
+    # Get haplotypes array
+    haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
+    n_haplotypes = matrix.num_haplotypes
+    
+    if n_haplotypes <= 1:
+        return 0.0
+    
+    # Find unique haplotypes and their counts
+    # Convert each haplotype to a string representation for hashing
+    if matrix.device == 'GPU':
+        # Convert to CPU for unique operations (CuPy doesn't have good unique support for 2D)
+        haplotypes_cpu = haplotypes.get()
+    else:
+        haplotypes_cpu = haplotypes
+    
+    # Convert haplotypes to string representation for finding uniques
+    hap_strings = [''.join(map(str, hap)) for hap in haplotypes_cpu]
+    
+    # Count unique haplotypes
+    from collections import Counter
+    hap_counts = Counter(hap_strings)
+    
+    # Calculate frequencies
+    frequencies = np.array(list(hap_counts.values())) / n_haplotypes
+    
+    # Calculate diversity: 1 - sum(p_i^2)
+    # Apply Nei's correction for finite sample size: multiply by n/(n-1)
+    diversity = (1.0 - np.sum(frequencies ** 2)) * n_haplotypes / (n_haplotypes - 1)
+    
+    return float(diversity)
 
 
 def _get_population_matrix(haplotype_matrix: HaplotypeMatrix,
