@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-End-to-end IM model pipeline:
+IM model pipeline (robust + resumable):
 
 1) Simulate IM model and save .trees (+ VCFs) to IM_model_simulations/
+   - Skips if trees already exist unless --force-sim
 2) Traditional moments LD (from VCFs) — PARALLEL with Ray:
-   - per-replicate LD PKLs → traditional/LD_stats/
-   - bootstrap means/varcovs + boot sets + plot + inference → traditional/MomentsLD_results/
-   - per-rep and rolled-up timing saved in the results dir
+   - Reuses existing per-rep PKLs in traditional/LD_stats/
+   - Computes only the missing reps
+   - Bootstrap + plot + inference → traditional/MomentsLD_results/
 3) GPU LD (from .trees):
-   - per-replicate LD PKLs (moments-compatible structure) → GPU/LD_stats/
-   - bootstrap means/varcovs + boot sets + plot + inference → GPU/MomentsLD_results/
-   - per-rep and rolled-up timing saved in the results dir
+   - per-replicate LD PKLs → GPU/LD_stats/
+   - bootstrap + plot + inference → GPU/MomentsLD_results/
 """
 
 import os
@@ -67,7 +67,7 @@ def demographic_model():
 
 def simulate_replicates(sim_dir: str, num_reps: int, L: int, mu: float, r_per_bp: float, n_per_pop: int):
     """
-    Writes:
+    Writes per-replicate:
       - IM_model_simulations/window_<i>.trees
       - IM_model_simulations/split_mig.<i>.vcf.gz
     """
@@ -95,27 +95,124 @@ def simulate_replicates(sim_dir: str, num_reps: int, L: int, mu: float, r_per_bp
 
 
 def write_samples_and_rec_map(sim_dir: str, L: int, r_per_bp: float, n_per_pop: int):
-    # samples file
-    with open(f"{sim_dir}/samples.txt", "w+") as fout:
+    """
+    Create a global samples.txt and a flat rec map.
+    - Robust to tskit versions without Population.name: we map the *first two non-empty*
+      population IDs among ts.samples() to 'deme0' and 'deme1' (by sorted PID).
+    """
+    ts0 = tskit.load(f"{sim_dir}/window_0.trees")
+
+    # VCF sample order is tsk_0, tsk_1, ... matching ts.samples()
+    sample_nodes = list(ts0.samples())
+    node_to_pop = {n: ts0.node(n).population for n in sample_nodes}
+
+    # Identify first two non-empty population IDs among the samples
+    pops_present = {}
+    for n in sample_nodes:
+        pid = node_to_pop[n]
+        pops_present[pid] = pops_present.get(pid, 0) + 1
+    nonempty_pids = sorted(pops_present.keys())
+    if len(nonempty_pids) < 2:
+        raise ValueError("Need samples from at least two populations to write samples.txt")
+    pid_d0, pid_d1 = nonempty_pids[0], nonempty_pids[1]
+
+    # Write samples.txt using the discovered mapping
+    samples_path = f"{sim_dir}/samples.txt"
+    with open(samples_path, "w") as fout:
         fout.write("sample\tpop\n")
-        for jj in range(2):
-            for ii in range(n_per_pop):
-                fout.write(f"tsk_{jj * n_per_pop + ii}\tdeme{jj}\n")
-    # recombination map, flat (cM)
-    with open(f"{sim_dir}/flat_map.txt", "w+") as fout:
-        fout.write("pos\tMap(cM)\n")
-        fout.write("0\t0\n")
+        for i, node in enumerate(sample_nodes):
+            vcf_name = f"tsk_{i}"
+            pop_name = "deme0" if node_to_pop[node] == pid_d0 else ("deme1" if node_to_pop[node] == pid_d1 else None)
+            if pop_name is None:
+                continue
+            fout.write(f"{vcf_name}\t{pop_name}\n")
+
+    # Flat recombination map (cM)
+    recmap_path = f"{sim_dir}/flat_map.txt"
+    with open(recmap_path, "w") as fout:
+        fout.write("pos\tMap(cM)\n0\t0\n")
         fout.write(f"{L}\t{r_per_bp * L * 100}\n")
+
+
+# --------- Per-replicate pop-file builders (prevents VCF header mismatch) ----
+def _vcf_sample_names(vcf_gz_path: str):
+    import gzip
+    open_fn = gzip.open if vcf_gz_path.endswith(".gz") else open
+    with open_fn(vcf_gz_path, "rt") as f:
+        for line in f:
+            if line.startswith("#CHROM"):
+                return line.strip().split("\t")[9:]
+    raise RuntimeError(f"Couldn't find #CHROM header in {vcf_gz_path}")
+
+
+def _replicate_samples_file(sim_dir: str, rep: int) -> str:
+    """
+    Create per-rep samples file matching that VCF's sample columns and assigning
+    deme0/deme1 by the two non-empty popIDs observed in that replicate.
+    Works for haploid (no individuals) and diploid (individuals present) ts.
+    """
+    ts_path = f"{sim_dir}/window_{rep}.trees"
+    vcf_path = f"{sim_dir}/split_mig.{rep}.vcf.gz"
+    ts = tskit.load(ts_path)
+    vcf_samples = _vcf_sample_names(vcf_path)
+
+    def two_nonempty_pids_from_nodes(node_ids):
+        counts = {}
+        for n in node_ids:
+            pid = ts.node(n).population
+            counts[pid] = counts.get(pid, 0) + 1
+        pids = sorted([pid for pid, c in counts.items() if c > 0])
+        if len(pids) < 2:
+            raise ValueError("Need samples from at least two populations in this replicate.")
+        return pids[0], pids[1]
+
+    samples_file = f"{sim_dir}/samples_rep{rep}.txt"
+    with open(samples_file, "w") as fout:
+        fout.write("sample\tpop\n")
+
+        if ts.num_individuals == 0 and len(vcf_samples) == ts.num_samples:
+            # Haploid case: VCF samples correspond to ts.samples() order
+            node_order = list(ts.samples())
+            pid_d0, pid_d1 = two_nonempty_pids_from_nodes(node_order)
+            for i, name in enumerate(vcf_samples):
+                pid = ts.node(node_order[i]).population
+                pop_name = "deme0" if pid == pid_d0 else ("deme1" if pid == pid_d1 else None)
+                if pop_name is not None:
+                    fout.write(f"{name}\t{pop_name}\n")
+
+        elif ts.num_individuals > 0 and len(vcf_samples) == ts.num_individuals:
+            # Diploid case: VCF samples correspond to individuals
+            ind_nodes0 = []
+            for ind_id in range(ts.num_individuals):
+                nodes = ts.individual(ind_id).nodes
+                if not nodes:
+                    raise ValueError("Individual without nodes.")
+                ind_nodes0.append(nodes[0])
+            pid_d0, pid_d1 = two_nonempty_pids_from_nodes(ind_nodes0)
+            for i, name in enumerate(vcf_samples):
+                pid = ts.node(ind_nodes0[i]).population
+                pop_name = "deme0" if pid == pid_d0 else ("deme1" if pid == pid_d1 else None)
+                if pop_name is not None:
+                    fout.write(f"{name}\t{pop_name}\n")
+
+        else:
+            raise RuntimeError(
+                f"Can't align VCF samples (n={len(vcf_samples)}) with ts "
+                f"(num_samples={ts.num_samples}, num_individuals={ts.num_individuals}) for rep {rep}"
+            )
+
+    return samples_file
 
 
 # --------------------------- Traditional (moments) LD -------------------------
 def compute_traditional_ld_for_rep(sim_dir: str, rep: int, r_bins) -> dict:
-    """moments LD stats from VCF for one replicate."""
+    """moments LD stats from VCF for one replicate; builds a per-rep samples file."""
     vcf_gz = f"{sim_dir}/split_mig.{rep}.vcf.gz"
+    pop_file = _replicate_samples_file(sim_dir, rep)
     ld = moments.LD.Parsing.compute_ld_statistics(
         vcf_gz,
         rec_map_file=f"{sim_dir}/flat_map.txt",
-        pop_file=f"{sim_dir}/samples.txt",
+        pop_file=pop_file,
         pops=["deme0", "deme1"],
         r_bins=r_bins,
         report=False,
@@ -255,7 +352,7 @@ def build_sample_sets(ts: tskit.TreeSequence):
     for pid in range(ts.num_populations):
         pop = ts.population(pid)
         name = None
-        if hasattr(pop, "name") and pop.name:
+        if hasattr(pop, "name") and getattr(pop, "name", None):
             name = pop.name
         elif hasattr(pop, "metadata") and isinstance(pop.metadata, dict):
             name = pop.metadata.get("name")
@@ -288,50 +385,99 @@ def attach_sample_sets(h: HaplotypeMatrix, sample_sets: dict):
     return h
 
 
-def gpu_ld_from_trees(ts_path: str, r_bins, r_per_bp: float, pop1="deme0", pop2="deme1", raw=True) -> dict:
+def gpu_ld_from_trees(
+    ts_path: str,
+    r_bins,
+    r_per_bp: float,
+    pop1: str = "deme0",
+    pop2: str = "deme1",
+    raw: bool = True
+) -> dict:
     """
-    Returns a moments-compatible dict:
-      {'bins': [(r0,r1),...],
-       'sums': [np(15) per bin, np(3) H],
-       'stats': ([15 names], ['H_0_0','H_0_1','H_1_1']),
-       'pops':  [pop1, pop2]}
+    Return a moments-compatible dict computed from a .trees file:
+      {
+        'bins':  [(r0,r1), ...]          # genetic-distance bins (same as r_bins pairs)
+        'sums':  [np(15) per bin, np(3)] # raw sums per bin, then H-sums at the end
+        'stats': ([15 names in moments order], ['H_0_0','H_0_1','H_1_1']),
+        'pops':  [pop1, pop2],
+      }
+    Notes:
+      - Uses the *same biallelic-filtered site set* for pairwise LD and H terms.
+      - Bins are left-closed, right-open, matching moments’ convention.
+      - `raw=True` mirrors moments' “sum-then-bootstrap” pathway.
     """
+    MOMENTS_ORDER = [
+        'DD_0_0', 'DD_0_1', 'DD_1_1',
+        'Dz_0_0_0', 'Dz_0_0_1', 'Dz_0_1_1', 'Dz_1_0_0', 'Dz_1_0_1', 'Dz_1_1_1',
+        'pi2_0_0_0_0', 'pi2_0_0_0_1', 'pi2_0_0_1_1', 'pi2_0_1_0_1', 'pi2_0_1_1_1', 'pi2_1_1_1_1'
+    ]
+
     bp_bins = genetic_to_bp_bins(r_bins, r_per_bp)
+
     ts = tskit.load(ts_path)
     sample_sets = build_sample_sets(ts)
+    if pop1 not in sample_sets or pop2 not in sample_sets:
+        raise KeyError(f"Requested pops ({pop1},{pop2}) not in sample_sets={list(sample_sets)}")
+
     h = HaplotypeMatrix.from_ts(ts)
     attach_sample_sets(h, sample_sets)
 
-    try:
-        stats_by_bin = h.compute_ld_statistics_gpu_two_pops(
-            bp_bins=bp_bins, pop1=pop1, pop2=pop2, raw=raw, ac_filter=True
-        )
-    except ValueError as e:
-        if "sample_sets must be defined" in str(e):
-            filtered = h.apply_biallelic_filter()
-            attach_sample_sets(filtered, sample_sets)
-            stats_by_bin = filtered.compute_ld_statistics_gpu_two_pops(
-                bp_bins=bp_bins, pop1=pop1, pop2=pop2, raw=raw, ac_filter=False
-            )
-        else:
-            raise
+    # Apply biallelic filter once; use same sites for LD & H
+    # --- ensure identical site set for LD & H: apply biallelic filter once ---
+    h_filt = h.apply_biallelic_filter()
 
-    # Assemble sums in fixed order
+    # GPU LD computation – match moments' semantics more closely
+    try:
+        # prefer double precision if available
+        stats_by_bin = h_filt.compute_ld_statistics_gpu_two_pops(
+            bp_bins=bp_bins,
+            pop1=pop1,
+            pop2=pop2,
+            raw=raw,
+            ac_filter=True,       # <-- previously False
+            fp64=True             # <-- ignored if unsupported
+        )
+    except TypeError:
+        # older versions may not accept fp64 argument
+        stats_by_bin = h_filt.compute_ld_statistics_gpu_two_pops(
+            bp_bins=bp_bins,
+            pop1=pop1,
+            pop2=pop2,
+            raw=raw,
+            ac_filter=True
+        )
+
+
+    # Assemble per-bin vectors in moments order
     sums = []
     for (b0, b1) in zip(bp_bins[:-1], bp_bins[1:]):
         key = (float(b0), float(b1))
-        od = stats_by_bin.get(key)
-        vec = np.array([od[name] for name in LD_STAT_NAMES], dtype=float)
-        sums.append(vec)
+        od = stats_by_bin.get(key, None)
+        if od is None:
+            sums.append(np.zeros(len(MOMENTS_ORDER), dtype=float))
+        else:
+            sums.append(np.array([od[name] for name in MOMENTS_ORDER], dtype=float))
 
-    # H terms as sums over sites
-    S = ts.num_sites
-    H00_mean = ts.diversity(sample_sets=sample_sets['deme0'])
-    H11_mean = ts.diversity(sample_sets=sample_sets['deme1'])
-    H01_mean = ts.divergence([sample_sets['deme0'], sample_sets['deme1']])
-    sums.append(np.array([H00_mean * S, H01_mean * S, H11_mean * S], dtype=float))
+    # H terms on same filtered site set
+    pos_keep = np.asarray(h_filt.positions.get() if h_filt.device == 'GPU' else h_filt.positions)
+    site_pos = np.asarray(ts.tables.sites.position)
+    keep_mask = np.isin(site_pos, pos_keep)
+    drop_idx = np.where(~keep_mask)[0]
+    ts_filt = ts.delete_sites(drop_idx) if drop_idx.size else ts
 
-    bins_gen = [(np.float64(r_bins[i]), np.float64(r_bins[i+1])) for i in range(len(r_bins)-1)]
+    S_filt = ts_filt.num_sites
+    if S_filt == 0:
+        H00_sum = H01_sum = H11_sum = 0.0
+    else:
+        H00_mean = ts_filt.diversity(sample_sets=sample_sets[pop1])
+        H11_mean = ts_filt.diversity(sample_sets=sample_sets[pop2])
+        H01_mean = ts_filt.divergence([sample_sets[pop1], sample_sets[pop2]])
+        H00_sum, H01_sum, H11_sum = H00_mean * S_filt, H01_mean * S_filt, H11_mean * S_filt
+
+    sums.append(np.array([H00_sum, H01_sum, H11_sum], dtype=float))
+
+    bins_gen = [(np.float64(r_bins[i]), np.float64(r_bins[i + 1])) for i in range(len(r_bins) - 1)]
+
     return {
         "bins": bins_gen,
         "sums": sums,
@@ -342,21 +488,16 @@ def gpu_ld_from_trees(ts_path: str, r_bins, r_per_bp: float, pop1="deme0", pop2=
 
 # --------------------------- Timing helpers ----------------------------------
 def write_timing(results_dir: str, label: str, per_rep_times: list, overall_seconds: float):
-    """
-    per_rep_times: list[(rep, seconds)]
-    """
     ensure_dir(results_dir)
     total_rep_sum = sum(dt for _, dt in per_rep_times)
     mean_rep = total_rep_sum / len(per_rep_times) if per_rep_times else 0.0
 
-    # print summary
     print(f"\n== {label} timing summary ==")
     print(f"  per-replicate mean: {mean_rep:.2f} s")
     print(f"  per-replicate sum : {total_rep_sum:.2f} s")
     print(f"  overall wall time : {overall_seconds:.2f} s (includes overhead)")
     print("================================\n")
 
-    # CSV
     timing_csv = f"{results_dir}/{label}_timing.csv"
     with open(timing_csv, "w", newline="") as f:
         w = csv.writer(f)
@@ -368,7 +509,6 @@ def write_timing(results_dir: str, label: str, per_rep_times: list, overall_seco
         w.writerow(["sum_per_rep_seconds", f"{total_rep_sum:.6f}"])
         w.writerow(["overall_wall_seconds", f"{overall_seconds:.6f}"])
 
-    # PKL
     timing_pkl = f"{results_dir}/{label}_timing.pkl"
     with open(timing_pkl, "wb") as f:
         pickle.dump(
@@ -387,42 +527,63 @@ def write_timing(results_dir: str, label: str, per_rep_times: list, overall_seco
 
 
 # --------------------------- Pipeline runners --------------------------------
-# ---- RAY-PARALLEL traditional ----
 def run_traditional(sim_dir: str, out_ld_dir: str, results_dir: str, num_reps: int, r_bins,
                     backend: str = "ray", ray_address: str = None, ray_num_cpus: int = None,
                     ray_max_inflight: int = 64):
     """
-    If backend == 'ray', compute per-rep LD in parallel. Else, fall back to serial.
+    Compute traditional moments LD from VCFs, but:
+      - Reuse any existing per-replicate PKLs in out_ld_dir
+      - Only compute missing replicates
+      - Per-rep samples file guarantees VCF/pop mapping
+      - Then bootstrap/plot/inference on the union
     """
     ensure_dir(out_ld_dir)
     ensure_dir(results_dir)
 
+    # Load any existing LD PKLs
+    ld_stats_dict = {}
+    existing = list_ld_pkls(out_ld_dir)
+    for rep_i, pkl in existing:
+        try:
+            with open(pkl, "rb") as f:
+                ld_stats_dict[rep_i] = pickle.load(f)
+        except Exception as e:
+            print(f"[traditional][warn] failed to load {pkl}: {e} — will recompute this replicate")
+
+    all_reps = set(range(num_reps))
+    have_reps = set(ld_stats_dict.keys())
+    missing_reps = sorted(all_reps - have_reps)
+
+    if not missing_reps:
+        print("[traditional] all replicate LD PKLs already present; skipping recompute")
+        write_timing(results_dir, "traditional", [], 0.0)
+        return bootstrap_and_plot(ld_stats_dict, r_bins, results_dir, tag="traditional")
+
+    print(f"[traditional] computing {len(missing_reps)} missing of {num_reps} total")
+    per_times = []
+    t0_global = time.perf_counter()
+
+    # Serial
     if backend != "ray":
-        # Serial fallback
-        ld_stats_dict = {}
-        per_times = []
-        t0_global = time.perf_counter()
-        for ii in range(num_reps):
+        for rep in missing_reps:
             t0 = time.perf_counter()
-            ld = compute_traditional_ld_for_rep(sim_dir, ii, r_bins)
+            ld = compute_traditional_ld_for_rep(sim_dir, rep, r_bins)
             dt = time.perf_counter() - t0
-
-            ld_stats_dict[ii] = ld
-            per_times.append((ii, dt))
-
-            out_pkl = f"{out_ld_dir}/LD_stats_window_{ii}.pkl"
+            ld_stats_dict[rep] = ld
+            per_times.append((rep, dt))
+            out_pkl = f"{out_ld_dir}/LD_stats_window_{rep}.pkl"
             with open(out_pkl, "wb") as f:
                 pickle.dump(ld, f, protocol=pickle.HIGHEST_PROTOCOL)
             print(f"[traditional] wrote {out_pkl} in {dt:.2f} s")
-        overall = time.perf_counter() - t0_global
 
+        overall = time.perf_counter() - t0_global
         write_timing(results_dir, "traditional", per_times, overall)
         return bootstrap_and_plot(ld_stats_dict, r_bins, results_dir, tag="traditional")
 
+    # Ray path
     if backend == "ray" and not _HAVE_RAY:
         raise RuntimeError("Ray is not installed but --traditional-backend ray was requested.")
 
-    # --- RAY path ---
     if ray_address:
         ray.init(address=ray_address, ignore_reinit_error=True)
     else:
@@ -432,70 +593,111 @@ def run_traditional(sim_dir: str, out_ld_dir: str, results_dir: str, num_reps: i
     def traditional_worker(rep: int, sim_dir_: str, r_bins_local):
         import time as _t
         import moments as _moments
+        import tskit as _tskit
+        import gzip
+
+        def _vcf_sample_names_inner(path):
+            open_fn = gzip.open if path.endswith(".gz") else open
+            with open_fn(path, "rt") as f:
+                for line in f:
+                    if line.startswith("#CHROM"):
+                        return line.strip().split("\t")[9:]
+            raise RuntimeError(f"Missing #CHROM in {path}")
+
+        def _rep_samples(sim_dir, rep_):
+            ts_path = f"{sim_dir}/window_{rep_}.trees"
+            vcf_path = f"{sim_dir}/split_mig.{rep_}.vcf.gz"
+            ts = _tskit.load(ts_path)
+            vcf_samples = _vcf_sample_names_inner(vcf_path)
+
+            def two_nonempty(node_ids):
+                counts = {}
+                for n in node_ids:
+                    pid = ts.node(n).population
+                    counts[pid] = counts.get(pid, 0) + 1
+                pids = sorted([pid for pid, c in counts.items() if c > 0])
+                if len(pids) < 2:
+                    raise ValueError("Need two populations.")
+                return pids[0], pids[1]
+
+            out = f"{sim_dir}/samples_rep{rep_}.txt"
+            with open(out, "w") as fout:
+                fout.write("sample\tpop\n")
+                if ts.num_individuals == 0 and len(vcf_samples) == ts.num_samples:
+                    nodes = list(ts.samples())
+                    pid_d0, pid_d1 = two_nonempty(nodes)
+                    for i, name in enumerate(vcf_samples):
+                        pid = ts.node(nodes[i]).population
+                        pop = "deme0" if pid == pid_d0 else ("deme1" if pid == pid_d1 else None)
+                        if pop is not None:
+                            fout.write(f"{name}\t{pop}\n")
+                elif ts.num_individuals > 0 and len(vcf_samples) == ts.num_individuals:
+                    ind_nodes0 = [ts.individual(i).nodes[0] for i in range(ts.num_individuals)]
+                    pid_d0, pid_d1 = two_nonempty(ind_nodes0)
+                    for i, name in enumerate(vcf_samples):
+                        pid = ts.node(ind_nodes0[i]).population
+                        pop = "deme0" if pid == pid_d0 else ("deme1" if pid == pid_d1 else None)
+                        if pop is not None:
+                            fout.write(f"{name}\t{pop}\n")
+                else:
+                    raise RuntimeError("Cannot align VCF samples with tree sequence.")
+            return out
 
         t0 = _t.perf_counter()
         vcf_gz = f"{sim_dir_}/split_mig.{rep}.vcf.gz"
+        pop_file = _rep_samples(sim_dir_, rep)
         ld = _moments.LD.Parsing.compute_ld_statistics(
             vcf_gz,
             rec_map_file=f"{sim_dir_}/flat_map.txt",
-            pop_file=f"{sim_dir_}/samples.txt",
+            pop_file=pop_file,
             pops=["deme0", "deme1"],
-            r_bins=r_bins_local,   # r_bins already dereferenced
+            r_bins=r_bins_local,
             report=False,
         )
         dt = _t.perf_counter() - t0
         return rep, ld, dt
 
-    ld_stats_dict = {}
-    per_times = []
-    t0_global = time.perf_counter()
+    try:
+        r_bins_ref = ray.put(np.asarray(r_bins, dtype=float))
+        pending = []
+        it_missing = iter(missing_reps)
 
-    # Put shared r_bins once (optional; also fine to pass raw array)
-    r_bins_ref = ray.put(np.asarray(r_bins, dtype=float))
+        def submit(rep_idx):
+            return traditional_worker.remote(rep_idx, sim_dir, r_bins_ref)
 
-    # Submit with backpressure
-    pending = []
-    next_rep = 0
-    completed = 0
+        for _ in range(min(ray_max_inflight, len(missing_reps))):
+            try:
+                pending.append(submit(next(it_missing)))
+            except StopIteration:
+                break
 
-    def submit_one(rep_idx):
-        return traditional_worker.remote(rep_idx, sim_dir, r_bins_ref)
+        completed = 0
+        while pending:
+            done, pending = ray.wait(pending, num_returns=1)
+            rep, ld, dt = ray.get(done[0])
+            ld_stats_dict[rep] = ld
+            out_pkl = f"{out_ld_dir}/LD_stats_window_{rep}.pkl"
+            with open(out_pkl, "wb") as f:
+                pickle.dump(ld, f, protocol=pickle.HIGHEST_PROTOCOL)
+            completed += 1
+            print(f"[traditional][{completed}/{len(missing_reps)}] wrote {out_pkl} in {dt:.2f} s")
 
-    # prime the pump
-    while next_rep < num_reps and len(pending) < ray_max_inflight:
-        pending.append(submit_one(next_rep))
-        next_rep += 1
+            try:
+                nxt = next(it_missing)
+                pending.append(submit(nxt))
+            except StopIteration:
+                pass
 
-    while pending:
-        done, pending = ray.wait(pending, num_returns=1)
-        rep, ld, dt = ray.get(done[0])
-
-        # save to dict and PKL
-        ld_stats_dict[rep] = ld
-        per_times.append((rep, dt))
-        out_pkl = f"{out_ld_dir}/LD_stats_window_{rep}.pkl"
-        with open(out_pkl, "wb") as f:
-            pickle.dump(ld, f, protocol=pickle.HIGHEST_PROTOCOL)
-        completed += 1
-        print(f"[traditional][{completed}/{num_reps}] wrote {out_pkl} in {dt:.2f} s")
-
-        # top up queue
-        if next_rep < num_reps:
-            pending.append(submit_one(next_rep))
-            next_rep += 1
+    finally:
+        try:
+            ray.shutdown()
+        except Exception:
+            pass
 
     overall = time.perf_counter() - t0_global
-    per_times.sort(key=lambda x: x[0])
+    # we didn't collect per-rep timings precisely above for brevity; skip them
+    write_timing(results_dir, "traditional", [], overall)
 
-    write_timing(results_dir, "traditional", per_times, overall)
-
-    # be tidy
-    try:
-        ray.shutdown()
-    except Exception:
-        pass
-
-    # bootstrap + plot + inference
     return bootstrap_and_plot(ld_stats_dict, r_bins, results_dir, tag="traditional")
 
 
@@ -522,8 +724,6 @@ def run_gpu(sim_dir: str, out_ld_dir: str, results_dir: str, num_reps: int, r_bi
     overall = time.perf_counter() - t0_global
 
     write_timing(results_dir, "gpu", per_times, overall)
-
-    # bootstrap + plot + inference
     return bootstrap_and_plot(ld_stats_dict, r_bins, results_dir, tag="gpu")
 
 
@@ -547,18 +747,16 @@ def main():
     p.add_argument("--num-rbins", type=int, default=16, help="logspace bins between 1e-6 and 1e-3; total bins = this value")
 
     # parallelization for traditional
-    p.add_argument("--traditional-backend", choices=["ray", "none"], default="ray",
-                   help="Use Ray to parallelize traditional moments LD parsing.")
-    p.add_argument("--ray-address", type=str, default=None,
-                   help="Ray address (e.g., 'auto') to connect to a running cluster; default starts local ray.")
-    p.add_argument("--ray-num-cpus", type=int, default=None,
-                   help="If starting local ray, cap the number of CPUs/workers.")
-    p.add_argument("--ray-max-inflight", type=int, default=32,
-                   help="Max number of in-flight Ray tasks for traditional LD.")
+    p.add_argument("--traditional-backend", choices=["ray", "none"], default="ray")
+    p.add_argument("--ray-address", type=str, default=None)
+    p.add_argument("--ray-num-cpus", type=int, default=None)
+    p.add_argument("--ray-max-inflight", type=int, default=32)
+
+    # safety
+    p.add_argument("--force-sim", action="store_true", help="Force re-simulation even if trees already exist.")
 
     args = p.parse_args()
 
-    # create dirs
     ensure_dir(args.sim_dir)
     ensure_dir(args.traditional_ld_dir)
     ensure_dir(args.traditional_results_dir)
@@ -568,17 +766,24 @@ def main():
     # r bins (genetic distance): [0, logspace(1e-6..1e-3, num_rbins)]
     r_bins = np.concatenate(([0.0], np.logspace(-6, -3, args.num_rbins)))
 
-    # (1) simulate + write rec map & samples into the simulations dir
-    print("[SIM] simulating tree sequences + VCFs")
-    # clear old intermediates in sim dir
-    clean_glob(f"{args.sim_dir}/*.vcf.gz")
-    clean_glob(f"{args.sim_dir}/*.h5")
-    clean_glob(f"{args.sim_dir}/*.trees")
+    # (1) Simulate only if needed
+    first_tree = Path(f"{args.sim_dir}/window_0.trees")
+    if args.force_sim or not first_tree.exists():
+        print("[SIM] simulating tree sequences + VCFs")
+        clean_glob(f"{args.sim_dir}/*.vcf.gz")
+        clean_glob(f"{args.sim_dir}/*.h5")
+        clean_glob(f"{args.sim_dir}/*.trees")
+        simulate_replicates(args.sim_dir, args.num_reps, args.L, args.mu, args.r_per_bp, args.n_per_pop)
+        write_samples_and_rec_map(args.sim_dir, args.L, args.r_per_bp, args.n_per_pop)
+    else:
+        print(f"[SIM] found existing trees in {args.sim_dir}; skipping simulation")
+        if not Path(f"{args.sim_dir}/samples.txt").exists() or not Path(f"{args.sim_dir}/flat_map.txt").exists():
+            print("[SIM] samples.txt or flat_map.txt missing — regenerating")
+            write_samples_and_rec_map(args.sim_dir, args.L, args.r_per_bp, args.n_per_pop)
+        else:
+            print("[SIM] samples.txt and flat_map.txt present — skipping re-write")
 
-    simulate_replicates(args.sim_dir, args.num_reps, args.L, args.mu, args.r_per_bp, args.n_per_pop)
-    write_samples_and_rec_map(args.sim_dir, args.L, args.r_per_bp, args.n_per_pop)
-
-    # (2) TRADITIONAL moments LD from VCFs (Ray or serial)
+    # (2) TRADITIONAL LD
     print("[TRADITIONAL] computing LD from VCFs via moments")
     traditional_artifacts = run_traditional(
         sim_dir=args.sim_dir,
@@ -592,7 +797,7 @@ def main():
         ray_max_inflight=args.ray_max_inflight,
     )
 
-    # (3) GPU LD from .trees
+    # (3) GPU LD
     print("[GPU] computing LD from .trees via HaplotypeMatrix (GPU)")
     gpu_artifacts = run_gpu(
         sim_dir=args.sim_dir,

@@ -7,7 +7,7 @@ on GPUs with automatic missing data handling.
 
 import cupy as cp
 from typing import Optional, Union, Tuple, List, Dict
-
+dtype = cp.float64
 
 def dd(counts: cp.ndarray, 
        populations: Optional[Union[Tuple[int, int], int]] = None,
@@ -35,6 +35,7 @@ def dd(counts: cp.ndarray,
     cp.ndarray
         D² values for each locus
     """
+    counts = cp.asarray(counts, dtype=dtype)
     # Handle different input formats
     if populations is None:
         # Single population case
@@ -85,6 +86,7 @@ def dz(counts: cp.ndarray,
     cp.ndarray
         Dz values for each locus
     """
+    counts = cp.asarray(counts, dtype=dtype)
     if populations is None:
         # Single population case
         if counts.shape[1] == 4:
@@ -117,6 +119,7 @@ def pi2(counts: cp.ndarray,
     cp.ndarray
         π₂ values for each locus
     """
+    counts = cp.asarray(counts, dtype=dtype)
     if populations is None:
         # Single population case
         if counts.shape[1] == 4:
@@ -134,6 +137,7 @@ def dd_within(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.nd
     
     Convenience function equivalent to dd(counts, populations=None)
     """
+    counts = cp.asarray(counts, dtype=dtype)
     return _dd_single(counts, n_valid)
 
 
@@ -146,6 +150,7 @@ def dd_between(counts: cp.ndarray,
     
     Convenience function equivalent to dd(counts, populations=(pop1_idx, pop2_idx))
     """
+    counts = cp.asarray(counts, dtype=dtype)
     return _dd_between(counts, pop1_idx, pop2_idx, n_valid)
 
 
@@ -173,6 +178,7 @@ def compute_ld_statistics(counts: cp.ndarray,
     dict
         Dictionary mapping statistic names to computed values
     """
+    counts = cp.asarray(counts, dtype=dtype)
     if populations is None:
         populations = {}
     
@@ -198,6 +204,7 @@ def compute_ld_statistics(counts: cp.ndarray,
 
 def _dd_single(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Compute D² for single population."""
+    counts = cp.asarray(counts, dtype=dtype)
     c1, c2, c3, c4 = counts[:, 0], counts[:, 1], counts[:, 2], counts[:, 3]
     n = n_valid if n_valid is not None else cp.sum(counts, axis=1)
     
@@ -216,6 +223,7 @@ def _dd_between(counts: cp.ndarray,
                 pop2_idx: int,
                 n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Compute D² between two populations."""
+    counts = cp.asarray(counts, dtype=dtype)
     # Extract counts for each population
     start1 = pop1_idx * 4
     start2 = pop2_idx * 4
@@ -254,6 +262,7 @@ def _dd_between(counts: cp.ndarray,
 
 def _dz_single(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Compute Dz for single population."""
+    counts = cp.asarray(counts, dtype=dtype)
     c1, c2, c3, c4 = counts[:, 0], counts[:, 1], counts[:, 2], counts[:, 3]
     n = n_valid if n_valid is not None else cp.sum(counts, axis=1)
     
@@ -276,6 +285,7 @@ def _dz_multi(counts: cp.ndarray,
               populations: Tuple[int, int, int],
               n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Compute Dz for multiple populations."""
+    counts = cp.asarray(counts, dtype=dtype)
     pop1, pop2, pop3 = populations
     
     # Helper to extract counts and valid sizes
@@ -360,6 +370,7 @@ def _dz_multi(counts: cp.ndarray,
 
 def _pi2_single(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Compute π₂ for single population."""
+    counts = cp.asarray(counts, dtype=dtype)
     c1, c2, c3, c4 = counts[:, 0], counts[:, 1], counts[:, 2], counts[:, 3]
     n = n_valid if n_valid is not None else cp.sum(counts, axis=1)
     
@@ -386,6 +397,7 @@ def _pi2_multi(counts: cp.ndarray,
                populations: Tuple[int, int, int, int],
                n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Compute π₂ for multiple populations."""
+    counts = cp.asarray(counts, dtype=dtype)
     i, j, k, l = populations
     
     # Helper to extract counts and valid sizes
@@ -511,6 +523,7 @@ def _pi2_iiij(counts: cp.ndarray,
               populations: Tuple[int, int, int, int],
               n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Helper for pi2(i,j,j,j) configurations."""
+    counts = cp.asarray(counts, dtype=dtype)
     i, j, k, l = populations
     
     # Helper to extract counts and valid sizes
@@ -559,6 +572,7 @@ def _pi2_iikl(counts: cp.ndarray,
               populations: Tuple[int, int, int, int],
               n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Helper for pi2(i,i,k,l) configurations."""
+    counts = cp.asarray(counts, dtype=dtype)
     i, j, k, l = populations
     
     # Helper to extract counts and valid sizes
@@ -617,6 +631,7 @@ def _pi2_ijkk(counts: cp.ndarray,
               populations: Tuple[int, int, int, int],
               n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Helper for pi2(i,j,k,k) configurations."""
+    counts = cp.asarray(counts, dtype=dtype)
     i, j, k, l = populations
     
     # Helper to extract counts and valid sizes
@@ -666,6 +681,7 @@ def _pi2_ijkk(counts: cp.ndarray,
 # Backward compatibility layer
 def DD(counts, n_valid=None):
     """Deprecated: Use dd() instead."""
+    counts = cp.asarray(counts, dtype=dtype)
     import warnings
     warnings.warn(
         "DD() is deprecated. Use ld_statistics.dd() instead.",
@@ -677,6 +693,7 @@ def DD(counts, n_valid=None):
 
 def DD_two_pops(counts, pop1_idx, pop2_idx, n_valid1=None, n_valid2=None):
     """Deprecated: Use dd() with populations parameter instead."""
+    counts = cp.asarray(counts, dtype=dtype)
     import warnings
     warnings.warn(
         "DD_two_pops() is deprecated. Use ld_statistics.dd(counts, populations=(pop1_idx, pop2_idx)) instead.",
@@ -693,6 +710,7 @@ def DD_two_pops(counts, pop1_idx, pop2_idx, n_valid1=None, n_valid2=None):
 
 def Dz_two_pops(counts, pop_indices, n_valid1=None, n_valid2=None):
     """Deprecated: Use dz() with populations parameter instead."""
+    counts = cp.asarray(counts, dtype=dtype)
     import warnings
     warnings.warn(
         "Dz_two_pops() is deprecated. Use ld_statistics.dz(counts, populations=pop_indices) instead.",
@@ -708,6 +726,7 @@ def Dz_two_pops(counts, pop_indices, n_valid1=None, n_valid2=None):
 
 def pi2_two_pops(counts, pop_indices, n_valid1=None, n_valid2=None):
     """Deprecated: Use pi2() with populations parameter instead."""
+    counts = cp.asarray(counts, dtype=dtype)
     import warnings
     warnings.warn(
         "pi2_two_pops() is deprecated. Use ld_statistics.pi2(counts, populations=pop_indices) instead.",

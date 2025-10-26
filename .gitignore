@@ -14,3 +14,8 @@
 *.pyz
 
 reference_code/*
+
+GPU/
+IM_model_simulations/
+split_isolation_sims/
+traditional/
