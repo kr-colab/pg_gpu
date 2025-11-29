@@ -1,10 +1,11 @@
 im_model:
   num_reps: 100
-  L: 2000000        # 2 Mb
+  L: 10000000        # 10 Mb
   mu: 1.5e-8
   r_per_bp: 1.5e-8
   n_per_pop: 10
   num_rbins: 16
+  max_sites: 20000
 
   sim_dir: "IM_model_simulations"
   trad_ld_dir: "traditional/LD_stats"

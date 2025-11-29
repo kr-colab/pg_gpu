@@ -11,6 +11,7 @@ IM = config["im_model"]
 
 NUM_REPS   = IM["num_reps"]
 L          = IM["L"]
+MAX_SITES  = IM["max_sites"]
 MU         = IM["mu"]
 R_PER_BP   = IM["r_per_bp"]
 N_PER_POP  = IM["n_per_pop"]
@@ -82,8 +83,10 @@ rule filter_sites:
         """
         python snakemake_scripts/filter_sites.py \
           --sim-dir {SIM_DIR} \
-          --rep {wildcards.rep}
+          --rep {wildcards.rep} \
+          --max-sites {MAX_SITES}
         """
+
 
 
 # 3) TRADITIONAL LD PER REPLICATE (parallelizable)

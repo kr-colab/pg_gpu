@@ -189,31 +189,58 @@ def _hash_positions(positions: np.ndarray) -> str:
     return hashlib.sha1(buf).hexdigest()
 
 
-def _build_filtered_ts_and_cache(sim_dir: str, rep: int):
+def _build_filtered_ts_and_cache(
+    sim_dir: str,
+    rep: int,
+    max_sites: int | None = None,
+    rng_seed: int | None = None,
+):
     """
     Load window_<rep>.trees, apply ONE biallelic filter via HaplotypeMatrix,
-    and persist:
+    optionally THIN the kept sites to at most `max_sites`, and persist:
+
       - filtered trees:   window_<rep>.filtered.trees
       - filtered VCF:     split_mig.filtered.<rep>.vcf.gz
       - kept site list:   kept_sites_rep<rep>.txt  (tab-separated index,position)
       - kept site sha1:   kept_sites_rep<rep>.sha1 (first line: N <tab> sha1)
-    All consumers (traditional & GPU) must use these filtered artifacts.
+
+    All downstream consumers (traditional & GPU) use these filtered artifacts.
+    If max_sites is None, no thinning is performed beyond biallelic filtering.
     """
     ts_path = f"{sim_dir}/window_{rep}.trees"
     ts = tskit.load(ts_path)
+
+    # Original site positions (before any filtering)
+    site_pos = np.asarray(ts.tables.sites.position)
+    n_sites_start = int(site_pos.size)
 
     # Apply biallelic filter once via HaplotypeMatrix
     h = HaplotypeMatrix.from_ts(ts)
     h_filt = h.apply_biallelic_filter()
 
-    # Extract kept positions from GPU object
+    # Positions kept by the biallelic filter (on host)
     if getattr(h_filt, "device", None) == "GPU":
         pos_keep = np.asarray(h_filt.positions.get())
     else:
         pos_keep = np.asarray(h_filt.positions)
 
-    # Convert to site indices in the original ts (match by exact position)
-    site_pos = np.asarray(ts.tables.sites.position)
+    n_sites_bi = int(pos_keep.size)
+    print(f"[FILTER][rep={rep}] start={n_sites_start} sites, biallelic_keep={n_sites_bi}")
+
+    # Optional thinning: reduce to at most max_sites (if requested)
+    if max_sites is not None and n_sites_bi > max_sites:
+        seed = rng_seed if rng_seed is not None else (1337 + int(rep))
+        rng = np.random.default_rng(seed)
+        # choose a subset of the biallelic-kept positions
+        keep_idx = np.sort(rng.choice(n_sites_bi, size=max_sites, replace=False))
+        pos_keep = pos_keep[keep_idx]
+        print(
+            f"[FILTER][rep={rep}] thinning biallelic sites from {n_sites_bi} "
+            f"to {max_sites} (deterministic with seed={seed})"
+        )
+
+    # Now drop all sites in ts whose position is NOT in pos_keep
+    # (so ts_filt has exactly the biallelic + thinned site set)
     keep_mask = np.isin(site_pos, pos_keep)
     drop_idx = np.where(~keep_mask)[0]
 
@@ -222,33 +249,44 @@ def _build_filtered_ts_and_cache(sim_dir: str, rep: int):
     else:
         ts_filt = ts
 
+    S_filt = int(ts_filt.num_sites)
+    sha1 = _hash_positions(np.asarray(ts_filt.tables.sites.position))
+    print(f"[sites][rep={rep}] S_filt={S_filt} sha1={sha1}")
+
     # Persist filtered trees
     ts_filt_path = f"{sim_dir}/window_{rep}.filtered.trees"
     ts_filt.dump(ts_filt_path)
 
-    # Persist filtered VCF (Traditional will read this)
+    # Persist filtered VCF (Traditional + GPU must use this same site set)
     vcf_filt = f"{sim_dir}/split_mig.filtered.{rep}.vcf"
     with open(vcf_filt, "w") as fout:
         ts_filt.write_vcf(fout, allow_position_zero=True)
     os.system(f"gzip -f {vcf_filt}")  # -> .vcf.gz
     vcf_filt_gz = f"{vcf_filt}.gz"
 
-    # Persist kept sites + hash for verification
+    # Persist kept sites (index, position) for debugging/QC
     kept_txt = f"{sim_dir}/kept_sites_rep{rep}.txt"
     with open(kept_txt, "w") as f:
         f.write("idx\tposition\n")
         for i, p in enumerate(ts_filt.tables.sites.position):
-            f.write(f"{i}\t{p:.0f}\n")  # integer bp positions from msprime when allow_position_zero=True
+            f.write(f"{i}\t{p:.0f}\n")  # integer bp positions from msprime
 
-    sha1 = _hash_positions(np.asarray(ts_filt.tables.sites.position))
+    # Persist sha1 summary
     sha_path = f"{sim_dir}/kept_sites_rep{rep}.sha1"
     with open(sha_path, "w") as f:
-        f.write(f"{ts_filt.num_sites}\t{sha1}\n")
+        f.write(f"{S_filt}\t{sha1}\n")
 
-    print(f"[sites][rep={rep}] S_filt={ts_filt.num_sites} sha1={sha1}")
+    print(
+        f"[FILTER][rep={rep}] ts_filt={ts_filt_path} "
+        f"vcf={vcf_filt_gz} S_filt={S_filt} sha1={sha1}"
+    )
 
-    return dict(ts_filt_path=ts_filt_path, vcf_filt_gz=vcf_filt_gz,
-                S_filt=ts_filt.num_sites, sha1=sha1)
+    return dict(
+        ts_filt_path=ts_filt_path,
+        vcf_filt_gz=vcf_filt_gz,
+        S_filt=S_filt,
+        sha1=sha1,
+    )
 
 
 # --------- Per-replicate pop-file builder (FROM FILTERED VCF HEADER) ---------
