@@ -37,6 +37,14 @@ def main():
         help="Cap on number of biallelic sites per replicate (after thinning). "
              "If omitted, use all biallelic sites.",
     )
+    ap.add_argument(
+    "--filter-mode",
+    choices=["biallelic", "none"],
+    default="biallelic",
+    help="How to build the site set: "
+         "'biallelic' (apply biallelic filter + optional thinning) or "
+         "'none' (no filtering/thinning; use all simulated sites).",
+    )
     args = ap.parse_args()
 
     out = core._build_filtered_ts_and_cache(
@@ -44,6 +52,8 @@ def main():
         rep=args.rep,
         max_sites=args.max_sites,
         rng_seed=None,  # uses deterministic 1337 + rep inside if None
+        filter_mode=args.filter_mode,
+
     )
 
     # Just a friendly log; Snakemake checks files via outputs.

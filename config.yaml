@@ -5,7 +5,7 @@ im_model:
   r_per_bp: 1.5e-8
   n_per_pop: 10
   num_rbins: 16
-  max_sites: 20000
+  max_sites: null
 
   sim_dir: "IM_model_simulations"
   trad_ld_dir: "traditional/LD_stats"

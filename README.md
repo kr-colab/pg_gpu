@@ -41,8 +41,6 @@ tests can be run with `pytest`.
 pytest tests/
 ```
 
-
-
 ## Usage
 
 ```python
@@ -72,4 +70,19 @@ print(h.diversity(span_normalize=True))
 D = h.pairwise_LD_v()
 ```
 
+## Snakemake Workflow
+This repository provides a Snakemake workflow for:
 
+1. Simulating an isolation–migration (IM) demographic model
+
+2. Filtering to biallelic SNPs (with optional subsampling)
+
+3. Computing LD statistics on the GPU using pg_gpu
+
+4. Computing LD statistics using traditional MomentsLD (CPU version)
+
+### Running the Workflow
+```bash
+snakemake GPU/LD_stats/LD_stats_window_7.pkl --cores 4 --resources gpu=1
+```
+(Setting ```--resources gpu=1``` will produce a memory error if no SNP filtering is used.)

@@ -6,16 +6,16 @@ configfile: "config.yaml"
 
 import numpy as np
 
-# Pull parameters from config
 IM = config["im_model"]
 
 NUM_REPS   = IM["num_reps"]
 L          = IM["L"]
-MAX_SITES  = IM["max_sites"]
+MAX_SITES  = IM.get("max_sites", None)  # <- allow it to be missing / null
 MU         = IM["mu"]
 R_PER_BP   = IM["r_per_bp"]
 N_PER_POP  = IM["n_per_pop"]
 NUM_RBINS  = IM["num_rbins"]
+
 
 SIM_DIR           = IM["sim_dir"]
 TRAD_LD_DIR       = IM["trad_ld_dir"]
@@ -79,13 +79,18 @@ rule filter_sites:
         vcf_filt_gz  = f"{SIM_DIR}/split_mig.filtered.{{rep}}.vcf.gz",
         kept_sites   = f"{SIM_DIR}/kept_sites_rep{{rep}}.txt",
         sha1         = f"{SIM_DIR}/kept_sites_rep{{rep}}.sha1",
+    params:
+        max_sites_flag = lambda wildcards: (
+            f"--max-sites {MAX_SITES}" if MAX_SITES is not None else ""
+        ),
     shell:
         """
         python snakemake_scripts/filter_sites.py \
           --sim-dir {SIM_DIR} \
           --rep {wildcards.rep} \
-          --max-sites {MAX_SITES}
+          {params.max_sites_flag}
         """
+
 
 
 
