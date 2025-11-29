@@ -9,6 +9,10 @@ Flow:
 3) Traditional LD (moments) reads the filtered VCF
 4) GPU LD reads the filtered tree sequence
 => Both consume identical sites. We verify with S_filt and SHA1 of positions.
+
+This version also:
+- Logs GPU memory via `nvidia-smi` around GPU LD calls.
+- Prints detailed exception info if GPU steps fail.
 """
 
 import os
@@ -18,6 +22,8 @@ import time
 import pickle
 import argparse
 import hashlib
+import subprocess
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +50,39 @@ def ensure_dir(p: str) -> None:
 
 def clean_glob(pattern: str) -> None:
     os.system(f"rm -f {pattern}")
+
+
+# --------------------------- GPU memory helpers -------------------------------
+def _gpu_memory_snapshot(label: str = "") -> None:
+    """
+    Log GPU memory usage via nvidia-smi.
+    Safe to call even if nvidia-smi is missing (will just print a warning).
+    """
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.total,memory.used,memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"[GPU MEM]{f'[{label}]' if label else ''} could not query nvidia-smi: {type(e).__name__}: {e}")
+        return
+
+    print(f"[GPU MEM]{f'[{label}]' if label else ''}")
+    for line in out.strip().splitlines():
+        idx, name, total, used, free = [x.strip() for x in line.split(",")]
+        print(
+            textwrap.dedent(
+                f"""\
+                - GPU {idx} ({name})
+                  total = {total} MiB
+                  used  = {used} MiB
+                  free  = {free} MiB"""
+            )
+        )
 
 
 # --------------------------- Model & Simulation -------------------------------
@@ -242,15 +281,17 @@ def _replicate_samples_file(sim_dir: str, rep: int, vcf_path: str) -> str:
             ind_nodes0 = []
             for ind_id in range(ts.num_individuals):
                 nodes = ts.individual(ind_id).nodes
-                if not nodes:
+                # nodes is a NumPy array; check length explicitly
+                if len(nodes) == 0:
                     raise ValueError("Individual without nodes.")
-                ind_nodes0.append(nodes[0])
+                ind_nodes0.append(int(nodes[0]))
             pid_d0, pid_d1 = two_nonempty_pids_from_nodes(ind_nodes0)
             for i, name in enumerate(vcf_samples):
                 pid = ts.node(ind_nodes0[i]).population
                 pop_name = "deme0" if pid == pid_d0 else ("deme1" if pid == pid_d1 else None)
                 if pop_name is not None:
                     fout.write(f"{name}\t{pop_name}\n")
+
 
         # Haploid: VCF samples correspond to ts.samples() order
         elif ts.num_individuals == 0 and len(vcf_samples) == ts.num_samples:
@@ -407,14 +448,14 @@ def bootstrap_and_plot(ld_stats_dict_of_dicts: dict, r_bins, results_dir: str, t
         print(f"  Div. time (gen)  :  {physical_units[2]:.1f}")
         print(f"  Migration rate   :  {physical_units[3]:.6f}")
         print(f"  N(ancestral)     :  {physical_units[4]:.1f}")
-        
+
     except np.linalg.LinAlgError as e:
         print(f"[{tag}] Optimization failed due to singular matrix: {e}")
         print(f"[{tag}] This can happen with insufficient data variation or perfect correlations")
         print(f"[{tag}] Bootstrap and plot files have been saved successfully")
         physical_units = [np.nan] * 5
         LL = np.nan
-        
+
     except Exception as e:
         print(f"[{tag}] Optimization failed with error: {e}")
         print(f"[{tag}] Bootstrap and plot files have been saved successfully")
@@ -535,48 +576,75 @@ def gpu_ld_from_trees(
     r_per_bp: float,
     pop1: str = "deme0",
     pop2: str = "deme1",
-    raw: bool = True
+    raw: bool = True,
 ) -> dict:
     """
     Return a moments-compatible dict computed from a *FILTERED* .trees file.
     Also includes _sitecheck {S_filt, sha1} for verification.
+
+    Uses HaplotypeMatrix.compute_ld_statistics_gpu_two_pops without fp64.
+    Logs GPU memory before/after to help debug OOM issues.
     """
     MOMENTS_ORDER = [
-        'DD_0_0', 'DD_0_1', 'DD_1_1',
-        'Dz_0_0_0', 'Dz_0_0_1', 'Dz_0_1_1', 'Dz_1_0_0', 'Dz_1_0_1', 'Dz_1_1_1',
-        'pi2_0_0_0_0', 'pi2_0_0_0_1', 'pi2_0_0_1_1', 'pi2_0_1_0_1', 'pi2_0_1_1_1', 'pi2_1_1_1_1'
+        "DD_0_0",
+        "DD_0_1",
+        "DD_1_1",
+        "Dz_0_0_0",
+        "Dz_0_0_1",
+        "Dz_0_1_1",
+        "Dz_1_0_0",
+        "Dz_1_0_1",
+        "Dz_1_1_1",
+        "pi2_0_0_0_0",
+        "pi2_0_0_0_1",
+        "pi2_0_0_1_1",
+        "pi2_0_1_0_1",
+        "pi2_0_1_1_1",
+        "pi2_1_1_1_1",
     ]
 
+    # convert r-bins (genetic) -> bp-bins for GPU code
     bp_bins = genetic_to_bp_bins(r_bins, r_per_bp)
 
-    ts = tskit.load(ts_path)  # NOTE: this is the *filtered* ts
+    # load filtered tree sequence
+    ts = tskit.load(ts_path)
     sample_sets = build_sample_sets(ts)
     if pop1 not in sample_sets or pop2 not in sample_sets:
-        raise KeyError(f"Requested pops ({pop1},{pop2}) not in sample_sets={list(sample_sets)}")
+        raise KeyError(
+            f"Requested pops ({pop1},{pop2}) not in sample_sets={list(sample_sets)}"
+        )
+
+    # ---- GPU memory BEFORE building haplotype matrix ----
+    _gpu_memory_snapshot(label=f"before HaplotypeMatrix (ts={ts_path})")
 
     h = HaplotypeMatrix.from_ts(ts)
     attach_sample_sets(h, sample_sets)
 
-    # No need to re-filter; ts is already filtered. Apply biallelic filter safely (no-op).
+    # ts_path is already filtered; biallelic filter should be a no-op
     h_filt = h.apply_biallelic_filter()
 
+    # ---- GPU memory BEFORE LD stats ----
+    _gpu_memory_snapshot(label=f"before LD stats (ts={ts_path})")
+
     try:
+        # single, clean call – no fp64 kwarg
         stats_by_bin = h_filt.compute_ld_statistics_gpu_two_pops(
             bp_bins=bp_bins,
             pop1=pop1,
             pop2=pop2,
             raw=raw,
             ac_filter=True,
-            fp64=True
         )
-    except TypeError:
-        stats_by_bin = h_filt.compute_ld_statistics_gpu_two_pops(
-            bp_bins=bp_bins,
-            pop1=pop1,
-            pop2=pop2,
-            raw=raw,
-            ac_filter=True
-        )
+    except Exception as e:
+        # Detailed logging on GPU failure, then re-raise so Snakemake sees the error
+        print(f"[GPU ERROR] compute_ld_statistics_gpu_two_pops failed on {ts_path}")
+        print(f"[GPU ERROR] Exception type: {type(e).__name__}")
+        print(f"[GPU ERROR] Message       : {e}")
+        _gpu_memory_snapshot(label=f"after failure (ts={ts_path})")
+        raise
+
+    # ---- GPU memory AFTER LD stats ----
+    _gpu_memory_snapshot(label=f"after LD stats (ts={ts_path})")
 
     # Assemble per-bin vectors in moments order
     sums = []
@@ -586,17 +654,23 @@ def gpu_ld_from_trees(
         if od is None:
             sums.append(np.zeros(len(MOMENTS_ORDER), dtype=float))
         else:
-            sums.append(np.array([od[name] for name in MOMENTS_ORDER], dtype=float))
+            sums.append(
+                np.array([od[name] for name in MOMENTS_ORDER], dtype=float)
+            )
 
-    # H terms: compute as *sums over sites* on the same filtered site set
+    # H terms: sums over sites on the same filtered TS
     H00_sum, H01_sum, H11_sum = _H_sums_from_filtered_ts(ts, sample_sets)
-
     sums.append(np.array([H00_sum, H01_sum, H11_sum], dtype=float))
 
-    bins_gen = [(np.float64(r_bins[i]), np.float64(r_bins[i + 1])) for i in range(len(r_bins) - 1)]
+    # bins in genetic units (for moments)
+    bins_gen = [
+        (np.float64(r_bins[i]), np.float64(r_bins[i + 1]))
+        for i in range(len(r_bins) - 1)
+    ]
 
-    # Verification tag
-    sha1 = _hash_positions(np.asarray(ts.tables.sites.position))
+    # Verification tag (site count + SHA1 of positions)
+    positions = np.asarray(ts.tables.sites.position)
+    sha1 = _hash_positions(positions)
     S_filt = int(ts.num_sites)
 
     return {
@@ -851,6 +925,12 @@ def run_traditional(sim_dir: str, out_ld_dir: str, results_dir: str, num_reps: i
 
 
 def run_gpu(sim_dir: str, out_ld_dir: str, results_dir: str, num_reps: int, r_bins, r_per_bp: float):
+    """
+    Run GPU LD on all replicates, logging timing and GPU memory.
+
+    If a replicate fails, prints detailed info (exception type/message + memory snapshot)
+    and re-raises the exception.
+    """
     ensure_dir(out_ld_dir)
     ensure_dir(results_dir)
 
@@ -862,9 +942,17 @@ def run_gpu(sim_dir: str, out_ld_dir: str, results_dir: str, num_reps: int, r_bi
         built = _build_filtered_ts_and_cache(sim_dir, ii)  # idempotent
         ts_path = built["ts_filt_path"]
 
-        t0 = time.perf_counter()
-        ld = gpu_ld_from_trees(ts_path, r_bins, r_per_bp, pop1="deme0", pop2="deme1", raw=True)
-        dt = time.perf_counter() - t0
+        try:
+            t0 = time.perf_counter()
+            ld = gpu_ld_from_trees(ts_path, r_bins, r_per_bp, pop1="deme0", pop2="deme1", raw=True)
+            dt = time.perf_counter() - t0
+        except Exception as e:
+            print(f"[GPU][rep={ii}] FAILED on {ts_path}")
+            print(f"[GPU][rep={ii}] Exception type: {type(e).__name__}")
+            print(f"[GPU][rep={ii}] Message       : {e}")
+            _gpu_memory_snapshot(label=f"failure in run_gpu rep={ii}")
+            # re-raise so caller / Snakemake sees a hard error
+            raise
 
         # quick cross-check print
         print(f"[sites][GPU rep={ii}] S_filt={ld['_sitecheck']['S_filt']} sha1={ld['_sitecheck']['sha1']}")
@@ -880,94 +968,3 @@ def run_gpu(sim_dir: str, out_ld_dir: str, results_dir: str, num_reps: int, r_bi
 
     write_timing(results_dir, "gpu", per_times, overall)
     return bootstrap_and_plot(ld_stats_dict, r_bins, results_dir, tag="gpu")
-
-
-# --------------------------- Main --------------------------------------------
-def main():
-    p = argparse.ArgumentParser(description="IM model: sims → traditional & GPU LD + MomentsLD analysis, IDENTICAL site sets, with timing")
-    p.add_argument("--num-reps", type=int, default=100)
-    p.add_argument("--L", type=int, default=5_000_000)
-    p.add_argument("--mu", type=float, default=1.5e-8)
-    p.add_argument("--r-per-bp", type=float, default=1.5e-8)
-    p.add_argument("--n-per-pop", type=int, default=10)
-
-    # directories
-    p.add_argument("--sim-dir", type=str, default="IM_model_simulations")
-    p.add_argument("--traditional-ld-dir", type=str, default="traditional/LD_stats")
-    p.add_argument("--traditional-results-dir", type=str, default="traditional/MomentsLD_results")
-    p.add_argument("--gpu-ld-dir", type=str, default="GPU/LD_stats")
-    p.add_argument("--gpu-results-dir", type=str, default="GPU/MomentsLD_results")
-
-    # binning
-    p.add_argument("--num-rbins", type=int, default=16, help="logspace bins between 1e-6 and 1e-3; total bins = this value")
-
-    # parallelization for traditional
-    p.add_argument("--traditional-backend", choices=["ray", "none"], default="ray")
-    p.add_argument("--ray-address", type=str, default=None)
-    p.add_argument("--ray-num-cpus", type=int, default=None)
-    p.add_argument("--ray-max-inflight", type=int, default=32)
-
-    # safety
-    p.add_argument("--force-sim", action="store_true", help="Force re-simulation even if trees already exist.")
-
-    args = p.parse_args()
-
-    ensure_dir(args.sim_dir)
-    ensure_dir(args.traditional_ld_dir)
-    ensure_dir(args.traditional_results_dir)
-    ensure_dir(args.gpu_ld_dir)
-    ensure_dir(args.gpu_results_dir)
-
-    # r bins (genetic distance): [0, logspace(1e-6..1e-3, num_rbins)]
-    r_bins = np.concatenate(([0.0], np.logspace(-6, -3, args.num_rbins)))
-
-    # (1) Simulate only if needed
-    first_tree = Path(f"{args.sim_dir}/window_0.trees")
-    if args.force_sim or not first_tree.exists():
-        print("[SIM] simulating tree sequences + VCFs")
-        clean_glob(f"{args.sim_dir}/*.vcf.gz")
-        clean_glob(f"{args.sim_dir}/*.h5")
-        clean_glob(f"{args.sim_dir}/*.trees")
-        simulate_replicates(args.sim_dir, args.num_reps, args.L, args.mu, args.r_per_bp, args.n_per_pop)
-        write_samples_and_rec_map(args.sim_dir, args.L, args.r_per_bp, args.n_per_pop)
-    else:
-        print(f"[SIM] found existing trees in {args.sim_dir}; skipping simulation")
-        if not Path(f"{args.sim_dir}/samples.txt").exists() or not Path(f"{args.sim_dir}/flat_map.txt").exists():
-            print("[SIM] samples.txt or flat_map.txt missing — regenerating")
-            write_samples_and_rec_map(args.sim_dir, args.L, args.r_per_bp, args.n_per_pop)
-        else:
-            print("[SIM] samples.txt and flat_map.txt present — skipping re-write")
-
-    # (2) TRADITIONAL LD (from FILTERED VCFs)
-    print("[TRADITIONAL] computing LD from FILTERED VCFs via moments (identical site set)")
-    traditional_artifacts = run_traditional(
-        sim_dir=args.sim_dir,
-        out_ld_dir=args.traditional_ld_dir,
-        results_dir=args.traditional_results_dir,
-        num_reps=args.num_reps,
-        r_bins=r_bins,
-        backend=args.traditional_backend,
-        ray_address=args.ray_address,
-        ray_num_cpus=args.ray_num_cpus,
-        ray_max_inflight=args.ray_max_inflight,
-    )
-
-    # (3) GPU LD (from FILTERED .trees)
-    print("[GPU] computing LD from FILTERED .trees via HaplotypeMatrix (GPU) — same sites")
-    gpu_artifacts = run_gpu(
-        sim_dir=args.sim_dir,
-        out_ld_dir=args.gpu_ld_dir,
-        results_dir=args.gpu_results_dir,
-        num_reps=args.num_reps,
-        r_bins=r_bins,
-        r_per_bp=args.r_per_bp,
-    )
-
-    print("\nAll done.")
-    print("Traditional artifacts:", traditional_artifacts)
-    print("GPU artifacts:", gpu_artifacts)
-    print("\nVerification: per-rep lines like `[sites][rep=K] S_filt=... sha1=...` must match between Traditional and GPU.")
-
-
-if __name__ == "__main__":
-    main()
