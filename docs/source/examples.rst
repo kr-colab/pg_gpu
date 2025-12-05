@@ -65,9 +65,11 @@ Integration with moments
    h.sample_sets = {"pop1": list(range(10))}
    
    # Compute LD statistics with GPU acceleration
+   # Memory-efficient: only processes pairs within max distance
+   # chunk_size='auto' adapts to available GPU memory
    ld_stats = h.compute_ld_statistics_gpu_single_pop(
        bp_bins=[0, 1000, 5000],
-       pop="pop1"
+       chunk_size='auto'  # or int for fixed size (e.g., 500_000)
    )
    
    # Use with moments demographic models

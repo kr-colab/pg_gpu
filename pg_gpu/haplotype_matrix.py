@@ -998,33 +998,178 @@ class HaplotypeMatrix:
                 # Stack the tallies along a new third axis and reshape into a 2D array.
                 tallies = cp.stack([n11_matrix, n10_matrix, n01_matrix, n00_matrix], axis=2).reshape(-1, 4)
                 results[(pop1, pop2)] = tallies
-        
+
         return results
 
-    def compute_ld_statistics_gpu_single_pop(self, bp_bins, raw=False, ac_filter=True):
+    def compute_ld_statistics_gpu_single_pop(
+        self,
+        bp_bins,
+        raw=False,
+        ac_filter=True,
+        chunk_size='auto'
+    ):
         """
+        GPU-based LD statistics computation for a single population.
+
+        Computes DD, Dz, and pi2 statistics for variant pairs binned by distance.
+        Only processes pairs within max(bp_bins) distance for memory efficiency.
+
+        Parameters
+        ----------
+        bp_bins : array-like
+            Array of bin boundaries in base pairs. Pairs are binned by distance
+            into intervals [bp_bins[i], bp_bins[i+1]).
+        raw : bool, optional
+            If True, return raw sums of statistics across pairs in each bin.
+            If False (default), return means.
+        ac_filter : bool, optional
+            If True (default), apply biallelic filtering before computation.
+        chunk_size : int or 'auto', optional
+            Number of pairs to process per chunk. If 'auto' (default),
+            automatically estimates optimal size based on available GPU memory.
+            Can specify an integer for manual control.
+
+        Returns
+        -------
+        dict
+            Dictionary mapping (bin_start, bin_end) tuples to tuples of statistics.
+            Each bin contains (DD, Dz, pi2) values.
+
+        Examples
+        --------
+        >>> bp_bins = [0, 10000, 50000, 100000]
+        >>> stats = hm.compute_ld_statistics_gpu_single_pop(bp_bins)
+        >>> stats[(0.0, 10000.0)]  # (DD, Dz, pi2) for first bin
+        """
+        # Apply biallelic filter if requested
+        if ac_filter:
+            filtered_self = self.apply_biallelic_filter()
+            return filtered_self.compute_ld_statistics_gpu_single_pop(
+                bp_bins=bp_bins, raw=raw, ac_filter=False, chunk_size=chunk_size
+            )
+
+        # Ensure GPU setup
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+
+        from pg_gpu import ld_statistics
+        import cupyx
+
+        # Get positions and compute max distance
+        pos = self.positions
+        if not isinstance(pos, cp.ndarray):
+            pos = cp.array(pos)
+
+        bp_bins = np.array(bp_bins)
+        max_dist = float(bp_bins[-1])
+        n_bins = len(bp_bins) - 1
+
+        # Handle chunk_size='auto'
+        if chunk_size == 'auto':
+            n_haps = self.num_haplotypes
+            chunk_size = _estimate_ld_chunk_size(n_haps)
+
+        # Generate distance-filtered pair indices
+        idx_i, idx_j = _generate_pairs_within_distance(pos, max_dist)
+        total_pairs = len(idx_i)
+
+        if total_pairs == 0:
+            # No pairs within distance - return zeros for all bins
+            out = {}
+            for i in range(n_bins):
+                out[(float(bp_bins[i]), float(bp_bins[i + 1]))] = (0.0, 0.0, 0.0)
+            return out
+
+        # Compute distances for all pairs
+        distances = pos[idx_j] - pos[idx_i]
+
+        # Bin assignment
+        bp_bins_cp = cp.array(bp_bins)
+        bin_inds = cp.digitize(distances, bp_bins_cp) - 1
+
+        # Initialize accumulators: sums and counts per bin
+        # 3 statistics: DD, Dz, pi2
+        bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
+        bin_counts = cp.zeros(n_bins, dtype=cp.float64)
+
+        # Process in chunks
+        for chunk_start in range(0, total_pairs, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, total_pairs)
+
+            # Get chunk indices
+            chunk_idx_i = idx_i[chunk_start:chunk_end]
+            chunk_idx_j = idx_j[chunk_start:chunk_end]
+            chunk_bin_inds = bin_inds[chunk_start:chunk_end]
+
+            # Compute haplotype counts for this chunk (no population filter)
+            counts, n_valid = _compute_counts_for_pairs(
+                self.haplotypes, chunk_idx_i, chunk_idx_j, pop_indices=None
+            )
+
+            # Compute all 3 statistics for this chunk
+            chunk_stats = _compute_single_pop_statistics_batch(
+                counts, n_valid, ld_statistics
+            )
+
+            # Accumulate into bins using scatter_add
+            valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
+            valid_bin_inds = chunk_bin_inds[valid_mask]
+            valid_stats = chunk_stats[valid_mask]
+
+            # Accumulate sums
+            for stat_idx in range(3):
+                cupyx.scatter_add(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
+
+            # Accumulate counts
+            cupyx.scatter_add(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
+
+            # Free chunk memory
+            del counts, n_valid, chunk_stats
+            del chunk_idx_i, chunk_idx_j, valid_stats
+
+        # Build output dictionary
+        out = {}
+        for i in range(n_bins):
+            bin_start = float(bp_bins[i])
+            bin_end = float(bp_bins[i + 1])
+            count = int(bin_counts[i].get())
+
+            if raw:
+                out[(bin_start, bin_end)] = (
+                    float(bin_sums[i, 0].get()),
+                    float(bin_sums[i, 1].get()),
+                    float(bin_sums[i, 2].get())
+                )
+            else:
+                if count > 0:
+                    out[(bin_start, bin_end)] = (
+                        float((bin_sums[i, 0] / bin_counts[i]).get()),
+                        float((bin_sums[i, 1] / bin_counts[i]).get()),
+                        float((bin_sums[i, 2] / bin_counts[i]).get())
+                    )
+                else:
+                    out[(bin_start, bin_end)] = (0.0, 0.0, 0.0)
+
+        return out
+
+    def _compute_ld_statistics_gpu_single_pop_all_pairs(self, bp_bins, raw=False, ac_filter=True):
+        """
+        DEPRECATED: Original all-pairs implementation. Use compute_ld_statistics_gpu_single_pop instead.
+
         GPU-based implementation of computing LD statistics for a single population using tallies
         from tally_gpu_haplotypes, followed by binning by base-pair distance.
-        
-        Steps:
-          1. Compute pairwise haplotype tallies using tally_gpu_haplotypes. Each row in the resulting 
-             CuPy array represents the 2x2 haplotype count table [n11, n10, n01, n00] for a variant pair.
-          2. Compute the positions for each variant pair from the upper-triangle indices (using cp.triu_indices)
-             so that distance = pos[j] - pos[i].
-          3. Using the GPU stats module (ld_statistics), compute for each pair: D, D^2, Dz, and π₂.
-          4. Bin the variant pairs by distance using the provided bp_bins.
-          5. Depending on the `raw` flag:
-               * If raw is False (default), return the mean (averaged over all pairs in the bin) of each statistic.
-               * If raw is True, return the raw sums for each statistic (which should match the Moments aggregation).
-        
+
+        This implementation computes ALL pairs, which can cause OOM errors for large datasets.
+        The new compute_ld_statistics_gpu_single_pop uses distance-limited chunked processing.
+
         Parameters:
             bp_bins (array-like): Array of bin boundaries in base pairs (e.g. [0, 50, 100, ...]).
             raw (bool): If True, return the raw sums aggregated in each bin, rather than mean values.
             ac_filter (bool): If True, apply biallelic filtering (matching moments' is_biallelic_01 behavior).
-        
+
         Returns:
             dict: A dictionary mapping each bin (tuple: (bin_start, bin_end)) to a tuple:
-                  (D2, Dz, pi2, D). If raw is False these values are averaged over pairs; if raw is True
+                  (D2, Dz, pi2). If raw is False these values are averaged over pairs; if raw is True
                   they are the raw sums.
         """
         # Apply biallelic filter if requested (matches moments' default behavior)
@@ -1032,7 +1177,7 @@ class HaplotypeMatrix:
             # Apply biallelic filtering to match moments' is_biallelic_01() behavior
             filtered_self = self.apply_biallelic_filter()
             # Use the filtered matrix for computation
-            return filtered_self.compute_ld_statistics_gpu_single_pop(
+            return filtered_self._compute_ld_statistics_gpu_single_pop_all_pairs(
                 bp_bins=bp_bins, raw=raw, ac_filter=False
             )
 
@@ -1710,3 +1855,27 @@ def _compute_two_pop_statistics_batch(counts_pop1, counts_pop2, n_valid1, n_vali
         Dz_0_0_0, Dz_0_0_1, Dz_0_1_1, Dz_1_0_0, Dz_1_0_1, Dz_1_1_1,
         pi2_0_0_0_0, pi2_0_0_0_1, pi2_0_0_1_1, pi2_0_1_0_1, pi2_0_1_1_1, pi2_1_1_1_1
     ], axis=1)
+
+
+def _compute_single_pop_statistics_batch(counts, n_valid, ld_statistics):
+    """
+    Compute single-population LD statistics (DD, Dz, pi2) for a batch of pairs.
+
+    Parameters
+    ----------
+    counts : cp.ndarray
+        Shape (n_pairs, 4), haplotype counts [n11, n10, n01, n00]
+    n_valid : cp.ndarray or None
+        Valid sample counts per pair. None if no missing data.
+    ld_statistics : module
+        The ld_statistics module with dd, dz, pi2 functions
+
+    Returns
+    -------
+    statistics : cp.ndarray
+        Shape (n_pairs, 3), columns [DD, Dz, pi2] for each pair
+    """
+    DD = ld_statistics.dd(counts, n_valid=n_valid)
+    Dz = ld_statistics.dz(counts, n_valid=n_valid)
+    pi2 = ld_statistics.pi2(counts, n_valid=n_valid)
+    return cp.stack([DD, Dz, pi2], axis=1)
