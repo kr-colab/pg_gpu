@@ -1323,7 +1323,7 @@ class HaplotypeMatrix:
         pop2: str,
         raw=False,
         ac_filter=True,
-        chunk_size: int = 1_000_000
+        chunk_size='auto'
     ):
         """
         Memory-efficient GPU-based LD statistics computation for two populations.
@@ -1347,8 +1347,9 @@ class HaplotypeMatrix:
             If True, return raw sums; if False, return means (default: False)
         ac_filter : bool, optional
             If True, apply biallelic filtering (default: True)
-        chunk_size : int, optional
-            Number of pairs to process per chunk (default: 1,000,000)
+        chunk_size : int or 'auto', optional
+            Number of pairs to process per chunk. If 'auto' (default),
+            automatically estimates optimal size based on available GPU memory.
 
         Returns
         -------
@@ -1382,6 +1383,11 @@ class HaplotypeMatrix:
         # Get population indices
         pop1_indices = self._sample_sets[pop1]
         pop2_indices = self._sample_sets[pop2]
+
+        # Handle chunk_size='auto'
+        if chunk_size == 'auto':
+            n_haps = max(len(pop1_indices), len(pop2_indices))
+            chunk_size = _estimate_ld_chunk_size(n_haps)
 
         # Generate distance-filtered pair indices
         idx_i, idx_j = _generate_pairs_within_distance(pos, max_dist)
@@ -1486,6 +1492,43 @@ class HaplotypeMatrix:
 # =============================================================================
 # Helper functions for memory-efficient LD computation with max distance filter
 # =============================================================================
+
+def _estimate_ld_chunk_size(n_haplotypes_per_pop, available_memory_bytes=None):
+    """
+    Estimate optimal chunk size for LD computation based on GPU memory.
+
+    Memory per pair (N pairs, H haplotypes per pop):
+    - hap_i, hap_j arrays (2 pops): 4 * H * N bytes
+    - counts arrays: 32 * N bytes
+    - statistics: 120 * N bytes
+    - Overhead (~3x): accounts for intermediates, fragmentation
+
+    Formula: bytes_per_pair ≈ (4*H + 150) * 3
+
+    Parameters
+    ----------
+    n_haplotypes_per_pop : int
+        Number of haplotypes in the larger population
+    available_memory_bytes : int, optional
+        Available GPU memory in bytes. If None, queries the GPU.
+
+    Returns
+    -------
+    int
+        Recommended chunk size (number of pairs per iteration)
+    """
+    if available_memory_bytes is None:
+        # Use 50% of available GPU memory (conservative)
+        available_memory_bytes = int(cp.cuda.Device().mem_info[0] * 0.5)
+
+    bytes_per_pair = (4 * n_haplotypes_per_pop + 150) * 3
+    chunk_size = available_memory_bytes // bytes_per_pair
+
+    # Bounds: min 100k, max 10M
+    chunk_size = max(100_000, min(chunk_size, 10_000_000))
+
+    return chunk_size
+
 
 def _generate_pairs_within_distance(positions, max_dist):
     """
