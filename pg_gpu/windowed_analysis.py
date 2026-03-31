@@ -689,3 +689,712 @@ def _compute_mean_r2(matrix: HaplotypeMatrix, max_distance: int) -> float:
         distances = np.abs(pos_j - pos_i)
         mask = (distances > 0) & (distances <= max_distance)
         return float(np.mean(r2_matrix[mask])) if np.any(mask) else np.nan
+
+
+# ---------------------------------------------------------------------------
+# Fused CUDA kernel: one block per window, all stats in one pass
+# ---------------------------------------------------------------------------
+
+# Haplotype data is transposed before kernel launch so variants are the
+# leading dimension (column-major for haplotype access). This ensures
+# coalesced memory reads when threads iterate over haplotypes.
+_fused_windowed_kernel_v2 = cp.RawKernel(r'''
+extern "C" __global__
+void fused_windowed_stats_v2(const signed char* hap_t,
+                             const long long* win_start,
+                             const long long* win_stop,
+                             int n_hap, int n_total_var, int n_windows,
+                             double* out_mpd_sum,
+                             double* out_seg_count,
+                             double* out_sing_count,
+                             double* out_var_count) {
+    // hap_t layout: (n_total_var, n_hap) - transposed for coalesced access
+    int wid = blockIdx.x;
+    if (wid >= n_windows) return;
+
+    int v_start = (int)win_start[wid];
+    int v_stop = (int)win_stop[wid];
+    int n_vars = v_stop - v_start;
+    if (n_vars <= 0) {
+        if (threadIdx.x == 0) {
+            out_mpd_sum[wid] = 0.0;
+            out_seg_count[wid] = 0.0;
+            out_sing_count[wid] = 0.0;
+            out_var_count[wid] = 0.0;
+        }
+        return;
+    }
+
+    double dn = (double)n_hap;
+    double thread_mpd = 0.0;
+    double thread_seg = 0.0;
+    double thread_sing = 0.0;
+    double thread_count = 0.0;
+
+    for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
+        int v = v_start + vi;
+
+        // hap_t[v * n_hap + h] -- consecutive h values are contiguous in memory
+        int dac = 0;
+        const signed char* row = hap_t + v * n_hap;
+        for (int h = 0; h < n_hap; h++) {
+            if (row[h] > 0) dac++;
+        }
+
+        double p = (double)dac / dn;
+        double mpd = 2.0 * p * (1.0 - p) * dn / (dn - 1.0);
+        thread_mpd += mpd;
+        thread_seg += (dac > 0 && dac < n_hap) ? 1.0 : 0.0;
+        thread_sing += (dac == 1 || dac == n_hap - 1) ? 1.0 : 0.0;
+        thread_count += 1.0;
+    }
+
+    __shared__ double smem[4 * 256];
+    int tid = threadIdx.x;
+    smem[tid] = thread_mpd;
+    smem[256 + tid] = thread_seg;
+    smem[512 + tid] = thread_sing;
+    smem[768 + tid] = thread_count;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            smem[tid] += smem[tid + s];
+            smem[256 + tid] += smem[256 + tid + s];
+            smem[512 + tid] += smem[512 + tid + s];
+            smem[768 + tid] += smem[768 + tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        out_mpd_sum[wid] = smem[0];
+        out_seg_count[wid] = smem[256];
+        out_sing_count[wid] = smem[512];
+        out_var_count[wid] = smem[768];
+    }
+}
+''', 'fused_windowed_stats_v2')
+
+
+# Two-population fused kernel for FST and Dxy
+_fused_windowed_twopop_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void fused_windowed_twopop(const signed char* hap1_t,
+                           const signed char* hap2_t,
+                           const long long* win_start,
+                           const long long* win_stop,
+                           int n_hap1, int n_hap2,
+                           int n_total_var, int n_windows,
+                           double* out_fst_num,
+                           double* out_fst_den,
+                           double* out_dxy_sum) {
+    // hap1_t, hap2_t: transposed layout (n_total_var, n_hap) for coalesced reads
+    int wid = blockIdx.x;
+    if (wid >= n_windows) return;
+
+    int v_start = (int)win_start[wid];
+    int v_stop = (int)win_stop[wid];
+    int n_vars = v_stop - v_start;
+    if (n_vars <= 0) {
+        if (threadIdx.x == 0) {
+            out_fst_num[wid] = 0.0;
+            out_fst_den[wid] = 0.0;
+            out_dxy_sum[wid] = 0.0;
+        }
+        return;
+    }
+
+    double dn1 = (double)n_hap1;
+    double dn2 = (double)n_hap2;
+    double t_fst_num = 0.0;
+    double t_fst_den = 0.0;
+    double t_dxy = 0.0;
+
+    for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
+        int v = v_start + vi;
+
+        int ac1_1 = 0, ac2_1 = 0;
+        const signed char* row1 = hap1_t + v * n_hap1;
+        for (int h = 0; h < n_hap1; h++) {
+            if (row1[h] > 0) ac1_1++;
+        }
+        const signed char* row2 = hap2_t + v * n_hap2;
+        for (int h = 0; h < n_hap2; h++) {
+            if (row2[h] > 0) ac2_1++;
+        }
+
+        double ac1_0 = dn1 - ac1_1;
+        double ac2_0 = dn2 - ac2_1;
+        double d_ac1_1 = (double)ac1_1;
+        double d_ac2_1 = (double)ac2_1;
+
+        // Within-pop mean pairwise difference
+        double n1_pairs = dn1 * (dn1 - 1.0) / 2.0;
+        double n1_same = (ac1_0 * (ac1_0 - 1.0) + d_ac1_1 * (d_ac1_1 - 1.0)) / 2.0;
+        double mpd1 = (n1_pairs > 0) ? (n1_pairs - n1_same) / n1_pairs : 0.0;
+
+        double n2_pairs = dn2 * (dn2 - 1.0) / 2.0;
+        double n2_same = (ac2_0 * (ac2_0 - 1.0) + d_ac2_1 * (d_ac2_1 - 1.0)) / 2.0;
+        double mpd2 = (n2_pairs > 0) ? (n2_pairs - n2_same) / n2_pairs : 0.0;
+
+        double within = (mpd1 + mpd2) / 2.0;
+
+        // Between-pop mean pairwise difference
+        double n_between = dn1 * dn2;
+        double n_between_same = ac1_0 * ac2_0 + d_ac1_1 * d_ac2_1;
+        double between = (n_between > 0) ? (n_between - n_between_same) / n_between : 0.0;
+
+        t_fst_num += between - within;
+        t_fst_den += between;
+        t_dxy += between;
+    }
+
+    // Block reduction
+    __shared__ double smem[3 * 256];
+    int tid = threadIdx.x;
+    smem[tid] = t_fst_num;
+    smem[256 + tid] = t_fst_den;
+    smem[512 + tid] = t_dxy;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            smem[tid] += smem[tid + s];
+            smem[256 + tid] += smem[256 + tid + s];
+            smem[512 + tid] += smem[512 + tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        out_fst_num[wid] = smem[0];
+        out_fst_den[wid] = smem[256];
+        out_dxy_sum[wid] = smem[512];
+    }
+}
+''', 'fused_windowed_twopop')
+
+
+def _compute_window_ranges(positions, bp_bins):
+    """Map window edges to variant index ranges using searchsorted.
+
+    Returns (win_start, win_stop) as CuPy int64 arrays where
+    win_start[i]:win_stop[i] are the variant indices in window i.
+    """
+    n_windows = len(bp_bins) - 1
+    win_start = cp.searchsorted(positions, bp_bins[:-1], side='left')
+    win_stop = cp.searchsorted(positions, bp_bins[1:], side='left')
+    return win_start.astype(cp.int64), win_stop.astype(cp.int64)
+
+
+def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
+                              bp_bins,
+                              statistics=('pi', 'theta_w', 'tajimas_d',
+                                          'segregating_sites', 'singletons'),
+                              population=None,
+                              pop1=None,
+                              pop2=None,
+                              per_base: bool = True,
+                              is_accessible=None):
+    """GPU-native windowed statistics using fused CUDA kernels.
+
+    One kernel launch processes ALL windows in parallel. Each thread block
+    handles one window, with threads cooperatively reducing over variants.
+    Reads the haplotype matrix once and computes all statistics simultaneously.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+        Haplotype data.
+    bp_bins : array_like
+        Window edges in base pairs. N+1 edges define N windows.
+    statistics : tuple of str
+        Statistics to compute. Single-pop: 'pi', 'theta_w', 'tajimas_d',
+        'segregating_sites', 'singletons'. Two-pop: 'fst', 'dxy'.
+    population : str or list, optional
+        Population for single-pop statistics.
+    pop1, pop2 : str or list, optional
+        Populations for two-pop statistics.
+    per_base : bool
+        Normalize by window size in base pairs.
+    is_accessible : array_like, optional
+        Accessibility mask for per-base normalization.
+
+    Returns
+    -------
+    dict
+        Maps statistic names to numpy arrays of shape (n_windows,).
+    """
+    from ._utils import get_population_matrix
+
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
+    if population is not None:
+        matrix = get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap_raw = matrix.haplotypes
+    n_hap = hap_raw.shape[0]
+    n_total_var = hap_raw.shape[1]
+    # transpose for coalesced kernel access: (n_total_var, n_hap)
+    hap = cp.ascontiguousarray(hap_raw.T.astype(cp.int8))
+
+    positions = matrix.positions
+    if not isinstance(positions, cp.ndarray):
+        positions = cp.asarray(positions)
+
+    bp_bins_gpu = cp.asarray(bp_bins, dtype=cp.float64)
+    n_windows = len(bp_bins_gpu) - 1
+
+    # map windows to variant index ranges
+    win_start, win_stop = _compute_window_ranges(positions, bp_bins_gpu)
+
+    results = {
+        'window_start': bp_bins_gpu[:-1].get(),
+        'window_stop': bp_bins_gpu[1:].get(),
+    }
+
+    # window sizes for normalization
+    if per_base:
+        if is_accessible is not None:
+            is_accessible = np.asarray(is_accessible, dtype=bool)
+            bp_edges = bp_bins_gpu.get()
+            window_bases = np.array([
+                np.count_nonzero(is_accessible[max(0, int(bp_edges[i])):int(bp_edges[i+1])])
+                for i in range(n_windows)
+            ], dtype=np.float64)
+        else:
+            window_bases = np.diff(bp_bins_gpu.get())
+
+    # single-pop stats via fused kernel
+    single_pop_requested = any(s in statistics for s in
+                               ('pi', 'theta_w', 'tajimas_d',
+                                'segregating_sites', 'singletons'))
+    if single_pop_requested:
+        out_mpd = cp.zeros(n_windows, dtype=cp.float64)
+        out_seg = cp.zeros(n_windows, dtype=cp.float64)
+        out_sing = cp.zeros(n_windows, dtype=cp.float64)
+        out_count = cp.zeros(n_windows, dtype=cp.float64)
+
+        block = 256
+        grid = n_windows
+
+        _fused_windowed_kernel_v2(
+            (grid,), (block,),
+            (hap, win_start, win_stop,
+             np.int32(n_hap), np.int32(n_total_var), np.int32(n_windows),
+             out_mpd, out_seg, out_sing, out_count))
+
+        mpd_sum = out_mpd.get()
+        seg_count = out_seg.get()
+        sing_count = out_sing.get()
+        var_count = out_count.get()
+
+        results['n_variants'] = var_count.astype(int)
+
+        if 'pi' in statistics:
+            if per_base:
+                results['pi'] = np.where(window_bases > 0,
+                                         mpd_sum / window_bases, np.nan)
+            else:
+                results['pi'] = mpd_sum
+
+        if 'theta_w' in statistics:
+            a1 = np.sum(1.0 / np.arange(1, n_hap))
+            theta_abs = seg_count / a1
+            if per_base:
+                results['theta_w'] = np.where(window_bases > 0,
+                                              theta_abs / window_bases, np.nan)
+            else:
+                results['theta_w'] = theta_abs
+
+        if 'segregating_sites' in statistics:
+            results['segregating_sites'] = seg_count.astype(int)
+
+        if 'singletons' in statistics:
+            results['singletons'] = sing_count.astype(int)
+
+        if 'tajimas_d' in statistics:
+            n = n_hap
+            a1 = np.sum(1.0 / np.arange(1, n))
+            a2 = np.sum(1.0 / np.arange(1, n) ** 2)
+            b1 = (n + 1) / (3 * (n - 1))
+            b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
+            c1 = b1 - 1 / a1
+            c2 = b2 - (n + 2) / (a1 * n) + a2 / a1 ** 2
+            e1 = c1 / a1
+            e2 = c2 / (a1 ** 2 + a2)
+
+            S = seg_count
+            d_num = mpd_sum - S / a1
+            d_var = e1 * S + e2 * S * (S - 1)
+            d_std = np.sqrt(np.maximum(d_var, 0))
+            tajd = np.where(d_std > 0, d_num / d_std, np.nan)
+            tajd[S < 3] = np.nan
+            results['tajimas_d'] = tajd
+
+    # two-pop stats via fused kernel
+    two_pop_requested = any(s in statistics for s in ('fst', 'dxy'))
+    if two_pop_requested:
+        if pop1 is None or pop2 is None:
+            raise ValueError("pop1 and pop2 required for fst/dxy")
+
+        m1 = get_population_matrix(haplotype_matrix, pop1)
+        m2 = get_population_matrix(haplotype_matrix, pop2)
+        if m1.device == 'CPU':
+            m1.transfer_to_gpu()
+        if m2.device == 'CPU':
+            m2.transfer_to_gpu()
+
+        n1 = m1.haplotypes.shape[0]
+        n2 = m2.haplotypes.shape[0]
+        # transpose for coalesced kernel access
+        hap1 = cp.ascontiguousarray(m1.haplotypes.T.astype(cp.int8))
+        hap2 = cp.ascontiguousarray(m2.haplotypes.T.astype(cp.int8))
+
+        out_fst_num = cp.zeros(n_windows, dtype=cp.float64)
+        out_fst_den = cp.zeros(n_windows, dtype=cp.float64)
+        out_dxy = cp.zeros(n_windows, dtype=cp.float64)
+
+        block = 256
+        grid = n_windows
+
+        _fused_windowed_twopop_kernel(
+            (grid,), (block,),
+            (hap1, hap2, win_start, win_stop,
+             np.int32(n1), np.int32(n2),
+             np.int32(n_total_var), np.int32(n_windows),
+             out_fst_num, out_fst_den, out_dxy))
+
+        fst_num = out_fst_num.get()
+        fst_den = out_fst_den.get()
+        dxy_sum = out_dxy.get()
+
+        if 'n_variants' not in results:
+            results['n_variants'] = (win_stop - win_start).get().astype(int)
+
+        if 'fst' in statistics:
+            results['fst'] = np.where(fst_den > 0, fst_num / fst_den, np.nan)
+
+        if 'dxy' in statistics:
+            if per_base:
+                results['dxy'] = np.where(window_bases > 0,
+                                          dxy_sum / window_bases, np.nan)
+            else:
+                results['dxy'] = dxy_sum
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# GPU-native windowed statistics: compute once, bin everywhere
+# ---------------------------------------------------------------------------
+
+def _scatter_sum(values, bin_idx, n_bins):
+    """Sum values into bins using scatter_add on GPU."""
+    import cupyx
+    result = cp.zeros(n_bins, dtype=cp.float64)
+    valid = (bin_idx >= 0) & (bin_idx < n_bins)
+    cupyx.scatter_add(result, bin_idx[valid], values[valid])
+    return result
+
+
+def _bin_counts(bin_idx, n_bins):
+    """Count variants per bin on GPU."""
+    valid = (bin_idx >= 0) & (bin_idx < n_bins)
+    return cp.bincount(bin_idx[valid], minlength=n_bins)
+
+
+def _allele_sum(hap, has_missing=None):
+    """Sum of alleles per variant, clamping missing (-1) to 0.
+
+    Parameters
+    ----------
+    hap : cupy.ndarray
+    has_missing : bool, optional
+        If known, skip the check. If None, checks for negatives.
+    """
+    if has_missing is None:
+        has_missing = bool(int(cp.min(hap)) < 0)
+    if has_missing:
+        hap = cp.maximum(hap, 0)
+    return cp.sum(hap, axis=0)
+
+
+def _per_variant_mpd(hap, n_hap):
+    """Mean pairwise difference per variant (GPU)."""
+    dac = _allele_sum(hap).astype(cp.float64)
+    p = dac / n_hap
+    return 2.0 * p * (1.0 - p) * n_hap / (n_hap - 1)
+
+
+def _per_variant_is_seg(hap, n_hap_int):
+    """Boolean: is variant segregating (GPU)."""
+    dac = _allele_sum(hap)
+    return (dac > 0) & (dac < n_hap_int)
+
+
+def _per_variant_is_singleton(hap, n_hap_int):
+    """Boolean: is variant a singleton (GPU)."""
+    dac = _allele_sum(hap)
+    return (dac == 1) | (dac == n_hap_int - 1)
+
+
+def _per_variant_fst_hudson_components(hap1, hap2, n1, n2):
+    """Per-variant Hudson FST numerator and denominator (GPU).
+
+    Returns (num, den) as CuPy arrays.
+    """
+    ac1_1 = cp.sum(hap1, axis=0).astype(cp.float64)
+    ac1_0 = n1 - ac1_1
+    ac2_1 = cp.sum(hap2, axis=0).astype(cp.float64)
+    ac2_0 = n2 - ac2_1
+
+    n1_pairs = n1 * (n1 - 1) / 2
+    n1_same = (ac1_0 * (ac1_0 - 1) + ac1_1 * (ac1_1 - 1)) / 2
+    mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
+
+    n2_pairs = n2 * (n2 - 1) / 2
+    n2_same = (ac2_0 * (ac2_0 - 1) + ac2_1 * (ac2_1 - 1)) / 2
+    mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
+
+    within = (mpd1 + mpd2) / 2.0
+
+    n_between = n1 * n2
+    n_between_same = ac1_0 * ac2_0 + ac1_1 * ac2_1
+    between = cp.where(n_between > 0,
+                       (n_between - n_between_same) / n_between, 0.0)
+
+    return between - within, between
+
+
+def _per_variant_dxy(hap1, hap2, n1, n2):
+    """Per-variant mean pairwise difference between populations (GPU)."""
+    ac1_1 = cp.sum(hap1, axis=0).astype(cp.float64)
+    ac1_0 = n1 - ac1_1
+    ac2_1 = cp.sum(hap2, axis=0).astype(cp.float64)
+    ac2_0 = n2 - ac2_1
+
+    n_pairs = n1 * n2
+    n_same = ac1_0 * ac2_0 + ac1_1 * ac2_1
+    return cp.where(n_pairs > 0, (n_pairs - n_same) / n_pairs, 0.0)
+
+
+def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
+                        bp_bins,
+                        statistics=('pi', 'theta_w', 'tajimas_d'),
+                        population=None,
+                        pop1=None,
+                        pop2=None,
+                        per_base: bool = True,
+                        is_accessible=None):
+    """GPU-native windowed statistics with no Python loop over windows.
+
+    Computes per-variant values once, then aggregates into windows using
+    GPU scatter_add operations. Dramatically faster than per-window
+    computation for large numbers of windows.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+        Haplotype data.
+    bp_bins : array_like
+        Window edges in base pairs. N+1 edges define N windows.
+    statistics : tuple of str
+        Statistics to compute. Supported:
+        Single-population: 'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
+        'singletons', 'het_expected'
+        Two-population: 'fst', 'dxy'
+    population : str or list, optional
+        Population for single-pop statistics.
+    pop1, pop2 : str or list, optional
+        Populations for two-pop statistics (fst, dxy).
+    per_base : bool
+        If True, normalize by window size in base pairs.
+    is_accessible : array_like, optional
+        Boolean accessibility mask for per-base normalization.
+
+    Returns
+    -------
+    dict
+        Maps statistic names to numpy arrays of shape (n_windows,).
+        Also includes 'n_variants' (count per window) and 'window_start',
+        'window_stop' arrays.
+    """
+    from ._utils import get_population_matrix
+
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
+    # get population subset for single-pop stats
+    if population is not None:
+        matrix = get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = matrix.haplotypes  # (n_haplotypes, n_variants)
+    n_hap_int = hap.shape[0]
+    n_hap = cp.float64(n_hap_int)
+
+    positions = matrix.positions
+    if not isinstance(positions, cp.ndarray):
+        positions = cp.asarray(positions)
+
+    # assign variants to windows (GPU parallel binary search)
+    bp_bins = cp.asarray(bp_bins, dtype=cp.float64)
+    n_windows = len(bp_bins) - 1
+    bin_idx = cp.searchsorted(bp_bins, positions, side='right').astype(cp.int64) - 1
+    # clamp to valid range
+    bin_idx = cp.clip(bin_idx, 0, n_windows - 1)
+    # mark out-of-range variants
+    out_of_range = (positions < bp_bins[0]) | (positions >= bp_bins[-1])
+    bin_idx[out_of_range] = -1
+
+    variant_counts = _bin_counts(bin_idx, n_windows)
+
+    results = {
+        'window_start': bp_bins[:-1].get(),
+        'window_stop': bp_bins[1:].get(),
+        'n_variants': variant_counts.get().astype(int),
+    }
+
+    # window sizes for per-base normalization
+    if per_base:
+        if is_accessible is not None:
+            is_accessible = np.asarray(is_accessible, dtype=bool)
+            window_bases = np.zeros(n_windows)
+            bp_edges = bp_bins.get()
+            for i in range(n_windows):
+                start = int(bp_edges[i])
+                stop = int(bp_edges[i + 1])
+                window_bases[i] = np.count_nonzero(
+                    is_accessible[max(0, start):stop])
+            window_bases = cp.asarray(window_bases, dtype=cp.float64)
+        else:
+            window_bases = cp.diff(bp_bins)
+
+    # Phase 1: compute per-variant values and aggregate
+
+    # check for missing data once, share across all stats
+    _has_missing = bool(int(cp.min(hap)) < 0)
+
+    # precompute allele counts once (shared across all stats)
+    dac = _allele_sum(hap, has_missing=_has_missing).astype(cp.float64)
+    p = dac / n_hap
+    need_mpd = any(s in statistics for s in ('pi', 'tajimas_d'))
+    need_seg = any(s in statistics for s in
+                   ('theta_w', 'tajimas_d', 'segregating_sites'))
+
+    mpd = 2.0 * p * (1.0 - p) * n_hap / (n_hap - 1) if need_mpd else None
+    is_seg = (dac > 0) & (dac < n_hap_int) if need_seg else None
+
+    if 'pi' in statistics:
+        pi_sum = _scatter_sum(mpd, bin_idx, n_windows)
+        if per_base:
+            results['pi'] = cp.where(window_bases > 0,
+                                     pi_sum / window_bases, cp.nan).get()
+        else:
+            results['pi'] = pi_sum.get()
+
+    if 'theta_w' in statistics:
+        seg_counts = _scatter_sum(is_seg.astype(cp.float64), bin_idx, n_windows)
+        n = n_hap_int
+        a1 = np.sum(1.0 / np.arange(1, n))
+        theta_abs = seg_counts / a1
+        if per_base:
+            results['theta_w'] = cp.where(window_bases > 0,
+                                          theta_abs / window_bases, cp.nan).get()
+        else:
+            results['theta_w'] = theta_abs.get()
+
+    if 'segregating_sites' in statistics:
+        seg_vals = is_seg if is_seg is not None else (dac > 0) & (dac < n_hap_int)
+        seg_counts_out = _scatter_sum(seg_vals.astype(cp.float64), bin_idx,
+                                      n_windows)
+        results['segregating_sites'] = seg_counts_out.get().astype(int)
+
+    if 'singletons' in statistics:
+        is_sing = (dac == 1) | (dac == n_hap_int - 1)
+        sing_counts = _scatter_sum(is_sing.astype(cp.float64), bin_idx,
+                                   n_windows)
+        results['singletons'] = sing_counts.get().astype(int)
+
+    if 'het_expected' in statistics:
+        he = 2.0 * p * (1.0 - p)
+        he_sum = _scatter_sum(he, bin_idx, n_windows)
+        results['het_expected'] = cp.where(
+            variant_counts > 0,
+            he_sum / variant_counts.astype(cp.float64), cp.nan).get()
+
+    if 'tajimas_d' in statistics:
+        # aggregate mpd and seg counts into windows, then apply formula
+        pi_sum_td = _scatter_sum(mpd, bin_idx, n_windows) if 'pi' not in statistics else _scatter_sum(mpd, bin_idx, n_windows)
+        seg_counts_td = _scatter_sum(is_seg.astype(cp.float64), bin_idx,
+                                     n_windows)
+
+        n = n_hap_int
+        a1 = np.sum(1.0 / np.arange(1, n))
+        a2 = np.sum(1.0 / np.arange(1, n) ** 2)
+        b1 = (n + 1) / (3 * (n - 1))
+        b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
+        c1 = b1 - 1 / a1
+        c2 = b2 - (n + 2) / (a1 * n) + a2 / a1 ** 2
+        e1 = c1 / a1
+        e2 = c2 / (a1 ** 2 + a2)
+
+        S = seg_counts_td.get()
+        pi_w = pi_sum_td.get()
+
+        d_num = pi_w - S / a1
+        d_var = e1 * S + e2 * S * (S - 1)
+        d_std = np.sqrt(np.maximum(d_var, 0))
+
+        tajd = np.where(d_std > 0, d_num / d_std, np.nan)
+        tajd[S < 3] = np.nan
+        results['tajimas_d'] = tajd
+
+    # two-population statistics
+    two_pop_stats = [s for s in statistics if s in ('fst', 'dxy')]
+    if two_pop_stats:
+        if pop1 is None or pop2 is None:
+            raise ValueError("pop1 and pop2 required for fst/dxy")
+
+        m1 = get_population_matrix(haplotype_matrix, pop1)
+        m2 = get_population_matrix(haplotype_matrix, pop2)
+        if m1.device == 'CPU':
+            m1.transfer_to_gpu()
+        if m2.device == 'CPU':
+            m2.transfer_to_gpu()
+
+        hap1 = m1.haplotypes
+        hap2 = m2.haplotypes
+        n1 = cp.float64(hap1.shape[0])
+        n2 = cp.float64(hap2.shape[0])
+
+        if 'fst' in statistics:
+            fst_num, fst_den = _per_variant_fst_hudson_components(
+                hap1, hap2, n1, n2)
+            num_sum = _scatter_sum(fst_num, bin_idx, n_windows)
+            den_sum = _scatter_sum(fst_den, bin_idx, n_windows)
+            results['fst'] = cp.where(den_sum > 0,
+                                      num_sum / den_sum, cp.nan).get()
+
+        if 'dxy' in statistics:
+            dxy_vals = _per_variant_dxy(hap1, hap2, n1, n2)
+            dxy_sum = _scatter_sum(dxy_vals, bin_idx, n_windows)
+            if per_base:
+                results['dxy'] = cp.where(window_bases > 0,
+                                          dxy_sum / window_bases, cp.nan).get()
+            else:
+                results['dxy'] = dxy_sum.get()
+
+    return results

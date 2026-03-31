@@ -59,6 +59,12 @@ New Functions
   - ``pairwise_distance()`` - GPU-accelerated with memory-safe batching
   - ``pcoa()`` - Principal Coordinate Analysis
 
+* **GPU-Native Windowed Statistics** (``pg_gpu.windowed_analysis``)
+
+  - ``windowed_statistics()`` - Compute pi, theta_w, tajimas_d, FST, Dxy across all windows in one GPU pass using scatter_add aggregation
+  - ``windowed_statistics_fused()`` - Fused CUDA kernel variant with one thread block per window
+  - Up to 4.3x speedup over allel for windowed FST at scale
+
 Infrastructure
 ~~~~~~~~~~~~~~
 

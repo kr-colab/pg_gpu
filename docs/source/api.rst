@@ -193,3 +193,13 @@ Distance
 
 .. autofunction:: pg_gpu.decomposition.pairwise_distance
 .. autofunction:: pg_gpu.decomposition.pcoa
+
+Windowed Statistics (GPU-Native)
+--------------------------------
+
+These functions compute statistics across all genomic windows in a single
+GPU pass, avoiding Python loops over windows.
+
+.. autofunction:: pg_gpu.windowed_analysis.windowed_statistics
+
+.. autofunction:: pg_gpu.windowed_analysis.windowed_statistics_fused

@@ -163,6 +163,36 @@ PCA and Dimensionality Reduction
    # Population-specific PCA
    coords_ceu, _ = decomposition.pca(h, n_components=5, population="CEU")
 
+GPU-Native Windowed Statistics
+------------------------------
+
+Compute multiple statistics across thousands of windows without Python loops:
+
+.. code-block:: python
+
+   from pg_gpu.windowed_analysis import windowed_statistics
+   import numpy as np
+
+   # Define windows across 1Mb region
+   bp_bins = np.arange(0, 1_000_001, 10_000)  # 100 windows of 10kb
+
+   # Compute 4 diversity stats in one GPU pass
+   result = windowed_statistics(
+       h, bp_bins,
+       statistics=('pi', 'theta_w', 'tajimas_d', 'segregating_sites')
+   )
+
+   # Results are numpy arrays, one value per window
+   print(f"Mean pi: {np.nanmean(result['pi']):.6f}")
+   print(f"Mean Tajima's D: {np.nanmean(result['tajimas_d']):.3f}")
+
+   # Windowed FST between populations
+   result = windowed_statistics(
+       h, bp_bins,
+       statistics=('pi', 'fst', 'dxy'),
+       pop1='CEU', pop2='YRI'
+   )
+
 Missing Data
 ------------
 

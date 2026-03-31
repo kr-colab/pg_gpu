@@ -174,6 +174,29 @@ PCA and Distance
    # PCoA from distance matrix
    coords, var_ratio = decomposition.pcoa(dist)
 
+Windowed Statistics (GPU-Native)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Compute statistics across all genomic windows in a single GPU pass:
+
+.. code-block:: python
+
+   from pg_gpu.windowed_analysis import windowed_statistics
+
+   # All single-pop stats in one call, no Python loop over windows
+   result = windowed_statistics(
+       h, bp_bins=[0, 10000, 20000, 30000, 40000, 50000],
+       statistics=('pi', 'theta_w', 'tajimas_d', 'segregating_sites')
+   )
+   # result['pi'], result['theta_w'], etc. are arrays with one value per window
+
+   # Two-population windowed FST + Dxy
+   result = windowed_statistics(
+       h, bp_bins=[0, 10000, 20000, 30000, 40000, 50000],
+       statistics=('fst', 'dxy'),
+       pop1='pop1', pop2='pop2'
+   )
+
 Missing Data
 ~~~~~~~~~~~~
 
