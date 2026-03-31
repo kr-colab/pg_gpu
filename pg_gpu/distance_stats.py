@@ -177,9 +177,27 @@ def dist_kurt(matrix, population=None):
     return dist_moments(matrix, population)[2]
 
 
-def _get_diffs(matrix, population=None):
-    """Dispatch to haploid or diploid pairwise diffs."""
+def pairwise_diffs(matrix, population=None):
+    """Compute pairwise Hamming distances on GPU.
+
+    Accepts HaplotypeMatrix (0/1 data, single matrix multiply) or
+    GenotypeMatrix (0/1/2 data, indicator matrix approach). Dispatches
+    automatically.
+
+    Parameters
+    ----------
+    matrix : HaplotypeMatrix or GenotypeMatrix
+    population : str or list, optional
+
+    Returns
+    -------
+    diffs : cupy.ndarray, float64, condensed form (n_pairs,)
+    """
     if isinstance(matrix, GenotypeMatrix):
         return pairwise_diffs_diploid(matrix, population)
     else:
         return pairwise_diffs_haploid(matrix, population)
+
+
+# internal alias
+_get_diffs = pairwise_diffs
