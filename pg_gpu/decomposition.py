@@ -34,7 +34,7 @@ def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'
         hap = hap[:, complete]
         has_missing = False
 
-    if missing_data in ('include', 'pairwise') and has_missing:
+    if has_missing:
         # Impute missing values to per-site mean frequency
         valid_mask = hap >= 0
         hap_clean = cp.where(valid_mask, hap, 0).astype(cp.float64)
@@ -42,7 +42,7 @@ def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'
         site_mean = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
         X = cp.where(valid_mask, hap_clean, site_mean[None, :])
     else:
-        X = cp.where(hap < 0, 0, hap).astype(cp.float64) if has_missing else hap.astype(cp.float64)
+        X = hap.astype(cp.float64)
 
     X = X.copy()
 
@@ -221,14 +221,15 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
         complete = missing_per_var == 0
         hap = hap[:, complete]
 
-    X = cp.where(hap < 0, 0, hap).astype(cp.float64)
+    X = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+    valid_mask = (hap >= 0).astype(cp.float64)
+    has_missing = cp.any(hap < 0)
     n = X.shape[0]
 
     if metric in ('euclidean', 'sqeuclidean', 'cityblock'):
         idx_i, idx_j = cp.triu_indices(n, k=1)
         n_pairs = len(idx_i)
 
-        # batch to avoid materializing huge (n_pairs, n_variants) arrays
         batch_size = max(1, min(n_pairs, 50000))
         dist_parts = []
 
@@ -237,17 +238,30 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
             bi = idx_i[start:end]
             bj = idx_j[start:end]
 
-            if metric == 'cityblock':
-                d = cp.sum(cp.abs(X[bi] - X[bj]), axis=1)
+            if has_missing:
+                # only compare at jointly-valid sites
+                joint = valid_mask[bi] * valid_mask[bj]
+                n_joint = cp.sum(joint, axis=1)
             else:
-                d = cp.sum((X[bi] - X[bj]) ** 2, axis=1)
-                if metric == 'euclidean':
-                    d = cp.sqrt(d)
+                n_joint = cp.float64(X.shape[1])
+
+            if metric == 'cityblock':
+                raw = cp.sum(cp.abs(X[bi] - X[bj]) * (joint if has_missing else 1.0), axis=1)
+            else:
+                raw = cp.sum(((X[bi] - X[bj]) ** 2) * (joint if has_missing else 1.0), axis=1)
+
+            # normalize by jointly-valid sites
+            if has_missing:
+                d = cp.where(n_joint > 0, raw * X.shape[1] / n_joint, 0.0)
+            else:
+                d = raw
+
+            if metric == 'euclidean':
+                d = cp.sqrt(d)
             dist_parts.append(d)
 
         return cp.concatenate(dist_parts).get()
     else:
-        # fall back to scipy for exotic metrics
         from scipy.spatial.distance import pdist
         X_cpu = X.get()
         return pdist(X_cpu, metric=metric)

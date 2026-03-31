@@ -872,7 +872,7 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
             else:
                 results['n_variants'] = haplotype_matrix.num_variants
         elif stat == 'haplotype_diversity':
-            results['haplotype_diversity'] = haplotype_diversity(haplotype_matrix, population)
+            results['haplotype_diversity'] = haplotype_diversity(haplotype_matrix, population, missing_data)
         else:
             raise ValueError(f"Unknown statistic: {stat}")
     
@@ -1593,9 +1593,11 @@ def _daf_histogram_diploid(genotype_matrix, n_bins=20, population=None):
     if not isinstance(geno, cp.ndarray):
         geno = cp.asarray(geno)
 
-    geno = cp.maximum(geno, 0).astype(cp.float64)
-    n_ind = geno.shape[0]
-    dafs = cp.sum(geno, axis=0) / (2.0 * n_ind)
+    valid_mask = geno >= 0
+    geno_clean = cp.where(valid_mask, geno, 0).astype(cp.float64)
+    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    usable = n_valid > 0
+    dafs = cp.where(usable, cp.sum(geno_clean, axis=0) / (2.0 * n_valid), 0.0)
 
     return _histogram_from_dafs(dafs, n_bins)
 

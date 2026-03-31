@@ -58,8 +58,8 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
         complete = missing_per_var == 0
         hap = hap[:, complete]
         X = hap.astype(cp.float64)
-    elif missing_data == 'include':
-        # Mask missing as 0 for diff calculation, track valid sites per pair
+    else:
+        # 'include' mode (default): mask missing, normalize per pair
         valid_mask = (hap >= 0).astype(cp.float64)
         X = cp.where(hap >= 0, hap, 0).astype(cp.float64)
 
@@ -72,14 +72,6 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
         # normalize: per-site average difference
         diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
         return _extract_upper_triangle(diffs_mat)
-    else:
-        X = cp.maximum(hap, 0).astype(cp.float64)
-
-    row_sums = cp.sum(X, axis=1)
-    gram = X @ X.T
-    diffs_mat = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
-
-    return _extract_upper_triangle(diffs_mat)
 
 
 def pairwise_diffs_diploid(genotype_matrix, population=None,
@@ -120,29 +112,18 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
         complete = missing_per_var == 0
         geno = geno[:, complete]
 
-    if missing_data == 'include':
-        valid_mask = (geno >= 0).astype(cp.float64)
-        geno_clean = cp.maximum(geno, 0)
+    # 'include' mode (default): mask missing, normalize per pair
+    valid_mask = (geno >= 0).astype(cp.float64)
+    geno_clean = cp.where(geno >= 0, geno, 0)
 
-        I0 = (geno_clean == 0).astype(cp.float64) * valid_mask
-        I1 = (geno_clean == 1).astype(cp.float64) * valid_mask
-        I2 = (geno_clean == 2).astype(cp.float64) * valid_mask
+    I0 = (geno_clean == 0).astype(cp.float64) * valid_mask
+    I1 = (geno_clean == 1).astype(cp.float64) * valid_mask
+    I2 = (geno_clean == 2).astype(cp.float64) * valid_mask
 
-        matches = I0 @ I0.T + I1 @ I1.T + I2 @ I2.T
-        joint_valid = valid_mask @ valid_mask.T
-        diffs_mat = joint_valid - matches
-        # normalize per jointly-valid sites
-        diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
-    else:
-        geno = cp.maximum(geno, 0)
-        n_var = cp.float64(geno.shape[1])
-
-        I0 = (geno == 0).astype(cp.float64)
-        I1 = (geno == 1).astype(cp.float64)
-        I2 = (geno == 2).astype(cp.float64)
-
-        matches = I0 @ I0.T + I1 @ I1.T + I2 @ I2.T
-        diffs_mat = n_var - matches
+    matches = I0 @ I0.T + I1 @ I1.T + I2 @ I2.T
+    joint_valid = valid_mask @ valid_mask.T
+    diffs_mat = joint_valid - matches
+    diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
 
     return _extract_upper_triangle(diffs_mat)
 

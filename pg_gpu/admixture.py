@@ -64,6 +64,13 @@ def _allele_freq_and_het(haplotype_matrix, missing_data='include'):
 
     freq = cp.where(an > 0, n1 / an, 0.0)
     h = cp.where(an > 1, (n0 * n1) / (an * (an - 1)), 0.0)
+
+    if missing_data == 'exclude':
+        has_missing = cp.any(hap < 0, axis=0)
+        freq[has_missing] = cp.nan
+        h[has_missing] = cp.nan
+        an[has_missing] = 0
+
     return freq, h, an
 
 
