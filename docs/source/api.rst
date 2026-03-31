@@ -228,8 +228,6 @@ Distance Distribution Statistics
 ---------------------------------
 
 .. autofunction:: pg_gpu.distance_stats.pairwise_diffs
-.. autofunction:: pg_gpu.distance_stats.pairwise_diffs_haploid
-.. autofunction:: pg_gpu.distance_stats.pairwise_diffs_diploid
 .. autofunction:: pg_gpu.distance_stats.dist_moments
 .. autofunction:: pg_gpu.distance_stats.dist_var
 .. autofunction:: pg_gpu.distance_stats.dist_skew
