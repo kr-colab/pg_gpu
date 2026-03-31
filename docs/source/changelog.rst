@@ -65,6 +65,16 @@ New Functions
   - ``windowed_statistics_fused()`` - Fused CUDA kernel variant with one thread block per window
   - Up to 4.3x speedup over allel for windowed FST at scale
 
+* **Visualization** (``pg_gpu.plotting``)
+
+  - ``plot_sfs()``, ``plot_joint_sfs()`` - SFS bar plots and heatmaps
+  - ``plot_pairwise_ld()``, ``plot_ld_decay()`` - LD heatmap and decay curves
+  - ``plot_pca()`` - PCA scatter with population labels
+  - ``plot_pairwise_distance()`` - Distance matrix heatmap
+  - ``plot_windowed()``, ``plot_windowed_panel()`` - Genome-wide windowed stat plots
+  - ``plot_haplotype_frequencies()``, ``plot_variant_locator()`` - Haplotype and variant viz
+  - Built on matplotlib + seaborn
+
 Infrastructure
 ~~~~~~~~~~~~~~
 

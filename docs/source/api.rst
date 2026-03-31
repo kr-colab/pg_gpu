@@ -203,3 +203,36 @@ GPU pass, avoiding Python loops over windows.
 .. autofunction:: pg_gpu.windowed_analysis.windowed_statistics
 
 .. autofunction:: pg_gpu.windowed_analysis.windowed_statistics_fused
+
+Visualization
+-------------
+
+Site Frequency Spectrum
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: pg_gpu.plotting.plot_sfs
+.. autofunction:: pg_gpu.plotting.plot_joint_sfs
+
+Linkage Disequilibrium
+~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: pg_gpu.plotting.plot_pairwise_ld
+.. autofunction:: pg_gpu.plotting.plot_ld_decay
+
+PCA and Population Structure
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: pg_gpu.plotting.plot_pca
+.. autofunction:: pg_gpu.plotting.plot_pairwise_distance
+
+Windowed Statistics
+~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: pg_gpu.plotting.plot_windowed
+.. autofunction:: pg_gpu.plotting.plot_windowed_panel
+
+Haplotype Structure
+~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: pg_gpu.plotting.plot_haplotype_frequencies
+.. autofunction:: pg_gpu.plotting.plot_variant_locator
