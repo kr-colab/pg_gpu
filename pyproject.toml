@@ -5,23 +5,17 @@ build-backend = "hatchling.build"
 [project]
 name = "pg_gpu"
 version = "0.1.0"
-authors = [
-    { name = "Your Name" },
-]
-description = "A package for computing linkage disequilibrium statistics using CuPy"
+description = "GPU-accelerated population genetics statistics"
+readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
-    "scikit-allel",
-    "msprime",
-    "pytest",
+authors = [
+    { name = "Andrew Kern", email = "adk@uoregon.edu" },
 ]
 
-[project.optional-dependencies]
-test = [
-    "pytest",
-]
+[project.urls]
+Homepage = "https://github.com/andrewkern/pg_gpu"
 
 [tool.pytest.ini_options]
 pythonpath = [
     "pg_gpu"
-] 
+]
