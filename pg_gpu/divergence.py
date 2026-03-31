@@ -92,8 +92,7 @@ def fst(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
-        
+
     Returns
     -------
     float
@@ -131,7 +130,6 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
         'pairwise' - Comparison-counting: FST = 1 - (pi_within / dxy)
 
     Returns
@@ -183,73 +181,46 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
             return 0.0
         pop1_haps = pop1_haps[:, valid_sites]
         pop2_haps = pop2_haps[:, valid_sites]
-    elif missing_data == 'include':
-        # Will handle missing data per site below
-        pass
-    elif missing_data == 'ignore':
-        # Treat missing as reference allele
-        pop1_haps = cp.where(pop1_haps < 0, 0, pop1_haps)
-        pop2_haps = cp.where(pop2_haps < 0, 0, pop2_haps)
-    
-    # Get allele frequencies
-    if missing_data == 'include':
-        # Calculate frequencies from non-missing data per site
-        pop1_mask = pop1_haps >= 0
-        pop2_mask = pop2_haps >= 0
-        pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
-        pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
-        pop1_n = cp.sum(pop1_mask, axis=0)
-        pop2_n = cp.sum(pop2_mask, axis=0)
-        
-        # Avoid division by zero
-        pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
-        pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
-        valid1 = pop1_n > 0
-        valid2 = pop2_n > 0
-        pop1_freqs[valid1] = pop1_counts[valid1] / pop1_n[valid1]
-        pop2_freqs[valid2] = pop2_counts[valid2] / pop2_n[valid2]
-        
-        # Use actual sample sizes per site
-        n1 = pop1_n
-        n2 = pop2_n
-    else:
-        pop1_freqs = cp.mean(pop1_haps, axis=0)
-        pop2_freqs = cp.mean(pop2_haps, axis=0)
-        n1 = len(pop1_idx)
-        n2 = len(pop2_idx)
-    
+
+    # Get allele frequencies - calculate from non-missing data per site
+    pop1_mask = pop1_haps >= 0
+    pop2_mask = pop2_haps >= 0
+    pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
+    pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
+    pop1_n = cp.sum(pop1_mask, axis=0)
+    pop2_n = cp.sum(pop2_mask, axis=0)
+
+    # Avoid division by zero
+    pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
+    pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
+    valid1 = pop1_n > 0
+    valid2 = pop2_n > 0
+    pop1_freqs[valid1] = pop1_counts[valid1] / pop1_n[valid1]
+    pop2_freqs[valid2] = pop2_counts[valid2] / pop2_n[valid2]
+
+    # Use actual sample sizes per site
+    n1 = pop1_n
+    n2 = pop2_n
+
     # Calculate within-population heterozygosity
-    if missing_data == 'include':
-        # Handle per-site sample sizes
-        hw1 = cp.zeros_like(pop1_freqs)
-        hw2 = cp.zeros_like(pop2_freqs)
-        valid1 = n1 > 1
-        valid2 = n2 > 1
-        hw1[valid1] = 2.0 * pop1_freqs[valid1] * (1 - pop1_freqs[valid1]) * n1[valid1] / (n1[valid1] - 1)
-        hw2[valid2] = 2.0 * pop2_freqs[valid2] * (1 - pop2_freqs[valid2]) * n2[valid2] / (n2[valid2] - 1)
-        hw = cp.zeros_like(hw1)
-        valid = (n1 + n2) > 0
-        hw[valid] = (hw1[valid] * n1[valid] + hw2[valid] * n2[valid]) / (n1[valid] + n2[valid])
-    else:
-        hw1 = 2.0 * pop1_freqs * (1 - pop1_freqs) * n1 / (n1 - 1)
-        hw2 = 2.0 * pop2_freqs * (1 - pop2_freqs) * n2 / (n2 - 1)
-        hw = (hw1 * n1 + hw2 * n2) / (n1 + n2)
-    
+    hw1 = cp.zeros_like(pop1_freqs)
+    hw2 = cp.zeros_like(pop2_freqs)
+    valid1 = n1 > 1
+    valid2 = n2 > 1
+    hw1[valid1] = 2.0 * pop1_freqs[valid1] * (1 - pop1_freqs[valid1]) * n1[valid1] / (n1[valid1] - 1)
+    hw2[valid2] = 2.0 * pop2_freqs[valid2] * (1 - pop2_freqs[valid2]) * n2[valid2] / (n2[valid2] - 1)
+    hw = cp.zeros_like(hw1)
+    valid = (n1 + n2) > 0
+    hw[valid] = (hw1[valid] * n1[valid] + hw2[valid] * n2[valid]) / (n1[valid] + n2[valid])
+
     # Calculate between-population heterozygosity
-    if missing_data == 'include':
-        p_avg = cp.zeros_like(pop1_freqs)
-        valid = (n1 + n2) > 0
-        p_avg[valid] = (pop1_freqs[valid] * n1[valid] + pop2_freqs[valid] * n2[valid]) / (n1[valid] + n2[valid])
-    else:
-        p_avg = (pop1_freqs * n1 + pop2_freqs * n2) / (n1 + n2)
+    p_avg = cp.zeros_like(pop1_freqs)
+    valid = (n1 + n2) > 0
+    p_avg[valid] = (pop1_freqs[valid] * n1[valid] + pop2_freqs[valid] * n2[valid]) / (n1[valid] + n2[valid])
     hb = 2.0 * p_avg * (1 - p_avg)
-    
-    # Calculate FST for each SNP
-    if missing_data == 'include':
-        # Only calculate for sites with sufficient data
-        valid_mask = (hb > 0) & (n1 > 0) & (n2 > 0)
-    else:
-        valid_mask = hb > 0
+
+    # Calculate FST for each SNP - only for sites with sufficient data
+    valid_mask = (hb > 0) & (n1 > 0) & (n2 > 0)
     fst_per_snp = cp.zeros_like(hb)
     fst_per_snp[valid_mask] = 1 - (hw[valid_mask] / hb[valid_mask])
     
@@ -281,7 +252,6 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - per-site sample sizes, ratio-of-sums
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
 
     Returns
     -------
@@ -312,100 +282,58 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
             return 0.0
         pop1_haps = pop1_haps[:, valid_sites]
         pop2_haps = pop2_haps[:, valid_sites]
-    elif missing_data == 'include':
-        # Will handle missing data per site below
-        pass
-    elif missing_data == 'ignore':
-        # Treat missing as reference allele
-        pop1_haps = cp.where(pop1_haps < 0, 0, pop1_haps)
-        pop2_haps = cp.where(pop2_haps < 0, 0, pop2_haps)
-    
-    # Get allele counts and frequencies
-    if missing_data == 'include':
-        # Calculate from non-missing data per site
-        pop1_mask = pop1_haps >= 0
-        pop2_mask = pop2_haps >= 0
-        pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0).astype(float)
-        pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0).astype(float)
-        n1 = cp.sum(pop1_mask, axis=0).astype(float)
-        n2 = cp.sum(pop2_mask, axis=0).astype(float)
-        
-        pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
-        pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
-        if missing_data == 'include':
-            valid1 = n1 > 0
-            valid2 = n2 > 0
-            pop1_freqs[valid1] = pop1_counts[valid1] / n1[valid1]
-            pop2_freqs[valid2] = pop2_counts[valid2] / n2[valid2]
-        else:
-            pop1_freqs = pop1_counts / n1
-            pop2_freqs = pop2_counts / n2
-    else:
-        pop1_counts = cp.sum(pop1_haps, axis=0).astype(float)
-        pop2_counts = cp.sum(pop2_haps, axis=0).astype(float)
-        n1 = float(len(pop1_idx))
-        n2 = float(len(pop2_idx))
-        pop1_freqs = pop1_counts / n1
-        pop2_freqs = pop2_counts / n2
-    
+
+    # Get allele counts and frequencies from non-missing data per site
+    pop1_mask = pop1_haps >= 0
+    pop2_mask = pop2_haps >= 0
+    pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0).astype(float)
+    pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0).astype(float)
+    n1 = cp.sum(pop1_mask, axis=0).astype(float)
+    n2 = cp.sum(pop2_mask, axis=0).astype(float)
+
+    pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
+    pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
+    valid1 = n1 > 0
+    valid2 = n2 > 0
+    pop1_freqs[valid1] = pop1_counts[valid1] / n1[valid1]
+    pop2_freqs[valid2] = pop2_counts[valid2] / n2[valid2]
+
     # Total sample size and average sample size
-    if missing_data == 'include':
-        n_total = n1 + n2
-        n_bar = n_total / 2.0  # For two populations
-        
-        # Sample size scaling factor (per site)
-        nc = cp.zeros_like(n_total)
-        valid = n_total > 0
-        nc[valid] = (n_total[valid] - (n1[valid]**2 + n2[valid]**2) / n_total[valid]) / 1.0
-        
-        # Average allele frequency
-        p_bar = cp.zeros_like(pop1_freqs)
-        valid = n_total > 0
-        p_bar[valid] = (n1[valid] * pop1_freqs[valid] + n2[valid] * pop2_freqs[valid]) / n_total[valid]
-    else:
-        n_total = n1 + n2
-        n_bar = n_total / 2.0  # For two populations
-        nc = (n_total - (n1**2 + n2**2) / n_total) / 1.0  # r-1 = 1 for 2 pops
-        p_bar = (n1 * pop1_freqs + n2 * pop2_freqs) / n_total
-    
+    n_total = n1 + n2
+    n_bar = n_total / 2.0  # For two populations
+
+    # Sample size scaling factor (per site)
+    nc = cp.zeros_like(n_total)
+    valid = n_total > 0
+    nc[valid] = (n_total[valid] - (n1[valid]**2 + n2[valid]**2) / n_total[valid]) / 1.0
+
+    # Average allele frequency
+    p_bar = cp.zeros_like(pop1_freqs)
+    valid = n_total > 0
+    p_bar[valid] = (n1[valid] * pop1_freqs[valid] + n2[valid] * pop2_freqs[valid]) / n_total[valid]
+
     # Sample variance of allele frequencies
-    if missing_data == 'include':
-        s_squared = cp.zeros_like(p_bar)
-        valid = n_bar > 0
-        s_squared[valid] = (n1[valid] * (pop1_freqs[valid] - p_bar[valid])**2 + 
-                           n2[valid] * (pop2_freqs[valid] - p_bar[valid])**2) / n_bar[valid]
-    else:
-        s_squared = (n1 * (pop1_freqs - p_bar)**2 + 
-                     n2 * (pop2_freqs - p_bar)**2) / (1 * n_bar)
-    
+    s_squared = cp.zeros_like(p_bar)
+    valid = n_bar > 0
+    s_squared[valid] = (n1[valid] * (pop1_freqs[valid] - p_bar[valid])**2 +
+                       n2[valid] * (pop2_freqs[valid] - p_bar[valid])**2) / n_bar[valid]
+
     # Calculate variance components
     # He = expected heterozygosity
     He = 2.0 * p_bar * (1 - p_bar)
-    
-    if missing_data == 'include':
-        # a = between population variance (per site)
-        a = cp.zeros_like(He)
-        b = cp.zeros_like(He)
-        c = He / 2.0
-        
-        valid = (n_bar > 0.5) & (nc > 0)
-        a[valid] = ((s_squared[valid] - He[valid] / (2 * n_bar[valid] - 1)) * 
-                    (n_bar[valid] / nc[valid]))
-        b[valid] = He[valid] * (2 * n_bar[valid] - 1) / (2 * n_bar[valid])
-    else:
-        # a = between population variance
-        a = (s_squared - He / (2 * n_bar - 1)) * (n_bar / nc)
-        # b = between individual within population variance
-        b = He * (2 * n_bar - 1) / (2 * n_bar)
-        # c = within individual variance
-        c = He / 2.0
-    
-    # Calculate FST for each locus
-    if missing_data == 'include':
-        # Only calculate for sites with sufficient data
-        valid_mask = ((a + b + c) > 0) & (n1 > 0) & (n2 > 0)
-    else:
-        valid_mask = (a + b + c) > 0
+
+    # a = between population variance (per site)
+    a = cp.zeros_like(He)
+    b = cp.zeros_like(He)
+    c = He / 2.0
+
+    valid = (n_bar > 0.5) & (nc > 0)
+    a[valid] = ((s_squared[valid] - He[valid] / (2 * n_bar[valid] - 1)) *
+                (n_bar[valid] / nc[valid]))
+    b[valid] = He[valid] * (2 * n_bar[valid] - 1) / (2 * n_bar[valid])
+
+    # Calculate FST for each locus - only for sites with sufficient data
+    valid_mask = ((a + b + c) > 0) & (n1 > 0) & (n2 > 0)
     fst_per_snp = cp.zeros_like(a)
     fst_per_snp[valid_mask] = a[valid_mask] / (a[valid_mask] + b[valid_mask] + c[valid_mask])
     
@@ -439,7 +367,6 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
         'pairwise' - Ratio-of-sums: sum(HT-HS) / sum(HT)
 
     Returns
@@ -471,54 +398,36 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
             return 0.0
         pop1_haps = pop1_haps[:, valid_sites]
         pop2_haps = pop2_haps[:, valid_sites]
-    elif missing_data == 'include':
-        pass
-    elif missing_data == 'ignore':
-        pop1_haps = cp.where(pop1_haps < 0, 0, pop1_haps)
-        pop2_haps = cp.where(pop2_haps < 0, 0, pop2_haps)
 
-    # Get allele frequencies
-    if missing_data == 'include':
-        pop1_mask = pop1_haps >= 0
-        pop2_mask = pop2_haps >= 0
-        pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
-        pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
-        n1 = cp.sum(pop1_mask, axis=0)
-        n2 = cp.sum(pop2_mask, axis=0)
+    # Get allele frequencies from non-missing data per site
+    pop1_mask = pop1_haps >= 0
+    pop2_mask = pop2_haps >= 0
+    pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
+    pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
+    n1 = cp.sum(pop1_mask, axis=0)
+    n2 = cp.sum(pop2_mask, axis=0)
 
-        pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
-        pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
-        valid1 = n1 > 0
-        valid2 = n2 > 0
-        pop1_freqs[valid1] = pop1_counts[valid1] / n1[valid1]
-        pop2_freqs[valid2] = pop2_counts[valid2] / n2[valid2]
-    else:
-        pop1_freqs = cp.mean(pop1_haps, axis=0)
-        pop2_freqs = cp.mean(pop2_haps, axis=0)
-        n1 = len(pop1_idx)
-        n2 = len(pop2_idx)
+    pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
+    pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
+    valid1 = n1 > 0
+    valid2 = n2 > 0
+    pop1_freqs[valid1] = pop1_counts[valid1] / n1[valid1]
+    pop2_freqs[valid2] = pop2_counts[valid2] / n2[valid2]
 
     # Within-population heterozygosity
     hs1 = 2.0 * pop1_freqs * (1 - pop1_freqs)
     hs2 = 2.0 * pop2_freqs * (1 - pop2_freqs)
 
-    if missing_data == 'include':
-        hs = cp.zeros_like(hs1)
-        p_total = cp.zeros_like(pop1_freqs)
-        valid = (n1 + n2) > 0
-        hs[valid] = (hs1[valid] * n1[valid] + hs2[valid] * n2[valid]) / (n1[valid] + n2[valid])
-        p_total[valid] = (pop1_freqs[valid] * n1[valid] + pop2_freqs[valid] * n2[valid]) / (n1[valid] + n2[valid])
-    else:
-        hs = (hs1 * n1 + hs2 * n2) / (n1 + n2)
-        p_total = (pop1_freqs * n1 + pop2_freqs * n2) / (n1 + n2)
+    hs = cp.zeros_like(hs1)
+    p_total = cp.zeros_like(pop1_freqs)
+    valid = (n1 + n2) > 0
+    hs[valid] = (hs1[valid] * n1[valid] + hs2[valid] * n2[valid]) / (n1[valid] + n2[valid])
+    p_total[valid] = (pop1_freqs[valid] * n1[valid] + pop2_freqs[valid] * n2[valid]) / (n1[valid] + n2[valid])
 
     ht = 2.0 * p_total * (1 - p_total)
 
-    # Calculate GST
-    if missing_data == 'include':
-        valid_mask = (ht > 0) & (n1 > 0) & (n2 > 0)
-    else:
-        valid_mask = ht > 0
+    # Calculate GST - only for sites with sufficient data
+    valid_mask = (ht > 0) & (n1 > 0) & (n2 > 0)
 
     if not cp.any(valid_mask):
         return 0.0
@@ -564,7 +473,6 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
         'pairwise' - Comparison-counting normalization (pixy-style):
             dxy = sum(diffs) / sum(comps) across all sites.
     span_denominator : bool
@@ -617,48 +525,33 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
             return 0.0 if not per_site else cp.zeros(total_sites)
         pop1_haps = pop1_haps[:, valid_sites]
         pop2_haps = pop2_haps[:, valid_sites]
-        n_sites = int(cp.sum(valid_sites).get())
-    elif missing_data == 'include':
-        # Will handle missing data per site below
-        n_sites = total_sites
-    elif missing_data == 'ignore':
-        # Treat missing as reference allele
-        pop1_haps = cp.where(pop1_haps < 0, 0, pop1_haps)
-        pop2_haps = cp.where(pop2_haps < 0, 0, pop2_haps)
-        n_sites = total_sites
-    
-    # Get allele frequencies
-    if missing_data == 'include':
-        # Calculate frequencies from non-missing data per site
-        pop1_mask = pop1_haps >= 0
-        pop2_mask = pop2_haps >= 0
-        pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
-        pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
-        pop1_n = cp.sum(pop1_mask, axis=0)
-        pop2_n = cp.sum(pop2_mask, axis=0)
-        
-        pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
-        pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
-        valid1 = pop1_n > 0
-        valid2 = pop2_n > 0
-        pop1_freqs[valid1] = pop1_counts[valid1] / pop1_n[valid1]
-        pop2_freqs[valid2] = pop2_counts[valid2] / pop2_n[valid2]
-        
-        # Calculate Dxy only for sites with data
-        valid_mask = (pop1_n > 0) & (pop2_n > 0)
-        dxy_per_site = cp.zeros(total_sites)
-        dxy_per_site[valid_mask] = (pop1_freqs[valid_mask] + pop2_freqs[valid_mask] - 
-                                   2 * pop1_freqs[valid_mask] * pop2_freqs[valid_mask])
-        
-        # Count sites with data for normalization
-        if not span_denominator:
-            n_sites = int(cp.sum(valid_mask).get())
-    else:
-        pop1_freqs = cp.mean(pop1_haps, axis=0)
-        pop2_freqs = cp.mean(pop2_haps, axis=0)
-        # Dxy = p1(1-p2) + p2(1-p1) = p1 + p2 - 2*p1*p2
-        dxy_per_site = pop1_freqs + pop2_freqs - 2 * pop1_freqs * pop2_freqs
-    
+    n_sites = total_sites
+
+    # Get allele frequencies from non-missing data per site
+    pop1_mask = pop1_haps >= 0
+    pop2_mask = pop2_haps >= 0
+    pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
+    pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
+    pop1_n = cp.sum(pop1_mask, axis=0)
+    pop2_n = cp.sum(pop2_mask, axis=0)
+
+    pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
+    pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
+    valid1 = pop1_n > 0
+    valid2 = pop2_n > 0
+    pop1_freqs[valid1] = pop1_counts[valid1] / pop1_n[valid1]
+    pop2_freqs[valid2] = pop2_counts[valid2] / pop2_n[valid2]
+
+    # Calculate Dxy only for sites with data
+    valid_mask = (pop1_n > 0) & (pop2_n > 0)
+    dxy_per_site = cp.zeros(total_sites)
+    dxy_per_site[valid_mask] = (pop1_freqs[valid_mask] + pop2_freqs[valid_mask] -
+                               2 * pop1_freqs[valid_mask] * pop2_freqs[valid_mask])
+
+    # Count sites with data for normalization
+    if not span_denominator:
+        n_sites = int(cp.sum(valid_mask).get())
+
     if per_site:
         if missing_data == 'exclude':
             # Return values for valid sites only
@@ -668,14 +561,12 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         else:
             return dxy_per_site
     else:
-        if span_denominator and missing_data == 'include':
+        if span_denominator:
             # Normalize by total sites
             return float(cp.sum(dxy_per_site).get() / total_sites)
-        elif missing_data == 'include' and n_sites > 0:
+        elif n_sites > 0:
             # Normalize by sites with data
             return float(cp.sum(dxy_per_site).get() / n_sites)
-        elif n_sites > 0:
-            return float(cp.mean(dxy_per_site).get())
         else:
             return 0.0
 
@@ -702,10 +593,9 @@ def da(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
     span_denominator : bool
         If True, normalize by total sites; if False, normalize by sites with data
-        
+
     Returns
     -------
     float
@@ -743,10 +633,9 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
     span_denominator : bool
         If True, normalize by total sites; if False, normalize by sites with data
-        
+
     Returns
     -------
     float
@@ -778,58 +667,35 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
         if not cp.any(valid_sites):
             return 0.0
         pop_haplotypes = pop_haplotypes[:, valid_sites]
-        n_sites = int(cp.sum(valid_sites).get())
-    elif missing_data == 'include':
-        # Will handle missing data per site below
-        n_sites = total_sites
-    elif missing_data == 'ignore':
-        # Treat missing as reference allele
-        pop_haplotypes = cp.where(pop_haplotypes < 0, 0, pop_haplotypes)
-        n_sites = total_sites
-    
-    if missing_data == 'include':
-        # Calculate frequencies from non-missing data per site
-        pop_mask = pop_haplotypes >= 0
-        pop_counts = cp.sum(cp.where(pop_mask, pop_haplotypes, 0), axis=0)
-        n = cp.sum(pop_mask, axis=0)
-        
-        pop_freq = cp.zeros_like(pop_counts, dtype=float)
-        valid = n > 0
-        pop_freq[valid] = pop_counts[valid] / n[valid]
-        
-        # Pi = 2 * p * (1 - p) * n / (n - 1) for sites with n > 1
-        pi_per_site = cp.zeros(total_sites)
-        valid_mask = n > 1
-        pi_per_site[valid_mask] = (2.0 * pop_freq[valid_mask] * (1 - pop_freq[valid_mask]) * 
-                                  n[valid_mask] / (n[valid_mask] - 1))
-        
-        # Count sites with sufficient data for normalization
-        if not span_denominator:
-            n_sites = int(cp.sum(valid_mask).get())
-        
-        if span_denominator:
-            # Normalize by total sites
-            return float(cp.sum(pi_per_site).get() / total_sites) if total_sites > 0 else 0.0
-        elif n_sites > 0:
-            # Normalize by sites with data
-            return float(cp.sum(pi_per_site).get() / n_sites)
-        else:
-            return 0.0
+    n_sites = total_sites
+
+    # Calculate frequencies from non-missing data per site
+    pop_mask = pop_haplotypes >= 0
+    pop_counts = cp.sum(cp.where(pop_mask, pop_haplotypes, 0), axis=0)
+    n = cp.sum(pop_mask, axis=0)
+
+    pop_freq = cp.zeros_like(pop_counts, dtype=float)
+    valid = n > 0
+    pop_freq[valid] = pop_counts[valid] / n[valid]
+
+    # Pi = 2 * p * (1 - p) * n / (n - 1) for sites with n > 1
+    pi_per_site = cp.zeros(total_sites)
+    valid_mask = n > 1
+    pi_per_site[valid_mask] = (2.0 * pop_freq[valid_mask] * (1 - pop_freq[valid_mask]) *
+                              n[valid_mask] / (n[valid_mask] - 1))
+
+    # Count sites with sufficient data for normalization
+    if not span_denominator:
+        n_sites = int(cp.sum(valid_mask).get())
+
+    if span_denominator:
+        # Normalize by total sites
+        return float(cp.sum(pi_per_site).get() / total_sites) if total_sites > 0 else 0.0
+    elif n_sites > 0:
+        # Normalize by sites with data
+        return float(cp.sum(pi_per_site).get() / n_sites)
     else:
-        n = len(pop_idx)
-        # Calculate allele frequency
-        pop_freq = cp.mean(pop_haplotypes, axis=0)
-        
-        # Pi = 2 * p * (1 - p) * n / (n - 1)
-        if n > 1:
-            pi_per_site = 2.0 * pop_freq * (1 - pop_freq) * n / (n - 1)
-            if span_denominator and missing_data == 'exclude':
-                # Normalize by total sites
-                return float(cp.sum(pi_per_site).get() / total_sites) if total_sites > 0 else 0.0
-            else:
-                return float(cp.mean(pi_per_site).get())
-        else:
-            return 0.0
+        return 0.0
 
 
 def divergence_stats(haplotype_matrix: HaplotypeMatrix,
@@ -854,7 +720,6 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
     span_denominator : bool
         If True, normalize by total sites; if False, normalize by sites with data
         (only applies to dxy, da, pi1, pi2)
@@ -911,8 +776,7 @@ def pairwise_fst(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
-        
+
     Returns
     -------
     fst_matrix : cp.ndarray
@@ -964,25 +828,25 @@ def _get_population_indices(haplotype_matrix: HaplotypeMatrix,
         return list(pop)
 
 
-def _pop_allele_counts(haplotype_matrix, pop, missing_data='ignore'):
+def _pop_allele_counts(haplotype_matrix, pop, missing_data='include'):
     """Compute per-variant allele counts for a population on GPU.
 
-    Returns (ac_0, ac_1, n) as CuPy arrays. When missing_data is
-    'include' or 'pairwise', n is per-site (array); otherwise scalar.
+    Returns (ac_0, ac_1, n) as CuPy arrays. n is per-site (array)
+    for 'include'/'pairwise' modes, and also per-site after filtering
+    for 'exclude' mode.
     """
     pop_idx = _get_population_indices(haplotype_matrix, pop)
     h = haplotype_matrix.haplotypes[pop_idx, :]
 
-    if missing_data in ('include', 'pairwise'):
-        valid_mask = h >= 0
-        n = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        ac_1 = cp.sum(cp.where(valid_mask, h, 0), axis=0).astype(cp.float64)
-        ac_0 = n - ac_1
-    else:
-        h = cp.where(h < 0, 0, h)
-        n = cp.float64(len(pop_idx))
-        ac_1 = cp.sum(h, axis=0).astype(cp.float64)
-        ac_0 = n - ac_1
+    if missing_data == 'exclude':
+        valid_sites = cp.all(h >= 0, axis=0)
+        h = h[:, valid_sites]
+
+    # Use per-site non-missing counts
+    valid_mask = h >= 0
+    n = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    ac_1 = cp.sum(cp.where(valid_mask, h, 0), axis=0).astype(cp.float64)
+    ac_0 = n - ac_1
     return ac_0, ac_1, n
 
 
@@ -1038,7 +902,7 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
         window_stop: Optional[int] = None,
         window_step: Optional[int] = None,
         normed: bool = True,
-        missing_data: str = 'ignore'):
+        missing_data: str = 'include'):
     """Compute the Population Branch Statistic (PBS).
 
     PBS detects genomic regions unusually differentiated in pop1 relative
@@ -1062,7 +926,7 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
         If True (default), return normalized PBS (PBSn1).
     missing_data : str
         'include' or 'pairwise' - per-site sample sizes
-        'ignore' - treat missing as reference allele
+        'exclude' - only use sites with no missing data
 
     Returns
     -------

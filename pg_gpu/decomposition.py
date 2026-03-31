@@ -12,7 +12,7 @@ from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
 
 
-def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='ignore'):
+def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'):
     """Center and scale haplotype matrix for PCA.
 
     Returns the prepared matrix X and its dimensions.
@@ -70,7 +70,7 @@ def pca(haplotype_matrix: HaplotypeMatrix,
         n_components: int = 10,
         scaler: Optional[str] = 'patterson',
         population: Optional[Union[str, list]] = None,
-        missing_data: str = 'ignore'):
+        missing_data: str = 'include'):
     """Principal Component Analysis on haplotype data.
 
     Parameters
@@ -89,7 +89,6 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - impute missing to per-site mean
         'exclude' - filter sites with any missing
-        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -118,7 +117,7 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
                    population: Optional[Union[str, list]] = None,
                    n_iter: int = 3,
                    random_state: Optional[int] = None,
-                   missing_data: str = 'ignore'):
+                   missing_data: str = 'include'):
     """Randomized PCA using truncated SVD approximation.
 
     Faster than full PCA for large datasets where only a few
@@ -183,7 +182,7 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
 def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
                       metric: str = 'euclidean',
                       population: Optional[Union[str, list]] = None,
-                      missing_data: str = 'ignore'):
+                      missing_data: str = 'include'):
     """Compute pairwise distances between samples.
 
     Parameters
@@ -198,7 +197,6 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - mask missing, normalize per pair
         'exclude' - filter sites with any missing
-        'ignore' - treat missing as reference allele
 
     Returns
     -------

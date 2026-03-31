@@ -406,12 +406,12 @@ class TestPairwiseThetaH:
         assert isinstance(result, float)
         assert result > 0
 
-    def test_no_missing_agrees_with_ignore(self, simple_matrix):
+    def test_no_missing_agrees_with_include(self, simple_matrix):
         th_pw = diversity.theta_h(simple_matrix, span_normalize=False,
                                   missing_data='pairwise')
-        th_ig = diversity.theta_h(simple_matrix, span_normalize=False,
-                                  missing_data='ignore')
-        assert th_pw == pytest.approx(th_ig, rel=1e-10)
+        th_inc = diversity.theta_h(simple_matrix, span_normalize=False,
+                                  missing_data='include')
+        assert th_pw == pytest.approx(th_inc, rel=1e-10)
 
     def test_with_missing(self, missing_matrix):
         result = diversity.theta_h(missing_matrix, span_normalize=False,
@@ -436,12 +436,12 @@ class TestPairwiseThetaL:
         assert isinstance(result, float)
         assert result > 0
 
-    def test_no_missing_agrees_with_ignore(self, simple_matrix):
+    def test_no_missing_agrees_with_include(self, simple_matrix):
         tl_pw = diversity.theta_l(simple_matrix, span_normalize=False,
                                   missing_data='pairwise')
-        tl_ig = diversity.theta_l(simple_matrix, span_normalize=False,
-                                  missing_data='ignore')
-        assert tl_pw == pytest.approx(tl_ig, rel=1e-10)
+        tl_inc = diversity.theta_l(simple_matrix, span_normalize=False,
+                                  missing_data='include')
+        assert tl_pw == pytest.approx(tl_inc, rel=1e-10)
 
     def test_with_missing(self, missing_matrix):
         result = diversity.theta_l(missing_matrix, span_normalize=False,
@@ -474,12 +474,12 @@ class TestPairwiseNormalizedH:
                                                 missing_data='pairwise')
         assert isinstance(result, float)
 
-    def test_no_missing_agrees_with_ignore(self, simple_matrix):
+    def test_no_missing_agrees_with_include(self, simple_matrix):
         h_pw = diversity.normalized_fay_wus_h(simple_matrix,
                                               missing_data='pairwise')
-        h_ig = diversity.normalized_fay_wus_h(simple_matrix,
-                                              missing_data='ignore')
-        assert h_pw == pytest.approx(h_ig, rel=1e-6)
+        h_inc = diversity.normalized_fay_wus_h(simple_matrix,
+                                              missing_data='include')
+        assert h_pw == pytest.approx(h_inc, rel=1e-6)
 
     def test_with_missing(self, missing_matrix):
         result = diversity.normalized_fay_wus_h(missing_matrix,
@@ -497,11 +497,11 @@ class TestPairwiseFayWuH:
         result = diversity.fay_wus_h(simple_matrix, missing_data='pairwise')
         assert isinstance(result, float)
 
-    def test_no_missing_agrees_with_ignore(self, simple_matrix):
+    def test_no_missing_agrees_with_include(self, simple_matrix):
         h_pw = diversity.fay_wus_h(simple_matrix, missing_data='pairwise')
-        h_ig = diversity.fay_wus_h(simple_matrix, missing_data='ignore')
+        h_inc = diversity.fay_wus_h(simple_matrix, missing_data='include')
         # Without missing data these should be very close
-        assert h_pw == pytest.approx(h_ig, rel=1e-6)
+        assert h_pw == pytest.approx(h_inc, rel=1e-6)
 
     def test_with_missing(self, missing_matrix):
         result = diversity.fay_wus_h(missing_matrix, missing_data='pairwise')
@@ -518,10 +518,10 @@ class TestPairwiseZengE:
         result = diversity.zeng_e(simple_matrix, missing_data='pairwise')
         assert isinstance(result, float)
 
-    def test_no_missing_agrees_with_ignore(self, simple_matrix):
+    def test_no_missing_agrees_with_include(self, simple_matrix):
         e_pw = diversity.zeng_e(simple_matrix, missing_data='pairwise')
-        e_ig = diversity.zeng_e(simple_matrix, missing_data='ignore')
-        assert e_pw == pytest.approx(e_ig, rel=1e-6)
+        e_inc = diversity.zeng_e(simple_matrix, missing_data='include')
+        assert e_pw == pytest.approx(e_inc, rel=1e-6)
 
     def test_with_missing(self, missing_matrix):
         result = diversity.zeng_e(missing_matrix, missing_data='pairwise')

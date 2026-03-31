@@ -21,7 +21,7 @@ def _extract_upper_triangle(mat):
 
 
 def pairwise_diffs_haploid(haplotype_matrix, population=None,
-                           missing_data='ignore'):
+                           missing_data='include'):
     """Compute pairwise Hamming distances between haplotypes on GPU.
 
     Uses a single matrix multiply: for 0/1 data,
@@ -34,13 +34,11 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
     missing_data : str
         'include' or 'pairwise' - normalize by jointly-valid sites per pair
         'exclude' - only use sites with no missing data
-        'ignore' - treat missing as reference allele
 
     Returns
     -------
     diffs : cupy.ndarray, float64, condensed form (n_pairs,)
         For 'include'/'pairwise', values are per-site average differences.
-        For 'ignore'/'exclude', values are total Hamming distances.
     """
     if missing_data == 'pairwise':
         missing_data = 'include'
@@ -85,7 +83,7 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
 
 
 def pairwise_diffs_diploid(genotype_matrix, population=None,
-                           missing_data='ignore'):
+                           missing_data='include'):
     """Compute pairwise genotype differences between diploid individuals.
 
     For 0/1/2 genotypes, uses indicator matrices: matches = I0.T@I0 +
@@ -98,7 +96,6 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
     missing_data : str
         'include' or 'pairwise' - normalize by jointly-valid sites per pair
         'exclude' - only sites with no missing data
-        'ignore' - treat missing as 0
 
     Returns
     -------
@@ -150,7 +147,7 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
     return _extract_upper_triangle(diffs_mat)
 
 
-def dist_moments(matrix, population=None, missing_data='ignore'):
+def dist_moments(matrix, population=None, missing_data='include'):
     """Compute variance, skewness, and kurtosis of pairwise distances.
 
     Computes the distance matrix once and derives all three moments,
@@ -196,22 +193,22 @@ def dist_moments(matrix, population=None, missing_data='ignore'):
     return var_val, skew_val, kurt_val
 
 
-def dist_var(matrix, population=None, missing_data='ignore'):
+def dist_var(matrix, population=None, missing_data='include'):
     """Variance of pairwise distance distribution."""
     return dist_moments(matrix, population, missing_data)[0]
 
 
-def dist_skew(matrix, population=None, missing_data='ignore'):
+def dist_skew(matrix, population=None, missing_data='include'):
     """Skewness of pairwise distance distribution."""
     return dist_moments(matrix, population, missing_data)[1]
 
 
-def dist_kurt(matrix, population=None, missing_data='ignore'):
+def dist_kurt(matrix, population=None, missing_data='include'):
     """Excess kurtosis of pairwise distance distribution."""
     return dist_moments(matrix, population, missing_data)[2]
 
 
-def pairwise_diffs(matrix, population=None, missing_data='ignore'):
+def pairwise_diffs(matrix, population=None, missing_data='include'):
     """Compute pairwise Hamming distances on GPU.
 
     Accepts HaplotypeMatrix (0/1 data, single matrix multiply) or

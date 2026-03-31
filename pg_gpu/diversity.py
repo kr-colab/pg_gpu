@@ -80,7 +80,7 @@ def _pairwise_pi_components(haplotypes, n_total_sites=None, n_haplotypes_full=No
 def pi(haplotype_matrix: HaplotypeMatrix,
        population: Optional[Union[str, list]] = None,
        span_normalize: bool = True,
-       missing_data: str = 'ignore',
+       missing_data: str = 'include',
        span_denominator: str = 'total',
        return_components: bool = False) -> Union[float, 'PairwiseResult']:
     """
@@ -100,7 +100,6 @@ def pi(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate pi from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
         'pairwise' - Comparison-counting normalization (pixy-style):
             pi = sum(diffs) / sum(comps) across all sites.
             Sites with more observed data contribute proportionally more.
@@ -159,52 +158,42 @@ def pi(haplotype_matrix: HaplotypeMatrix,
                                  total_missing, n_sites)
         return pi_value
 
-    if missing_data == 'ignore':
-        # Original behavior - use standard AFS calculation
-        afs = allele_frequency_spectrum(matrix, missing_data='ignore')
-        n_haplotypes = matrix.num_haplotypes
+    # Default: 'include' mode - calculate pi per site using only non-missing data (vectorized)
+    haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
 
-        i = cp.arange(1, n_haplotypes, dtype=cp.float64)
-        weight = (2 * i * (n_haplotypes - i)) / (n_haplotypes * (n_haplotypes - 1))
-        pi_value = cp.sum((weight * afs[1:n_haplotypes]).astype(cp.float64))
+    # Create mask for valid (non-missing) data
+    valid_mask = haplotypes >= 0  # shape: (n_haplotypes, n_variants)
 
-    else:  # missing_data == 'include'
-        # Calculate pi per site using only non-missing data at each site (vectorized)
-        haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
+    # Count valid samples per site
+    n_valid_per_site = cp.sum(valid_mask, axis=0)  # shape: (n_variants,)
 
-        # Create mask for valid (non-missing) data
-        valid_mask = haplotypes >= 0  # shape: (n_haplotypes, n_variants)
+    # Only consider sites with at least 2 valid samples
+    sites_with_data = n_valid_per_site >= 2
 
-        # Count valid samples per site
-        n_valid_per_site = cp.sum(valid_mask, axis=0)  # shape: (n_variants,)
+    if not cp.any(sites_with_data):
+        pi_value = cp.float64(0.0)
+    else:
+        # For each site, count derived alleles among valid samples
+        # Set missing data to 0 for counting, but use valid_mask to exclude from counts
+        hap_clean = cp.where(valid_mask, haplotypes, 0)
 
-        # Only consider sites with at least 2 valid samples
-        sites_with_data = n_valid_per_site >= 2
+        # Count derived alleles per site (only among valid samples)
+        derived_counts = cp.sum(hap_clean, axis=0)  # shape: (n_variants,)
 
-        if not cp.any(sites_with_data):
-            pi_value = cp.float64(0.0)
-        else:
-            # For each site, count derived alleles among valid samples
-            # Set missing data to 0 for counting, but use valid_mask to exclude from counts
-            hap_clean = cp.where(valid_mask, haplotypes, 0)
+        # Only compute for sites with valid data
+        valid_sites = cp.where(sites_with_data)[0]
+        n_valid = n_valid_per_site[valid_sites].astype(cp.float64)
+        derived = derived_counts[valid_sites].astype(cp.float64)
 
-            # Count derived alleles per site (only among valid samples)
-            derived_counts = cp.sum(hap_clean, axis=0)  # shape: (n_variants,)
+        # Calculate frequencies
+        freq_derived = derived / n_valid
+        freq_ancestral = (n_valid - derived) / n_valid
 
-            # Only compute for sites with valid data
-            valid_sites = cp.where(sites_with_data)[0]
-            n_valid = n_valid_per_site[valid_sites].astype(cp.float64)
-            derived = derived_counts[valid_sites].astype(cp.float64)
+        # Calculate pi per site with Nei's correction
+        site_pi = 2 * freq_ancestral * freq_derived * n_valid / (n_valid - 1)
 
-            # Calculate frequencies
-            freq_derived = derived / n_valid
-            freq_ancestral = (n_valid - derived) / n_valid
-
-            # Calculate pi per site with Nei's correction
-            site_pi = 2 * freq_ancestral * freq_derived * n_valid / (n_valid - 1)
-
-            # Sum across all valid sites
-            pi_value = cp.sum(site_pi)
+        # Sum across all valid sites
+        pi_value = cp.sum(site_pi)
 
     # Apply span normalization
     if span_normalize:
@@ -220,7 +209,7 @@ def pi(haplotype_matrix: HaplotypeMatrix,
 def theta_w(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
             span_normalize: bool = True,
-            missing_data: str = 'ignore',
+            missing_data: str = 'include',
             span_denominator: str = 'total',
             return_components: bool = False) -> Union[float, 'PairwiseResult']:
     """
@@ -240,7 +229,6 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
         'pairwise' - Per-site 1/a(n_i) for segregating sites, normalized
             by n_total_sites when invariant info is available.
     span_denominator : str
@@ -318,11 +306,6 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
         # Count segregating sites in the filtered data
         seg_sites = segregating_sites(matrix, missing_data='exclude')
 
-    elif missing_data == 'ignore':
-        # Original behavior
-        n_haplotypes = matrix.num_haplotypes
-        seg_sites = segregating_sites(matrix, missing_data='ignore')
-
     else:  # missing_data == 'include'
         # Calculate theta using site-specific sample sizes (vectorized)
         haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
@@ -373,8 +356,8 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
                 
                 theta = theta_sum
         
-    # For exclude and ignore modes, compute theta the standard way
-    if missing_data in ['exclude', 'ignore']:
+    # For exclude mode, compute theta the standard way
+    if missing_data == 'exclude':
         a1 = cp.sum(1.0 / cp.arange(1, n_haplotypes, dtype=cp.float64))
         theta = seg_sites / a1
     
@@ -391,13 +374,13 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
 
 def tajimas_d(haplotype_matrix: HaplotypeMatrix,
               population: Optional[Union[str, list]] = None,
-              missing_data: str = 'ignore') -> float:
+              missing_data: str = 'include') -> float:
     """
     Calculate Tajima's D statistic.
-    
+
     Tajima's D tests the neutral mutation hypothesis by comparing two
     estimates of the population mutation rate.
-    
+
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
@@ -407,7 +390,6 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
         
     Returns
     -------
@@ -533,7 +515,7 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
             segregating_mask = (derived_sites > 0) & (derived_sites < n_valid_sites)
             S = int(cp.sum(segregating_mask).get())
     else:
-        # For 'exclude' and 'ignore' modes
+        # For 'exclude' mode
         n_haplotypes = matrix.num_haplotypes
         S = segregating_sites(matrix, missing_data=missing_data)
     
@@ -581,8 +563,7 @@ def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Calculate AFS using available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
-        
+
     Returns
     -------
     cp.ndarray
@@ -617,11 +598,6 @@ def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
         
         # Count derived alleles at each valid site
         freqs = cp.sum(valid_haplotypes, axis=0)
-        
-    elif missing_data == 'ignore':
-        # Original behavior - count missing as ref (0)
-        n_haplotypes = matrix.num_haplotypes
-        freqs = cp.sum(cp.nan_to_num(matrix.haplotypes, nan=0).astype(cp.int32), axis=0)
         
     else:  # missing_data == 'include'
         # Build AFS considering variable sample sizes per site (vectorized)
@@ -674,7 +650,7 @@ def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
         
         return afs
     
-    # For exclude and ignore modes, create standard histogram
+    # For exclude mode, create standard histogram
     return cp.histogram(freqs, bins=cp.arange(n_haplotypes + 2))[0]
 
 
@@ -695,8 +671,7 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Count sites as segregating based on non-missing data only
         'exclude' - Only count sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
-        
+
     Returns
     -------
     int
@@ -727,12 +702,6 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
         n_haplotypes = matrix.num_haplotypes
         
         # Site is segregating if not all 0s or all 1s
-        segregating = (allele_counts > 0) & (allele_counts < n_haplotypes)
-        
-    elif missing_data == 'ignore':
-        # Original behavior - missing treated as ref (0)
-        allele_counts = cp.sum(matrix.haplotypes, axis=0)
-        n_haplotypes = matrix.num_haplotypes
         segregating = (allele_counts > 0) & (allele_counts < n_haplotypes)
         
     else:  # missing_data == 'include'
@@ -786,8 +755,7 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Count singletons based on non-missing data only
         'exclude' - Only count singletons at sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
-        
+
     Returns
     -------
     int
@@ -819,10 +787,6 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
         valid_haplotypes = matrix.haplotypes[:, valid_sites]
         allele_counts = cp.sum(valid_haplotypes, axis=0)
         
-    elif missing_data == 'ignore':
-        # Original behavior - missing treated as ref (0)
-        allele_counts = cp.sum(matrix.haplotypes, axis=0)
-        
     else:  # missing_data == 'include'
         # Count singletons based on non-missing data at each site (vectorized)
         haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
@@ -852,7 +816,7 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
         
         return int(cp.sum(singleton_mask).get())
     
-    # For exclude and ignore modes
+    # For exclude mode
     return int(cp.sum(allele_counts == 1).get())
 
 
@@ -878,7 +842,6 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
     span_denominator : str
         'total' - Use total genomic span (chrom_end - chrom_start)
         'sites' - Use number of sites analyzed
@@ -934,7 +897,6 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
         'pairwise' - Per-site sample sizes (same as include for H)
 
     Returns
@@ -975,7 +937,7 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
 
 def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
                        population: Optional[Union[str, list]] = None,
-                       missing_data: str = 'ignore') -> float:
+                       missing_data: str = 'include') -> float:
     """
     Calculate haplotype diversity for a population.
 
@@ -991,7 +953,6 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - exclude haplotypes with any missing data
         'exclude' - filter to sites with no missing data
-        'ignore' - treat -1 as 0
 
     Returns
     -------
@@ -1016,12 +977,10 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
         missing_per_var = np.sum(haplotypes_cpu < 0, axis=0)
         complete = missing_per_var == 0
         haplotypes_cpu = haplotypes_cpu[:, complete]
-    elif missing_data == 'include':
-        # exclude haplotypes with any missing site
+    else:
+        # 'include' mode - exclude haplotypes with any missing site
         has_missing = np.any(haplotypes_cpu < 0, axis=1)
         haplotypes_cpu = haplotypes_cpu[~has_missing]
-    else:
-        haplotypes_cpu = np.maximum(haplotypes_cpu, 0)
 
     n_haplotypes = haplotypes_cpu.shape[0]
     if n_haplotypes <= 1:
@@ -1043,7 +1002,7 @@ _get_population_matrix = get_population_matrix
 def theta_h(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
             span_normalize: bool = True,
-            missing_data: str = 'ignore') -> float:
+            missing_data: str = 'include') -> float:
     """Compute theta_H (homozygosity-based diversity estimator).
 
     theta_H = sum_i [ i^2 * S_i ] * 2 / (n*(n-1)) where S_i is the count
@@ -1058,7 +1017,6 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - per-site sample sizes
         'exclude' - only sites with no missing data
-        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -1079,20 +1037,15 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
             return 0.0
         matrix = matrix.get_subset(valid_sites)
 
-    if missing_data in ('include', 'pairwise'):
-        haplotypes = matrix.haplotypes
-        valid_mask = haplotypes >= 0
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        hap_clean = cp.where(valid_mask, haplotypes, 0)
-        dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
+    # 'include' / 'pairwise' mode (default fallback)
+    haplotypes = matrix.haplotypes
+    valid_mask = haplotypes >= 0
+    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    hap_clean = cp.where(valid_mask, haplotypes, 0)
+    dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
 
-        usable = n_valid > 1
-        th = cp.sum(2.0 * dac[usable] ** 2 / (n_valid[usable] * (n_valid[usable] - 1)))
-    else:
-        hap = cp.maximum(matrix.haplotypes, 0)
-        n = hap.shape[0]
-        dac = cp.sum(hap, axis=0).astype(cp.float64)
-        th = cp.sum(dac * dac) * 2.0 / (n * (n - 1))
+    usable = n_valid > 1
+    th = cp.sum(2.0 * dac[usable] ** 2 / (n_valid[usable] * (n_valid[usable] - 1)))
 
     if span_normalize:
         span = matrix.get_span()
@@ -1105,7 +1058,7 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
 def theta_l(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
             span_normalize: bool = True,
-            missing_data: str = 'ignore') -> float:
+            missing_data: str = 'include') -> float:
     """Compute theta_L diversity estimator.
 
     theta_L = sum_i(i * xi_i) / (n - 1), where xi_i is the count of
@@ -1128,7 +1081,6 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - per-site sample sizes
         'exclude' - only sites with no missing data
-        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -1149,20 +1101,15 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
             return 0.0
         matrix = matrix.get_subset(valid_sites)
 
-    if missing_data in ('include', 'pairwise'):
-        haplotypes = matrix.haplotypes
-        valid_mask = haplotypes >= 0
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        hap_clean = cp.where(valid_mask, haplotypes, 0)
-        dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
+    # 'include' / 'pairwise' mode (default fallback)
+    haplotypes = matrix.haplotypes
+    valid_mask = haplotypes >= 0
+    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    hap_clean = cp.where(valid_mask, haplotypes, 0)
+    dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
 
-        usable = n_valid > 1
-        tl = cp.sum(dac[usable] / (n_valid[usable] - 1))
-    else:
-        hap = cp.maximum(matrix.haplotypes, 0)
-        n = hap.shape[0]
-        dac = cp.sum(hap, axis=0).astype(cp.float64)
-        tl = cp.sum(dac) / (n - 1)
+    usable = n_valid > 1
+    tl = cp.sum(dac[usable] / (n_valid[usable] - 1))
 
     if span_normalize:
         span = matrix.get_span()
@@ -1177,7 +1124,7 @@ def _effective_n_and_S(matrix, missing_data):
 
     For 'include'/'pairwise': uses harmonic mean of per-site n_valid
     as effective n, and counts segregating sites among valid data.
-    For 'exclude'/'ignore': uses the fixed sample size.
+    For 'exclude': uses the fixed sample size.
 
     Returns (n_eff, S, matrix) where matrix may be subset-filtered.
     """
@@ -1188,37 +1135,29 @@ def _effective_n_and_S(matrix, missing_data):
             return 0.0, 0.0, matrix
         matrix = matrix.get_subset(valid_idx)
 
-    if missing_data in ('include', 'pairwise'):
-        haplotypes = matrix.haplotypes
-        valid_mask = haplotypes >= 0
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        usable = n_valid >= 2
-        if not cp.any(usable):
-            return 0.0, 0.0, matrix
+    # 'include' / 'pairwise' mode (default fallback)
+    haplotypes = matrix.haplotypes
+    valid_mask = haplotypes >= 0
+    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    usable = n_valid >= 2
+    if not cp.any(usable):
+        return 0.0, 0.0, matrix
 
-        hap_clean = cp.where(valid_mask, haplotypes, 0)
-        dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
-        seg_mask = usable & (dac > 0) & (dac < n_valid)
-        S = float(cp.sum(seg_mask).get())
+    hap_clean = cp.where(valid_mask, haplotypes, 0)
+    dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
+    seg_mask = usable & (dac > 0) & (dac < n_valid)
+    S = float(cp.sum(seg_mask).get())
 
-        # harmonic mean of per-site sample sizes (across usable sites)
-        n_usable = n_valid[usable]
-        n_eff = float(len(n_usable)) / float(cp.sum(1.0 / n_usable).get())
-    else:
-        # 'ignore' mode — treat missing as ref
-        n_eff = float(matrix.num_haplotypes)
-        hap = cp.maximum(matrix.haplotypes, 0)
-        dac = cp.sum(hap, axis=0).astype(cp.float64)
-        n = int(matrix.num_haplotypes)
-        seg_mask = (dac > 0) & (dac < n)
-        S = float(cp.sum(seg_mask).get())
+    # harmonic mean of per-site sample sizes (across usable sites)
+    n_usable = n_valid[usable]
+    n_eff = float(len(n_usable)) / float(cp.sum(1.0 / n_usable).get())
 
     return n_eff, S, matrix
 
 
 def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
                          population: Optional[Union[str, list]] = None,
-                         missing_data: str = 'ignore') -> float:
+                         missing_data: str = 'include') -> float:
     """Compute normalized Fay and Wu's H (H*).
 
     H = theta_pi - theta_H, normalized by its standard deviation under
@@ -1237,7 +1176,6 @@ def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
         'include' or 'pairwise' - per-site sample sizes, harmonic mean n
             for variance terms
         'exclude' - only sites with no missing data
-        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -1291,7 +1229,7 @@ def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
 
 def zeng_e(haplotype_matrix: HaplotypeMatrix,
            population: Optional[Union[str, list]] = None,
-           missing_data: str = 'ignore') -> float:
+           missing_data: str = 'include') -> float:
     """Compute Zeng's E test statistic.
 
     E = theta_L - theta_W, normalized by its standard deviation.
@@ -1311,7 +1249,6 @@ def zeng_e(haplotype_matrix: HaplotypeMatrix,
         'include' or 'pairwise' - per-site sample sizes, harmonic mean n
             for variance terms
         'exclude' - only sites with no missing data
-        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -1364,7 +1301,7 @@ def zeng_e(haplotype_matrix: HaplotypeMatrix,
 
 def zeng_dh(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
-            missing_data: str = 'ignore') -> float:
+            missing_data: str = 'include') -> float:
     """Compute Zeng's DH joint test statistic.
 
     Combines Tajima's D and Fay & Wu's H into a single test with
@@ -1400,7 +1337,7 @@ def zeng_dh(haplotype_matrix: HaplotypeMatrix,
 
 def max_daf(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
-            missing_data: str = 'ignore') -> float:
+            missing_data: str = 'include') -> float:
     """Maximum derived allele frequency across all variants.
 
     Parameters
@@ -1410,7 +1347,6 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - per-site n_valid for frequency
         'exclude' - only sites with no missing data
-        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -1454,7 +1390,7 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
 
 def haplotype_count(haplotype_matrix: HaplotypeMatrix,
                     population: Optional[Union[str, list]] = None,
-                    missing_data: str = 'ignore') -> int:
+                    missing_data: str = 'include') -> int:
     """Count distinct haplotypes.
 
     Parameters
@@ -1464,7 +1400,6 @@ def haplotype_count(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - exclude haplotypes with any missing
         'exclude' - filter to sites with no missing data
-        'ignore' - treat -1 as 0
 
     Returns
     -------
@@ -1498,7 +1433,7 @@ def haplotype_count(haplotype_matrix: HaplotypeMatrix,
 
 def daf_histogram(matrix, n_bins: int = 20,
                   population: Optional[Union[str, list]] = None,
-                  missing_data: str = 'ignore'):
+                  missing_data: str = 'include'):
     """Normalized histogram of derived allele frequencies.
 
     Accepts HaplotypeMatrix or GenotypeMatrix. For diploid data,
@@ -1513,7 +1448,6 @@ def daf_histogram(matrix, n_bins: int = 20,
     missing_data : str
         'include' or 'pairwise' - per-site n_valid for frequency
         'exclude' - only sites with no missing data
-        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -1651,7 +1585,6 @@ def neutrality_tests(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
         
     Returns
     -------
@@ -1669,7 +1602,7 @@ def neutrality_tests(haplotype_matrix: HaplotypeMatrix,
 
 def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
                             population: Optional[Union[str, list]] = None,
-                            missing_data: str = 'ignore'):
+                            missing_data: str = 'include'):
     """
     Compute expected heterozygosity (gene diversity) per variant.
 
@@ -1683,7 +1616,6 @@ def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or sample indices.
     missing_data : str
-        'ignore' - treat missing as reference allele
         'exclude' - NaN at sites with any missing data
         'include' or 'pairwise' - per-site n_valid for frequency calculation
 
@@ -1750,7 +1682,6 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - skip missing individuals per site (default)
         'exclude' - NaN at sites with any missing data
-        'ignore' - treat -1 as 0
 
     Returns
     -------
@@ -1774,9 +1705,6 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
     if n_hap % ploidy != 0:
         raise ValueError(
             f"Number of haplotypes ({n_hap}) not divisible by ploidy ({ploidy})")
-
-    if missing_data == 'ignore':
-        hap = cp.maximum(hap, 0)
 
     n_individuals = n_hap // ploidy
 
@@ -1886,7 +1814,7 @@ def mu_var(haplotype_matrix: HaplotypeMatrix,
 
 def mu_sfs(haplotype_matrix: HaplotypeMatrix,
            population: Optional[Union[str, list]] = None,
-           missing_data: str = 'ignore') -> float:
+           missing_data: str = 'include') -> float:
     """mu_SFS: fraction of SNPs at SFS edges (RAiSD).
 
     Counts singletons (DAC=1) and near-fixed variants (DAC=n-1),
@@ -1899,7 +1827,6 @@ def mu_sfs(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - per-site n_valid for edge classification
         'exclude' - only sites with no missing data
-        'ignore' - treat missing as reference allele
 
     Returns
     -------

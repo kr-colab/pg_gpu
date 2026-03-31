@@ -480,7 +480,6 @@ class WindowedAnalyzer:
         missing_data : str
             'include' - Use all sites, calculate from available data per site
             'exclude' - Only use sites with no missing data
-            'ignore' - Treat missing as reference allele (original behavior)
         span_denominator : str
             'total' - Use total genomic span (chrom_end - chrom_start)
             'sites' - Use number of sites analyzed
@@ -637,7 +636,6 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'ignore' - Treat missing as reference allele (original behavior)
     span_denominator : str
         'total' - Use total genomic span (chrom_end - chrom_start)
         'sites' - Use number of sites analyzed

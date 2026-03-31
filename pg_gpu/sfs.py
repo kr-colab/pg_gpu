@@ -12,7 +12,7 @@ from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
 
 
-def _derived_allele_counts(haplotype_matrix, missing_data='ignore'):
+def _derived_allele_counts(haplotype_matrix, missing_data='include'):
     """Compute derived allele counts per variant on GPU.
 
     Parameters
@@ -21,7 +21,6 @@ def _derived_allele_counts(haplotype_matrix, missing_data='ignore'):
     missing_data : str
         'include' or 'pairwise' - return per-site n_valid
         'exclude' - filter to complete sites
-        'ignore' - treat -1 as 0
 
     Returns
     -------
@@ -56,7 +55,7 @@ def _derived_allele_counts(haplotype_matrix, missing_data='ignore'):
         return dac, n
 
 
-def _allele_counts(haplotype_matrix, missing_data='ignore'):
+def _allele_counts(haplotype_matrix, missing_data='include'):
     """Compute biallelic allele counts [ref, alt] per variant.
 
     Returns
@@ -79,7 +78,7 @@ def _allele_counts(haplotype_matrix, missing_data='ignore'):
 
 def sfs(haplotype_matrix: HaplotypeMatrix,
         population: Optional[Union[str, list]] = None,
-        missing_data: str = 'ignore'):
+        missing_data: str = 'include'):
     """Compute the unfolded site frequency spectrum.
 
     Parameters
@@ -91,7 +90,6 @@ def sfs(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' or 'pairwise' - per-site n_valid; bins by actual DAC
         'exclude' - only sites with no missing data
-        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -124,7 +122,7 @@ def sfs(haplotype_matrix: HaplotypeMatrix,
 
 def sfs_folded(haplotype_matrix: HaplotypeMatrix,
                population: Optional[Union[str, list]] = None,
-               missing_data: str = 'ignore'):
+               missing_data: str = 'include'):
     """Compute the folded site frequency spectrum (minor allele counts).
 
     Parameters
@@ -168,7 +166,7 @@ def sfs_folded(haplotype_matrix: HaplotypeMatrix,
 
 def sfs_scaled(haplotype_matrix: HaplotypeMatrix,
                population: Optional[Union[str, list]] = None,
-               missing_data: str = 'ignore'):
+               missing_data: str = 'include'):
     """Compute the scaled unfolded site frequency spectrum.
 
     Scaling: element k is multiplied by k, yielding a constant expectation
@@ -190,7 +188,7 @@ def sfs_scaled(haplotype_matrix: HaplotypeMatrix,
 
 def sfs_folded_scaled(haplotype_matrix: HaplotypeMatrix,
                       population: Optional[Union[str, list]] = None,
-                      missing_data: str = 'ignore'):
+                      missing_data: str = 'include'):
     """Compute the scaled folded site frequency spectrum.
 
     Scaling: element k is multiplied by k * (n - k) / n.
@@ -224,7 +222,7 @@ def sfs_folded_scaled(haplotype_matrix: HaplotypeMatrix,
 def joint_sfs(haplotype_matrix: HaplotypeMatrix,
               pop1: Union[str, list],
               pop2: Union[str, list],
-              missing_data: str = 'ignore'):
+              missing_data: str = 'include'):
     """Compute the joint site frequency spectrum between two populations.
 
     Parameters
@@ -268,7 +266,7 @@ def joint_sfs(haplotype_matrix: HaplotypeMatrix,
 def joint_sfs_folded(haplotype_matrix: HaplotypeMatrix,
                      pop1: Union[str, list],
                      pop2: Union[str, list],
-                     missing_data: str = 'ignore'):
+                     missing_data: str = 'include'):
     """Compute the folded joint site frequency spectrum.
 
     Parameters
@@ -312,7 +310,7 @@ def joint_sfs_folded(haplotype_matrix: HaplotypeMatrix,
 def joint_sfs_scaled(haplotype_matrix: HaplotypeMatrix,
                      pop1: Union[str, list],
                      pop2: Union[str, list],
-                     missing_data: str = 'ignore'):
+                     missing_data: str = 'include'):
     """Compute the scaled joint site frequency spectrum.
 
     Scaling: element [i, j] is multiplied by i * j.
@@ -334,7 +332,7 @@ def joint_sfs_scaled(haplotype_matrix: HaplotypeMatrix,
 def joint_sfs_folded_scaled(haplotype_matrix: HaplotypeMatrix,
                             pop1: Union[str, list],
                             pop2: Union[str, list],
-                            missing_data: str = 'ignore'):
+                            missing_data: str = 'include'):
     """Compute the scaled folded joint site frequency spectrum.
 
     Scaling: element [i, j] is multiplied by i * j * (n1 - i) * (n2 - j).
