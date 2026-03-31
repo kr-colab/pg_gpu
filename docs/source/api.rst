@@ -87,6 +87,10 @@ Core Functions
 Convenience Functions
 ~~~~~~~~~~~~~~~~~~~~~
 
+.. autofunction:: pg_gpu.diversity.theta_l
+.. autofunction:: pg_gpu.diversity.normalized_fay_wus_h
+.. autofunction:: pg_gpu.diversity.zeng_e
+.. autofunction:: pg_gpu.diversity.zeng_dh
 .. autofunction:: pg_gpu.diversity.diversity_stats
 .. autofunction:: pg_gpu.diversity.neutrality_tests
 .. autofunction:: pg_gpu.diversity.theta_h

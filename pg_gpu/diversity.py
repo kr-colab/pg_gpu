@@ -927,7 +927,6 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     n = hap.shape[0]
     dac = cp.sum(hap, axis=0).astype(cp.float64)
 
-    # theta_H = (2 / (n*(n-1))) * sum(dac_i^2) per site, summed
     th = cp.sum(dac * dac) * 2.0 / (n * (n - 1))
 
     if span_normalize:
@@ -936,6 +935,248 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
             th = th / span
 
     return float(th.get())
+
+
+def theta_l(haplotype_matrix: HaplotypeMatrix,
+            population: Optional[Union[str, list]] = None,
+            span_normalize: bool = True) -> float:
+    """Compute theta_L diversity estimator.
+
+    theta_L = sum_i(i * xi_i) / (n - 1), where xi_i is the count of
+    sites with derived allele count i. Weights variants linearly by
+    derived allele frequency, bridging theta_pi and theta_H.
+
+    Reference: Zeng et al. (2006), "Statistical Tests for Detecting
+    Positive Selection by Utilizing High-Frequency Variants",
+    Genetics 174: 1431-1439, Equation (8).
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    population : str or list, optional
+    span_normalize : bool
+        If True, normalize by genomic span.
+
+    Returns
+    -------
+    float
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = cp.maximum(matrix.haplotypes, 0)
+    n = hap.shape[0]
+    dac = cp.sum(hap, axis=0).astype(cp.float64)
+
+    tl = cp.sum(dac) / (n - 1)
+
+    if span_normalize:
+        span = matrix.get_span()
+        if span > 0:
+            tl = tl / span
+
+    return float(tl.get())
+
+
+def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
+                         population: Optional[Union[str, list]] = None) -> float:
+    """Compute normalized Fay and Wu's H (H*).
+
+    H = theta_pi - theta_H, normalized by its standard deviation under
+    the standard neutral model. The normalization allows comparison
+    across samples with different numbers of segregating sites.
+
+    Reference: Zeng et al. (2006), "Statistical Tests for Detecting
+    Positive Selection by Utilizing High-Frequency Variants",
+    Genetics 174: 1431-1439, Equation (11).
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    population : str or list, optional
+
+    Returns
+    -------
+    float
+        Normalized H*. Negative values indicate excess high-frequency
+        derived alleles (directional selection signal).
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = cp.maximum(matrix.haplotypes, 0)
+    n = int(hap.shape[0])
+    dac = cp.sum(hap, axis=0).astype(cp.float64)
+
+    # S = number of segregating sites
+    is_seg = (dac > 0) & (dac < n)
+    S = float(cp.sum(is_seg).get())
+
+    if S < 2:
+        return 0.0
+
+    # theta_pi per site (not span-normalized)
+    pi_per_site = cp.sum(2.0 * dac * (n - dac) / (n * (n - 1)))
+    # theta_H per site
+    th_per_site = cp.sum(dac * dac) * 2.0 / (n * (n - 1))
+
+    H = float((pi_per_site - th_per_site).get())
+
+    # variance of H under neutrality (Zeng et al. 2006, below eq 11)
+    # uses theta_W as estimator
+    n_f = float(n)
+    a_n = sum(1.0 / i for i in range(1, n))
+    b_n = sum(1.0 / (i * i) for i in range(1, n))
+    theta_w = S / a_n
+
+    # variance components from Zeng et al. Table 1
+    # Var(H) = e1 * S + e2 * S * (S - 1)
+    # where e1 and e2 are functions of n
+    an2 = a_n * a_n
+
+    # coefficients for H = theta_pi - theta_H
+    # from Zeng et al. (2006) supplementary / Table 1
+    n2 = n_f * n_f
+    n3 = n2 * n_f
+
+    # e1 coefficient (linear in S)
+    e1_num = (n_f - 2) / (6 * (n_f - 1))
+    e1 = e1_num
+
+    # e2 coefficient (quadratic in S)
+    e2_num = (18 * n2 * (3 * n_f + 2) * b_n
+              - (88 * n3 + 9 * n2 - 13 * n_f + 6))
+    e2_den = 9 * n_f * (n2 - n_f) * a_n + 9 * n_f * (n2 - n_f) * b_n
+    # simplified form from Zeng:
+    # Var(H) approx using theta_W
+    e2 = e2_num / e2_den if e2_den != 0 else 0.0
+
+    var_H = e1 * S + e2 * S * (S - 1)
+
+    if var_H <= 0:
+        return 0.0
+
+    return float(H / (var_H ** 0.5))
+
+
+def zeng_e(haplotype_matrix: HaplotypeMatrix,
+           population: Optional[Union[str, list]] = None) -> float:
+    """Compute Zeng's E test statistic.
+
+    E = theta_L - theta_W, normalized by its standard deviation.
+    Contrasts high-frequency variants (theta_L) against rare variants
+    (theta_W). Negative values indicate excess high-frequency derived
+    alleles relative to rare variants.
+
+    Reference: Zeng et al. (2006), "Statistical Tests for Detecting
+    Positive Selection by Utilizing High-Frequency Variants",
+    Genetics 174: 1431-1439, Equation (13).
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    population : str or list, optional
+
+    Returns
+    -------
+    float
+        Normalized E statistic.
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = cp.maximum(matrix.haplotypes, 0)
+    n = int(hap.shape[0])
+    dac = cp.sum(hap, axis=0).astype(cp.float64)
+
+    is_seg = (dac > 0) & (dac < n)
+    S = float(cp.sum(is_seg).get())
+
+    if S < 2:
+        return 0.0
+
+    n_f = float(n)
+    a_n = sum(1.0 / i for i in range(1, n))
+    b_n = sum(1.0 / (i * i) for i in range(1, n))
+
+    # theta_L (not span-normalized)
+    tl = float(cp.sum(dac[is_seg]).get()) / (n_f - 1)
+
+    # theta_W
+    tw = S / a_n
+
+    E = tl - tw
+
+    # variance of E under neutrality (Zeng et al. 2006, eq 14)
+    # Var(E) = e1 * S + e2 * S * (S - 1)
+    # where coefficients derived from Table 1 in the paper
+
+    # theta for variance estimation
+    theta = S / a_n
+
+    # Var(theta_L) and Cov terms from Zeng et al.
+    # Using the general formula from the paper
+    e1 = (n_f / (2 * (n_f - 1)) - 1.0 / a_n)
+    e2_num = (b_n / (a_n * a_n)
+              + 2 * (n_f / (n_f - 1)) ** 2 * b_n
+              - 2 * (n_f * b_n - n_f + 1) / ((n_f - 1) * a_n)
+              - (3 * n_f + 1) / (n_f - 1))
+    e2 = e2_num / (a_n * a_n + b_n)
+
+    var_E = e1 * theta + e2 * theta * theta
+
+    if var_E <= 0:
+        return 0.0
+
+    return float(E / (var_E ** 0.5))
+
+
+def zeng_dh(haplotype_matrix: HaplotypeMatrix,
+            population: Optional[Union[str, list]] = None) -> float:
+    """Compute Zeng's DH joint test statistic.
+
+    Combines Tajima's D and Fay & Wu's H into a single test with
+    improved power to detect directional selection. Defined as the
+    product D * H when both are negative, zero otherwise.
+
+    Reference: Zeng et al. (2006), "Statistical Tests for Detecting
+    Positive Selection by Utilizing High-Frequency Variants",
+    Genetics 174: 1431-1439, Equation (15).
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    population : str or list, optional
+
+    Returns
+    -------
+    float
+        DH statistic. Positive when both D and H are negative
+        (consistent with a selective sweep).
+    """
+    D = tajimas_d(haplotype_matrix, population)
+    H = fay_wus_h(haplotype_matrix, population)
+
+    # DH is the product when both are negative (sweep signal)
+    if D < 0 and H < 0:
+        return float(D * H)
+    else:
+        return 0.0
 
 
 def max_daf(haplotype_matrix: HaplotypeMatrix,
