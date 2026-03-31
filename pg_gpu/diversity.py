@@ -896,6 +896,229 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
 _get_population_matrix = get_population_matrix
 
 
+def theta_h(haplotype_matrix: HaplotypeMatrix,
+            population: Optional[Union[str, list]] = None,
+            span_normalize: bool = True) -> float:
+    """Compute theta_H (homozygosity-based diversity estimator).
+
+    theta_H = sum_i [ i^2 * S_i ] * 2 / (n*(n-1)) where S_i is the count
+    of variants with derived allele count i. Used to compute Fay and Wu's H.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    population : str or list, optional
+    span_normalize : bool
+        If True, normalize by genomic span.
+
+    Returns
+    -------
+    float
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = cp.maximum(matrix.haplotypes, 0)
+    n = hap.shape[0]
+    dac = cp.sum(hap, axis=0).astype(cp.float64)
+
+    # theta_H = (2 / (n*(n-1))) * sum(dac_i^2) per site, summed
+    th = cp.sum(dac * dac) * 2.0 / (n * (n - 1))
+
+    if span_normalize:
+        span = matrix.get_span()
+        if span > 0:
+            th = th / span
+
+    return float(th.get())
+
+
+def max_daf(haplotype_matrix: HaplotypeMatrix,
+            population: Optional[Union[str, list]] = None) -> float:
+    """Maximum derived allele frequency across all variants.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    population : str or list, optional
+
+    Returns
+    -------
+    float
+        Maximum DAF in [0, 1].
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = cp.maximum(matrix.haplotypes, 0)
+    n = hap.shape[0]
+    dac = cp.sum(hap, axis=0).astype(cp.float64)
+    freqs = dac / n
+
+    return float(cp.max(freqs).get())
+
+
+def haplotype_count(haplotype_matrix: HaplotypeMatrix,
+                    population: Optional[Union[str, list]] = None) -> int:
+    """Count distinct haplotypes.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    population : str or list, optional
+
+    Returns
+    -------
+    int
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap_cpu = matrix.haplotypes.get().astype(np.int8)
+    hap_bytes = np.array([row.tobytes() for row in hap_cpu])
+    return len(np.unique(hap_bytes))
+
+
+def daf_histogram(haplotype_matrix: HaplotypeMatrix,
+                  n_bins: int = 20,
+                  population: Optional[Union[str, list]] = None):
+    """Normalized histogram of derived allele frequencies.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    n_bins : int
+        Number of frequency bins spanning [0, 1].
+    population : str or list, optional
+
+    Returns
+    -------
+    hist : ndarray, float64, shape (n_bins,)
+        Normalized counts (sum to 1).
+    bin_edges : ndarray, float64, shape (n_bins + 1,)
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = cp.maximum(matrix.haplotypes, 0)
+    n = hap.shape[0]
+    dafs = cp.sum(hap, axis=0).astype(cp.float64) / n
+
+    bin_edges = cp.linspace(0, 1, n_bins + 1)
+    hist = cp.histogram(dafs, bins=bin_edges)[0].astype(cp.float64)
+
+    total = cp.sum(hist)
+    if total > 0:
+        hist = hist / total
+
+    return hist.get(), bin_edges.get()
+
+
+def diplotype_frequency_spectrum(genotype_matrix,
+                                 population: Optional[Union[str, list]] = None):
+    """Count distinct multi-locus genotype patterns (diplotypes).
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix
+    population : str or list, optional
+
+    Returns
+    -------
+    freqs : ndarray, float64, sorted descending
+        Diplotype frequencies.
+    n_diplotypes : int
+        Number of distinct diplotypes.
+    """
+    if population is not None:
+        pop_idx = genotype_matrix.sample_sets.get(population)
+        if pop_idx is None:
+            raise ValueError(f"Population {population} not found")
+        geno = genotype_matrix.genotypes[pop_idx, :]
+    else:
+        geno = genotype_matrix.genotypes
+
+    if isinstance(geno, cp.ndarray):
+        geno = geno.get()
+
+    geno = np.maximum(geno, 0).astype(np.int8)
+    n_ind = geno.shape[0]
+
+    geno_bytes = np.array([row.tobytes() for row in geno])
+    _, counts = np.unique(geno_bytes, return_counts=True)
+
+    freqs = counts / n_ind
+    freqs = np.sort(freqs)[::-1]
+
+    return freqs, len(counts)
+
+
+def daf_histogram_diploid(genotype_matrix,
+                          n_bins: int = 20,
+                          population: Optional[Union[str, list]] = None):
+    """Normalized DAF histogram from diploid genotypes.
+
+    DAF = sum(genotypes) / (2 * n_individuals) since each individual
+    contributes 2 alleles.
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix
+    n_bins : int
+    population : str or list, optional
+
+    Returns
+    -------
+    hist : ndarray, float64, shape (n_bins,)
+    bin_edges : ndarray, float64, shape (n_bins + 1,)
+    """
+    from .genotype_matrix import GenotypeMatrix
+
+    if population is not None:
+        pop_idx = genotype_matrix.sample_sets.get(population)
+        if pop_idx is None:
+            raise ValueError(f"Population {population} not found")
+        geno = genotype_matrix.genotypes[pop_idx, :]
+    else:
+        geno = genotype_matrix.genotypes
+
+    if not isinstance(geno, cp.ndarray):
+        geno = cp.asarray(geno)
+
+    geno = cp.maximum(geno, 0).astype(cp.float64)
+    n_ind = geno.shape[0]
+    dafs = cp.sum(geno, axis=0) / (2.0 * n_ind)
+
+    bin_edges = cp.linspace(0, 1, n_bins + 1)
+    hist = cp.histogram(dafs, bins=bin_edges)[0].astype(cp.float64)
+
+    total = cp.sum(hist)
+    if total > 0:
+        hist = hist / total
+
+    return hist.get(), bin_edges.get()
+
+
 # Summary statistics combinations commonly used
 
 def neutrality_tests(haplotype_matrix: HaplotypeMatrix,
@@ -1083,3 +1306,76 @@ def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
         f = np.where(he > 0, 1.0 - ho / he, np.nan)
 
     return f
+
+
+def mu_var(haplotype_matrix: HaplotypeMatrix,
+           window_length: Optional[float] = None,
+           population: Optional[Union[str, list]] = None) -> float:
+    """mu_VAR: SNP density statistic (RAiSD).
+
+    Number of SNPs per base pair. Elevated near sweeps due to
+    hitchhiking effects on local variant density.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    window_length : float, optional
+        Window length in bp. If None, uses chrom_end - chrom_start.
+    population : str or list, optional
+
+    Returns
+    -------
+    float
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    n_snps = matrix.num_variants
+    if window_length is None:
+        window_length = matrix.chrom_end - matrix.chrom_start
+    if window_length <= 0:
+        return 0.0
+
+    return float(n_snps / window_length)
+
+
+def mu_sfs(haplotype_matrix: HaplotypeMatrix,
+           population: Optional[Union[str, list]] = None) -> float:
+    """mu_SFS: fraction of SNPs at SFS edges (RAiSD).
+
+    Counts singletons (DAC=1) and near-fixed variants (DAC=n-1),
+    divided by total segregating sites. Elevated near selective sweeps.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    population : str or list, optional
+
+    Returns
+    -------
+    float
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = cp.maximum(matrix.haplotypes, 0)
+    n = hap.shape[0]
+    dac = cp.sum(hap, axis=0)
+
+    is_seg = (dac > 0) & (dac < n)
+    n_seg = cp.sum(is_seg)
+
+    if int(n_seg.get()) == 0:
+        return 0.0
+
+    is_edge = (dac == 1) | (dac == n - 1)
+    n_edge = cp.sum(is_edge)
+
+    return float((n_edge.astype(cp.float64) / n_seg.astype(cp.float64)).get())

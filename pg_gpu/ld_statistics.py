@@ -5,6 +5,7 @@ This module provides an API for computing LD statistics
 on GPUs with automatic missing data handling.
 """
 
+import numpy as np
 import cupy as cp
 from typing import Optional, Union, Tuple, List, Dict
 
@@ -202,6 +203,247 @@ def r_squared(counts: cp.ndarray,
         r-squared values. NaN where computation is undefined.
     """
     return r(counts, n_valid) ** 2
+
+
+def zns(r2_matrix):
+    """Kelly's ZnS: mean pairwise r-squared across all SNP pairs.
+
+    Parameters
+    ----------
+    r2_matrix : cupy or numpy ndarray, shape (m, m)
+        Square r-squared matrix (e.g. from HaplotypeMatrix.pairwise_r2()).
+
+    Returns
+    -------
+    float
+        Mean r-squared (excluding diagonal).
+    """
+    if not isinstance(r2_matrix, cp.ndarray):
+        r2_matrix = cp.asarray(r2_matrix, dtype=cp.float64)
+
+    m = r2_matrix.shape[0]
+    if m < 2:
+        return 0.0
+    total = cp.sum(r2_matrix) - cp.trace(r2_matrix)
+    return float((total / (m * (m - 1))).get())
+
+
+def omega(r2_matrix):
+    """Kim and Nielsen's Omega: max ratio of within-partition to
+    cross-partition mean LD.
+
+    For each possible SNP partition point, computes the ratio of
+    mean r-squared within the two blocks to mean r-squared between
+    blocks. Returns the maximum ratio across all partition points.
+
+    Uses GPU prefix sums to evaluate all partition points without
+    a Python loop.
+
+    Parameters
+    ----------
+    r2_matrix : cupy or numpy ndarray, shape (m, m)
+        Square r-squared matrix.
+
+    Returns
+    -------
+    float
+        Maximum omega value. Returns 0 if fewer than 4 SNPs.
+    """
+    if not isinstance(r2_matrix, cp.ndarray):
+        r2_matrix = cp.asarray(r2_matrix, dtype=cp.float64)
+
+    m = r2_matrix.shape[0]
+    if m < 4:
+        return 0.0
+
+    r2 = r2_matrix.astype(cp.float64)
+
+    # precompute 2D prefix sums for O(1) block sum queries
+    # S[i,j] = sum of r2[0:i, 0:j]
+    S = cp.cumsum(cp.cumsum(r2, axis=0), axis=1)
+
+    # prefix sum of diagonal for trace computation
+    diag = cp.diag(r2)
+    diag_cumsum = cp.cumsum(diag)
+
+    # total sum and trace
+    total_sum = S[m-1, m-1]
+    total_trace = diag_cumsum[m-1]
+
+    # for partition at l (left=[0:l], right=[l:m]):
+    # sum_left = S[l-1, l-1]
+    # sum_cross = S[l-1, m-1] - S[l-1, l-1]  (top-right block)
+    #           + S[m-1, l-1] - S[l-1, l-1]  (bottom-left block)
+    # but r2 is symmetric so cross = 2 * (S[l-1, m-1] - S[l-1, l-1])
+    # sum_right = total_sum - S[l-1, m-1] - S[m-1, l-1] + S[l-1, l-1]
+
+    # evaluate all partition points l = 2..m-2 in parallel
+    l_vals = cp.arange(2, m - 1)
+
+    sum_left = S[l_vals - 1, l_vals - 1]
+    trace_left = diag_cumsum[l_vals - 1]
+
+    sum_right = total_sum - S[l_vals - 1, m-1] - S[m-1, l_vals - 1] + sum_left
+    trace_right = total_trace - trace_left
+
+    # cross = total - left_block - right_block
+    # S[l-1, m-1] = sum of rows 0..l-1, all cols
+    # left block = S[l-1, l-1], right block needs careful extraction
+    sum_cross = total_sum - sum_left - sum_right
+    # cross has no diagonal contribution so no trace adjustment needed
+    # but we double-counted: cross appears in both off-diagonal blocks
+    # Actually: sum_left + sum_right + sum_cross = total_sum
+    # where sum_cross is the sum of both off-diagonal blocks combined
+
+    n_left = l_vals * (l_vals - 1)
+    n_right = (m - l_vals) * (m - l_vals - 1)
+    n_cross = 2 * l_vals * (m - l_vals)  # both off-diagonal blocks
+
+    # within = (left excl diag + right excl diag)
+    within_sum = (sum_left - trace_left) + (sum_right - trace_right)
+    n_within = n_left + n_right
+
+    valid = (n_within > 0) & (n_cross > 0) & (sum_cross > 0)
+
+    omega_vals = cp.zeros_like(l_vals, dtype=cp.float64)
+    mean_within = cp.where(n_within > 0, within_sum / n_within, 0.0)
+    mean_cross = cp.where(n_cross > 0, sum_cross / n_cross, 1.0)
+    omega_vals = cp.where(valid, mean_within / mean_cross, 0.0)
+
+    return float(cp.max(omega_vals).get())
+
+
+def mu_ld(haplotype_matrix):
+    """mu_LD: haplotype pattern exclusivity between left/right halves (RAiSD).
+
+    Splits variants at midpoint and measures how exclusively haplotype
+    patterns associate across halves. Elevated at sweep boundaries where
+    LD structure changes abruptly.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+
+    Returns
+    -------
+    float
+    """
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
+    hap = cp.maximum(haplotype_matrix.haplotypes, 0)
+    n_hap, n_var = hap.shape
+
+    if n_var < 2:
+        return 0.0
+
+    mid = n_var // 2
+
+    # transfer to CPU for unique-row hashing (no GPU equivalent for byte-string uniqueness)
+    left = hap[:, :mid].get().astype(np.int8)
+    right = hap[:, mid:].get().astype(np.int8)
+
+    left_bytes = [row.tobytes() for row in left]
+    right_bytes = [row.tobytes() for row in right]
+
+    # for each distinct left pattern, count how many distinct right patterns it pairs with
+    left_to_right = {}
+    right_to_left = {}
+    for i in range(n_hap):
+        lb, rb = left_bytes[i], right_bytes[i]
+        left_to_right.setdefault(lb, set()).add(rb)
+        right_to_left.setdefault(rb, set()).add(lb)
+
+    n_left = len(left_to_right)
+    n_right = len(right_to_left)
+
+    if n_left == 0 or n_right == 0:
+        return 0.0
+
+    # exclusive = pattern paired with only one pattern in the other half
+    n_excl_left = sum(1 for v in left_to_right.values() if len(v) == 1)
+    n_excl_right = sum(1 for v in right_to_left.values() if len(v) == 1)
+
+    return float((n_excl_left / n_left + n_excl_right / n_right) / 2.0)
+
+
+def r2_matrix_diploid(genotype_matrix):
+    """Compute r-squared matrix from diploid genotypes (0/1/2) on GPU.
+
+    Uses genotype correlation: treats 0/1/2 as continuous dosage values,
+    computes Pearson correlation, then squares.
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix or cupy.ndarray
+        If GenotypeMatrix, uses .genotypes. If array, shape (n_individuals, n_variants).
+
+    Returns
+    -------
+    r2 : cupy.ndarray, float64, shape (n_variants, n_variants)
+    """
+    from .genotype_matrix import GenotypeMatrix
+
+    if isinstance(genotype_matrix, GenotypeMatrix):
+        if genotype_matrix.device == 'CPU':
+            genotype_matrix.transfer_to_gpu()
+        geno = genotype_matrix.genotypes
+    else:
+        geno = genotype_matrix
+
+    if not isinstance(geno, cp.ndarray):
+        geno = cp.asarray(geno)
+
+    geno = cp.maximum(geno, 0).astype(cp.float64)
+    n_ind = geno.shape[0]
+
+    # center genotypes per variant
+    mean = cp.mean(geno, axis=0)
+    gn = geno - mean
+
+    # variance per variant
+    var = cp.sum(gn ** 2, axis=0)
+    valid = var > 0
+
+    # correlation via matrix multiply
+    cov = gn.T @ gn  # (n_var, n_var)
+
+    # normalize: r_ij = cov_ij / sqrt(var_i * var_j)
+    denom = cp.sqrt(cp.outer(var, var))
+    r2 = cp.where(denom > 0, (cov / denom) ** 2, 0.0)
+    cp.fill_diagonal(r2, 0.0)
+
+    return r2
+
+
+def zns_diploid(genotype_matrix):
+    """Kelly's ZnS from diploid genotypes.
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix
+
+    Returns
+    -------
+    float
+    """
+    r2 = r2_matrix_diploid(genotype_matrix)
+    return zns(r2)
+
+
+def omega_diploid(genotype_matrix):
+    """Kim and Nielsen's Omega from diploid genotypes.
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix
+
+    Returns
+    -------
+    float
+    """
+    r2 = r2_matrix_diploid(genotype_matrix)
+    return omega(r2)
 
 
 def compute_ld_statistics(counts: cp.ndarray,

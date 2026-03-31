@@ -9,9 +9,11 @@ from . import sfs
 from . import admixture
 from . import decomposition
 from . import plotting
+from . import distance_stats
+from .genotype_matrix import GenotypeMatrix
 from .haplotype_matrix import HaplotypeMatrix
 from .windowed_analysis import WindowedAnalyzer, windowed_analysis
 
-__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'HaplotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis']
+__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'distance_stats', 'HaplotypeMatrix', 'GenotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis']
 
 __version__ = '0.1.0'

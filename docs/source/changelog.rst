@@ -75,6 +75,20 @@ New Functions
   - ``plot_haplotype_frequencies()``, ``plot_variant_locator()`` - Haplotype and variant viz
   - Built on matplotlib + seaborn
 
+* **GenotypeMatrix** (``pg_gpu.genotype_matrix``)
+
+  - Diploid genotype storage (0/1/2 alt allele counts)
+  - Conversion to/from HaplotypeMatrix, VCF loading
+
+* **diploSHIC-Derived Statistics**
+
+  - ``zns()``, ``omega()`` - Kelly's ZnS and Kim & Nielsen's Omega (GPU prefix-sum Omega)
+  - ``mu_ld()`` - Haplotype pattern exclusivity (RAiSD)
+  - ``mu_var()``, ``mu_sfs()`` - SNP density and SFS edge fraction (RAiSD)
+  - ``theta_h()``, ``max_daf()``, ``haplotype_count()``, ``daf_histogram()``
+  - ``dist_var()``, ``dist_skew()``, ``dist_kurt()`` - Pairwise distance moments
+  - Diploid variants: ``zns_diploid()``, ``omega_diploid()``, ``garud_h_diploid()``, ``diplotype_frequency_spectrum()``, ``daf_histogram_diploid()``
+
 Infrastructure
 ~~~~~~~~~~~~~~
 

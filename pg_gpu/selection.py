@@ -204,6 +204,34 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
     return results[:, 0], results[:, 1], results[:, 2], results[:, 3]
 
 
+def garud_h_diploid(genotype_matrix, population=None):
+    """Compute Garud's H1, H12, H123, H2/H1 from diploid genotypes.
+
+    Uses diplotype (multi-locus genotype pattern) frequencies instead
+    of haplotype frequencies.
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix
+    population : str or list, optional
+
+    Returns
+    -------
+    h1, h12, h123, h2_h1 : float
+    """
+    from .diversity import diplotype_frequency_spectrum
+
+    freqs, _ = diplotype_frequency_spectrum(genotype_matrix, population)
+
+    h1 = float(np.sum(freqs ** 2))
+    h12 = float(np.sum(freqs[:2]) ** 2 + np.sum(freqs[2:] ** 2))
+    h123 = float(np.sum(freqs[:3]) ** 2 + np.sum(freqs[3:] ** 2))
+    h2 = h1 - float(freqs[0] ** 2)
+    h2_h1 = h2 / h1 if h1 > 0 else 0.0
+
+    return h1, h12, h123, h2_h1
+
+
 # ---------------------------------------------------------------------------
 # Public API: nSL / XP-nSL
 # ---------------------------------------------------------------------------
