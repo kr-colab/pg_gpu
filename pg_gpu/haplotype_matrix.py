@@ -651,6 +651,136 @@ class HaplotypeMatrix:
 
         return r2
 
+    def locate_unlinked(self, size=100, step=20, threshold=0.1):
+        """Locate variants in approximate linkage equilibrium.
+
+        Uses a sliding window approach to identify variants whose r-squared
+        with all other variants in the window is below the threshold.
+
+        Parameters
+        ----------
+        size : int
+            Window size (number of variants).
+        step : int
+            Number of variants to advance between windows.
+        threshold : float
+            Maximum r-squared value to consider variants unlinked.
+
+        Returns
+        -------
+        ndarray, bool, shape (n_variants,)
+            True for variants in approximate linkage equilibrium.
+        """
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+
+        m = self.num_variants
+        n_hap = self.num_haplotypes
+
+        # allele frequencies
+        p = cp.sum(self.haplotypes, axis=0).astype(cp.float64) / n_hap
+
+        # pruning state kept on CPU to avoid per-scalar GPU transfers
+        loc = np.ones(m, dtype=bool)
+
+        for w_start in range(0, m, step):
+            w_end = min(w_start + size, m)
+
+            active = loc[w_start:w_end]
+            if np.sum(active) <= 1:
+                continue
+
+            active_idx = np.where(active)[0] + w_start
+            active_idx_gpu = cp.asarray(active_idx)
+            hap_window = self.haplotypes[:, active_idx_gpu]
+            p_window = p[active_idx_gpu]
+
+            # pairwise r² within window via matrix multiply
+            p_AB = (hap_window.T @ hap_window).astype(cp.float64) / n_hap
+            p_Ap_B = cp.outer(p_window, p_window)
+            D = p_AB - p_Ap_B
+            denom = cp.outer(p_window * (1 - p_window),
+                             p_window * (1 - p_window))
+            r2_mat = cp.where(denom > 0, (D ** 2) / denom, 0.0)
+            cp.fill_diagonal(r2_mat, 0.0)
+
+            # prune on CPU to avoid per-scalar GPU transfers
+            r2_mat_cpu = r2_mat.get()
+            n_active = len(active_idx)
+            for i in range(n_active):
+                if not loc[active_idx[i]]:
+                    continue
+                for j in range(i + 1, n_active):
+                    if not loc[active_idx[j]]:
+                        continue
+                    if r2_mat_cpu[i, j] > threshold:
+                        loc[active_idx[j]] = False
+
+        return loc
+
+    def windowed_r_squared(self, bp_bins, percentile=50, pop=None):
+        """Compute percentiles of r-squared in genomic distance bins.
+
+        Parameters
+        ----------
+        bp_bins : array_like
+            Bin edges for genomic distances in base pairs.
+        percentile : float or array_like
+            Percentile(s) to compute within each bin.
+        pop : str, optional
+            Population key to use.
+
+        Returns
+        -------
+        result : ndarray, shape (n_bins,) or (n_bins, n_percentiles)
+            Percentile(s) of r-squared per bin.
+        counts : ndarray, int, shape (n_bins,)
+            Number of variant pairs per bin.
+        """
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+
+        pos = self.positions
+        if not isinstance(pos, cp.ndarray):
+            pos = cp.array(pos)
+
+        m = self.num_variants
+
+        # compute counts and r² via tally
+        counts_arr, n_valid = self.tally_gpu_haplotypes(pop=pop)
+        from pg_gpu import ld_statistics
+        r2_vals = ld_statistics.r_squared(counts_arr, n_valid=n_valid)
+
+        # pair distances
+        idx_i, idx_j = cp.triu_indices(m, k=1)
+        distances = pos[idx_j] - pos[idx_i]
+
+        bp_bins_cp = cp.array(bp_bins)
+        n_bins = len(bp_bins) - 1
+        bin_inds = cp.digitize(distances, bp_bins_cp) - 1
+
+        valid_mask = (bin_inds >= 0) & (bin_inds < n_bins) & ~cp.isnan(r2_vals)
+
+        # transfer to CPU for percentile computation
+        r2_cpu = r2_vals[valid_mask].get()
+        bins_cpu = bin_inds[valid_mask].get()
+
+        percentile = np.atleast_1d(percentile)
+        result = np.full((n_bins, len(percentile)), np.nan)
+        pair_counts = np.zeros(n_bins, dtype=int)
+
+        for i in range(n_bins):
+            mask = bins_cpu == i
+            pair_counts[i] = int(np.sum(mask))
+            if pair_counts[i] > 0:
+                for p_idx, pct in enumerate(percentile):
+                    result[i, p_idx] = np.percentile(r2_cpu[mask], pct)
+
+        if result.shape[1] == 1:
+            result = result[:, 0]
+
+        return result, pair_counts
+
 
     def tally_gpu_haplotypes(self, pop=None):
         """

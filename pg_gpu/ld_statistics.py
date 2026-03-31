@@ -149,6 +149,61 @@ def dd_between(counts: cp.ndarray,
     return _dd_between(counts, pop1_idx, pop2_idx, n_valid)
 
 
+def r(counts: cp.ndarray,
+      n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
+    """
+    Compute Pearson correlation coefficient r between variant pairs
+    from haplotype counts.
+
+    Parameters
+    ----------
+    counts : cp.ndarray, shape (N, 4)
+        Haplotype counts [n11, n10, n01, n00] for each variant pair.
+    n_valid : cp.ndarray, optional
+        Valid sample counts per pair. Shape (N,).
+
+    Returns
+    -------
+    cp.ndarray, float64, shape (N,)
+        Pearson r values. NaN where computation is undefined
+        (monomorphic at either locus).
+    """
+    c11, c10, c01, c00 = counts[:, 0], counts[:, 1], counts[:, 2], counts[:, 3]
+    n = n_valid.astype(cp.float64) if n_valid is not None else cp.sum(counts, axis=1).astype(cp.float64)
+
+    p_A = (c11 + c10) / n
+    p_B = (c11 + c01) / n
+    D = (c11 * c00 - c10 * c01).astype(cp.float64) / (n * n)
+    denom = p_A * (1 - p_A) * p_B * (1 - p_B)
+
+    valid_mask = denom > 0
+    result = cp.full(n.shape[0], cp.nan, dtype=cp.float64)
+    result[valid_mask] = D[valid_mask] / cp.sqrt(denom[valid_mask])
+
+    return result
+
+
+def r_squared(counts: cp.ndarray,
+              n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
+    """
+    Compute r-squared (squared Pearson correlation) between variant pairs
+    from haplotype counts.
+
+    Parameters
+    ----------
+    counts : cp.ndarray, shape (N, 4)
+        Haplotype counts [n11, n10, n01, n00] for each variant pair.
+    n_valid : cp.ndarray, optional
+        Valid sample counts per pair. Shape (N,).
+
+    Returns
+    -------
+    cp.ndarray, float64, shape (N,)
+        r-squared values. NaN where computation is undefined.
+    """
+    return r(counts, n_valid) ** 2
+
+
 def compute_ld_statistics(counts: cp.ndarray,
                          statistics: List[str] = ['dd', 'dz', 'pi2'],
                          populations: Optional[Dict[str, Union[Tuple, None]]] = None,
@@ -188,6 +243,10 @@ def compute_ld_statistics(counts: cp.ndarray,
         elif stat == 'pi2':
             pop_config = populations.get('pi2', None)
             results['pi2'] = pi2(counts, pop_config, n_valid)
+        elif stat == 'r':
+            results['r'] = r(counts, n_valid)
+        elif stat == 'r_squared':
+            results['r_squared'] = r_squared(counts, n_valid)
         else:
             raise ValueError(f"Unknown statistic: {stat}")
     

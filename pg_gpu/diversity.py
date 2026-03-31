@@ -10,6 +10,7 @@ import numpy as np
 import cupy as cp
 from typing import Union, Optional, Dict, Tuple
 from .haplotype_matrix import HaplotypeMatrix
+from ._utils import get_population_matrix
 
 
 def pi(haplotype_matrix: HaplotypeMatrix,
@@ -892,43 +893,7 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
     return float(diversity)
 
 
-def _get_population_matrix(haplotype_matrix: HaplotypeMatrix,
-                          population: Union[str, list]) -> HaplotypeMatrix:
-    """
-    Extract population-specific haplotype matrix.
-    
-    Parameters
-    ----------
-    haplotype_matrix : HaplotypeMatrix
-        The full haplotype data
-    population : str or list
-        Population name or list of sample indices
-        
-    Returns
-    -------
-    HaplotypeMatrix
-        Subset containing only the specified population
-    """
-    if isinstance(population, str):
-        if haplotype_matrix.sample_sets is None:
-            raise ValueError("No sample_sets defined in haplotype matrix")
-        if population not in haplotype_matrix.sample_sets:
-            raise ValueError(f"Population {population} not found in sample_sets")
-        pop_indices = haplotype_matrix.sample_sets[population]
-    else:
-        pop_indices = list(population)
-    
-    # Extract population haplotypes
-    pop_haplotypes = haplotype_matrix.haplotypes[pop_indices, :]
-    
-    # Create new matrix for this population
-    return HaplotypeMatrix(
-        pop_haplotypes,
-        haplotype_matrix.positions,
-        haplotype_matrix.chrom_start,
-        haplotype_matrix.chrom_end,
-        sample_sets={'all': list(range(len(pop_indices)))}
-    )
+_get_population_matrix = get_population_matrix
 
 
 # Summary statistics combinations commonly used
@@ -964,3 +929,157 @@ def neutrality_tests(haplotype_matrix: HaplotypeMatrix,
         'theta_w': theta_w(haplotype_matrix, population, span_normalize=False, missing_data=missing_data),
         'segregating_sites': segregating_sites(haplotype_matrix, population, missing_data)
     }
+
+
+def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
+                            population: Optional[Union[str, list]] = None,
+                            missing_data: str = 'ignore'):
+    """
+    Compute expected heterozygosity (gene diversity) per variant.
+
+    He = 1 - sum(p_i^2) for each variant, where p_i are allele frequencies.
+    For biallelic sites this simplifies to He = 2*p*(1-p).
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+        Haplotype data.
+    population : str or list, optional
+        Population name or sample indices.
+    missing_data : str
+        'ignore' - treat missing as reference allele
+        'exclude' - skip sites with any missing data
+
+    Returns
+    -------
+    ndarray, float64, shape (n_variants,)
+        Expected heterozygosity per variant.
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = matrix.haplotypes  # (n_haplotypes, n_variants)
+    n = hap.shape[0]
+
+    # only create a cleaned copy if missing data actually exists
+    has_missing = cp.any(hap < 0)
+    hap_for_sum = cp.where(hap >= 0, hap, 0) if has_missing else hap
+    dac = cp.sum(hap_for_sum, axis=0).astype(cp.float64)
+    p = dac / n
+    he = 2.0 * p * (1.0 - p)
+
+    if missing_data == 'exclude' and has_missing:
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        he[missing_per_var > 0] = cp.nan
+
+    return he.get()
+
+
+def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
+                            population: Optional[Union[str, list]] = None,
+                            ploidy: int = 2):
+    """
+    Compute observed heterozygosity per variant.
+
+    Assumes consecutive haplotypes belong to the same individual
+    (standard for diploid VCF data). A site is heterozygous in an
+    individual if the two haplotypes differ.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+        Haplotype data.
+    population : str or list, optional
+        Population name or sample indices.
+    ploidy : int
+        Ploidy level. Default 2 (diploid). Consecutive haplotypes in
+        groups of `ploidy` are treated as belonging to one individual.
+
+    Returns
+    -------
+    ndarray, float64, shape (n_variants,)
+        Observed heterozygosity per variant.
+    """
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = matrix.haplotypes  # (n_haplotypes, n_variants)
+    n_hap = hap.shape[0]
+
+    if n_hap % ploidy != 0:
+        raise ValueError(
+            f"Number of haplotypes ({n_hap}) not divisible by ploidy ({ploidy})")
+
+    n_individuals = n_hap // ploidy
+
+    if ploidy == 2:
+        # fast path for diploid: compare consecutive pairs
+        h1 = hap[0::2]  # even-indexed haplotypes
+        h2 = hap[1::2]  # odd-indexed haplotypes
+
+        # a site is het if h1 != h2 (and neither is missing)
+        valid = (h1 >= 0) & (h2 >= 0)
+        het = (h1 != h2) & valid
+        n_valid = cp.sum(valid, axis=0).astype(cp.float64)
+        n_het = cp.sum(het, axis=0).astype(cp.float64)
+
+        ho = cp.where(n_valid > 0, n_het / n_valid, cp.nan)
+    else:
+        # general ploidy: het if not all alleles identical within individual
+        n_variants = hap.shape[1]
+        n_het = cp.zeros(n_variants, dtype=cp.float64)
+        n_valid_ind = cp.zeros(n_variants, dtype=cp.float64)
+
+        for ind in range(n_individuals):
+            ind_haps = hap[ind * ploidy:(ind + 1) * ploidy]
+            all_valid = cp.all(ind_haps >= 0, axis=0)
+            all_same = cp.all(ind_haps == ind_haps[0:1], axis=0)
+            n_valid_ind += all_valid.astype(cp.float64)
+            n_het += (all_valid & ~all_same).astype(cp.float64)
+
+        ho = cp.where(n_valid_ind > 0, n_het / n_valid_ind, cp.nan)
+
+    return ho.get()
+
+
+def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
+                           population: Optional[Union[str, list]] = None,
+                           ploidy: int = 2):
+    """
+    Compute Wright's inbreeding coefficient F per variant.
+
+    F = 1 - Ho/He, where Ho is observed heterozygosity and He is
+    expected heterozygosity.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+        Haplotype data.
+    population : str or list, optional
+        Population name or sample indices.
+    ploidy : int
+        Ploidy level for observed heterozygosity computation.
+
+    Returns
+    -------
+    ndarray, float64, shape (n_variants,)
+        Inbreeding coefficient per variant. NaN where He = 0.
+    """
+    ho = heterozygosity_observed(haplotype_matrix, population, ploidy)
+    he = heterozygosity_expected(haplotype_matrix, population)
+
+    # F = 1 - Ho/He; undefined where He = 0
+    with np.errstate(divide='ignore', invalid='ignore'):
+        f = np.where(he > 0, 1.0 - ho / he, np.nan)
+
+    return f
