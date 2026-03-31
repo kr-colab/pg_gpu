@@ -12,7 +12,7 @@ from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
 
 
-def _prepare_matrix(haplotype_matrix, scaler, population):
+def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='ignore'):
     """Center and scale haplotype matrix for PCA.
 
     Returns the prepared matrix X and its dimensions.
@@ -25,9 +25,25 @@ def _prepare_matrix(haplotype_matrix, scaler, population):
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    X = matrix.haplotypes.astype(cp.float64)
-    if cp.any(X < 0):
-        X = cp.where(X < 0, 0, X)
+    hap = matrix.haplotypes
+    has_missing = cp.any(hap < 0)
+
+    if missing_data == 'exclude' and has_missing:
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        complete = missing_per_var == 0
+        hap = hap[:, complete]
+        has_missing = False
+
+    if missing_data in ('include', 'pairwise') and has_missing:
+        # Impute missing values to per-site mean frequency
+        valid_mask = hap >= 0
+        hap_clean = cp.where(valid_mask, hap, 0).astype(cp.float64)
+        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+        site_mean = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
+        X = cp.where(valid_mask, hap_clean, site_mean[None, :])
+    else:
+        X = cp.where(hap < 0, 0, hap).astype(cp.float64) if has_missing else hap.astype(cp.float64)
+
     X = X.copy()
 
     # center
@@ -36,7 +52,7 @@ def _prepare_matrix(haplotype_matrix, scaler, population):
 
     # scale
     if scaler == 'patterson':
-        p = cp.where(matrix.haplotypes < 0, 0, matrix.haplotypes).astype(cp.float64).mean(axis=0)
+        p = cp.mean(X + mean, axis=0)  # original mean freq
         scale = cp.sqrt(p * (1 - p))
         valid = scale > 0
         X[:, valid] /= scale[valid]
@@ -53,7 +69,8 @@ def _prepare_matrix(haplotype_matrix, scaler, population):
 def pca(haplotype_matrix: HaplotypeMatrix,
         n_components: int = 10,
         scaler: Optional[str] = 'patterson',
-        population: Optional[Union[str, list]] = None):
+        population: Optional[Union[str, list]] = None,
+        missing_data: str = 'ignore'):
     """Principal Component Analysis on haplotype data.
 
     Parameters
@@ -69,6 +86,10 @@ def pca(haplotype_matrix: HaplotypeMatrix,
         None - center only (subtract mean)
     population : str or list, optional
         Population subset to use.
+    missing_data : str
+        'include' or 'pairwise' - impute missing to per-site mean
+        'exclude' - filter sites with any missing
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -77,7 +98,7 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     explained_variance_ratio : ndarray, float64, shape (n_components,)
         Proportion of variance explained by each component.
     """
-    X = _prepare_matrix(haplotype_matrix, scaler, population)
+    X = _prepare_matrix(haplotype_matrix, scaler, population, missing_data)
     n_samples, n_variants = X.shape
     n_components = min(n_components, min(n_samples, n_variants))
 
@@ -96,7 +117,8 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
                    scaler: Optional[str] = 'patterson',
                    population: Optional[Union[str, list]] = None,
                    n_iter: int = 3,
-                   random_state: Optional[int] = None):
+                   random_state: Optional[int] = None,
+                   missing_data: str = 'ignore'):
     """Randomized PCA using truncated SVD approximation.
 
     Faster than full PCA for large datasets where only a few
@@ -122,7 +144,7 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     coords : ndarray, float64, shape (n_samples, n_components)
     explained_variance_ratio : ndarray, float64, shape (n_components,)
     """
-    X = _prepare_matrix(haplotype_matrix, scaler, population)
+    X = _prepare_matrix(haplotype_matrix, scaler, population, missing_data)
     n_samples, n_variants = X.shape
     n_components = min(n_components, min(n_samples, n_variants))
 
@@ -160,7 +182,8 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
 
 def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
                       metric: str = 'euclidean',
-                      population: Optional[Union[str, list]] = None):
+                      population: Optional[Union[str, list]] = None,
+                      missing_data: str = 'ignore'):
     """Compute pairwise distances between samples.
 
     Parameters
@@ -172,12 +195,19 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
         'sqeuclidean'. Falls back to scipy for other metrics.
     population : str or list, optional
         Population subset.
+    missing_data : str
+        'include' or 'pairwise' - mask missing, normalize per pair
+        'exclude' - filter sites with any missing
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
     dist : ndarray, float64, shape (n_samples * (n_samples - 1) // 2,)
         Condensed distance matrix.
     """
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
     else:
@@ -186,8 +216,14 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    X = matrix.haplotypes.astype(cp.float64)
-    X = cp.where(X < 0, 0, X)
+    hap = matrix.haplotypes
+
+    if missing_data == 'exclude':
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        complete = missing_per_var == 0
+        hap = hap[:, complete]
+
+    X = cp.where(hap < 0, 0, hap).astype(cp.float64)
     n = X.shape[0]
 
     if metric in ('euclidean', 'sqeuclidean', 'cityblock'):

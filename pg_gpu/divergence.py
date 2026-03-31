@@ -279,27 +279,31 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
     pop2 : str or list
         Second population
     missing_data : str
-        'include' - Use all sites, calculate from available data per site
+        'include' or 'pairwise' - per-site sample sizes, ratio-of-sums
         'exclude' - Only use sites with no missing data
         'ignore' - Treat missing as reference allele (original behavior)
-        
+
     Returns
     -------
     float
         Weir & Cockerham's FST estimate
     """
+    # pairwise uses same ratio-of-sums as include for W-C
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     # Get population indices
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
-    
+
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
-    
+
     # Get haplotype data
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
-    
+
     # Handle missing data
     if missing_data == 'exclude':
         # Only use sites with no missing data
@@ -436,7 +440,8 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
         'ignore' - Treat missing as reference allele (original behavior)
-        
+        'pairwise' - Ratio-of-sums: sum(HT-HS) / sum(HT)
+
     Returns
     -------
     float
@@ -453,33 +458,34 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     # Get haplotype data
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
-    
+
+    # Pairwise mode: ratio-of-sums GST = sum(HT-HS) / sum(HT)
+    _is_pairwise = missing_data == 'pairwise'
+    if _is_pairwise:
+        missing_data = 'include'
+
     # Handle missing data
     if missing_data == 'exclude':
-        # Only use sites with no missing data
         valid_sites = cp.all(pop1_haps >= 0, axis=0) & cp.all(pop2_haps >= 0, axis=0)
         if not cp.any(valid_sites):
             return 0.0
         pop1_haps = pop1_haps[:, valid_sites]
         pop2_haps = pop2_haps[:, valid_sites]
     elif missing_data == 'include':
-        # Will handle missing data per site below
         pass
     elif missing_data == 'ignore':
-        # Treat missing as reference allele
         pop1_haps = cp.where(pop1_haps < 0, 0, pop1_haps)
         pop2_haps = cp.where(pop2_haps < 0, 0, pop2_haps)
-    
+
     # Get allele frequencies
     if missing_data == 'include':
-        # Calculate frequencies from non-missing data per site
         pop1_mask = pop1_haps >= 0
         pop2_mask = pop2_haps >= 0
         pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
         pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
         n1 = cp.sum(pop1_mask, axis=0)
         n2 = cp.sum(pop2_mask, axis=0)
-        
+
         pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
         pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
         valid1 = n1 > 0
@@ -491,11 +497,11 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
         pop2_freqs = cp.mean(pop2_haps, axis=0)
         n1 = len(pop1_idx)
         n2 = len(pop2_idx)
-    
+
     # Within-population heterozygosity
     hs1 = 2.0 * pop1_freqs * (1 - pop1_freqs)
     hs2 = 2.0 * pop2_freqs * (1 - pop2_freqs)
-    
+
     if missing_data == 'include':
         hs = cp.zeros_like(hs1)
         p_total = cp.zeros_like(pop1_freqs)
@@ -505,24 +511,31 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     else:
         hs = (hs1 * n1 + hs2 * n2) / (n1 + n2)
         p_total = (pop1_freqs * n1 + pop2_freqs * n2) / (n1 + n2)
-    
+
     ht = 2.0 * p_total * (1 - p_total)
-    
-    # Calculate GST for each SNP
+
+    # Calculate GST
     if missing_data == 'include':
-        # Only calculate for sites with sufficient data
         valid_mask = (ht > 0) & (n1 > 0) & (n2 > 0)
     else:
         valid_mask = ht > 0
+
+    if not cp.any(valid_mask):
+        return 0.0
+
+    # Pairwise / ratio-of-sums: sum(HT-HS) / sum(HT)
+    if _is_pairwise:
+        sum_ht = float(cp.sum(ht[valid_mask]).get())
+        sum_hs = float(cp.sum(hs[valid_mask]).get())
+        if sum_ht == 0:
+            return 0.0
+        return max(0.0, (sum_ht - sum_hs) / sum_ht)
+
     gst_per_snp = cp.zeros_like(ht)
     gst_per_snp[valid_mask] = (ht[valid_mask] - hs[valid_mask]) / ht[valid_mask]
-    
-    # Average across SNPs
-    if cp.any(valid_mask):
-        mean_gst = float(cp.mean(gst_per_snp[valid_mask]).get())
-        return max(0.0, mean_gst)
-    else:
-        return 0.0
+
+    mean_gst = float(cp.mean(gst_per_snp[valid_mask]).get())
+    return max(0.0, mean_gst)
 
 
 def dxy(haplotype_matrix: HaplotypeMatrix,
@@ -951,17 +964,25 @@ def _get_population_indices(haplotype_matrix: HaplotypeMatrix,
         return list(pop)
 
 
-def _pop_allele_counts(haplotype_matrix, pop):
+def _pop_allele_counts(haplotype_matrix, pop, missing_data='ignore'):
     """Compute per-variant allele counts for a population on GPU.
 
-    Returns (ac_0, ac_1, n) as CuPy arrays.
+    Returns (ac_0, ac_1, n) as CuPy arrays. When missing_data is
+    'include' or 'pairwise', n is per-site (array); otherwise scalar.
     """
     pop_idx = _get_population_indices(haplotype_matrix, pop)
     h = haplotype_matrix.haplotypes[pop_idx, :]
-    h = cp.where(h < 0, 0, h)
-    n = cp.float64(len(pop_idx))
-    ac_1 = cp.sum(h, axis=0).astype(cp.float64)
-    ac_0 = n - ac_1
+
+    if missing_data in ('include', 'pairwise'):
+        valid_mask = h >= 0
+        n = cp.sum(valid_mask, axis=0).astype(cp.float64)
+        ac_1 = cp.sum(cp.where(valid_mask, h, 0), axis=0).astype(cp.float64)
+        ac_0 = n - ac_1
+    else:
+        h = cp.where(h < 0, 0, h)
+        n = cp.float64(len(pop_idx))
+        ac_1 = cp.sum(h, axis=0).astype(cp.float64)
+        ac_0 = n - ac_1
     return ac_0, ac_1, n
 
 
@@ -1016,7 +1037,8 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
         window_start: int = 0,
         window_stop: Optional[int] = None,
         window_step: Optional[int] = None,
-        normed: bool = True):
+        normed: bool = True,
+        missing_data: str = 'ignore'):
     """Compute the Population Branch Statistic (PBS).
 
     PBS detects genomic regions unusually differentiated in pop1 relative
@@ -1038,6 +1060,9 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
         Stride between windows. Defaults to window_size (non-overlapping).
     normed : bool, optional
         If True (default), return normalized PBS (PBSn1).
+    missing_data : str
+        'include' or 'pairwise' - per-site sample sizes
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -1048,9 +1073,9 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix.transfer_to_gpu()
 
     # precompute allele counts once per population
-    ac1_0, ac1_1, n1 = _pop_allele_counts(haplotype_matrix, pop1)
-    ac2_0, ac2_1, n2 = _pop_allele_counts(haplotype_matrix, pop2)
-    ac3_0, ac3_1, n3 = _pop_allele_counts(haplotype_matrix, pop3)
+    ac1_0, ac1_1, n1 = _pop_allele_counts(haplotype_matrix, pop1, missing_data)
+    ac2_0, ac2_1, n2 = _pop_allele_counts(haplotype_matrix, pop2, missing_data)
+    ac3_0, ac3_1, n3 = _pop_allele_counts(haplotype_matrix, pop3, missing_data)
 
     # compute all three pairwise FST num/den from shared counts
     num12, den12 = _hudson_fst_from_counts(ac1_0, ac1_1, n1, ac2_0, ac2_1, n2)

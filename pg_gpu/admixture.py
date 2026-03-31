@@ -12,24 +12,41 @@ from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
 
 
-def _allele_freq(haplotype_matrix):
+def _allele_freq(haplotype_matrix, missing_data='ignore'):
     """Compute alternate allele frequency only (no heterozygosity)."""
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
     hap = haplotype_matrix.haplotypes
-    n_hap = hap.shape[0]
-    hap_clean = cp.where(hap >= 0, hap, 0)
-    n1 = cp.sum(hap_clean, axis=0).astype(cp.float64)
-    return n1 / cp.float64(n_hap)
+
+    if missing_data in ('include', 'pairwise'):
+        valid_mask = hap >= 0
+        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+        n1 = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
+        return cp.where(n_valid > 0, n1 / n_valid, 0.0)
+    elif missing_data == 'exclude':
+        valid_mask = hap >= 0
+        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+        n1 = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
+        freq = cp.where(n_valid > 0, n1 / n_valid, cp.nan)
+        # mark sites with any missing as NaN
+        has_missing = cp.any(hap < 0, axis=0)
+        freq[has_missing] = cp.nan
+        return freq
+    else:
+        n_hap = hap.shape[0]
+        hap_clean = cp.where(hap >= 0, hap, 0)
+        n1 = cp.sum(hap_clean, axis=0).astype(cp.float64)
+        return n1 / cp.float64(n_hap)
 
 
-def _allele_freq_and_het(haplotype_matrix):
+def _allele_freq_and_het(haplotype_matrix, missing_data='ignore'):
     """Compute alternate allele frequency and unbiased heterozygosity.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
+    missing_data : str
 
     Returns
     -------
@@ -38,23 +55,32 @@ def _allele_freq_and_het(haplotype_matrix):
     h : cupy.ndarray, float64, shape (n_variants,)
         Unbiased heterozygosity estimator: n0*n1 / (n*(n-1)).
     n : cupy.ndarray, float64, shape (n_variants,)
-        Allele number (total chromosomes).
+        Allele number per site (n_valid for include/pairwise, global for ignore).
     """
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
     hap = haplotype_matrix.haplotypes  # (n_haplotypes, n_variants)
-    n_hap = hap.shape[0]
 
-    hap_clean = cp.where(hap >= 0, hap, 0)
-    n1 = cp.sum(hap_clean, axis=0).astype(cp.float64)  # alt count
-    n0 = cp.float64(n_hap) - n1  # ref count
-    an = cp.float64(n_hap)
+    if missing_data in ('include', 'pairwise'):
+        valid_mask = hap >= 0
+        an = cp.sum(valid_mask, axis=0).astype(cp.float64)  # per-site n
+        n1 = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
+        n0 = an - n1
 
-    freq = n1 / an
-    h = (n0 * n1) / (an * (an - 1))
+        freq = cp.where(an > 0, n1 / an, 0.0)
+        h = cp.where(an > 1, (n0 * n1) / (an * (an - 1)), 0.0)
+        return freq, h, an
+    else:
+        n_hap = hap.shape[0]
+        hap_clean = cp.where(hap >= 0, hap, 0)
+        n1 = cp.sum(hap_clean, axis=0).astype(cp.float64)
+        n0 = cp.float64(n_hap) - n1
+        an = cp.float64(n_hap)
 
-    return freq, h, cp.full_like(freq, an)
+        freq = n1 / an
+        h = (n0 * n1) / (an * (an - 1))
+        return freq, h, cp.full_like(freq, an)
 
 
 def _moving_statistic(values, statistic, size, start=0, stop=None, step=None):
@@ -142,7 +168,8 @@ def _jackknife(values, statistic):
 
 def patterson_f2(haplotype_matrix: HaplotypeMatrix,
                  pop_a: Union[str, list],
-                 pop_b: Union[str, list]):
+                 pop_b: Union[str, list],
+                 missing_data: str = 'ignore'):
     """Unbiased estimator for F2(A, B), the branch length between populations.
 
     Parameters
@@ -150,6 +177,10 @@ def patterson_f2(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     pop_a, pop_b : str or list
         Population names or sample indices.
+    missing_data : str
+        'include' or 'pairwise' - per-site n_valid for frequencies
+        'exclude' - NaN at sites with any missing
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -159,8 +190,8 @@ def patterson_f2(haplotype_matrix: HaplotypeMatrix,
     ma = _get_population_matrix(haplotype_matrix, pop_a)
     mb = _get_population_matrix(haplotype_matrix, pop_b)
 
-    a, ha, sa = _allele_freq_and_het(ma)
-    b, hb, sb = _allele_freq_and_het(mb)
+    a, ha, sa = _allele_freq_and_het(ma, missing_data)
+    b, hb, sb = _allele_freq_and_het(mb, missing_data)
 
     f2 = ((a - b) ** 2) - (ha / sa) - (hb / sb)
     return f2.get()
@@ -169,7 +200,8 @@ def patterson_f2(haplotype_matrix: HaplotypeMatrix,
 def patterson_f3(haplotype_matrix: HaplotypeMatrix,
                  pop_c: Union[str, list],
                  pop_a: Union[str, list],
-                 pop_b: Union[str, list]):
+                 pop_b: Union[str, list],
+                 missing_data: str = 'ignore'):
     """Unbiased estimator for F3(C; A, B), the three-population admixture test.
 
     A significantly negative F3 indicates that population C is admixed
@@ -182,6 +214,10 @@ def patterson_f3(haplotype_matrix: HaplotypeMatrix,
         Test population.
     pop_a, pop_b : str or list
         Source populations.
+    missing_data : str
+        'include' or 'pairwise' - per-site n_valid
+        'exclude' - NaN at sites with any missing
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -189,19 +225,14 @@ def patterson_f3(haplotype_matrix: HaplotypeMatrix,
         Un-normalized F3 estimates per variant.
     B : ndarray, float64, shape (n_variants,)
         Heterozygosity estimates (2 * h_hat) for population C.
-
-    Notes
-    -----
-    For normalized F3*: ``np.nansum(T) / np.nansum(B)``.
-    For un-normalized F3: ``np.nanmean(T)``.
     """
     mc = _get_population_matrix(haplotype_matrix, pop_c)
     ma = _get_population_matrix(haplotype_matrix, pop_a)
     mb = _get_population_matrix(haplotype_matrix, pop_b)
 
-    c, hc, sc = _allele_freq_and_het(mc)
-    a, _, _ = _allele_freq_and_het(ma)
-    b, _, _ = _allele_freq_and_het(mb)
+    c, hc, sc = _allele_freq_and_het(mc, missing_data)
+    a, _, _ = _allele_freq_and_het(ma, missing_data)
+    b, _, _ = _allele_freq_and_het(mb, missing_data)
 
     T = ((c - a) * (c - b)) - (hc / sc)
     B = 2 * hc
@@ -213,7 +244,8 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
                 pop_a: Union[str, list],
                 pop_b: Union[str, list],
                 pop_c: Union[str, list],
-                pop_d: Union[str, list]):
+                pop_d: Union[str, list],
+                missing_data: str = 'ignore'):
     """Unbiased estimator for D(A, B; C, D), the ABBA-BABA test.
 
     Tests for admixture between (A or B) and (C or D).
@@ -223,6 +255,10 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     pop_a, pop_b, pop_c, pop_d : str or list
         Population names or sample indices.
+    missing_data : str
+        'include' or 'pairwise' - per-site n_valid
+        'exclude' - NaN at sites with any missing
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -230,20 +266,16 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
         Numerator (un-normalized F4 estimates).
     den : ndarray, float64, shape (n_variants,)
         Denominator.
-
-    Notes
-    -----
-    Normalized D: ``np.nansum(num) / np.nansum(den)``.
     """
     ma = _get_population_matrix(haplotype_matrix, pop_a)
     mb = _get_population_matrix(haplotype_matrix, pop_b)
     mc = _get_population_matrix(haplotype_matrix, pop_c)
     md = _get_population_matrix(haplotype_matrix, pop_d)
 
-    a = _allele_freq(ma)
-    b = _allele_freq(mb)
-    c = _allele_freq(mc)
-    d = _allele_freq(md)
+    a = _allele_freq(ma, missing_data)
+    b = _allele_freq(mb, missing_data)
+    c = _allele_freq(mc, missing_data)
+    d = _allele_freq(md, missing_data)
 
     num = (a - b) * (c - d)
     den = (a + b - 2 * a * b) * (c + d - 2 * c * d)
@@ -263,7 +295,8 @@ def moving_patterson_f3(haplotype_matrix: HaplotypeMatrix,
                         start: int = 0,
                         stop: Optional[int] = None,
                         step: Optional[int] = None,
-                        normed: bool = True):
+                        normed: bool = True,
+                        missing_data: str = 'ignore'):
     """Estimate F3(C; A, B) in moving windows.
 
     Parameters
@@ -275,12 +308,14 @@ def moving_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     start, stop, step : int, optional
     normed : bool
         If True, compute normalized F3* per window.
+    missing_data : str
 
     Returns
     -------
     f3 : ndarray, float64, shape (n_windows,)
     """
-    T, B = patterson_f3(haplotype_matrix, pop_c, pop_a, pop_b)
+    T, B = patterson_f3(haplotype_matrix, pop_c, pop_a, pop_b,
+                         missing_data=missing_data)
 
     if normed:
         T_bsum = _moving_statistic(T, np.nansum, size, start, stop, step)
@@ -300,7 +335,8 @@ def moving_patterson_d(haplotype_matrix: HaplotypeMatrix,
                        size: int,
                        start: int = 0,
                        stop: Optional[int] = None,
-                       step: Optional[int] = None):
+                       step: Optional[int] = None,
+                       missing_data: str = 'ignore'):
     """Estimate D(A, B; C, D) in moving windows.
 
     Parameters
@@ -309,12 +345,14 @@ def moving_patterson_d(haplotype_matrix: HaplotypeMatrix,
     pop_a, pop_b, pop_c, pop_d : str or list
     size : int
     start, stop, step : int, optional
+    missing_data : str
 
     Returns
     -------
     d : ndarray, float64, shape (n_windows,)
     """
-    num, den = patterson_d(haplotype_matrix, pop_a, pop_b, pop_c, pop_d)
+    num, den = patterson_d(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
+                            missing_data=missing_data)
     num_sum = _moving_statistic(num, np.nansum, size, start, stop, step)
     den_sum = _moving_statistic(den, np.nansum, size, start, stop, step)
     return num_sum / den_sum
@@ -329,7 +367,8 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
                          pop_a: Union[str, list],
                          pop_b: Union[str, list],
                          blen: int,
-                         normed: bool = True):
+                         normed: bool = True,
+                         missing_data: str = 'ignore'):
     """Estimate F3(C; A, B) with standard error via block-jackknife.
 
     Parameters
@@ -340,6 +379,7 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
         Block size (number of variants).
     normed : bool
         If True, compute normalized F3*.
+    missing_data : str
 
     Returns
     -------
@@ -354,7 +394,8 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     vj : ndarray
         Jackknife resampled values.
     """
-    T, B = patterson_f3(haplotype_matrix, pop_c, pop_a, pop_b)
+    T, B = patterson_f3(haplotype_matrix, pop_c, pop_a, pop_b,
+                         missing_data=missing_data)
 
     if normed:
         f3 = np.nansum(T) / np.nansum(B)
@@ -379,7 +420,8 @@ def average_patterson_d(haplotype_matrix: HaplotypeMatrix,
                         pop_b: Union[str, list],
                         pop_c: Union[str, list],
                         pop_d: Union[str, list],
-                        blen: int):
+                        blen: int,
+                        missing_data: str = 'ignore'):
     """Estimate D(A, B; C, D) with standard error via block-jackknife.
 
     Parameters
@@ -388,6 +430,7 @@ def average_patterson_d(haplotype_matrix: HaplotypeMatrix,
     pop_a, pop_b, pop_c, pop_d : str or list
     blen : int
         Block size (number of variants).
+    missing_data : str
 
     Returns
     -------
@@ -402,7 +445,8 @@ def average_patterson_d(haplotype_matrix: HaplotypeMatrix,
     vj : ndarray
         Jackknife resampled values.
     """
-    num, den = patterson_d(haplotype_matrix, pop_a, pop_b, pop_c, pop_d)
+    num, den = patterson_d(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
+                            missing_data=missing_data)
 
     d_avg = np.nansum(num) / np.nansum(den)
 

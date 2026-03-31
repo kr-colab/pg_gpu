@@ -974,64 +974,66 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
 
 
 def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
-                       population: Optional[Union[str, list]] = None) -> float:
+                       population: Optional[Union[str, list]] = None,
+                       missing_data: str = 'ignore') -> float:
     """
     Calculate haplotype diversity for a population.
-    
-    Haplotype diversity is defined as 1 - sum(p_i^2) where p_i is the 
+
+    Haplotype diversity is defined as 1 - sum(p_i^2) where p_i is the
     frequency of the i-th unique haplotype in the population.
-    
+
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
         The haplotype data
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
-        
+    missing_data : str
+        'include' or 'pairwise' - exclude haplotypes with any missing data
+        'exclude' - filter to sites with no missing data
+        'ignore' - treat -1 as 0
+
     Returns
     -------
     float
         Haplotype diversity value
     """
-    # Get population subset if specified
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
-    
-    # Ensure on GPU for efficient computation
+
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
-    
-    # Get haplotypes array
-    haplotypes = matrix.haplotypes  # shape: (n_haplotypes, n_variants)
-    n_haplotypes = matrix.num_haplotypes
-    
+
+    haplotypes = matrix.haplotypes
+    haplotypes_cpu = haplotypes.get() if matrix.device == 'GPU' else haplotypes
+
+    if missing_data == 'exclude':
+        missing_per_var = np.sum(haplotypes_cpu < 0, axis=0)
+        complete = missing_per_var == 0
+        haplotypes_cpu = haplotypes_cpu[:, complete]
+    elif missing_data == 'include':
+        # exclude haplotypes with any missing site
+        has_missing = np.any(haplotypes_cpu < 0, axis=1)
+        haplotypes_cpu = haplotypes_cpu[~has_missing]
+    else:
+        haplotypes_cpu = np.maximum(haplotypes_cpu, 0)
+
+    n_haplotypes = haplotypes_cpu.shape[0]
     if n_haplotypes <= 1:
         return 0.0
-    
-    # Find unique haplotypes and their counts
-    # Convert each haplotype to a string representation for hashing
-    if matrix.device == 'GPU':
-        # Convert to CPU for unique operations (CuPy doesn't have good unique support for 2D)
-        haplotypes_cpu = haplotypes.get()
-    else:
-        haplotypes_cpu = haplotypes
-    
-    # Convert haplotypes to string representation for finding uniques
-    hap_strings = [''.join(map(str, hap)) for hap in haplotypes_cpu]
-    
-    # Count unique haplotypes
+
     from collections import Counter
+    hap_strings = [''.join(map(str, hap)) for hap in haplotypes_cpu]
     hap_counts = Counter(hap_strings)
-    
-    # Calculate frequencies
+
     frequencies = np.array(list(hap_counts.values())) / n_haplotypes
-    
-    # Calculate diversity: 1 - sum(p_i^2)
-    # Apply Nei's correction for finite sample size: multiply by n/(n-1)
     diversity = (1.0 - np.sum(frequencies ** 2)) * n_haplotypes / (n_haplotypes - 1)
-    
+
     return float(diversity)
 
 
@@ -1397,19 +1399,27 @@ def zeng_dh(haplotype_matrix: HaplotypeMatrix,
 
 
 def max_daf(haplotype_matrix: HaplotypeMatrix,
-            population: Optional[Union[str, list]] = None) -> float:
+            population: Optional[Union[str, list]] = None,
+            missing_data: str = 'ignore') -> float:
     """Maximum derived allele frequency across all variants.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
+    missing_data : str
+        'include' or 'pairwise' - per-site n_valid for frequency
+        'exclude' - only sites with no missing data
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
     float
         Maximum DAF in [0, 1].
     """
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
     else:
@@ -1418,27 +1428,51 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    hap = cp.maximum(matrix.haplotypes, 0)
-    n = hap.shape[0]
-    dac = cp.sum(hap, axis=0).astype(cp.float64)
-    freqs = dac / n
+    hap = matrix.haplotypes
+
+    if missing_data == 'include':
+        valid_mask = hap >= 0
+        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+        dac = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
+        usable = n_valid > 0
+        freqs = cp.where(usable, dac / n_valid, 0.0)
+    elif missing_data == 'exclude':
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        complete = missing_per_var == 0
+        hap_clean = cp.where(hap >= 0, hap, 0)
+        n = hap.shape[0]
+        dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
+        freqs = cp.where(complete, dac / n, -1.0)  # -1 so excluded sites aren't max
+    else:
+        hap_clean = cp.maximum(hap, 0)
+        n = hap.shape[0]
+        dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
+        freqs = dac / n
 
     return float(cp.max(freqs).get())
 
 
 def haplotype_count(haplotype_matrix: HaplotypeMatrix,
-                    population: Optional[Union[str, list]] = None) -> int:
+                    population: Optional[Union[str, list]] = None,
+                    missing_data: str = 'ignore') -> int:
     """Count distinct haplotypes.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
+    missing_data : str
+        'include' or 'pairwise' - exclude haplotypes with any missing
+        'exclude' - filter to sites with no missing data
+        'ignore' - treat -1 as 0
 
     Returns
     -------
     int
     """
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
     else:
@@ -1448,12 +1482,23 @@ def haplotype_count(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     hap_cpu = matrix.haplotypes.get().astype(np.int8)
+
+    if missing_data == 'exclude':
+        missing_per_var = np.sum(hap_cpu < 0, axis=0)
+        hap_cpu = hap_cpu[:, missing_per_var == 0]
+    elif missing_data == 'include':
+        has_missing = np.any(hap_cpu < 0, axis=1)
+        hap_cpu = hap_cpu[~has_missing]
+    else:
+        hap_cpu = np.maximum(hap_cpu, 0)
+
     hap_bytes = np.array([row.tobytes() for row in hap_cpu])
     return len(np.unique(hap_bytes))
 
 
 def daf_histogram(matrix, n_bins: int = 20,
-                  population: Optional[Union[str, list]] = None):
+                  population: Optional[Union[str, list]] = None,
+                  missing_data: str = 'ignore'):
     """Normalized histogram of derived allele frequencies.
 
     Accepts HaplotypeMatrix or GenotypeMatrix. For diploid data,
@@ -1465,6 +1510,10 @@ def daf_histogram(matrix, n_bins: int = 20,
     n_bins : int
         Number of frequency bins spanning [0, 1].
     population : str or list, optional
+    missing_data : str
+        'include' or 'pairwise' - per-site n_valid for frequency
+        'exclude' - only sites with no missing data
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
@@ -1472,6 +1521,9 @@ def daf_histogram(matrix, n_bins: int = 20,
         Normalized counts (sum to 1).
     bin_edges : ndarray, float64, shape (n_bins + 1,)
     """
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     from .genotype_matrix import GenotypeMatrix
 
     if isinstance(matrix, GenotypeMatrix):
@@ -1483,9 +1535,26 @@ def daf_histogram(matrix, n_bins: int = 20,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    hap = cp.maximum(matrix.haplotypes, 0)
-    n = hap.shape[0]
-    dafs = cp.sum(hap, axis=0).astype(cp.float64) / n
+    hap = matrix.haplotypes
+
+    if missing_data == 'include':
+        valid_mask = hap >= 0
+        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+        dac = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
+        usable = n_valid > 0
+        dafs = cp.where(usable, dac / n_valid, 0.0)
+    elif missing_data == 'exclude':
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        complete = missing_per_var == 0
+        hap_clean = cp.where(hap >= 0, hap, 0)
+        n = hap.shape[0]
+        dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
+        dafs = dac / n
+        dafs = dafs[complete]  # filter to complete sites
+    else:
+        hap_clean = cp.maximum(hap, 0)
+        n = hap.shape[0]
+        dafs = cp.sum(hap_clean, axis=0).astype(cp.float64) / n
 
     return _histogram_from_dafs(dafs, n_bins)
 
@@ -1615,13 +1684,17 @@ def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
         Population name or sample indices.
     missing_data : str
         'ignore' - treat missing as reference allele
-        'exclude' - skip sites with any missing data
+        'exclude' - NaN at sites with any missing data
+        'include' or 'pairwise' - per-site n_valid for frequency calculation
 
     Returns
     -------
     ndarray, float64, shape (n_variants,)
         Expected heterozygosity per variant.
     """
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
     else:
@@ -1631,25 +1704,34 @@ def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     hap = matrix.haplotypes  # (n_haplotypes, n_variants)
-    n = hap.shape[0]
-
-    # only create a cleaned copy if missing data actually exists
     has_missing = cp.any(hap < 0)
-    hap_for_sum = cp.where(hap >= 0, hap, 0) if has_missing else hap
-    dac = cp.sum(hap_for_sum, axis=0).astype(cp.float64)
-    p = dac / n
-    he = 2.0 * p * (1.0 - p)
 
-    if missing_data == 'exclude' and has_missing:
-        missing_per_var = cp.sum(hap < 0, axis=0)
-        he[missing_per_var > 0] = cp.nan
+    if missing_data == 'include' and has_missing:
+        valid_mask = hap >= 0
+        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+        hap_clean = cp.where(valid_mask, hap, 0)
+        dac = cp.sum(hap_clean, axis=0).astype(cp.float64)
+        p = cp.where(n_valid > 0, dac / n_valid, 0.0)
+        he = 2.0 * p * (1.0 - p)
+        he = cp.where(n_valid >= 2, he, cp.nan)
+    else:
+        n = hap.shape[0]
+        hap_for_sum = cp.where(hap >= 0, hap, 0) if has_missing else hap
+        dac = cp.sum(hap_for_sum, axis=0).astype(cp.float64)
+        p = dac / n
+        he = 2.0 * p * (1.0 - p)
+
+        if missing_data == 'exclude' and has_missing:
+            missing_per_var = cp.sum(hap < 0, axis=0)
+            he[missing_per_var > 0] = cp.nan
 
     return he.get()
 
 
 def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
                             population: Optional[Union[str, list]] = None,
-                            ploidy: int = 2):
+                            ploidy: int = 2,
+                            missing_data: str = 'include'):
     """
     Compute observed heterozygosity per variant.
 
@@ -1664,14 +1746,20 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or sample indices.
     ploidy : int
-        Ploidy level. Default 2 (diploid). Consecutive haplotypes in
-        groups of `ploidy` are treated as belonging to one individual.
+        Ploidy level. Default 2 (diploid).
+    missing_data : str
+        'include' or 'pairwise' - skip missing individuals per site (default)
+        'exclude' - NaN at sites with any missing data
+        'ignore' - treat -1 as 0
 
     Returns
     -------
     ndarray, float64, shape (n_variants,)
         Observed heterozygosity per variant.
     """
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
     else:
@@ -1687,14 +1775,15 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
         raise ValueError(
             f"Number of haplotypes ({n_hap}) not divisible by ploidy ({ploidy})")
 
+    if missing_data == 'ignore':
+        hap = cp.maximum(hap, 0)
+
     n_individuals = n_hap // ploidy
 
     if ploidy == 2:
-        # fast path for diploid: compare consecutive pairs
-        h1 = hap[0::2]  # even-indexed haplotypes
-        h2 = hap[1::2]  # odd-indexed haplotypes
+        h1 = hap[0::2]
+        h2 = hap[1::2]
 
-        # a site is het if h1 != h2 (and neither is missing)
         valid = (h1 >= 0) & (h2 >= 0)
         het = (h1 != h2) & valid
         n_valid = cp.sum(valid, axis=0).astype(cp.float64)
@@ -1702,7 +1791,6 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
 
         ho = cp.where(n_valid > 0, n_het / n_valid, cp.nan)
     else:
-        # general ploidy: het if not all alleles identical within individual
         n_variants = hap.shape[1]
         n_het = cp.zeros(n_variants, dtype=cp.float64)
         n_valid_ind = cp.zeros(n_variants, dtype=cp.float64)
@@ -1716,12 +1804,19 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
 
         ho = cp.where(n_valid_ind > 0, n_het / n_valid_ind, cp.nan)
 
+    if missing_data == 'exclude':
+        has_missing = cp.any(hap < 0)
+        if has_missing:
+            missing_per_var = cp.sum(hap < 0, axis=0)
+            ho[missing_per_var > 0] = cp.nan
+
     return ho.get()
 
 
 def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
                            population: Optional[Union[str, list]] = None,
-                           ploidy: int = 2):
+                           ploidy: int = 2,
+                           missing_data: str = 'include'):
     """
     Compute Wright's inbreeding coefficient F per variant.
 
@@ -1736,14 +1831,18 @@ def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
         Population name or sample indices.
     ploidy : int
         Ploidy level for observed heterozygosity computation.
+    missing_data : str
+        Passed to heterozygosity_expected and heterozygosity_observed.
 
     Returns
     -------
     ndarray, float64, shape (n_variants,)
         Inbreeding coefficient per variant. NaN where He = 0.
     """
-    ho = heterozygosity_observed(haplotype_matrix, population, ploidy)
-    he = heterozygosity_expected(haplotype_matrix, population)
+    ho = heterozygosity_observed(haplotype_matrix, population, ploidy,
+                                 missing_data=missing_data)
+    he = heterozygosity_expected(haplotype_matrix, population,
+                                 missing_data=missing_data)
 
     # F = 1 - Ho/He; undefined where He = 0
     with np.errstate(divide='ignore', invalid='ignore'):
@@ -1786,7 +1885,8 @@ def mu_var(haplotype_matrix: HaplotypeMatrix,
 
 
 def mu_sfs(haplotype_matrix: HaplotypeMatrix,
-           population: Optional[Union[str, list]] = None) -> float:
+           population: Optional[Union[str, list]] = None,
+           missing_data: str = 'ignore') -> float:
     """mu_SFS: fraction of SNPs at SFS edges (RAiSD).
 
     Counts singletons (DAC=1) and near-fixed variants (DAC=n-1),
@@ -1796,11 +1896,18 @@ def mu_sfs(haplotype_matrix: HaplotypeMatrix,
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
+    missing_data : str
+        'include' or 'pairwise' - per-site n_valid for edge classification
+        'exclude' - only sites with no missing data
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
     float
     """
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
     else:
@@ -1809,17 +1916,33 @@ def mu_sfs(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    hap = cp.maximum(matrix.haplotypes, 0)
-    n = hap.shape[0]
-    dac = cp.sum(hap, axis=0)
+    hap = matrix.haplotypes
 
-    is_seg = (dac > 0) & (dac < n)
+    if missing_data == 'include':
+        valid_mask = hap >= 0
+        n_valid = cp.sum(valid_mask, axis=0)
+        dac = cp.sum(cp.where(valid_mask, hap, 0), axis=0)
+        usable = n_valid >= 2
+        is_seg = usable & (dac > 0) & (dac < n_valid)
+        is_edge = usable & ((dac == 1) | (dac == n_valid - 1))
+    elif missing_data == 'exclude':
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        complete = missing_per_var == 0
+        hap_clean = cp.where(hap >= 0, hap, 0)
+        n = hap.shape[0]
+        dac = cp.sum(hap_clean, axis=0)
+        is_seg = complete & (dac > 0) & (dac < n)
+        is_edge = complete & ((dac == 1) | (dac == n - 1))
+    else:
+        hap_clean = cp.maximum(hap, 0)
+        n = hap.shape[0]
+        dac = cp.sum(hap_clean, axis=0)
+        is_seg = (dac > 0) & (dac < n)
+        is_edge = (dac == 1) | (dac == n - 1)
+
     n_seg = cp.sum(is_seg)
-
     if int(n_seg.get()) == 0:
         return 0.0
 
-    is_edge = (dac == 1) | (dac == n - 1)
     n_edge = cp.sum(is_edge)
-
     return float((n_edge.astype(cp.float64) / n_seg.astype(cp.float64)).get())

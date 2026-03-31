@@ -20,7 +20,8 @@ def _extract_upper_triangle(mat):
     return mat[idx_i, idx_j]
 
 
-def pairwise_diffs_haploid(haplotype_matrix, population=None):
+def pairwise_diffs_haploid(haplotype_matrix, population=None,
+                           missing_data='ignore'):
     """Compute pairwise Hamming distances between haplotypes on GPU.
 
     Uses a single matrix multiply: for 0/1 data,
@@ -30,11 +31,20 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None):
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
+    missing_data : str
+        'include' or 'pairwise' - normalize by jointly-valid sites per pair
+        'exclude' - only use sites with no missing data
+        'ignore' - treat missing as reference allele
 
     Returns
     -------
     diffs : cupy.ndarray, float64, condensed form (n_pairs,)
+        For 'include'/'pairwise', values are per-site average differences.
+        For 'ignore'/'exclude', values are total Hamming distances.
     """
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     if population is not None:
         matrix = get_population_matrix(haplotype_matrix, population)
     else:
@@ -43,7 +53,30 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None):
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    X = cp.maximum(matrix.haplotypes, 0).astype(cp.float64)
+    hap = matrix.haplotypes
+
+    if missing_data == 'exclude':
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        complete = missing_per_var == 0
+        hap = hap[:, complete]
+        X = hap.astype(cp.float64)
+    elif missing_data == 'include':
+        # Mask missing as 0 for diff calculation, track valid sites per pair
+        valid_mask = (hap >= 0).astype(cp.float64)
+        X = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+
+        row_sums = cp.sum(X, axis=1)
+        gram = X @ X.T
+        diffs_mat = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
+
+        # jointly-valid sites per pair
+        joint_valid = valid_mask @ valid_mask.T
+        # normalize: per-site average difference
+        diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
+        return _extract_upper_triangle(diffs_mat)
+    else:
+        X = cp.maximum(hap, 0).astype(cp.float64)
+
     row_sums = cp.sum(X, axis=1)
     gram = X @ X.T
     diffs_mat = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
@@ -51,7 +84,8 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None):
     return _extract_upper_triangle(diffs_mat)
 
 
-def pairwise_diffs_diploid(genotype_matrix, population=None):
+def pairwise_diffs_diploid(genotype_matrix, population=None,
+                           missing_data='ignore'):
     """Compute pairwise genotype differences between diploid individuals.
 
     For 0/1/2 genotypes, uses indicator matrices: matches = I0.T@I0 +
@@ -61,11 +95,18 @@ def pairwise_diffs_diploid(genotype_matrix, population=None):
     ----------
     genotype_matrix : GenotypeMatrix
     population : str or list, optional
+    missing_data : str
+        'include' or 'pairwise' - normalize by jointly-valid sites per pair
+        'exclude' - only sites with no missing data
+        'ignore' - treat missing as 0
 
     Returns
     -------
     diffs : cupy.ndarray, float64, condensed form (n_pairs,)
     """
+    if missing_data == 'pairwise':
+        missing_data = 'include'
+
     if population is not None:
         pop_idx = genotype_matrix.sample_sets.get(population)
         if pop_idx is None:
@@ -77,20 +118,39 @@ def pairwise_diffs_diploid(genotype_matrix, population=None):
     if not isinstance(geno, cp.ndarray):
         geno = cp.asarray(geno)
 
-    geno = cp.maximum(geno, 0)
-    n_var = cp.float64(geno.shape[1])
+    if missing_data == 'exclude':
+        missing_per_var = cp.sum(geno < 0, axis=0)
+        complete = missing_per_var == 0
+        geno = geno[:, complete]
 
-    I0 = (geno == 0).astype(cp.float64)
-    I1 = (geno == 1).astype(cp.float64)
-    I2 = (geno == 2).astype(cp.float64)
+    if missing_data == 'include':
+        valid_mask = (geno >= 0).astype(cp.float64)
+        geno_clean = cp.maximum(geno, 0)
 
-    matches = I0 @ I0.T + I1 @ I1.T + I2 @ I2.T
-    diffs_mat = n_var - matches
+        I0 = (geno_clean == 0).astype(cp.float64) * valid_mask
+        I1 = (geno_clean == 1).astype(cp.float64) * valid_mask
+        I2 = (geno_clean == 2).astype(cp.float64) * valid_mask
+
+        matches = I0 @ I0.T + I1 @ I1.T + I2 @ I2.T
+        joint_valid = valid_mask @ valid_mask.T
+        diffs_mat = joint_valid - matches
+        # normalize per jointly-valid sites
+        diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
+    else:
+        geno = cp.maximum(geno, 0)
+        n_var = cp.float64(geno.shape[1])
+
+        I0 = (geno == 0).astype(cp.float64)
+        I1 = (geno == 1).astype(cp.float64)
+        I2 = (geno == 2).astype(cp.float64)
+
+        matches = I0 @ I0.T + I1 @ I1.T + I2 @ I2.T
+        diffs_mat = n_var - matches
 
     return _extract_upper_triangle(diffs_mat)
 
 
-def dist_moments(matrix, population=None):
+def dist_moments(matrix, population=None, missing_data='ignore'):
     """Compute variance, skewness, and kurtosis of pairwise distances.
 
     Computes the distance matrix once and derives all three moments,
@@ -100,6 +160,7 @@ def dist_moments(matrix, population=None):
     ----------
     matrix : HaplotypeMatrix or GenotypeMatrix
     population : str or list, optional
+    missing_data : str
 
     Returns
     -------
@@ -107,7 +168,7 @@ def dist_moments(matrix, population=None):
     skew : float
     kurt : float
     """
-    diffs = _get_diffs(matrix, population)
+    diffs = _get_diffs(matrix, population, missing_data)
     n = diffs.shape[0]
 
     if n < 2:
@@ -135,49 +196,22 @@ def dist_moments(matrix, population=None):
     return var_val, skew_val, kurt_val
 
 
-def dist_var(matrix, population=None):
-    """Variance of pairwise distance distribution.
-
-    Parameters
-    ----------
-    matrix : HaplotypeMatrix or GenotypeMatrix
-
-    Returns
-    -------
-    float
-    """
-    return dist_moments(matrix, population)[0]
+def dist_var(matrix, population=None, missing_data='ignore'):
+    """Variance of pairwise distance distribution."""
+    return dist_moments(matrix, population, missing_data)[0]
 
 
-def dist_skew(matrix, population=None):
-    """Skewness of pairwise distance distribution.
-
-    Parameters
-    ----------
-    matrix : HaplotypeMatrix or GenotypeMatrix
-
-    Returns
-    -------
-    float
-    """
-    return dist_moments(matrix, population)[1]
+def dist_skew(matrix, population=None, missing_data='ignore'):
+    """Skewness of pairwise distance distribution."""
+    return dist_moments(matrix, population, missing_data)[1]
 
 
-def dist_kurt(matrix, population=None):
-    """Excess kurtosis of pairwise distance distribution.
-
-    Parameters
-    ----------
-    matrix : HaplotypeMatrix or GenotypeMatrix
-
-    Returns
-    -------
-    float
-    """
-    return dist_moments(matrix, population)[2]
+def dist_kurt(matrix, population=None, missing_data='ignore'):
+    """Excess kurtosis of pairwise distance distribution."""
+    return dist_moments(matrix, population, missing_data)[2]
 
 
-def pairwise_diffs(matrix, population=None):
+def pairwise_diffs(matrix, population=None, missing_data='ignore'):
     """Compute pairwise Hamming distances on GPU.
 
     Accepts HaplotypeMatrix (0/1 data, single matrix multiply) or
@@ -188,15 +222,16 @@ def pairwise_diffs(matrix, population=None):
     ----------
     matrix : HaplotypeMatrix or GenotypeMatrix
     population : str or list, optional
+    missing_data : str
 
     Returns
     -------
     diffs : cupy.ndarray, float64, condensed form (n_pairs,)
     """
     if isinstance(matrix, GenotypeMatrix):
-        return pairwise_diffs_diploid(matrix, population)
+        return pairwise_diffs_diploid(matrix, population, missing_data)
     else:
-        return pairwise_diffs_haploid(matrix, population)
+        return pairwise_diffs_haploid(matrix, population, missing_data)
 
 
 # internal alias
