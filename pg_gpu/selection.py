@@ -99,7 +99,7 @@ def standardize_by_allele_count(score, aac, bins=None, n_bins=None):
 # Public API: Garud's H statistics
 # ---------------------------------------------------------------------------
 
-def garud_h(matrix, population=None):
+def garud_h(matrix, population=None, missing_data='include'):
     """Compute Garud's H1, H12, H123, and H2/H1 statistics.
 
     Accepts either HaplotypeMatrix (uses haplotype frequencies) or
@@ -112,6 +112,9 @@ def garud_h(matrix, population=None):
         Haplotype or diploid genotype data.
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples.
+    missing_data : str
+        'include' - exclude haplotypes with any missing site
+        'exclude' - filter to sites with no missing data
 
     Returns
     -------
@@ -136,7 +139,16 @@ def garud_h(matrix, population=None):
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
-    f = _distinct_haplotype_frequencies(haplotype_matrix.haplotypes)
+    hap = haplotype_matrix.haplotypes
+    if missing_data == 'exclude':
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        hap = hap[:, missing_per_var == 0]
+    else:
+        # exclude haplotypes with any missing
+        has_missing = cp.any(hap < 0, axis=1)
+        hap = hap[~has_missing]
+
+    f = _distinct_haplotype_frequencies(hap)
 
     return _garud_from_freqs(f)
 
@@ -224,7 +236,8 @@ garud_h_diploid = _garud_h_diploid
 # ---------------------------------------------------------------------------
 
 def nsl(haplotype_matrix: HaplotypeMatrix,
-        population: Optional[Union[str, list]] = None):
+        population: Optional[Union[str, list]] = None,
+        missing_data: str = 'include'):
     """Compute the unstandardized nSL statistic for each variant.
 
     Compares the mean shared haplotype length around the reference (0)
@@ -236,6 +249,9 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
         Haplotype data.
     population : str or list, optional
         Population name or list of sample indices.
+    missing_data : str
+        'include' - missing extends shared suffix length (default)
+        'exclude' - filter to sites with no missing data before scan
 
     Returns
     -------
@@ -249,6 +265,13 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
 
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
+
+    if missing_data == 'exclude':
+        missing_per_var = matrix.count_missing(axis=0)
+        valid = cp.where(missing_per_var == 0)[0]
+        if len(valid) == 0:
+            return np.full(matrix.num_variants, np.nan)
+        matrix = matrix.get_subset(valid)
 
     # pg_gpu: (n_haplotypes, n_variants) -> allel convention: (n_variants, n_haplotypes)
     hap = matrix.haplotypes.T  # now (n_variants, n_haplotypes)
@@ -270,7 +293,8 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
 
 def xpnsl(haplotype_matrix: HaplotypeMatrix,
           pop1: Union[str, list],
-          pop2: Union[str, list]):
+          pop2: Union[str, list],
+          missing_data: str = 'include'):
     """Compute the unstandardized cross-population nSL statistic.
 
     Parameters
@@ -281,12 +305,24 @@ def xpnsl(haplotype_matrix: HaplotypeMatrix,
         First population name or sample indices.
     pop2 : str or list
         Second population name or sample indices.
+    missing_data : str
+        'include' - missing extends shared suffix length (default)
+        'exclude' - filter to sites with no missing data before scan
 
     Returns
     -------
     score : ndarray, float, shape (n_variants,)
         Unstandardized XP-nSL scores: log(nSL_pop1 / nSL_pop2).
     """
+    if missing_data == 'exclude':
+        if haplotype_matrix.device == 'CPU':
+            haplotype_matrix.transfer_to_gpu()
+        missing_per_var = cp.sum(haplotype_matrix.haplotypes < 0, axis=0)
+        valid = cp.where(missing_per_var == 0)[0]
+        if len(valid) == 0:
+            return np.full(haplotype_matrix.num_variants, np.nan)
+        haplotype_matrix = haplotype_matrix.get_subset(valid)
+
     m1 = _get_population_matrix(haplotype_matrix, pop1)
     m2 = _get_population_matrix(haplotype_matrix, pop2)
 
@@ -326,7 +362,8 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
         gap_scale: int = 20000,
         max_gap: int = 200000,
         is_accessible=None,
-        population: Optional[Union[str, list]] = None):
+        population: Optional[Union[str, list]] = None,
+        missing_data: str = 'include'):
     """Compute the unstandardized integrated haplotype score (iHS).
 
     Compares the integrated EHH for the reference vs alternate allele
@@ -354,6 +391,9 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
         Genome accessibility mask.
     population : str or list, optional
         Population name or sample indices.
+    missing_data : str
+        'include' - missing extends shared suffix length (default)
+        'exclude' - filter to sites with no missing data before scan
 
     Returns
     -------
@@ -367,6 +407,15 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
 
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
+
+    if missing_data == 'exclude':
+        missing_per_var = matrix.count_missing(axis=0)
+        valid = cp.where(missing_per_var == 0)[0]
+        if len(valid) == 0:
+            return np.full(matrix.num_variants, np.nan)
+        matrix = matrix.get_subset(valid)
+        if pos is not None:
+            pos = np.asarray(pos)[valid.get()]
 
     if pos is None:
         pos = matrix.positions
@@ -404,7 +453,8 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
           include_edges: bool = False,
           gap_scale: int = 20000,
           max_gap: int = 200000,
-          is_accessible=None):
+          is_accessible=None,
+          missing_data: str = 'include'):
     """Compute the unstandardized cross-population EHH (XP-EHH) statistic.
 
     Parameters
@@ -429,12 +479,25 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
         Mark gaps larger than this as invalid.
     is_accessible : array_like, optional
         Genome accessibility mask.
+    missing_data : str
+        'include' - missing extends shared suffix length (default)
+        'exclude' - filter to sites with no missing data before scan
 
     Returns
     -------
     score : ndarray, float, shape (n_variants,)
         Unstandardized XP-EHH scores: log(IHH_pop1 / IHH_pop2).
     """
+    if missing_data == 'exclude':
+        if haplotype_matrix.device == 'CPU':
+            haplotype_matrix.transfer_to_gpu()
+        missing_per_var = cp.sum(haplotype_matrix.haplotypes < 0, axis=0)
+        valid = cp.where(missing_per_var == 0)[0]
+        if len(valid) == 0:
+            return np.full(haplotype_matrix.num_variants, np.nan)
+        haplotype_matrix = haplotype_matrix.get_subset(valid)
+        if pos is not None:
+            pos = np.asarray(pos)[valid.get()]
     m1 = _get_population_matrix(haplotype_matrix, pop1)
     m2 = _get_population_matrix(haplotype_matrix, pop2)
 
@@ -478,17 +541,21 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
 
 def ehh_decay(haplotype_matrix: HaplotypeMatrix,
               truncate: bool = False,
-              population: Optional[Union[str, list]] = None):
+              population: Optional[Union[str, list]] = None,
+              missing_data: str = 'exclude'):
     """Compute EHH decay from the first variant.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
-        Haplotype data. Must not contain missing values (-1).
+        Haplotype data.
     truncate : bool, optional
         If True, exclude trailing zeros from the result.
     population : str or list, optional
         Population name or sample indices.
+    missing_data : str
+        'exclude' - filter to sites with no missing data (default)
+        'include' - raise error if missing data present
 
     Returns
     -------
@@ -502,6 +569,12 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
 
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
+
+    if missing_data == 'exclude':
+        missing_per_var = matrix.count_missing(axis=0)
+        valid = cp.where(missing_per_var == 0)[0]
+        if len(valid) < matrix.num_variants:
+            matrix = matrix.get_subset(valid)
 
     hap = matrix.haplotypes  # (n_haplotypes, n_variants)
     n_hap = hap.shape[0]
