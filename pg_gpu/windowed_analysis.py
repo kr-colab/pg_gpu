@@ -657,7 +657,8 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     fused_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites', 'singletons'}
     fused_two = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
     fused_garud = {'garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1'}
-    fused_all = fused_single | fused_two | fused_garud
+    fused_selection = {'mean_nsl'}
+    fused_all = fused_single | fused_two | fused_garud | fused_selection
     requested = set(statistics)
 
     can_fuse = (step_size == window_size
@@ -1336,6 +1337,27 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         _compute_fused_garud_h(haplotype_matrix, population, bp_bins_gpu,
                                win_start, win_stop, n_windows, statistics,
                                results)
+
+    # Per-site selection scan stats binned into windows
+    if 'mean_nsl' in statistics:
+        from . import selection as sel
+        nsl_scores = sel.nsl(haplotype_matrix, population=population)
+        nsl_gpu = cp.asarray(nsl_scores)
+
+        # Bin into windows: sum and count finite values per window
+        bin_idx = cp.searchsorted(bp_bins_gpu[1:], positions)
+        valid = cp.isfinite(nsl_gpu)
+        nsl_sum = cp.zeros(n_windows, dtype=cp.float64)
+        nsl_count = cp.zeros(n_windows, dtype=cp.float64)
+        import cupyx
+        valid_idx = bin_idx[valid]
+        in_range = (valid_idx >= 0) & (valid_idx < n_windows)
+        cupyx.scatter_add(nsl_sum, valid_idx[in_range], nsl_gpu[valid][in_range])
+        cupyx.scatter_add(nsl_count, valid_idx[in_range],
+                          cp.ones_like(valid_idx[in_range], dtype=cp.float64))
+        nsl_mean = nsl_sum.get() / np.maximum(nsl_count.get(), 1)
+        nsl_mean[nsl_count.get() == 0] = np.nan
+        results['mean_nsl'] = nsl_mean
 
     return results
 
