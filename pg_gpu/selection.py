@@ -204,14 +204,63 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
     if step is None:
         step = size
 
-    results = []
-    for w_start in range(start, stop - size + 1, step):
-        w_end = w_start + size
-        hap_window = hap[:, w_start:w_end]
-        f = _distinct_haplotype_frequencies_missing(hap_window)
-        results.append(_garud_from_freqs(f))
+    has_missing = bool(cp.any(hap < 0).get())
 
-    results = np.array(results, dtype='f8')
+    if has_missing:
+        # Fallback: per-window wildcard matching
+        results = []
+        for w_start in range(start, stop - size + 1, step):
+            w_end = w_start + size
+            hap_window = hap[:, w_start:w_end]
+            f = _distinct_haplotype_frequencies_missing(hap_window)
+            results.append(_garud_from_freqs(f))
+        results = np.array(results, dtype='f8')
+        return results[:, 0], results[:, 1], results[:, 2], results[:, 3]
+
+    # GPU fast path: precompute cumulative weighted sums on GPU,
+    # compute per-window hashes on GPU, transfer only the small hash
+    # arrays to CPU for sorting/counting.
+    n_hap = hap.shape[0]
+    h_f64 = hap.astype(cp.float64)
+
+    rng = cp.random.RandomState(seed=42)
+    w1 = rng.standard_normal(n_variants, dtype=cp.float64)
+    w2 = rng.standard_normal(n_variants, dtype=cp.float64)
+
+    hw1 = h_f64 * w1[cp.newaxis, :]
+    hw2 = h_f64 * w2[cp.newaxis, :]
+
+    cs1 = cp.zeros((n_hap, n_variants + 1), dtype=cp.float64)
+    cs2 = cp.zeros((n_hap, n_variants + 1), dtype=cp.float64)
+    cp.cumsum(hw1, axis=1, out=cs1[:, 1:])
+    cp.cumsum(hw2, axis=1, out=cs2[:, 1:])
+
+    windows = list(range(start, stop - size + 1, step))
+    n_windows = len(windows)
+
+    # Compute all window hashes on GPU at once: (n_windows, n_hap)
+    w_starts = cp.array(windows, dtype=cp.int64)
+    w_ends = w_starts + size
+    # Gather prefix sums at window boundaries: (n_hap, n_windows)
+    all_hash1 = cs1[:, w_ends] - cs1[:, w_starts]  # (n_hap, n_windows)
+    all_hash2 = cs2[:, w_ends] - cs2[:, w_starts]
+
+    # Transfer to CPU: (n_hap, n_windows) * 2 * 8 bytes -- small
+    ah1 = all_hash1.get().T  # (n_windows, n_hap)
+    ah2 = all_hash2.get().T
+
+    results = np.empty((n_windows, 4), dtype='f8')
+    for wi in range(n_windows):
+        order = np.lexsort((ah2[wi], ah1[wi]))
+        s1 = ah1[wi, order]
+        s2 = ah2[wi, order]
+        diff = (np.abs(s1[1:] - s1[:-1]) > 1e-6) | (np.abs(s2[1:] - s2[:-1]) > 1e-6)
+        boundaries = np.concatenate([[True], diff])
+        boundary_idx = np.where(boundaries)[0]
+        counts = np.diff(np.concatenate([boundary_idx, [n_hap]]))
+        freqs = np.sort(counts)[::-1].astype(np.float64) / n_hap
+        results[wi] = _garud_from_freqs(freqs)
+
     return results[:, 0], results[:, 1], results[:, 2], results[:, 3]
 
 
@@ -605,6 +654,9 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
 def _distinct_haplotype_frequencies(hap):
     """Compute distinct haplotype frequencies, sorted descending.
 
+    Uses GPU dot-product hashing with two random weight vectors for
+    collision-free haplotype identification.
+
     Parameters
     ----------
     hap : cupy.ndarray, shape (n_haplotypes, n_variants)
@@ -613,22 +665,29 @@ def _distinct_haplotype_frequencies(hap):
     -------
     freqs : ndarray, float64, sorted descending (CPU)
     """
-    n_hap = hap.shape[0]
-    hap_cpu = hap.get().astype(np.int8)
-
-    hap_bytes = np.array([row.tobytes() for row in hap_cpu])
-    _, counts = np.unique(hap_bytes, return_counts=True)
-
-    freqs = counts / n_hap
-    freqs = np.sort(freqs)[::-1]
-    return freqs
+    n_hap, n_var = hap.shape
+    rng = cp.random.RandomState(seed=42)
+    w1 = rng.standard_normal(n_var, dtype=cp.float32)
+    w2 = rng.standard_normal(n_var, dtype=cp.float32)
+    h_f32 = hap.astype(cp.float32)
+    hash1 = h_f32 @ w1
+    hash2 = h_f32 @ w2
+    order = cp.lexsort(cp.stack([hash2, hash1]))
+    s1 = hash1[order]
+    s2 = hash2[order]
+    diff = (cp.abs(s1[1:] - s1[:-1]) > 1e-3) | (cp.abs(s2[1:] - s2[:-1]) > 1e-3)
+    boundaries = cp.concatenate([cp.array([True]), diff])
+    boundary_idx = cp.where(boundaries)[0]
+    counts = cp.diff(cp.concatenate([boundary_idx, cp.array([n_hap])]))
+    freqs = cp.sort(counts)[::-1].astype(cp.float64) / n_hap
+    return freqs.get()
 
 
 def _distinct_haplotype_frequencies_missing(hap):
     """Compute distinct haplotype frequencies treating -1 as wildcard.
 
-    Two haplotypes are considered identical if they match at all
-    positions where both are non-missing.
+    Uses GPU dot-product hashing when no missing data is present,
+    otherwise falls back to CPU wildcard matching.
 
     Parameters
     ----------
@@ -638,6 +697,17 @@ def _distinct_haplotype_frequencies_missing(hap):
     -------
     freqs : ndarray, float64, sorted descending (CPU)
     """
+    if isinstance(hap, cp.ndarray):
+        has_missing = bool(cp.any(hap < 0).get())
+    else:
+        has_missing = bool(np.any(hap < 0))
+
+    if not has_missing:
+        if not isinstance(hap, cp.ndarray):
+            hap = cp.asarray(hap)
+        return _distinct_haplotype_frequencies(hap)
+
+    # Fallback: wildcard matching on CPU
     from .diversity import _cluster_haplotypes_with_missing
     from collections import Counter
 
