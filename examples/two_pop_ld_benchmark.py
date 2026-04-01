@@ -160,6 +160,9 @@ def plot_results(mom, gpu, labels, stat_names, t_moments, t_pg):
     ax.set_title("Two-population LD statistics")
     ax.set_xscale('symlog', linthresh=1e-6)
     ax.set_yscale('symlog', linthresh=1e-6)
+    ticks = [-1e-2, -1e-4, 0, 1e-4, 1e-2, 1, 1e2]
+    ax.set_xticks(ticks)
+    ax.set_yticks(ticks)
 
     from matplotlib.patches import Patch
     ax.legend(handles=[Patch(color='#3498db', label='DD'),
