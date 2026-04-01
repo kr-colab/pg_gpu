@@ -207,6 +207,7 @@ def main():
     sns.barplot(data=bar_df, x="window", y="time", hue="tool", ax=ax2,
                 edgecolor="0.3", linewidth=0.5,
                 palette=["#e74c3c", "#2ecc71"])
+    ax2.set_yscale("log")
     ax2.set_ylabel("Wall time (s)")
     ax2.set_xlabel("Window size")
     ax2.set_title("Total time: 7 statistics")
