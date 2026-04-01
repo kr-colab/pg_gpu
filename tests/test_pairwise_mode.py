@@ -267,13 +267,13 @@ class TestPairwiseFst:
         result = divergence.fst_hudson(two_pop_matrix, 'pop1', 'pop2',
                                        missing_data='pairwise')
         assert isinstance(result, float)
-        assert 0 <= result <= 1
+        assert result <= 1
 
     def test_fst_dispatcher(self, two_pop_matrix):
         result = divergence.fst(two_pop_matrix, 'pop1', 'pop2',
                                 method='hudson', missing_data='pairwise')
         assert isinstance(result, float)
-        assert 0 <= result <= 1
+        assert result <= 1
 
 
 # ---------------------------------------------------------------------------

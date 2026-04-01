@@ -27,7 +27,10 @@ class TestFSTCalculations:
         }
         
         fst_value = divergence.fst(matrix, 'pop1', 'pop2')
-        assert fst_value == 0.0
+        # Identical populations yield FST <= 0 (slightly negative due to
+        # bias correction in within-population heterozygosity)
+        assert fst_value <= 0.0 + 1e-10
+        assert fst_value > -0.2  # should be close to zero
     
     def test_fst_completely_differentiated(self):
         """Test FST = 1 for completely differentiated populations."""
@@ -101,7 +104,8 @@ class TestFSTCalculations:
         pop2_indices = list(range(20, 40))
         
         fst_value = divergence.fst(matrix, pop1_indices, pop2_indices)
-        assert 0 <= fst_value <= 1
+        assert fst_value <= 1
+        assert fst_value > -0.2  # random split, expect near zero
 
 
 class TestDxyCalculations:
@@ -248,13 +252,14 @@ class TestDivergenceStats:
         assert 'pi1' in stats
         assert 'pi2' in stats
         
-        # All values should be non-negative
-        for key, value in stats.items():
-            assert value >= 0
-            
-        # FST values should be between 0 and 1
+        # Diversity values should be non-negative
+        for key in ['dxy', 'pi1', 'pi2']:
+            assert stats[key] >= 0
+
+        # FST and Da can be slightly negative for random splits of the same
+        # population (no clipping to zero, matching scikit-allel behavior)
         for fst_key in ['fst', 'fst_hudson', 'fst_wc', 'fst_nei']:
-            assert 0 <= stats[fst_key] <= 1
+            assert stats[fst_key] <= 1
 
 
 class TestPairwiseFST:

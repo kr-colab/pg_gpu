@@ -167,7 +167,7 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
         if dxy_val == 0 or dxy_val != dxy_val:  # nan check
             return 0.0
         fst_val = 1.0 - (pi_within / dxy_val)
-        return max(0.0, fst_val)
+        return fst_val
 
     # Get haplotype data
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
@@ -202,32 +202,31 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     n1 = pop1_n
     n2 = pop2_n
 
-    # Calculate within-population heterozygosity
-    hw1 = cp.zeros_like(pop1_freqs)
-    hw2 = cp.zeros_like(pop2_freqs)
+    # Per-site within-population mean pairwise difference
+    # mpd(p, n) = p*(1-p)*n/(n-1)  (unbiased heterozygosity)
+    within1 = cp.zeros_like(pop1_freqs)
+    within2 = cp.zeros_like(pop2_freqs)
     valid1 = n1 > 1
     valid2 = n2 > 1
-    hw1[valid1] = 2.0 * pop1_freqs[valid1] * (1 - pop1_freqs[valid1]) * n1[valid1] / (n1[valid1] - 1)
-    hw2[valid2] = 2.0 * pop2_freqs[valid2] * (1 - pop2_freqs[valid2]) * n2[valid2] / (n2[valid2] - 1)
-    hw = cp.zeros_like(hw1)
-    valid = (n1 + n2) > 0
-    hw[valid] = (hw1[valid] * n1[valid] + hw2[valid] * n2[valid]) / (n1[valid] + n2[valid])
+    within1[valid1] = (pop1_freqs[valid1] * (1 - pop1_freqs[valid1])
+                       * n1[valid1] / (n1[valid1] - 1))
+    within2[valid2] = (pop2_freqs[valid2] * (1 - pop2_freqs[valid2])
+                       * n2[valid2] / (n2[valid2] - 1))
+    within = (within1 + within2) / 2.0
 
-    # Calculate between-population heterozygosity
-    p_avg = cp.zeros_like(pop1_freqs)
-    valid = (n1 + n2) > 0
-    p_avg[valid] = (pop1_freqs[valid] * n1[valid] + pop2_freqs[valid] * n2[valid]) / (n1[valid] + n2[valid])
-    hb = 2.0 * p_avg * (1 - p_avg)
+    # Per-site between-population mean pairwise difference
+    between = (pop1_freqs * (1 - pop2_freqs)
+               + pop2_freqs * (1 - pop1_freqs)) / 2.0
 
-    # Calculate FST for each SNP - only for sites with sufficient data
-    valid_mask = (hb > 0) & (n1 > 0) & (n2 > 0)
-    fst_per_snp = cp.zeros_like(hb)
-    fst_per_snp[valid_mask] = 1 - (hw[valid_mask] / hb[valid_mask])
-    
-    # Average across SNPs (excluding invalid values)
+    # Numerator and denominator per SNP (ratio-of-averages)
+    num = between - within
+    den = between
+
+    valid_mask = (den > 0) & (n1 > 0) & (n2 > 0)
+
     if cp.any(valid_mask):
-        mean_fst = float(cp.mean(fst_per_snp[valid_mask]).get())
-        return max(0.0, mean_fst)  # FST should be non-negative
+        fst_val = float((cp.sum(num[valid_mask]) / cp.sum(den[valid_mask])).get())
+        return fst_val
     else:
         return 0.0
 
@@ -298,39 +297,48 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
     pop1_freqs[valid1] = pop1_counts[valid1] / n1[valid1]
     pop2_freqs[valid2] = pop2_counts[valid2] / n2[valid2]
 
-    # Total sample size and average sample size
-    n_total = n1 + n2
-    n_bar = n_total / 2.0  # For two populations
+    # Number of populations
+    r = 2
 
-    # Sample size scaling factor (per site)
+    # Total sample size and average sample size (in haplotypes)
+    n_total = n1 + n2
+    n_bar = n_total / float(r)
+
+    # Sample size scaling factor n_C (per site)
+    # n_C = (n_total - sum(n_i^2)/n_total) / (r - 1)
     nc = cp.zeros_like(n_total)
     valid = n_total > 0
-    nc[valid] = (n_total[valid] - (n1[valid]**2 + n2[valid]**2) / n_total[valid]) / 1.0
+    nc[valid] = (n_total[valid] - (n1[valid]**2 + n2[valid]**2) / n_total[valid]) / (r - 1)
 
-    # Average allele frequency
+    # Average allele frequency weighted by sample size
     p_bar = cp.zeros_like(pop1_freqs)
     valid = n_total > 0
     p_bar[valid] = (n1[valid] * pop1_freqs[valid] + n2[valid] * pop2_freqs[valid]) / n_total[valid]
 
     # Sample variance of allele frequencies
+    # s^2 = sum(n_i * (p_i - p_bar)^2) / ((r-1) * n_bar)
     s_squared = cp.zeros_like(p_bar)
     valid = n_bar > 0
     s_squared[valid] = (n1[valid] * (pop1_freqs[valid] - p_bar[valid])**2 +
-                       n2[valid] * (pop2_freqs[valid] - p_bar[valid])**2) / n_bar[valid]
+                       n2[valid] * (pop2_freqs[valid] - p_bar[valid])**2) / ((r - 1) * n_bar[valid])
 
-    # Calculate variance components
-    # He = expected heterozygosity
-    He = 2.0 * p_bar * (1 - p_bar)
+    # For haploid data, observed heterozygosity h_bar = 0
+    # This simplifies the W-C variance components:
+    #   a = (n_bar/n_C) * (s^2 - (1/(n_bar-1)) * (p_bar*(1-p_bar) - (r-1)*s^2/r))
+    #   b = (n_bar/(n_bar-1)) * (p_bar*(1-p_bar) - (r-1)*s^2/r)
+    #   c = 0
+    a = cp.zeros_like(p_bar)
+    b = cp.zeros_like(p_bar)
+    c = cp.zeros_like(p_bar)
 
-    # a = between population variance (per site)
-    a = cp.zeros_like(He)
-    b = cp.zeros_like(He)
-    c = He / 2.0
+    valid = (n_bar > 1) & (nc > 0)
+    pq = p_bar[valid] * (1 - p_bar[valid])
+    s2 = s_squared[valid]
+    nb = n_bar[valid]
+    ncc = nc[valid]
 
-    valid = (n_bar > 0.5) & (nc > 0)
-    a[valid] = ((s_squared[valid] - He[valid] / (2 * n_bar[valid] - 1)) *
-                (n_bar[valid] / nc[valid]))
-    b[valid] = He[valid] * (2 * n_bar[valid] - 1) / (2 * n_bar[valid])
+    a[valid] = (nb / ncc) * (s2 - (1.0 / (nb - 1)) * (pq - (r - 1) * s2 / r))
+    b[valid] = (nb / (nb - 1)) * (pq - (r - 1) * s2 / r)
 
     # Calculate FST for each locus - only for sites with sufficient data
     valid_mask = ((a + b + c) > 0) & (n1 > 0) & (n2 > 0)
@@ -339,9 +347,9 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
     
     # Global FST estimate (ratio of averages)
     if cp.any(valid_mask):
-        global_fst = float(cp.sum(a[valid_mask]).get() / 
+        global_fst = float(cp.sum(a[valid_mask]).get() /
                           cp.sum(a[valid_mask] + b[valid_mask] + c[valid_mask]).get())
-        return max(0.0, global_fst)
+        return global_fst
     else:
         return 0.0
 
@@ -432,19 +440,12 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     if not cp.any(valid_mask):
         return 0.0
 
-    # Pairwise / ratio-of-sums: sum(HT-HS) / sum(HT)
-    if _is_pairwise:
-        sum_ht = float(cp.sum(ht[valid_mask]).get())
-        sum_hs = float(cp.sum(hs[valid_mask]).get())
-        if sum_ht == 0:
-            return 0.0
-        return max(0.0, (sum_ht - sum_hs) / sum_ht)
-
-    gst_per_snp = cp.zeros_like(ht)
-    gst_per_snp[valid_mask] = (ht[valid_mask] - hs[valid_mask]) / ht[valid_mask]
-
-    mean_gst = float(cp.mean(gst_per_snp[valid_mask]).get())
-    return max(0.0, mean_gst)
+    # Ratio-of-averages: sum(HT-HS) / sum(HT)
+    sum_ht = float(cp.sum(ht[valid_mask]).get())
+    sum_hs = float(cp.sum(hs[valid_mask]).get())
+    if sum_ht == 0:
+        return 0.0
+    return (sum_ht - sum_hs) / sum_ht
 
 
 def dxy(haplotype_matrix: HaplotypeMatrix,
@@ -614,7 +615,7 @@ def da(haplotype_matrix: HaplotypeMatrix,
     # Calculate Da
     da_value = dxy_value - (pi1 + pi2) / 2.0
     
-    return max(0.0, da_value)  # Da should be non-negative
+    return da_value
 
 
 def pi_within_population(haplotype_matrix: HaplotypeMatrix,
