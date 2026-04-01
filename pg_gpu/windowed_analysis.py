@@ -1379,13 +1379,13 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
             results['theta_w'] = theta_abs.get()
 
     if 'segregating_sites' in statistics:
-        seg_vals = is_seg if is_seg is not None else (dac > 0) & (dac < n_hap_int)
+        seg_vals = is_seg if is_seg is not None else (dac > 0) & (dac < n_v)
         seg_counts_out = _scatter_sum(seg_vals.astype(cp.float64), bin_idx,
                                       n_windows)
         results['segregating_sites'] = seg_counts_out.get().astype(int)
 
     if 'singletons' in statistics:
-        is_sing = (dac == 1) | (dac == n_hap_int - 1)
+        is_sing = (dac == 1) | (dac == n_v - 1)
         sing_counts = _scatter_sum(is_sing.astype(cp.float64), bin_idx,
                                    n_windows)
         results['singletons'] = sing_counts.get().astype(int)
