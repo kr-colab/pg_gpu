@@ -16,6 +16,7 @@ h5py = ">=3.0"
 tqdm = ">=4.0"
 cupy = ">=13.0"
 cuda-version = "12.*"
+notebook = ">=7.5.5,<8"
 
 [system-requirements]
 cuda = "12"
