@@ -971,27 +971,50 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    haplotypes = matrix.haplotypes
-    haplotypes_cpu = haplotypes.get() if matrix.device == 'GPU' else haplotypes
+    haplotypes = matrix.haplotypes  # (n_hap, n_var)
 
     if missing_data == 'exclude':
-        missing_per_var = np.sum(haplotypes_cpu < 0, axis=0)
-        complete = missing_per_var == 0
-        haplotypes_cpu = haplotypes_cpu[:, complete]
+        missing_per_var = cp.sum(haplotypes < 0, axis=0)
+        complete = cp.where(missing_per_var == 0)[0]
+        haplotypes = haplotypes[:, complete]
 
-    n_haplotypes = haplotypes_cpu.shape[0]
+    n_haplotypes = haplotypes.shape[0]
     if n_haplotypes <= 1:
         return 0.0
 
-    # Group haplotypes treating missing (-1) as wildcard:
-    # two haplotypes match if they agree at all jointly non-missing sites
-    cluster_id = _cluster_haplotypes_with_missing(haplotypes_cpu)
+    has_missing = bool(cp.any(haplotypes < 0).get())
 
-    from collections import Counter
-    counts = Counter(cluster_id)
-    frequencies = np.array(list(counts.values())) / n_haplotypes
+    if has_missing:
+        # Fallback: wildcard matching requires CPU pairwise comparison
+        haplotypes_cpu = haplotypes.get() if hasattr(haplotypes, 'get') else haplotypes
+        cluster_id = _cluster_haplotypes_with_missing(haplotypes_cpu)
+        from collections import Counter
+        counts = Counter(cluster_id)
+        frequencies = np.array(list(counts.values())) / n_haplotypes
+    else:
+        # GPU fast path: compute two independent hash values per haplotype
+        # via dot product with random int32 weights. Binary data (0/1) makes
+        # this a simple sum of selected weights. Two hashes avoid collisions.
+        n_var = haplotypes.shape[1]
+        rng = cp.random.RandomState(seed=42)
+        w1 = rng.standard_normal(n_var, dtype=cp.float64)
+        w2 = rng.standard_normal(n_var, dtype=cp.float64)
+        h_f64 = haplotypes.astype(cp.float64)
+        hash1 = h_f64 @ w1  # (n_hap,)
+        hash2 = h_f64 @ w2  # (n_hap,)
+        # Sort by (hash1, hash2) to group identical haplotypes
+        order = cp.lexsort(cp.stack([hash2, hash1]))
+        s1 = hash1[order]
+        s2 = hash2[order]
+        # Count runs of identical keys (use tolerance for float comparison)
+        diff = (cp.abs(s1[1:] - s1[:-1]) > 1e-6) | (cp.abs(s2[1:] - s2[:-1]) > 1e-6)
+        boundaries = cp.concatenate([cp.array([True]), diff])
+        boundary_idx = cp.where(boundaries)[0]
+        counts_gpu = cp.diff(cp.concatenate([boundary_idx,
+                                              cp.array([n_haplotypes])]))
+        frequencies = (counts_gpu.astype(cp.float64) / n_haplotypes).get()
+
     diversity = (1.0 - np.sum(frequencies ** 2)) * n_haplotypes / (n_haplotypes - 1)
-
     return float(diversity)
 
 
