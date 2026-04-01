@@ -1,126 +1,236 @@
 Missing Data Handling
 =====================
 
-pg_gpu provides comprehensive support for missing data in population genetics analyses.
+pg_gpu provides comprehensive support for missing data across all
+population genetics statistics. Missing data is encoded as ``-1`` in
+haplotype and genotype matrices.
 
-Overview
---------
+Missing Data Modes
+------------------
 
-Missing data is represented as ``-1`` in haplotype matrices. All statistics functions automatically detect and handle missing data using three strategies:
+Every function that operates on genetic data accepts a ``missing_data``
+parameter with three options:
 
-* **include** - Include missing data in calculations (default for most statistics)
-* **exclude** - Exclude sites/samples with missing data
-* **ignore** - Treat missing data as a separate allele state
+**include** (default)
+   Skip missing entries per site, computing statistics from observed
+   data only. Each site uses its own sample size (``n_valid``). For
+   haplotype identity comparisons (e.g., Garud's H, haplotype
+   diversity), missing values are treated as wildcards compatible with
+   any allele.
+
+**exclude**
+   Drop entire sites that have any missing data in any sample. Only
+   fully genotyped sites contribute to the result.
+
+**pairwise**
+   Comparison-counting normalization inspired by pixy (Korunes & Samuk
+   2021). Instead of averaging per-site estimates, computes
+   ``sum(diffs) / sum(comps)`` across all sites, where sites with more
+   observed data contribute proportionally more weight. Invariant sites
+   can be included in the denominator when ``n_total_sites`` is set on
+   the matrix (see :ref:`invariant-sites`).
+
+The old ``'ignore'`` mode (which treated missing as reference allele)
+has been removed because it silently biases allele frequencies.
 
 Basic Usage
 -----------
 
 .. code-block:: python
 
-   from pg_gpu import HaplotypeMatrix, diversity
-   
-   # Load data with missing values
-   h = HaplotypeMatrix.from_vcf("data_with_missing.vcf")
-   
-   # Statistics automatically handle missing data
-   pi = diversity.pi(h, missing_data='exclude')
-   theta = diversity.theta_w(h, missing_data='include')
+   from pg_gpu import HaplotypeMatrix, diversity, divergence
 
-Span Normalization
-------------------
+   h = HaplotypeMatrix.from_vcf("data.vcf")
 
-When normalizing by genomic span, you can specify how to calculate the denominator:
+   # Default: per-site valid data (include mode)
+   pi = diversity.pi(h)
+
+   # Conservative: only fully genotyped sites
+   pi_excl = diversity.pi(h, missing_data='exclude')
+
+   # Pixy-style comparison counting
+   pi_pw = diversity.pi(h, missing_data='pairwise')
+
+How Each Mode Works
+-------------------
+
+Consider a site with 100 haplotypes where 10 are missing (``-1``):
+
+* **include**: Computes allele frequencies from the 90 observed
+  haplotypes. The site contributes to the result with ``n_valid = 90``.
+* **exclude**: The site is dropped entirely because it has missing data.
+* **pairwise**: The site contributes ``C(90, 2) = 4005`` comparisons
+  to the denominator and the observed pairwise differences to the
+  numerator. A fully genotyped site would contribute ``C(100, 2) = 4950``
+  comparisons, so it naturally gets more weight.
+
+.. _invariant-sites:
+
+Invariant Sites and Pairwise Mode
+----------------------------------
+
+The ``pairwise`` mode can account for invariant (monomorphic) sites in
+the denominator, which is essential for unbiased estimation of pi and
+dxy. Without invariant sites, diversity is overestimated because only
+variable sites contribute comparisons.
+
+To enable this, set ``n_total_sites`` on the matrix:
 
 .. code-block:: python
 
-   # Total span (default)
-   pi_total = diversity.pi(h, span_normalize=True, span_denominator='total')
-   
-   # Only sites present in data
-   pi_sites = diversity.pi(h, span_normalize=True, span_denominator='sites')
-   
-   # Only callable sites (non-missing)
-   pi_callable = diversity.pi(h, span_normalize=True, span_denominator='callable')
+   # From tree sequences: track total callable sites analytically
+   h = HaplotypeMatrix.from_ts(ts, include_invariant=True)
+
+   # From VCFs containing invariant sites (ALT=".")
+   h = HaplotypeMatrix.from_vcf("allsites.vcf", include_invariant=True)
+
+   # Set manually
+   h.n_total_sites = 1_000_000
+
+   # Now pairwise mode includes invariant sites in the denominator
+   pi = diversity.pi(h, missing_data='pairwise')
+
+If ``n_total_sites`` is not set, pairwise mode emits a warning and
+computes from variant sites only.
+
+Component Statistics
+~~~~~~~~~~~~~~~~~~~~
+
+In pairwise mode, ``pi()`` and ``dxy()`` can return the underlying
+components for proper windowed aggregation:
+
+.. code-block:: python
+
+   result = diversity.pi(h, missing_data='pairwise',
+                         span_normalize=False, return_components=True)
+   print(result.total_diffs)    # sum of pairwise differences
+   print(result.total_comps)    # sum of pairwise comparisons
+   print(result.total_missing)  # comparisons lost to missing data
+   print(result.value)          # total_diffs / total_comps
+
+Supported Statistics
+--------------------
+
+Every public function accepts the ``missing_data`` parameter:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 15 15
+
+   * - Function
+     - include
+     - exclude
+     - pairwise
+   * - Diversity (pi, theta_w, theta_h, theta_l)
+     - per-site n
+     - filter sites
+     - sum/sum
+   * - Neutrality tests (tajimas_d, fay_wus_h, H*, E, DH)
+     - per-site n
+     - filter sites
+     - harmonic mean n
+   * - Divergence (dxy, fst, da)
+     - per-site n
+     - filter sites
+     - sum/sum
+   * - SFS (sfs, joint_sfs, folded variants)
+     - per-site n
+     - filter sites
+     - maps to include
+   * - Admixture (patterson_d, f2, f3)
+     - per-site n
+     - NaN at missing
+     - maps to include
+   * - Selection scans (ihs, nsl, xpehh)
+     - wildcard in SSL
+     - filter sites
+     - maps to include
+   * - Haplotype stats (garud_h, haplotype_diversity)
+     - wildcard match
+     - filter sites
+     - maps to include
+   * - Distance (pairwise_diffs, pca)
+     - per-pair norm
+     - filter sites
+     - maps to include
+   * - LD (zns, omega, mu_ld)
+     - per-site n
+     - filter sites
+     - maps to include
+
+Haplotype Identity and Missing Data
+------------------------------------
+
+For statistics based on haplotype identity (Garud's H, haplotype
+diversity, haplotype count), missing values are treated as wildcards:
+two haplotypes match if they agree at all positions where both are
+non-missing.
+
+.. code-block:: python
+
+   # Haplotypes [0, 1, 0, 1] and [0, -1, 0, 1] are considered identical
+   # because they match at positions 0, 2, 3 (position 1 is missing)
+
+   from pg_gpu import selection
+   h1, h12, h123, h2_h1 = selection.garud_h(h)
 
 HaplotypeMatrix Utilities
 -------------------------
 
-The HaplotypeMatrix class provides several utilities for working with missing data:
-
 .. code-block:: python
 
-   # Check for missing data
-   has_missing = h.has_missing()
-   
-   # Count missing data
+   # Detect and count missing data
    missing_per_site = h.count_missing(axis=0)
    missing_per_sample = h.count_missing(axis=1)
-   
-   # Filter variants by missing data frequency
-   h_filtered = h.filter_variants_by_missing(max_missing_freq=0.1)
-   
-   # Get summary statistics
+
+   # Filter by missing data frequency
+   h_clean = h.filter_variants_by_missing(max_missing_freq=0.1)
+
+   # Summary statistics
    summary = h.summarize_missing_data()
-   print(f"Total missing: {summary['missing_freq_overall']:.1%}")
 
-Statistics with Missing Data
-----------------------------
+   # Invariant site info
+   h.n_total_sites = 1_000_000
+   print(h.has_invariant_info)    # True
+   print(h.n_invariant_sites)     # total - variant count
 
-Diversity Statistics
-~~~~~~~~~~~~~~~~~~~~
+Windowed Analysis
+-----------------
 
-All diversity statistics support the ``missing_data`` parameter:
-
-.. code-block:: python
-
-   # Nucleotide diversity
-   pi = diversity.pi(h, missing_data='exclude')
-   
-   # Watterson's theta
-   theta = diversity.theta_w(h, missing_data='include')
-   
-   # Tajima's D (always excludes missing)
-   d = diversity.tajimas_d(h)
-   
-   # Haplotype diversity
-   h_div = diversity.haplotype_diversity(h)
-
-Divergence Statistics
-~~~~~~~~~~~~~~~~~~~~~
-
-Population divergence statistics also handle missing data:
+The windowed analysis framework respects the ``missing_data`` parameter.
+In pairwise mode, component columns (diffs, comps, missing) are included
+in the output for proper sum-then-divide aggregation across windows:
 
 .. code-block:: python
 
-   # FST with missing data handling
-   fst = divergence.fst(h, 'pop1', 'pop2', missing_data='exclude')
-   
-   # Dxy excluding missing sites
-   dxy = divergence.dxy(h, 'pop1', 'pop2', missing_data='exclude')
+   from pg_gpu.windowed_analysis import StatisticsComputer, WindowedAnalyzer
 
-LD Statistics
-~~~~~~~~~~~~~
+   computer = StatisticsComputer(
+       statistics=['pi', 'dxy'],
+       populations=['pop1', 'pop2'],
+       missing_data='pairwise'
+   )
 
-LD statistics automatically detect and handle missing data:
-
-.. code-block:: python
-
-   from pg_gpu import ld_statistics
-   
-   # Tally haplotypes (returns counts and n_valid for missing data)
-   counts, n_valid = h.tally_gpu_haplotypes()
-   
-   # LD statistics use n_valid automatically
-   dd_vals = ld_statistics.dd(counts, n_valid=n_valid)
-   dz_vals = ld_statistics.dz(counts, n_valid=n_valid)
+   # Component columns appear automatically:
+   # pi_pop1_diffs, pi_pop1_comps, pi_pop1_missing, ...
 
 Best Practices
 --------------
 
-1. **Check your data** - Use ``summarize_missing_data()`` to understand missingness patterns
-2. **Choose appropriate strategy** - Use 'exclude' for conservative estimates, 'include' when missing is random
-3. **Consider filtering** - Remove sites with high missing rates before analysis
-4. **Document your choice** - Missing data handling affects results, document your approach
+1. **Use include mode** (default) for most analyses. It uses all
+   available data at each site without bias.
+
+2. **Use pairwise mode** when you need unbiased genome-wide estimates
+   of pi or dxy, especially with variable missingness across sites.
+   Set ``n_total_sites`` or use ``include_invariant=True`` to include
+   invariant sites in the denominator.
+
+3. **Use exclude mode** when you need all samples to be comparable
+   at exactly the same sites (e.g., for certain LD analyses).
+
+4. **Check missingness patterns** before analysis with
+   ``summarize_missing_data()`` and consider filtering sites with
+   very high missing rates.
 
 Example Workflow
 ----------------
@@ -128,19 +238,22 @@ Example Workflow
 .. code-block:: python
 
    from pg_gpu import HaplotypeMatrix, diversity, divergence
-   
-   # Load and inspect data
-   h = HaplotypeMatrix.from_vcf("data.vcf")
+
+   # Load data with invariant sites for unbiased estimation
+   h = HaplotypeMatrix.from_vcf("allsites.vcf", include_invariant=True)
+
+   # Inspect missing data
    summary = h.summarize_missing_data()
-   print(f"Missing data: {summary['fraction_missing']:.1%}")
-   
-   # Filter high-missing sites
-   h_filtered = h.filter_variants_by_missing(max_missing_freq=0.2)
-   print(f"Kept {h_filtered.num_variants} of {h.num_variants} variants")
-   
-   # Compute statistics with explicit missing data handling
-   results = {
-       'pi': diversity.pi(h_filtered, missing_data='exclude'),
-       'theta': diversity.theta_w(h_filtered, missing_data='exclude'),
-       'fst': divergence.fst(h_filtered, 'pop1', 'pop2', missing_data='exclude')
-   }
+   print(f"Missing: {summary['fraction_missing']:.1%}")
+
+   # Filter extreme missingness
+   h = h.filter_variants_by_missing(max_missing_freq=0.5)
+
+   # Compute diversity with pixy-style comparison counting
+   pi = diversity.pi(h, missing_data='pairwise')
+   dxy = divergence.dxy(h, 'pop1', 'pop2', missing_data='pairwise')
+   fst = divergence.fst(h, 'pop1', 'pop2', missing_data='pairwise')
+
+   # Or use default include mode
+   tajd = diversity.tajimas_d(h)
+   fwh = diversity.fay_wus_h(h)

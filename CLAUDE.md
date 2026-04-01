@@ -79,8 +79,8 @@ pixi run python examples/performance_comparison.py
      - Supports flexible population configurations via `populations` parameter
    - `pg_gpu/diversity.py`: Comprehensive within-population diversity statistics
      - All functions fully vectorized for GPU acceleration
-     - Three missing data strategies: 'ignore', 'include', 'exclude'
-     - Functions: `pi()`, `theta_w()`, `tajimas_d()`, `segregating_sites()`, `singleton_count()`, `fay_wus_h()`
+     - Three missing data strategies: 'include' (default), 'exclude', 'pairwise'
+     - Functions: `pi()`, `theta_w()`, `theta_h()`, `theta_l()`, `tajimas_d()`, `fay_wus_h()`, `normalized_fay_wus_h()`, `zeng_e()`, `zeng_dh()`, `segregating_sites()`, `singleton_count()`
    - `pg_gpu/divergence.py`: Between-population divergence statistics
      - Efficient vectorized FST, Dxy, Da calculations
      - Multiple FST estimators: Hudson, Weir-Cockerham, Nei
@@ -90,7 +90,7 @@ pixi run python examples/performance_comparison.py
 
 ### Key Design Patterns
 
-- **Automatic Missing Data Detection**: Functions check for -1 values and switch to missing data algorithms automatically
+- **Missing Data Handling**: All functions default to 'include' mode (per-site valid data). 'pairwise' mode uses pixy-style comparison counting. 'exclude' drops sites with any missing. Missing values (-1) are never treated as reference alleles.
 - **GPU Memory Management**: Uses CuPy for efficient GPU memory handling
 - **Batch Processing**: Processes multiple statistics simultaneously for efficiency
 - **Vectorized Algorithms**: All diversity and divergence functions use fully vectorized GPU operations (no Python loops over variants)
@@ -105,6 +105,11 @@ pixi run python examples/performance_comparison.py
 ## Important Implementation Details
 
 - Missing data is encoded as -1 in haplotype matrices
+- All functions default to `missing_data='include'` (per-site valid data)
+- Three modes: 'include' (skip missing per-site), 'exclude' (drop sites), 'pairwise' (comparison counting)
+- The 'pairwise' mode implements pixy-style sum(diffs)/sum(comps) normalization
+- `n_total_sites` on HaplotypeMatrix/GenotypeMatrix enables invariant site correction in pairwise mode
+- For haplotype identity (Garud's H, haplotype_diversity), missing is treated as wildcard
 - GPU functions use shared memory optimization for performance
 - Statistics are computed pairwise across all SNPs by default
 - Two-population statistics require population masks to identify samples
