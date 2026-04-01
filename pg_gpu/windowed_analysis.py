@@ -655,7 +655,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     # Requirements: non-overlapping windows, 'include' missing data,
     # and all requested stats are supported by the fused kernel.
     fused_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites', 'singletons'}
-    fused_two = {'fst', 'dxy', 'da'}
+    fused_two = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
     fused_garud = {'garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1'}
     fused_all = fused_single | fused_two | fused_garud
     requested = set(statistics)
@@ -865,7 +865,9 @@ void fused_windowed_twopop(const signed char* hap1_t,
                            double* out_fst_den,
                            double* out_dxy_sum,
                            double* out_pi1_sum,
-                           double* out_pi2_sum) {
+                           double* out_pi2_sum,
+                           double* out_wc_a_sum,
+                           double* out_wc_ab_sum) {
     int wid = blockIdx.x;
     if (wid >= n_windows) return;
 
@@ -874,19 +876,25 @@ void fused_windowed_twopop(const signed char* hap1_t,
     int n_vars = v_stop - v_start;
     if (n_vars <= 0) {
         if (threadIdx.x == 0) {
-            out_fst_num[wid] = 0.0;
-            out_fst_den[wid] = 0.0;
-            out_dxy_sum[wid] = 0.0;
-            out_pi1_sum[wid] = 0.0;
-            out_pi2_sum[wid] = 0.0;
+            out_fst_num[wid] = 0.0;  out_fst_den[wid] = 0.0;
+            out_dxy_sum[wid] = 0.0;  out_pi1_sum[wid] = 0.0;
+            out_pi2_sum[wid] = 0.0;  out_wc_a_sum[wid] = 0.0;
+            out_wc_ab_sum[wid] = 0.0;
         }
         return;
     }
 
     double dn1 = (double)n_hap1;
     double dn2 = (double)n_hap2;
+
+    // Weir-Cockerham constants (haploid, r=2, constant sample sizes)
+    double n_total = dn1 + dn2;
+    double n_bar = n_total / 2.0;
+    double n_C = (n_total - (dn1*dn1 + dn2*dn2) / n_total);  // r-1 = 1
+
     double t_fst_num = 0.0, t_fst_den = 0.0;
     double t_dxy = 0.0, t_pi1 = 0.0, t_pi2 = 0.0;
+    double t_wc_a = 0.0, t_wc_ab = 0.0;
 
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
@@ -906,6 +914,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
         double d_ac1_1 = (double)ac1_1;
         double d_ac2_1 = (double)ac2_1;
 
+        // Hudson: within-pop mean pairwise difference
         double n1_pairs = dn1 * (dn1 - 1.0) / 2.0;
         double n1_same = (ac1_0 * (ac1_0 - 1.0) + d_ac1_1 * (d_ac1_1 - 1.0)) / 2.0;
         double mpd1 = (n1_pairs > 0) ? (n1_pairs - n1_same) / n1_pairs : 0.0;
@@ -916,6 +925,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
 
         double within = (mpd1 + mpd2) / 2.0;
 
+        // Between-pop mean pairwise difference
         double n_between = dn1 * dn2;
         double n_between_same = ac1_0 * ac2_0 + d_ac1_1 * d_ac2_1;
         double between = (n_between > 0) ? (n_between - n_between_same) / n_between : 0.0;
@@ -925,34 +935,57 @@ void fused_windowed_twopop(const signed char* hap1_t,
         t_dxy += between;
         t_pi1 += mpd1;
         t_pi2 += mpd2;
+
+        // Weir-Cockerham (haploid, h_bar=0, r=2)
+        double p1 = d_ac1_1 / dn1;
+        double p2 = d_ac2_1 / dn2;
+        double p_bar = (dn1 * p1 + dn2 * p2) / n_total;
+        double s2 = (dn1 * (p1 - p_bar) * (p1 - p_bar) +
+                     dn2 * (p2 - p_bar) * (p2 - p_bar)) / n_bar;
+        double pq = p_bar * (1.0 - p_bar);
+
+        double a_val = 0.0, b_val = 0.0;
+        if (n_bar > 1.0 && n_C > 0.0) {
+            a_val = (n_bar / n_C) * (s2 - (1.0 / (n_bar - 1.0)) * (pq - s2 / 2.0));
+            b_val = (n_bar / (n_bar - 1.0)) * (pq - s2 / 2.0);
+        }
+        t_wc_a += a_val;
+        t_wc_ab += a_val + b_val;
     }
 
-    __shared__ double smem[5 * 256];
+    // Block reduction (7 values)
+    __shared__ double smem[7 * 256];
     int tid = threadIdx.x;
-    smem[tid]         = t_fst_num;
-    smem[256 + tid]   = t_fst_den;
-    smem[512 + tid]   = t_dxy;
-    smem[768 + tid]   = t_pi1;
-    smem[1024 + tid]  = t_pi2;
+    smem[tid]          = t_fst_num;
+    smem[256 + tid]    = t_fst_den;
+    smem[512 + tid]    = t_dxy;
+    smem[768 + tid]    = t_pi1;
+    smem[1024 + tid]   = t_pi2;
+    smem[1280 + tid]   = t_wc_a;
+    smem[1536 + tid]   = t_wc_ab;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
         if (tid < s) {
-            smem[tid]         += smem[tid + s];
-            smem[256 + tid]   += smem[256 + tid + s];
-            smem[512 + tid]   += smem[512 + tid + s];
-            smem[768 + tid]   += smem[768 + tid + s];
-            smem[1024 + tid]  += smem[1024 + tid + s];
+            smem[tid]          += smem[tid + s];
+            smem[256 + tid]    += smem[256 + tid + s];
+            smem[512 + tid]    += smem[512 + tid + s];
+            smem[768 + tid]    += smem[768 + tid + s];
+            smem[1024 + tid]   += smem[1024 + tid + s];
+            smem[1280 + tid]   += smem[1280 + tid + s];
+            smem[1536 + tid]   += smem[1536 + tid + s];
         }
         __syncthreads();
     }
 
     if (tid == 0) {
-        out_fst_num[wid] = smem[0];
-        out_fst_den[wid] = smem[256];
-        out_dxy_sum[wid] = smem[512];
-        out_pi1_sum[wid] = smem[768];
-        out_pi2_sum[wid] = smem[1024];
+        out_fst_num[wid]  = smem[0];
+        out_fst_den[wid]  = smem[256];
+        out_dxy_sum[wid]  = smem[512];
+        out_pi1_sum[wid]  = smem[768];
+        out_pi2_sum[wid]  = smem[1024];
+        out_wc_a_sum[wid] = smem[1280];
+        out_wc_ab_sum[wid]= smem[1536];
     }
 }
 ''', 'fused_windowed_twopop')
@@ -1223,7 +1256,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             results['tajimas_d'] = tajd
 
     # two-pop stats via fused kernel
-    two_pop_requested = any(s in statistics for s in ('fst', 'dxy', 'da'))
+    two_pop_stats = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
+    two_pop_requested = any(s in statistics for s in two_pop_stats)
     if two_pop_requested:
         if pop1 is None or pop2 is None:
             raise ValueError("pop1 and pop2 required for fst/dxy/da")
@@ -1245,6 +1279,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         out_dxy = cp.zeros(n_windows, dtype=cp.float64)
         out_pi1 = cp.zeros(n_windows, dtype=cp.float64)
         out_pi2 = cp.zeros(n_windows, dtype=cp.float64)
+        out_wc_a = cp.zeros(n_windows, dtype=cp.float64)
+        out_wc_ab = cp.zeros(n_windows, dtype=cp.float64)
 
         block = 256
         grid = n_windows
@@ -1254,19 +1290,29 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             (hap1, hap2, win_start, win_stop,
              np.int32(n1), np.int32(n2),
              np.int32(n_total_var), np.int32(n_windows),
-             out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2))
+             out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
+             out_wc_a, out_wc_ab))
 
         fst_num = out_fst_num.get()
         fst_den = out_fst_den.get()
         dxy_sum = out_dxy.get()
         pi1_sum = out_pi1.get()
         pi2_sum = out_pi2.get()
+        wc_a = out_wc_a.get()
+        wc_ab = out_wc_ab.get()
 
         if 'n_variants' not in results:
             results['n_variants'] = (win_stop - win_start).get().astype(int)
 
-        if 'fst' in statistics:
-            results['fst'] = np.where(fst_den > 0, fst_num / fst_den, np.nan)
+        if 'fst' in statistics or 'fst_hudson' in statistics:
+            hudson_fst = np.where(fst_den > 0, fst_num / fst_den, np.nan)
+            if 'fst' in statistics:
+                results['fst'] = hudson_fst
+            if 'fst_hudson' in statistics:
+                results['fst_hudson'] = hudson_fst
+
+        if 'fst_wc' in statistics:
+            results['fst_wc'] = np.where(wc_ab > 0, wc_a / wc_ab, np.nan)
 
         if 'dxy' in statistics:
             if per_base:
