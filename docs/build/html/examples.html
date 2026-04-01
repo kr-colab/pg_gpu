@@ -1,0 +1,326 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Examples &mdash; pg_gpu 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=01f34227"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="Changelog" href="changelog.html" />
+    <link rel="prev" title="Missing Data Handling" href="missing_data.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            pg_gpu
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="missing_data.html">Missing Data Handling</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Examples</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#complete-workflow">Complete Workflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#two-population-ld">Two-Population LD</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#batch-statistics">Batch Statistics</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#integration-with-moments">Integration with moments</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#ld-pruning">LD Pruning</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#selection-scan-pipeline">Selection Scan Pipeline</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#sfs-and-admixture">SFS and Admixture</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#pbs-population-branch-statistic">PBS (Population Branch Statistic)</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#pca-and-dimensionality-reduction">PCA and Dimensionality Reduction</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#gpu-native-windowed-statistics">GPU-Native Windowed Statistics</a></li>
+<li class="toctree-l2"><a class="reference internal" href="#missing-data">Missing Data</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="changelog.html">Changelog</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">pg_gpu</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Examples</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/examples.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="examples">
+<h1>Examples<a class="headerlink" href="#examples" title="Link to this heading"></a></h1>
+<section id="complete-workflow">
+<h2>Complete Workflow<a class="headerlink" href="#complete-workflow" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span> <span class="n">ld_statistics</span><span class="p">,</span> <span class="n">diversity</span><span class="p">,</span> <span class="n">selection</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="c1"># Load VCF data</span>
+<span class="n">h</span> <span class="o">=</span> <span class="n">HaplotypeMatrix</span><span class="o">.</span><span class="n">from_vcf</span><span class="p">(</span><span class="s2">&quot;example.vcf&quot;</span><span class="p">)</span>
+
+<span class="c1"># Define populations</span>
+<span class="n">h</span><span class="o">.</span><span class="n">sample_sets</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;CEU&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">,</span> <span class="mi">4</span><span class="p">],</span>
+    <span class="s2">&quot;YRI&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">5</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mi">7</span><span class="p">,</span> <span class="mi">8</span><span class="p">,</span> <span class="mi">9</span><span class="p">]</span>
+<span class="p">}</span>
+
+<span class="c1"># Diversity</span>
+<span class="n">pi_ceu</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">pi</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">population</span><span class="o">=</span><span class="s2">&quot;CEU&quot;</span><span class="p">)</span>
+<span class="n">pi_yri</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">pi</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">population</span><span class="o">=</span><span class="s2">&quot;YRI&quot;</span><span class="p">)</span>
+
+<span class="c1"># Divergence</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">divergence</span>
+<span class="n">fst</span> <span class="o">=</span> <span class="n">divergence</span><span class="o">.</span><span class="n">fst</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s2">&quot;CEU&quot;</span><span class="p">,</span> <span class="s2">&quot;YRI&quot;</span><span class="p">)</span>
+
+<span class="c1"># LD</span>
+<span class="n">counts</span><span class="p">,</span> <span class="n">n_valid</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">tally_gpu_haplotypes</span><span class="p">()</span>
+<span class="n">r2</span> <span class="o">=</span> <span class="n">ld_statistics</span><span class="o">.</span><span class="n">r_squared</span><span class="p">(</span><span class="n">counts</span><span class="p">,</span> <span class="n">n_valid</span><span class="o">=</span><span class="n">n_valid</span><span class="p">)</span>
+
+<span class="c1"># Selection scans</span>
+<span class="n">ihs_scores</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">ihs</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">population</span><span class="o">=</span><span class="s2">&quot;CEU&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="two-population-ld">
+<h2>Two-Population LD<a class="headerlink" href="#two-population-ld" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Memory-efficient chunked computation</span>
+<span class="n">stats</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">compute_ld_statistics_gpu_two_pops</span><span class="p">(</span>
+    <span class="n">bp_bins</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1000</span><span class="p">,</span> <span class="mi">5000</span><span class="p">,</span> <span class="mi">10000</span><span class="p">,</span> <span class="mi">50000</span><span class="p">]),</span>
+    <span class="n">pop1</span><span class="o">=</span><span class="s2">&quot;CEU&quot;</span><span class="p">,</span>
+    <span class="n">pop2</span><span class="o">=</span><span class="s2">&quot;YRI&quot;</span><span class="p">,</span>
+    <span class="n">chunk_size</span><span class="o">=</span><span class="s1">&#39;auto&#39;</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="batch-statistics">
+<h2>Batch Statistics<a class="headerlink" href="#batch-statistics" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Multiple LD statistics in one call</span>
+<span class="n">results</span> <span class="o">=</span> <span class="n">ld_statistics</span><span class="o">.</span><span class="n">compute_ld_statistics</span><span class="p">(</span>
+    <span class="n">counts</span><span class="p">,</span>
+    <span class="n">statistics</span><span class="o">=</span><span class="p">[</span><span class="s1">&#39;dd&#39;</span><span class="p">,</span> <span class="s1">&#39;dz&#39;</span><span class="p">,</span> <span class="s1">&#39;pi2&#39;</span><span class="p">,</span> <span class="s1">&#39;r_squared&#39;</span><span class="p">],</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="integration-with-moments">
+<h2>Integration with moments<a class="headerlink" href="#integration-with-moments" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">HaplotypeMatrix</span>
+
+<span class="n">h</span> <span class="o">=</span> <span class="n">HaplotypeMatrix</span><span class="o">.</span><span class="n">from_vcf</span><span class="p">(</span><span class="s2">&quot;data.vcf&quot;</span><span class="p">)</span>
+<span class="n">h</span><span class="o">.</span><span class="n">sample_sets</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;pop1&quot;</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="mi">10</span><span class="p">))}</span>
+
+<span class="c1"># Compute LD statistics with GPU acceleration</span>
+<span class="c1"># chunk_size=&#39;auto&#39; adapts to available GPU memory</span>
+<span class="n">ld_stats</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">compute_ld_statistics_gpu_single_pop</span><span class="p">(</span>
+    <span class="n">bp_bins</span><span class="o">=</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1000</span><span class="p">,</span> <span class="mi">5000</span><span class="p">],</span>
+    <span class="n">chunk_size</span><span class="o">=</span><span class="s1">&#39;auto&#39;</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="ld-pruning">
+<h2>LD Pruning<a class="headerlink" href="#ld-pruning" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Find variants in linkage equilibrium</span>
+<span class="n">unlinked</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">locate_unlinked</span><span class="p">(</span><span class="n">size</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">step</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span> <span class="n">threshold</span><span class="o">=</span><span class="mf">0.1</span><span class="p">)</span>
+<span class="n">h_pruned</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">get_subset</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">unlinked</span><span class="p">)[</span><span class="mi">0</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Kept </span><span class="si">{</span><span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">unlinked</span><span class="p">)</span><span class="si">}</span><span class="s2"> of </span><span class="si">{</span><span class="n">h</span><span class="o">.</span><span class="n">num_variants</span><span class="si">}</span><span class="s2"> variants&quot;</span><span class="p">)</span>
+
+<span class="c1"># Windowed r-squared decay</span>
+<span class="n">bins</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">100001</span><span class="p">,</span> <span class="mi">1000</span><span class="p">)</span>
+<span class="n">r2_decay</span><span class="p">,</span> <span class="n">counts</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">windowed_r_squared</span><span class="p">(</span><span class="n">bins</span><span class="p">,</span> <span class="n">percentile</span><span class="o">=</span><span class="mi">50</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="selection-scan-pipeline">
+<h2>Selection Scan Pipeline<a class="headerlink" href="#selection-scan-pipeline" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">selection</span>
+
+<span class="c1"># iHS with standardization by allele count</span>
+<span class="n">ihs_raw</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">ihs</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+
+<span class="c1"># Get allele counts for binned standardization</span>
+<span class="n">dac</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">h</span><span class="o">.</span><span class="n">haplotypes</span><span class="o">.</span><span class="n">get</span><span class="p">(),</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+<span class="n">ihs_std</span><span class="p">,</span> <span class="n">bins</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">standardize_by_allele_count</span><span class="p">(</span><span class="n">ihs_raw</span><span class="p">,</span> <span class="n">dac</span><span class="p">)</span>
+
+<span class="c1"># Cross-population scans</span>
+<span class="n">xpehh_scores</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">xpehh</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s2">&quot;CEU&quot;</span><span class="p">,</span> <span class="s2">&quot;YRI&quot;</span><span class="p">)</span>
+<span class="n">xpehh_std</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">standardize</span><span class="p">(</span><span class="n">xpehh_scores</span><span class="p">)</span>
+
+<span class="c1"># Garud&#39;s H in sliding windows</span>
+<span class="n">h1</span><span class="p">,</span> <span class="n">h12</span><span class="p">,</span> <span class="n">h123</span><span class="p">,</span> <span class="n">h2_h1</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">moving_garud_h</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">200</span><span class="p">,</span> <span class="n">step</span><span class="o">=</span><span class="mi">50</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="sfs-and-admixture">
+<h2>SFS and Admixture<a class="headerlink" href="#sfs-and-admixture" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">sfs</span><span class="p">,</span> <span class="n">admixture</span>
+
+<span class="c1"># Joint SFS</span>
+<span class="n">jsfs</span> <span class="o">=</span> <span class="n">sfs</span><span class="o">.</span><span class="n">joint_sfs</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s2">&quot;CEU&quot;</span><span class="p">,</span> <span class="s2">&quot;YRI&quot;</span><span class="p">)</span>
+
+<span class="c1"># Patterson&#39;s D with block-jackknife</span>
+<span class="n">d</span><span class="p">,</span> <span class="n">se</span><span class="p">,</span> <span class="n">z</span><span class="p">,</span> <span class="n">vb</span><span class="p">,</span> <span class="n">vj</span> <span class="o">=</span> <span class="n">admixture</span><span class="o">.</span><span class="n">average_patterson_d</span><span class="p">(</span>
+    <span class="n">h</span><span class="p">,</span> <span class="s2">&quot;popA&quot;</span><span class="p">,</span> <span class="s2">&quot;popB&quot;</span><span class="p">,</span> <span class="s2">&quot;popC&quot;</span><span class="p">,</span> <span class="s2">&quot;popD&quot;</span><span class="p">,</span> <span class="n">blen</span><span class="o">=</span><span class="mi">100</span>
+<span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;D = </span><span class="si">{</span><span class="n">d</span><span class="si">:</span><span class="s2">.4f</span><span class="si">}</span><span class="s2">, SE = </span><span class="si">{</span><span class="n">se</span><span class="si">:</span><span class="s2">.4f</span><span class="si">}</span><span class="s2">, Z = </span><span class="si">{</span><span class="n">z</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="pbs-population-branch-statistic">
+<h2>PBS (Population Branch Statistic)<a class="headerlink" href="#pbs-population-branch-statistic" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">divergence</span>
+
+<span class="c1"># Detect selection in pop1 relative to pop2 and pop3</span>
+<span class="n">pbs_vals</span> <span class="o">=</span> <span class="n">divergence</span><span class="o">.</span><span class="n">pbs</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s2">&quot;pop1&quot;</span><span class="p">,</span> <span class="s2">&quot;pop2&quot;</span><span class="p">,</span> <span class="s2">&quot;pop3&quot;</span><span class="p">,</span> <span class="n">window_size</span><span class="o">=</span><span class="mi">50</span><span class="p">)</span>
+
+<span class="c1"># Un-normalized PBS</span>
+<span class="n">pbs_raw</span> <span class="o">=</span> <span class="n">divergence</span><span class="o">.</span><span class="n">pbs</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s2">&quot;pop1&quot;</span><span class="p">,</span> <span class="s2">&quot;pop2&quot;</span><span class="p">,</span> <span class="s2">&quot;pop3&quot;</span><span class="p">,</span>
+                         <span class="n">window_size</span><span class="o">=</span><span class="mi">50</span><span class="p">,</span> <span class="n">normed</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="pca-and-dimensionality-reduction">
+<h2>PCA and Dimensionality Reduction<a class="headerlink" href="#pca-and-dimensionality-reduction" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">decomposition</span>
+
+<span class="c1"># GPU-accelerated PCA (up to 56x faster than allel)</span>
+<span class="n">coords</span><span class="p">,</span> <span class="n">var_ratio</span> <span class="o">=</span> <span class="n">decomposition</span><span class="o">.</span><span class="n">pca</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">n_components</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span>
+                                       <span class="n">scaler</span><span class="o">=</span><span class="s1">&#39;patterson&#39;</span><span class="p">)</span>
+
+<span class="c1"># Randomized PCA for very large datasets</span>
+<span class="n">coords</span><span class="p">,</span> <span class="n">var_ratio</span> <span class="o">=</span> <span class="n">decomposition</span><span class="o">.</span><span class="n">randomized_pca</span><span class="p">(</span>
+    <span class="n">h</span><span class="p">,</span> <span class="n">n_components</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="mi">42</span><span class="p">)</span>
+
+<span class="c1"># Pairwise genetic distance (batched for memory safety)</span>
+<span class="n">dist</span> <span class="o">=</span> <span class="n">decomposition</span><span class="o">.</span><span class="n">pairwise_distance</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">metric</span><span class="o">=</span><span class="s1">&#39;euclidean&#39;</span><span class="p">)</span>
+
+<span class="c1"># PCoA from distance matrix</span>
+<span class="n">coords</span><span class="p">,</span> <span class="n">var_ratio</span> <span class="o">=</span> <span class="n">decomposition</span><span class="o">.</span><span class="n">pcoa</span><span class="p">(</span><span class="n">dist</span><span class="p">,</span> <span class="n">n_components</span><span class="o">=</span><span class="mi">5</span><span class="p">)</span>
+
+<span class="c1"># Population-specific PCA</span>
+<span class="n">coords_ceu</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">decomposition</span><span class="o">.</span><span class="n">pca</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">n_components</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">population</span><span class="o">=</span><span class="s2">&quot;CEU&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="gpu-native-windowed-statistics">
+<h2>GPU-Native Windowed Statistics<a class="headerlink" href="#gpu-native-windowed-statistics" title="Link to this heading"></a></h2>
+<p>Compute multiple statistics across thousands of windows without Python loops:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu.windowed_analysis</span><span class="w"> </span><span class="kn">import</span> <span class="n">windowed_statistics</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+
+<span class="c1"># Define windows across 1Mb region</span>
+<span class="n">bp_bins</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1_000_001</span><span class="p">,</span> <span class="mi">10_000</span><span class="p">)</span>  <span class="c1"># 100 windows of 10kb</span>
+
+<span class="c1"># Compute 4 diversity stats in one GPU pass</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">windowed_statistics</span><span class="p">(</span>
+    <span class="n">h</span><span class="p">,</span> <span class="n">bp_bins</span><span class="p">,</span>
+    <span class="n">statistics</span><span class="o">=</span><span class="p">(</span><span class="s1">&#39;pi&#39;</span><span class="p">,</span> <span class="s1">&#39;theta_w&#39;</span><span class="p">,</span> <span class="s1">&#39;tajimas_d&#39;</span><span class="p">,</span> <span class="s1">&#39;segregating_sites&#39;</span><span class="p">)</span>
+<span class="p">)</span>
+
+<span class="c1"># Results are numpy arrays, one value per window</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Mean pi: </span><span class="si">{</span><span class="n">np</span><span class="o">.</span><span class="n">nanmean</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s1">&#39;pi&#39;</span><span class="p">])</span><span class="si">:</span><span class="s2">.6f</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Mean Tajima&#39;s D: </span><span class="si">{</span><span class="n">np</span><span class="o">.</span><span class="n">nanmean</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s1">&#39;tajimas_d&#39;</span><span class="p">])</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="c1"># Windowed FST between populations</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">windowed_statistics</span><span class="p">(</span>
+    <span class="n">h</span><span class="p">,</span> <span class="n">bp_bins</span><span class="p">,</span>
+    <span class="n">statistics</span><span class="o">=</span><span class="p">(</span><span class="s1">&#39;pi&#39;</span><span class="p">,</span> <span class="s1">&#39;fst&#39;</span><span class="p">,</span> <span class="s1">&#39;dxy&#39;</span><span class="p">),</span>
+    <span class="n">pop1</span><span class="o">=</span><span class="s1">&#39;CEU&#39;</span><span class="p">,</span> <span class="n">pop2</span><span class="o">=</span><span class="s1">&#39;YRI&#39;</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="missing-data">
+<h2>Missing Data<a class="headerlink" href="#missing-data" title="Link to this heading"></a></h2>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">diversity</span>
+
+<span class="c1"># Check missing data summary</span>
+<span class="n">summary</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">summarize_missing_data</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Missing: </span><span class="si">{</span><span class="n">summary</span><span class="p">[</span><span class="s1">&#39;missing_freq_overall&#39;</span><span class="p">]</span><span class="si">:</span><span class="s2">.1%</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="c1"># Different strategies</span>
+<span class="n">pi_include</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">pi</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">missing_data</span><span class="o">=</span><span class="s1">&#39;include&#39;</span><span class="p">)</span>
+<span class="n">pi_exclude</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">pi</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">missing_data</span><span class="o">=</span><span class="s1">&#39;exclude&#39;</span><span class="p">)</span>
+
+<span class="c1"># LD statistics handle missing data automatically</span>
+<span class="n">counts</span><span class="p">,</span> <span class="n">n_valid</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">tally_gpu_haplotypes</span><span class="p">()</span>
+<span class="n">dd_vals</span> <span class="o">=</span> <span class="n">ld_statistics</span><span class="o">.</span><span class="n">dd</span><span class="p">(</span><span class="n">counts</span><span class="p">,</span> <span class="n">n_valid</span><span class="o">=</span><span class="n">n_valid</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="missing_data.html" class="btn btn-neutral float-left" title="Missing Data Handling" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="changelog.html" class="btn btn-neutral float-right" title="Changelog" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Andrew Kern.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

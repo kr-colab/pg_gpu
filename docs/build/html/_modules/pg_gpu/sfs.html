@@ -1,0 +1,514 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pg_gpu.sfs &mdash; pg_gpu 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=01f34227"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            pg_gpu
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../missing_data.html">Missing Data Handling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../changelog.html">Changelog</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">pg_gpu</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">pg_gpu.sfs</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for pg_gpu.sfs</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">GPU-accelerated site frequency spectrum computation.</span>
+
+<span class="sd">This module provides functions for computing unfolded, folded, scaled, and</span>
+<span class="sd">joint site frequency spectra from haplotype data.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">cupy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">cp</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Union</span><span class="p">,</span> <span class="n">Optional</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.haplotype_matrix</span><span class="w"> </span><span class="kn">import</span> <span class="n">HaplotypeMatrix</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">._utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_population_matrix</span> <span class="k">as</span> <span class="n">_get_population_matrix</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_derived_allele_counts</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute derived allele counts per variant on GPU.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    dac : cupy.ndarray, int64, shape (n_variants,)</span>
+<span class="sd">        Derived allele counts.</span>
+<span class="sd">    n : int</span>
+<span class="sd">        Total number of haplotypes (chromosomes).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">haplotype_matrix</span><span class="o">.</span><span class="n">device</span> <span class="o">==</span> <span class="s1">&#39;CPU&#39;</span><span class="p">:</span>
+        <span class="n">haplotype_matrix</span><span class="o">.</span><span class="n">transfer_to_gpu</span><span class="p">()</span>
+
+    <span class="n">hap</span> <span class="o">=</span> <span class="n">haplotype_matrix</span><span class="o">.</span><span class="n">haplotypes</span>  <span class="c1"># (n_haplotypes, n_variants)</span>
+    <span class="n">n</span> <span class="o">=</span> <span class="n">hap</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+    <span class="c1"># treat missing (-1) as 0 for counting</span>
+    <span class="n">hap_clean</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">hap</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">,</span> <span class="n">hap</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="n">dac</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">hap_clean</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">dac</span><span class="p">,</span> <span class="n">n</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_allele_counts</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute biallelic allele counts [ref, alt] per variant.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ac : cupy.ndarray, int64, shape (n_variants, 2)</span>
+<span class="sd">    n : int</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">dac</span><span class="p">,</span> <span class="n">n</span> <span class="o">=</span> <span class="n">_derived_allele_counts</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">)</span>
+    <span class="n">ref_counts</span> <span class="o">=</span> <span class="n">n</span> <span class="o">-</span> <span class="n">dac</span>
+    <span class="n">ac</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">stack</span><span class="p">([</span><span class="n">ref_counts</span><span class="p">,</span> <span class="n">dac</span><span class="p">],</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">ac</span><span class="p">,</span> <span class="n">n</span>
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># Public API: Single-population SFS</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="sfs">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.sfs">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">sfs</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+        <span class="n">population</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute the unfolded site frequency spectrum.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">        Haplotype data.</span>
+<span class="sd">    population : str or list, optional</span>
+<span class="sd">        Population name or sample indices.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray, int64, shape (n_chromosomes + 1,)</span>
+<span class="sd">        Element k = number of variants with k derived alleles.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">population</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">population</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">haplotype_matrix</span>
+
+    <span class="n">dac</span><span class="p">,</span> <span class="n">n</span> <span class="o">=</span> <span class="n">_derived_allele_counts</span><span class="p">(</span><span class="n">matrix</span><span class="p">)</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">bincount</span><span class="p">(</span><span class="n">dac</span><span class="p">,</span> <span class="n">minlength</span><span class="o">=</span><span class="n">n</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">s</span><span class="o">.</span><span class="n">get</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="sfs_folded">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.sfs_folded">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">sfs_folded</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+               <span class="n">population</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute the folded site frequency spectrum (minor allele counts).</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">        Haplotype data.</span>
+<span class="sd">    population : str or list, optional</span>
+<span class="sd">        Population name or sample indices.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray, int64, shape (n_chromosomes // 2 + 1,)</span>
+<span class="sd">        Element k = number of variants with minor allele count k.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">population</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">population</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">haplotype_matrix</span>
+
+    <span class="n">ac</span><span class="p">,</span> <span class="n">n</span> <span class="o">=</span> <span class="n">_allele_counts</span><span class="p">(</span><span class="n">matrix</span><span class="p">)</span>
+    <span class="n">mac</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">amin</span><span class="p">(</span><span class="n">ac</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">n</span> <span class="o">//</span> <span class="mi">2</span> <span class="o">+</span> <span class="mi">1</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">bincount</span><span class="p">(</span><span class="n">mac</span><span class="p">,</span> <span class="n">minlength</span><span class="o">=</span><span class="n">x</span><span class="p">)[:</span><span class="n">x</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">s</span><span class="o">.</span><span class="n">get</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="sfs_scaled">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.sfs_scaled">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">sfs_scaled</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+               <span class="n">population</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute the scaled unfolded site frequency spectrum.</span>
+
+<span class="sd">    Scaling: element k is multiplied by k, yielding a constant expectation</span>
+<span class="sd">    under neutrality and constant population size.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">    population : str or list, optional</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray, float64, shape (n_chromosomes + 1,)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">sfs</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">population</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">scale_sfs</span><span class="p">(</span><span class="n">s</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="sfs_folded_scaled">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.sfs_folded_scaled">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">sfs_folded_scaled</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+                      <span class="n">population</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute the scaled folded site frequency spectrum.</span>
+
+<span class="sd">    Scaling: element k is multiplied by k * (n - k) / n.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">    population : str or list, optional</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray, float64, shape (n_chromosomes // 2 + 1,)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">population</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">population</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">haplotype_matrix</span>
+
+    <span class="n">_</span><span class="p">,</span> <span class="n">n</span> <span class="o">=</span> <span class="n">_derived_allele_counts</span><span class="p">(</span><span class="n">matrix</span><span class="p">)</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">sfs_folded</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">population</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">scale_sfs_folded</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">n</span><span class="p">)</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># Public API: Joint SFS (two populations)</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="joint_sfs">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.joint_sfs">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">joint_sfs</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+              <span class="n">pop1</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">],</span>
+              <span class="n">pop2</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute the joint site frequency spectrum between two populations.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">    pop1, pop2 : str or list</span>
+<span class="sd">        Population names or sample indices.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray, int64, shape (n1 + 1, n2 + 1)</span>
+<span class="sd">        Element [i, j] = number of variants with i derived alleles in pop1</span>
+<span class="sd">        and j derived alleles in pop2.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">m1</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">pop1</span><span class="p">)</span>
+    <span class="n">m2</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">pop2</span><span class="p">)</span>
+
+    <span class="n">dac1</span><span class="p">,</span> <span class="n">n1</span> <span class="o">=</span> <span class="n">_derived_allele_counts</span><span class="p">(</span><span class="n">m1</span><span class="p">)</span>
+    <span class="n">dac2</span><span class="p">,</span> <span class="n">n2</span> <span class="o">=</span> <span class="n">_derived_allele_counts</span><span class="p">(</span><span class="n">m2</span><span class="p">)</span>
+
+    <span class="n">x</span> <span class="o">=</span> <span class="n">n1</span> <span class="o">+</span> <span class="mi">1</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="n">n2</span> <span class="o">+</span> <span class="mi">1</span>
+    <span class="n">tmp</span> <span class="o">=</span> <span class="p">(</span><span class="n">dac1</span> <span class="o">*</span> <span class="n">y</span> <span class="o">+</span> <span class="n">dac2</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">bincount</span><span class="p">(</span><span class="n">tmp</span><span class="p">,</span> <span class="n">minlength</span><span class="o">=</span><span class="n">x</span> <span class="o">*</span> <span class="n">y</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">s</span><span class="p">[:</span><span class="n">x</span> <span class="o">*</span> <span class="n">y</span><span class="p">]</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="joint_sfs_folded">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.joint_sfs_folded">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">joint_sfs_folded</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+                     <span class="n">pop1</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">],</span>
+                     <span class="n">pop2</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute the folded joint site frequency spectrum.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">    pop1, pop2 : str or list</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray, int64, shape (n1 // 2 + 1, n2 // 2 + 1)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">m1</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">pop1</span><span class="p">)</span>
+    <span class="n">m2</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">pop2</span><span class="p">)</span>
+
+    <span class="n">ac1</span><span class="p">,</span> <span class="n">n1</span> <span class="o">=</span> <span class="n">_allele_counts</span><span class="p">(</span><span class="n">m1</span><span class="p">)</span>
+    <span class="n">ac2</span><span class="p">,</span> <span class="n">n2</span> <span class="o">=</span> <span class="n">_allele_counts</span><span class="p">(</span><span class="n">m2</span><span class="p">)</span>
+
+    <span class="n">mac1</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">amin</span><span class="p">(</span><span class="n">ac1</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+    <span class="n">mac2</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">amin</span><span class="p">(</span><span class="n">ac2</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+
+    <span class="n">x</span> <span class="o">=</span> <span class="n">n1</span> <span class="o">//</span> <span class="mi">2</span> <span class="o">+</span> <span class="mi">1</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="n">n2</span> <span class="o">//</span> <span class="mi">2</span> <span class="o">+</span> <span class="mi">1</span>
+    <span class="n">tmp</span> <span class="o">=</span> <span class="p">(</span><span class="n">mac1</span> <span class="o">*</span> <span class="n">y</span> <span class="o">+</span> <span class="n">mac2</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">int64</span><span class="p">)</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">bincount</span><span class="p">(</span><span class="n">tmp</span><span class="p">,</span> <span class="n">minlength</span><span class="o">=</span><span class="n">x</span> <span class="o">*</span> <span class="n">y</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">s</span><span class="p">[:</span><span class="n">x</span> <span class="o">*</span> <span class="n">y</span><span class="p">]</span><span class="o">.</span><span class="n">reshape</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="joint_sfs_scaled">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.joint_sfs_scaled">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">joint_sfs_scaled</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+                     <span class="n">pop1</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">],</span>
+                     <span class="n">pop2</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute the scaled joint site frequency spectrum.</span>
+
+<span class="sd">    Scaling: element [i, j] is multiplied by i * j.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">    pop1, pop2 : str or list</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray, float64, shape (n1 + 1, n2 + 1)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">joint_sfs</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">pop1</span><span class="p">,</span> <span class="n">pop2</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">scale_joint_sfs</span><span class="p">(</span><span class="n">s</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="joint_sfs_folded_scaled">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.joint_sfs_folded_scaled">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">joint_sfs_folded_scaled</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+                            <span class="n">pop1</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">],</span>
+                            <span class="n">pop2</span><span class="p">:</span> <span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute the scaled folded joint site frequency spectrum.</span>
+
+<span class="sd">    Scaling: element [i, j] is multiplied by i * j * (n1 - i) * (n2 - j).</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">    pop1, pop2 : str or list</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray, float64, shape (n1 // 2 + 1, n2 // 2 + 1)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">m1</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">pop1</span><span class="p">)</span>
+    <span class="n">m2</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">pop2</span><span class="p">)</span>
+
+    <span class="n">_</span><span class="p">,</span> <span class="n">n1</span> <span class="o">=</span> <span class="n">_derived_allele_counts</span><span class="p">(</span><span class="n">m1</span><span class="p">)</span>
+    <span class="n">_</span><span class="p">,</span> <span class="n">n2</span> <span class="o">=</span> <span class="n">_derived_allele_counts</span><span class="p">(</span><span class="n">m2</span><span class="p">)</span>
+
+    <span class="n">s</span> <span class="o">=</span> <span class="n">joint_sfs_folded</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">pop1</span><span class="p">,</span> <span class="n">pop2</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">scale_joint_sfs_folded</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">n1</span><span class="p">,</span> <span class="n">n2</span><span class="p">)</span></div>
+
+
+
+<span class="c1"># ---------------------------------------------------------------------------</span>
+<span class="c1"># Public API: Scaling and folding utilities</span>
+<span class="c1"># ---------------------------------------------------------------------------</span>
+
+<div class="viewcode-block" id="scale_sfs">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.scale_sfs">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">scale_sfs</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Scale a site frequency spectrum by multiplying element k by k.&quot;&quot;&quot;</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="s1">&#39;f8&#39;</span><span class="p">)</span>
+    <span class="n">k</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">size</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">s</span> <span class="o">*</span> <span class="n">k</span></div>
+
+
+
+<div class="viewcode-block" id="scale_sfs_folded">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.scale_sfs_folded">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">scale_sfs_folded</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">n</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Scale a folded SFS: element k multiplied by k * (n - k) / n.&quot;&quot;&quot;</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="s1">&#39;f8&#39;</span><span class="p">)</span>
+    <span class="n">k</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">s</span> <span class="o">*</span> <span class="n">k</span> <span class="o">*</span> <span class="p">(</span><span class="n">n</span> <span class="o">-</span> <span class="n">k</span><span class="p">)</span> <span class="o">/</span> <span class="n">n</span></div>
+
+
+
+<div class="viewcode-block" id="scale_joint_sfs">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.scale_joint_sfs">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">scale_joint_sfs</span><span class="p">(</span><span class="n">s</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Scale a joint SFS: element [i, j] multiplied by i * j.&quot;&quot;&quot;</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="s1">&#39;f8&#39;</span><span class="p">)</span>
+    <span class="n">i</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">])[:,</span> <span class="kc">None</span><span class="p">]</span>
+    <span class="n">j</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">])[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span>
+    <span class="k">return</span> <span class="p">(</span><span class="n">s</span> <span class="o">*</span> <span class="n">i</span><span class="p">)</span> <span class="o">*</span> <span class="n">j</span></div>
+
+
+
+<div class="viewcode-block" id="scale_joint_sfs_folded">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.scale_joint_sfs_folded">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">scale_joint_sfs_folded</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">n1</span><span class="p">,</span> <span class="n">n2</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Scale a folded joint SFS: element [i,j] * i * j * (n1-i) * (n2-j).&quot;&quot;&quot;</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="s1">&#39;f8&#39;</span><span class="p">)</span>
+    <span class="n">i</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">])[:,</span> <span class="kc">None</span><span class="p">]</span>
+    <span class="n">j</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">arange</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">])[</span><span class="kc">None</span><span class="p">,</span> <span class="p">:]</span>
+    <span class="k">return</span> <span class="n">s</span> <span class="o">*</span> <span class="n">i</span> <span class="o">*</span> <span class="n">j</span> <span class="o">*</span> <span class="p">(</span><span class="n">n1</span> <span class="o">-</span> <span class="n">i</span><span class="p">)</span> <span class="o">*</span> <span class="p">(</span><span class="n">n2</span> <span class="o">-</span> <span class="n">j</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="fold_sfs">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.fold_sfs">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">fold_sfs</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">n</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Fold an unfolded SFS.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    s : array_like</span>
+<span class="sd">        Unfolded SFS.</span>
+<span class="sd">    n : int</span>
+<span class="sd">        Number of chromosomes.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray</span>
+<span class="sd">        Folded SFS.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+
+    <span class="c1"># pad to full size if needed</span>
+    <span class="k">if</span> <span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">n</span> <span class="o">+</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">sn</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="n">n</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">s</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+        <span class="n">sn</span><span class="p">[:</span><span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span> <span class="o">=</span> <span class="n">s</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="n">sn</span>
+
+    <span class="n">nf</span> <span class="o">=</span> <span class="p">(</span><span class="n">n</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">//</span> <span class="mi">2</span>
+    <span class="n">n_even</span> <span class="o">=</span> <span class="n">nf</span> <span class="o">*</span> <span class="mi">2</span>
+    <span class="n">o</span> <span class="o">=</span> <span class="n">s</span><span class="p">[:</span><span class="n">nf</span><span class="p">]</span> <span class="o">+</span> <span class="n">s</span><span class="p">[</span><span class="n">nf</span><span class="p">:</span><span class="n">n_even</span><span class="p">][::</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+    <span class="k">return</span> <span class="n">o</span></div>
+
+
+
+<div class="viewcode-block" id="fold_joint_sfs">
+<a class="viewcode-back" href="../../api.html#pg_gpu.sfs.fold_joint_sfs">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">fold_joint_sfs</span><span class="p">(</span><span class="n">s</span><span class="p">,</span> <span class="n">n1</span><span class="p">,</span> <span class="n">n2</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Fold a joint SFS.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    s : array_like, shape (n1 + 1, n2 + 1)</span>
+<span class="sd">    n1, n2 : int</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    ndarray</span>
+<span class="sd">        Folded joint SFS.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">s</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">s</span><span class="p">)</span>
+
+    <span class="c1"># pad if needed</span>
+    <span class="k">if</span> <span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">n1</span> <span class="o">+</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">sm</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">n1</span> <span class="o">+</span> <span class="mi">1</span><span class="p">,</span> <span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">s</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+        <span class="n">sm</span><span class="p">[:</span><span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]]</span> <span class="o">=</span> <span class="n">s</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="n">sm</span>
+    <span class="k">if</span> <span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">&lt;</span> <span class="n">n2</span> <span class="o">+</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">sn</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">n2</span> <span class="o">+</span> <span class="mi">1</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">s</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
+        <span class="n">sn</span><span class="p">[:,</span> <span class="p">:</span><span class="n">s</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]]</span> <span class="o">=</span> <span class="n">s</span>
+        <span class="n">s</span> <span class="o">=</span> <span class="n">sn</span>
+
+    <span class="n">mf</span> <span class="o">=</span> <span class="p">(</span><span class="n">n1</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">//</span> <span class="mi">2</span>
+    <span class="n">nf</span> <span class="o">=</span> <span class="p">(</span><span class="n">n2</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">//</span> <span class="mi">2</span>
+    <span class="n">m_even</span> <span class="o">=</span> <span class="n">mf</span> <span class="o">*</span> <span class="mi">2</span>
+    <span class="n">n_even</span> <span class="o">=</span> <span class="n">nf</span> <span class="o">*</span> <span class="mi">2</span>
+
+    <span class="n">o</span> <span class="o">=</span> <span class="p">(</span><span class="n">s</span><span class="p">[:</span><span class="n">mf</span><span class="p">,</span> <span class="p">:</span><span class="n">nf</span><span class="p">]</span> <span class="o">+</span>
+         <span class="n">s</span><span class="p">[</span><span class="n">mf</span><span class="p">:</span><span class="n">m_even</span><span class="p">,</span> <span class="p">:</span><span class="n">nf</span><span class="p">][::</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span>
+         <span class="n">s</span><span class="p">[:</span><span class="n">mf</span><span class="p">,</span> <span class="n">nf</span><span class="p">:</span><span class="n">n_even</span><span class="p">][:,</span> <span class="p">::</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">+</span>
+         <span class="n">s</span><span class="p">[</span><span class="n">mf</span><span class="p">:</span><span class="n">m_even</span><span class="p">,</span> <span class="n">nf</span><span class="p">:</span><span class="n">n_even</span><span class="p">][::</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">::</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span>
+    <span class="k">return</span> <span class="n">o</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Andrew Kern.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

@@ -1,0 +1,345 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quick Start Guide &mdash; pg_gpu 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=01f34227"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="next" title="API Reference" href="api.html" />
+    <link rel="prev" title="Installation" href="installation.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            pg_gpu
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Quick Start Guide</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#basic-usage">Basic Usage</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#loading-data">Loading Data</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#ld-statistics">LD Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#diversity-statistics">Diversity Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#divergence-statistics">Divergence Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#selection-scans">Selection Scans</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#site-frequency-spectrum">Site Frequency Spectrum</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#admixture-f-statistics">Admixture / F-Statistics</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#pca-and-distance">PCA and Distance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#windowed-statistics-gpu-native">Windowed Statistics (GPU-Native)</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#diploid-data">Diploid Data</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#missing-data">Missing Data</a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="missing_data.html">Missing Data Handling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="changelog.html">Changelog</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">pg_gpu</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Quick Start Guide</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/quickstart.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="quick-start-guide">
+<h1>Quick Start Guide<a class="headerlink" href="#quick-start-guide" title="Link to this heading"></a></h1>
+<section id="basic-usage">
+<h2>Basic Usage<a class="headerlink" href="#basic-usage" title="Link to this heading"></a></h2>
+<section id="loading-data">
+<h3>Loading Data<a class="headerlink" href="#loading-data" title="Link to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">HaplotypeMatrix</span>
+
+<span class="c1"># From VCF file</span>
+<span class="n">h</span> <span class="o">=</span> <span class="n">HaplotypeMatrix</span><span class="o">.</span><span class="n">from_vcf</span><span class="p">(</span><span class="s2">&quot;data.vcf&quot;</span><span class="p">)</span>
+
+<span class="c1"># From NumPy array (n_haplotypes, n_variants)</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="n">hap</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">],</span> <span class="p">[</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">]],</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">int8</span><span class="p">)</span>
+<span class="n">positions</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">array</span><span class="p">([</span><span class="mi">100</span><span class="p">,</span> <span class="mi">200</span><span class="p">,</span> <span class="mi">300</span><span class="p">])</span>
+<span class="n">h</span> <span class="o">=</span> <span class="n">HaplotypeMatrix</span><span class="p">(</span><span class="n">hap</span><span class="p">,</span> <span class="n">positions</span><span class="p">,</span> <span class="n">chrom_start</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">chrom_end</span><span class="o">=</span><span class="mi">400</span><span class="p">)</span>
+
+<span class="c1"># Define populations</span>
+<span class="n">h</span><span class="o">.</span><span class="n">sample_sets</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">&quot;pop1&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">3</span><span class="p">],</span>
+    <span class="s2">&quot;pop2&quot;</span><span class="p">:</span> <span class="p">[</span><span class="mi">4</span><span class="p">,</span> <span class="mi">5</span><span class="p">,</span> <span class="mi">6</span><span class="p">,</span> <span class="mi">7</span><span class="p">]</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="ld-statistics">
+<h3>LD Statistics<a class="headerlink" href="#ld-statistics" title="Link to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">ld_statistics</span>
+
+<span class="c1"># Pairwise r-squared matrix</span>
+<span class="n">r2</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">pairwise_r2</span><span class="p">()</span>
+
+<span class="c1"># Haplotype count-based statistics</span>
+<span class="n">counts</span><span class="p">,</span> <span class="n">n_valid</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">tally_gpu_haplotypes</span><span class="p">()</span>
+<span class="n">dd_vals</span> <span class="o">=</span> <span class="n">ld_statistics</span><span class="o">.</span><span class="n">dd</span><span class="p">(</span><span class="n">counts</span><span class="p">,</span> <span class="n">n_valid</span><span class="o">=</span><span class="n">n_valid</span><span class="p">)</span>
+<span class="n">r_vals</span> <span class="o">=</span> <span class="n">ld_statistics</span><span class="o">.</span><span class="n">r</span><span class="p">(</span><span class="n">counts</span><span class="p">,</span> <span class="n">n_valid</span><span class="o">=</span><span class="n">n_valid</span><span class="p">)</span>
+<span class="n">r2_vals</span> <span class="o">=</span> <span class="n">ld_statistics</span><span class="o">.</span><span class="n">r_squared</span><span class="p">(</span><span class="n">counts</span><span class="p">,</span> <span class="n">n_valid</span><span class="o">=</span><span class="n">n_valid</span><span class="p">)</span>
+
+<span class="c1"># LD pruning</span>
+<span class="n">unlinked</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">locate_unlinked</span><span class="p">(</span><span class="n">size</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">step</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span> <span class="n">threshold</span><span class="o">=</span><span class="mf">0.1</span><span class="p">)</span>
+
+<span class="c1"># Windowed r-squared</span>
+<span class="n">result</span><span class="p">,</span> <span class="n">pair_counts</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">windowed_r_squared</span><span class="p">(</span>
+    <span class="n">bp_bins</span><span class="o">=</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1000</span><span class="p">,</span> <span class="mi">5000</span><span class="p">,</span> <span class="mi">10000</span><span class="p">]</span>
+<span class="p">)</span>
+
+<span class="c1"># Two-population LD</span>
+<span class="n">stats</span> <span class="o">=</span> <span class="n">h</span><span class="o">.</span><span class="n">compute_ld_statistics_gpu_two_pops</span><span class="p">(</span>
+    <span class="n">bp_bins</span><span class="o">=</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">1000</span><span class="p">,</span> <span class="mi">5000</span><span class="p">,</span> <span class="mi">10000</span><span class="p">],</span>
+    <span class="n">pop1</span><span class="o">=</span><span class="s2">&quot;pop1&quot;</span><span class="p">,</span> <span class="n">pop2</span><span class="o">=</span><span class="s2">&quot;pop2&quot;</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="diversity-statistics">
+<h3>Diversity Statistics<a class="headerlink" href="#diversity-statistics" title="Link to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">diversity</span>
+
+<span class="c1"># Basic diversity</span>
+<span class="n">pi_val</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">pi</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">span_normalize</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">theta</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">theta_w</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">span_normalize</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">tajd</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">tajimas_d</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+
+<span class="c1"># Heterozygosity</span>
+<span class="n">he</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">heterozygosity_expected</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+<span class="n">ho</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">heterozygosity_observed</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+<span class="n">f</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">inbreeding_coefficient</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+
+<span class="c1"># Allele frequency spectrum</span>
+<span class="n">afs</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">allele_frequency_spectrum</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+
+<span class="c1"># Population-specific</span>
+<span class="n">pi_pop1</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">pi</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">population</span><span class="o">=</span><span class="s1">&#39;pop1&#39;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="divergence-statistics">
+<h3>Divergence Statistics<a class="headerlink" href="#divergence-statistics" title="Link to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">divergence</span>
+
+<span class="n">fst</span> <span class="o">=</span> <span class="n">divergence</span><span class="o">.</span><span class="n">fst</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s1">&#39;pop1&#39;</span><span class="p">,</span> <span class="s1">&#39;pop2&#39;</span><span class="p">)</span>
+<span class="n">dxy_val</span> <span class="o">=</span> <span class="n">divergence</span><span class="o">.</span><span class="n">dxy</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s1">&#39;pop1&#39;</span><span class="p">,</span> <span class="s1">&#39;pop2&#39;</span><span class="p">)</span>
+
+<span class="c1"># Population Branch Statistic (3 populations)</span>
+<span class="n">pbs_vals</span> <span class="o">=</span> <span class="n">divergence</span><span class="o">.</span><span class="n">pbs</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s1">&#39;pop1&#39;</span><span class="p">,</span> <span class="s1">&#39;pop2&#39;</span><span class="p">,</span> <span class="s1">&#39;pop3&#39;</span><span class="p">,</span> <span class="n">window_size</span><span class="o">=</span><span class="mi">50</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="selection-scans">
+<h3>Selection Scans<a class="headerlink" href="#selection-scans" title="Link to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">selection</span>
+
+<span class="c1"># Integrated haplotype score</span>
+<span class="n">ihs_scores</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">ihs</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+<span class="n">ihs_std</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">standardize</span><span class="p">(</span><span class="n">ihs_scores</span><span class="p">)</span>
+
+<span class="c1"># Cross-population EHH</span>
+<span class="n">xpehh_scores</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">xpehh</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s1">&#39;pop1&#39;</span><span class="p">,</span> <span class="s1">&#39;pop2&#39;</span><span class="p">)</span>
+
+<span class="c1"># nSL (no distance weighting)</span>
+<span class="n">nsl_scores</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">nsl</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+
+<span class="c1"># Garud&#39;s H statistics</span>
+<span class="n">h1</span><span class="p">,</span> <span class="n">h12</span><span class="p">,</span> <span class="n">h123</span><span class="p">,</span> <span class="n">h2_h1</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">garud_h</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+
+<span class="c1"># EHH decay</span>
+<span class="n">ehh</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">ehh_decay</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="site-frequency-spectrum">
+<h3>Site Frequency Spectrum<a class="headerlink" href="#site-frequency-spectrum" title="Link to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">sfs</span>
+
+<span class="c1"># Unfolded and folded SFS</span>
+<span class="n">s</span> <span class="o">=</span> <span class="n">sfs</span><span class="o">.</span><span class="n">sfs</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+<span class="n">s_folded</span> <span class="o">=</span> <span class="n">sfs</span><span class="o">.</span><span class="n">sfs_folded</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+
+<span class="c1"># Scaled SFS</span>
+<span class="n">s_scaled</span> <span class="o">=</span> <span class="n">sfs</span><span class="o">.</span><span class="n">sfs_scaled</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+
+<span class="c1"># Joint SFS (two populations)</span>
+<span class="n">j</span> <span class="o">=</span> <span class="n">sfs</span><span class="o">.</span><span class="n">joint_sfs</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s1">&#39;pop1&#39;</span><span class="p">,</span> <span class="s1">&#39;pop2&#39;</span><span class="p">)</span>
+<span class="n">j_folded</span> <span class="o">=</span> <span class="n">sfs</span><span class="o">.</span><span class="n">joint_sfs_folded</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s1">&#39;pop1&#39;</span><span class="p">,</span> <span class="s1">&#39;pop2&#39;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="admixture-f-statistics">
+<h3>Admixture / F-Statistics<a class="headerlink" href="#admixture-f-statistics" title="Link to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">admixture</span>
+
+<span class="c1"># Patterson&#39;s F2 (branch length)</span>
+<span class="n">f2</span> <span class="o">=</span> <span class="n">admixture</span><span class="o">.</span><span class="n">patterson_f2</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s1">&#39;pop1&#39;</span><span class="p">,</span> <span class="s1">&#39;pop2&#39;</span><span class="p">)</span>
+
+<span class="c1"># Patterson&#39;s F3 (admixture test)</span>
+<span class="n">T</span><span class="p">,</span> <span class="n">B</span> <span class="o">=</span> <span class="n">admixture</span><span class="o">.</span><span class="n">patterson_f3</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s1">&#39;test_pop&#39;</span><span class="p">,</span> <span class="s1">&#39;source1&#39;</span><span class="p">,</span> <span class="s1">&#39;source2&#39;</span><span class="p">)</span>
+<span class="n">f3_star</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">nansum</span><span class="p">(</span><span class="n">T</span><span class="p">)</span> <span class="o">/</span> <span class="n">np</span><span class="o">.</span><span class="n">nansum</span><span class="p">(</span><span class="n">B</span><span class="p">)</span>
+
+<span class="c1"># Patterson&#39;s D (ABBA-BABA)</span>
+<span class="n">num</span><span class="p">,</span> <span class="n">den</span> <span class="o">=</span> <span class="n">admixture</span><span class="o">.</span><span class="n">patterson_d</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="s1">&#39;popA&#39;</span><span class="p">,</span> <span class="s1">&#39;popB&#39;</span><span class="p">,</span> <span class="s1">&#39;popC&#39;</span><span class="p">,</span> <span class="s1">&#39;popD&#39;</span><span class="p">)</span>
+
+<span class="c1"># Block-jackknife with standard error</span>
+<span class="n">d</span><span class="p">,</span> <span class="n">se</span><span class="p">,</span> <span class="n">z</span><span class="p">,</span> <span class="n">vb</span><span class="p">,</span> <span class="n">vj</span> <span class="o">=</span> <span class="n">admixture</span><span class="o">.</span><span class="n">average_patterson_d</span><span class="p">(</span>
+    <span class="n">h</span><span class="p">,</span> <span class="s1">&#39;popA&#39;</span><span class="p">,</span> <span class="s1">&#39;popB&#39;</span><span class="p">,</span> <span class="s1">&#39;popC&#39;</span><span class="p">,</span> <span class="s1">&#39;popD&#39;</span><span class="p">,</span> <span class="n">blen</span><span class="o">=</span><span class="mi">100</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="pca-and-distance">
+<h3>PCA and Distance<a class="headerlink" href="#pca-and-distance" title="Link to this heading"></a></h3>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">decomposition</span>
+
+<span class="c1"># PCA (GPU-accelerated SVD)</span>
+<span class="n">coords</span><span class="p">,</span> <span class="n">var_ratio</span> <span class="o">=</span> <span class="n">decomposition</span><span class="o">.</span><span class="n">pca</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">n_components</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+
+<span class="c1"># Randomized PCA (faster for large datasets)</span>
+<span class="n">coords</span><span class="p">,</span> <span class="n">var_ratio</span> <span class="o">=</span> <span class="n">decomposition</span><span class="o">.</span><span class="n">randomized_pca</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">n_components</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+
+<span class="c1"># Pairwise genetic distance</span>
+<span class="n">dist</span> <span class="o">=</span> <span class="n">decomposition</span><span class="o">.</span><span class="n">pairwise_distance</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">metric</span><span class="o">=</span><span class="s1">&#39;euclidean&#39;</span><span class="p">)</span>
+
+<span class="c1"># PCoA from distance matrix</span>
+<span class="n">coords</span><span class="p">,</span> <span class="n">var_ratio</span> <span class="o">=</span> <span class="n">decomposition</span><span class="o">.</span><span class="n">pcoa</span><span class="p">(</span><span class="n">dist</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="windowed-statistics-gpu-native">
+<h3>Windowed Statistics (GPU-Native)<a class="headerlink" href="#windowed-statistics-gpu-native" title="Link to this heading"></a></h3>
+<p>Compute statistics across all genomic windows in a single GPU pass:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu.windowed_analysis</span><span class="w"> </span><span class="kn">import</span> <span class="n">windowed_statistics</span>
+
+<span class="c1"># All single-pop stats in one call, no Python loop over windows</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">windowed_statistics</span><span class="p">(</span>
+    <span class="n">h</span><span class="p">,</span> <span class="n">bp_bins</span><span class="o">=</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">10000</span><span class="p">,</span> <span class="mi">20000</span><span class="p">,</span> <span class="mi">30000</span><span class="p">,</span> <span class="mi">40000</span><span class="p">,</span> <span class="mi">50000</span><span class="p">],</span>
+    <span class="n">statistics</span><span class="o">=</span><span class="p">(</span><span class="s1">&#39;pi&#39;</span><span class="p">,</span> <span class="s1">&#39;theta_w&#39;</span><span class="p">,</span> <span class="s1">&#39;tajimas_d&#39;</span><span class="p">,</span> <span class="s1">&#39;segregating_sites&#39;</span><span class="p">)</span>
+<span class="p">)</span>
+<span class="c1"># result[&#39;pi&#39;], result[&#39;theta_w&#39;], etc. are arrays with one value per window</span>
+
+<span class="c1"># Two-population windowed FST + Dxy</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">windowed_statistics</span><span class="p">(</span>
+    <span class="n">h</span><span class="p">,</span> <span class="n">bp_bins</span><span class="o">=</span><span class="p">[</span><span class="mi">0</span><span class="p">,</span> <span class="mi">10000</span><span class="p">,</span> <span class="mi">20000</span><span class="p">,</span> <span class="mi">30000</span><span class="p">,</span> <span class="mi">40000</span><span class="p">,</span> <span class="mi">50000</span><span class="p">],</span>
+    <span class="n">statistics</span><span class="o">=</span><span class="p">(</span><span class="s1">&#39;fst&#39;</span><span class="p">,</span> <span class="s1">&#39;dxy&#39;</span><span class="p">),</span>
+    <span class="n">pop1</span><span class="o">=</span><span class="s1">&#39;pop1&#39;</span><span class="p">,</span> <span class="n">pop2</span><span class="o">=</span><span class="s1">&#39;pop2&#39;</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="diploid-data">
+<h3>Diploid Data<a class="headerlink" href="#diploid-data" title="Link to this heading"></a></h3>
+<p>Use <code class="docutils literal notranslate"><span class="pre">GenotypeMatrix</span></code> for diploid genotypes (0/1/2). Many functions
+auto-dispatch based on input type:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">pg_gpu</span><span class="w"> </span><span class="kn">import</span> <span class="n">GenotypeMatrix</span>
+
+<span class="c1"># Convert from haploid (pairs consecutive haplotypes)</span>
+<span class="n">gm</span> <span class="o">=</span> <span class="n">GenotypeMatrix</span><span class="o">.</span><span class="n">from_haplotype_matrix</span><span class="p">(</span><span class="n">h</span><span class="p">)</span>
+
+<span class="c1"># Same functions work on both types</span>
+<span class="n">h1</span><span class="p">,</span> <span class="n">h12</span><span class="p">,</span> <span class="n">h123</span><span class="p">,</span> <span class="n">h2h1</span> <span class="o">=</span> <span class="n">selection</span><span class="o">.</span><span class="n">garud_h</span><span class="p">(</span><span class="n">gm</span><span class="p">)</span>  <span class="c1"># uses diplotype frequencies</span>
+<span class="n">z</span> <span class="o">=</span> <span class="n">ld_statistics</span><span class="o">.</span><span class="n">zns</span><span class="p">(</span><span class="n">gm</span><span class="p">)</span>                      <span class="c1"># uses genotype correlation</span>
+<span class="n">hist</span><span class="p">,</span> <span class="n">edges</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">daf_histogram</span><span class="p">(</span><span class="n">gm</span><span class="p">)</span>       <span class="c1"># DAF = sum / (2*n_ind)</span>
+
+<span class="c1"># Distance distribution moments</span>
+<span class="n">var</span><span class="p">,</span> <span class="n">skew</span><span class="p">,</span> <span class="n">kurt</span> <span class="o">=</span> <span class="n">distance_stats</span><span class="o">.</span><span class="n">dist_moments</span><span class="p">(</span><span class="n">gm</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+<section id="missing-data">
+<h3>Missing Data<a class="headerlink" href="#missing-data" title="Link to this heading"></a></h3>
+<p>Missing data is encoded as -1 and handled automatically:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="c1"># Different missing data strategies</span>
+<span class="n">pi_include</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">pi</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">missing_data</span><span class="o">=</span><span class="s1">&#39;include&#39;</span><span class="p">)</span>
+<span class="n">pi_exclude</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">pi</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">missing_data</span><span class="o">=</span><span class="s1">&#39;exclude&#39;</span><span class="p">)</span>
+<span class="n">pi_ignore</span> <span class="o">=</span> <span class="n">diversity</span><span class="o">.</span><span class="n">pi</span><span class="p">(</span><span class="n">h</span><span class="p">,</span> <span class="n">missing_data</span><span class="o">=</span><span class="s1">&#39;ignore&#39;</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="installation.html" class="btn btn-neutral float-left" title="Installation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="api.html" class="btn btn-neutral float-right" title="API Reference" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Andrew Kern.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

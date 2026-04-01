@@ -1,0 +1,329 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pg_gpu.genotype_matrix &mdash; pg_gpu 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=01f34227"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            pg_gpu
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../missing_data.html">Missing Data Handling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../changelog.html">Changelog</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">pg_gpu</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">pg_gpu.genotype_matrix</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for pg_gpu.genotype_matrix</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">Diploid genotype matrix for population genetics analysis.</span>
+
+<span class="sd">Stores genotype data as alt allele counts (0/1/2) per individual per variant.</span>
+<span class="sd">Provides conversion to/from HaplotypeMatrix.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">cupy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">cp</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Optional</span>
+
+
+<div class="viewcode-block" id="GenotypeMatrix">
+<a class="viewcode-back" href="../../api.html#pg_gpu.GenotypeMatrix">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">GenotypeMatrix</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Diploid genotype matrix with values 0 (hom ref), 1 (het), 2 (hom alt).</span>
+
+<span class="sd">    Shape: (n_individuals, n_variants). Missing data encoded as -1.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    genotypes : ndarray, int8, shape (n_individuals, n_variants)</span>
+<span class="sd">        Alt allele count per individual per variant.</span>
+<span class="sd">    positions : ndarray, shape (n_variants,)</span>
+<span class="sd">        Variant positions.</span>
+<span class="sd">    chrom_start, chrom_end : int, optional</span>
+<span class="sd">        Chromosome boundaries.</span>
+<span class="sd">    sample_sets : dict, optional</span>
+<span class="sd">        Maps population names to lists of individual indices.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">genotypes</span><span class="p">,</span> <span class="n">positions</span><span class="p">,</span> <span class="n">chrom_start</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">chrom_end</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
+                 <span class="n">sample_sets</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+        <span class="k">if</span> <span class="n">genotypes</span><span class="o">.</span><span class="n">size</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;genotypes cannot be empty&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">positions</span><span class="o">.</span><span class="n">size</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;positions cannot be empty&quot;</span><span class="p">)</span>
+
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">genotypes</span><span class="p">,</span> <span class="n">cp</span><span class="o">.</span><span class="n">ndarray</span><span class="p">):</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_device</span> <span class="o">=</span> <span class="s1">&#39;GPU&#39;</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">positions</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">ndarray</span><span class="p">):</span>
+                <span class="n">positions</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">array</span><span class="p">(</span><span class="n">positions</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_device</span> <span class="o">=</span> <span class="s1">&#39;CPU&#39;</span>
+            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">positions</span><span class="p">,</span> <span class="n">cp</span><span class="o">.</span><span class="n">ndarray</span><span class="p">):</span>
+                <span class="n">positions</span> <span class="o">=</span> <span class="n">positions</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span> <span class="o">=</span> <span class="n">genotypes</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">positions</span> <span class="o">=</span> <span class="n">positions</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">chrom_start</span> <span class="o">=</span> <span class="n">chrom_start</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">chrom_end</span> <span class="o">=</span> <span class="n">chrom_end</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_sample_sets</span> <span class="o">=</span> <span class="n">sample_sets</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">device</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_device</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">sample_sets</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sample_sets</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="p">{</span><span class="s2">&quot;all&quot;</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="nb">range</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]))}</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_sample_sets</span>
+
+    <span class="nd">@sample_sets</span><span class="o">.</span><span class="n">setter</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">sample_sets</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">sample_sets</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_sample_sets</span> <span class="o">=</span> <span class="n">sample_sets</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">shape</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span><span class="o">.</span><span class="n">shape</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">num_variants</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
+
+    <span class="nd">@property</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">num_individuals</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__repr__</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">return</span> <span class="p">(</span><span class="sa">f</span><span class="s2">&quot;GenotypeMatrix(shape=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">, &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;first_position=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">positions</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2">, &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;last_position=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">positions</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">)</span>
+
+<div class="viewcode-block" id="GenotypeMatrix.transfer_to_gpu">
+<a class="viewcode-back" href="../../api.html#pg_gpu.GenotypeMatrix.transfer_to_gpu">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">transfer_to_gpu</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_device</span> <span class="o">==</span> <span class="s1">&#39;CPU&#39;</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">positions</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">positions</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_device</span> <span class="o">=</span> <span class="s1">&#39;GPU&#39;</span></div>
+
+
+<div class="viewcode-block" id="GenotypeMatrix.transfer_to_cpu">
+<a class="viewcode-back" href="../../api.html#pg_gpu.GenotypeMatrix.transfer_to_cpu">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">transfer_to_cpu</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_device</span> <span class="o">==</span> <span class="s1">&#39;GPU&#39;</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span><span class="o">.</span><span class="n">get</span><span class="p">())</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">positions</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">positions</span><span class="o">.</span><span class="n">get</span><span class="p">())</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_device</span> <span class="o">=</span> <span class="s1">&#39;CPU&#39;</span></div>
+
+
+<div class="viewcode-block" id="GenotypeMatrix.from_haplotype_matrix">
+<a class="viewcode-back" href="../../api.html#pg_gpu.GenotypeMatrix.from_haplotype_matrix">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_haplotype_matrix</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">hap_matrix</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Convert a HaplotypeMatrix to a GenotypeMatrix.</span>
+
+<span class="sd">        Pairs consecutive haplotypes (0,1), (2,3), ... as diploid individuals.</span>
+<span class="sd">        Genotype = sum of paired haplotypes (0, 1, or 2).</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        hap_matrix : HaplotypeMatrix</span>
+<span class="sd">            Haploid data. Must have even number of haplotypes.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        GenotypeMatrix</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="n">n_hap</span> <span class="o">=</span> <span class="n">hap_matrix</span><span class="o">.</span><span class="n">haplotypes</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">if</span> <span class="n">n_hap</span> <span class="o">%</span> <span class="mi">2</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Need even number of haplotypes for diploid conversion, got </span><span class="si">{</span><span class="n">n_hap</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+        <span class="n">hap</span> <span class="o">=</span> <span class="n">hap_matrix</span><span class="o">.</span><span class="n">haplotypes</span>
+        <span class="n">xp</span> <span class="o">=</span> <span class="n">cp</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">hap</span><span class="p">,</span> <span class="n">cp</span><span class="o">.</span><span class="n">ndarray</span><span class="p">)</span> <span class="k">else</span> <span class="n">np</span>
+
+        <span class="c1"># pair consecutive haplotypes</span>
+        <span class="n">h1</span> <span class="o">=</span> <span class="n">hap</span><span class="p">[</span><span class="mi">0</span><span class="p">::</span><span class="mi">2</span><span class="p">]</span>  <span class="c1"># even indices</span>
+        <span class="n">h2</span> <span class="o">=</span> <span class="n">hap</span><span class="p">[</span><span class="mi">1</span><span class="p">::</span><span class="mi">2</span><span class="p">]</span>  <span class="c1"># odd indices</span>
+
+        <span class="c1"># handle missing: if either haplotype is missing, genotype is missing</span>
+        <span class="k">if</span> <span class="n">xp</span> <span class="ow">is</span> <span class="n">cp</span><span class="p">:</span>
+            <span class="n">missing</span> <span class="o">=</span> <span class="p">(</span><span class="n">h1</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="n">h2</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="n">geno</span> <span class="o">=</span> <span class="p">(</span><span class="n">xp</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">h1</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">xp</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">h2</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">xp</span><span class="o">.</span><span class="n">int8</span><span class="p">)</span>
+            <span class="n">geno</span><span class="p">[</span><span class="n">missing</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">missing</span> <span class="o">=</span> <span class="p">(</span><span class="n">h1</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="o">|</span> <span class="p">(</span><span class="n">h2</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+            <span class="n">geno</span> <span class="o">=</span> <span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">h1</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span> <span class="o">+</span> <span class="n">np</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">h2</span><span class="p">,</span> <span class="mi">0</span><span class="p">))</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int8</span><span class="p">)</span>
+            <span class="n">geno</span><span class="p">[</span><span class="n">missing</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+
+        <span class="c1"># remap sample_sets: haplotype indices -&gt; individual indices</span>
+        <span class="n">new_sample_sets</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="n">hap_matrix</span><span class="o">.</span><span class="n">_sample_sets</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">new_sample_sets</span> <span class="o">=</span> <span class="p">{}</span>
+            <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">indices</span> <span class="ow">in</span> <span class="n">hap_matrix</span><span class="o">.</span><span class="n">_sample_sets</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+                <span class="c1"># map haplotype indices to individual indices</span>
+                <span class="n">ind_indices</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">i</span> <span class="o">//</span> <span class="mi">2</span> <span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="n">indices</span><span class="p">))</span>
+                <span class="n">new_sample_sets</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">ind_indices</span>
+
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="n">geno</span><span class="p">,</span> <span class="n">hap_matrix</span><span class="o">.</span><span class="n">positions</span><span class="p">,</span> <span class="n">hap_matrix</span><span class="o">.</span><span class="n">chrom_start</span><span class="p">,</span>
+                   <span class="n">hap_matrix</span><span class="o">.</span><span class="n">chrom_end</span><span class="p">,</span> <span class="n">sample_sets</span><span class="o">=</span><span class="n">new_sample_sets</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="GenotypeMatrix.to_haplotype_matrix">
+<a class="viewcode-back" href="../../api.html#pg_gpu.GenotypeMatrix.to_haplotype_matrix">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">to_haplotype_matrix</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Convert back to HaplotypeMatrix (expand diploid to haploid).</span>
+
+<span class="sd">        Each individual becomes two consecutive haplotypes.</span>
+<span class="sd">        Het sites (genotype=1) are assigned as (0,1).</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        HaplotypeMatrix</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">.haplotype_matrix</span><span class="w"> </span><span class="kn">import</span> <span class="n">HaplotypeMatrix</span>
+
+        <span class="n">geno</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">genotypes</span>
+        <span class="n">xp</span> <span class="o">=</span> <span class="n">cp</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">geno</span><span class="p">,</span> <span class="n">cp</span><span class="o">.</span><span class="n">ndarray</span><span class="p">)</span> <span class="k">else</span> <span class="n">np</span>
+
+        <span class="n">n_ind</span><span class="p">,</span> <span class="n">n_var</span> <span class="o">=</span> <span class="n">geno</span><span class="o">.</span><span class="n">shape</span>
+        <span class="n">hap</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">zeros</span><span class="p">((</span><span class="n">n_ind</span> <span class="o">*</span> <span class="mi">2</span><span class="p">,</span> <span class="n">n_var</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">xp</span><span class="o">.</span><span class="n">int8</span><span class="p">)</span>
+
+        <span class="n">missing</span> <span class="o">=</span> <span class="n">geno</span> <span class="o">&lt;</span> <span class="mi">0</span>
+        <span class="n">g</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">maximum</span><span class="p">(</span><span class="n">geno</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span>
+
+        <span class="c1"># haplotype 1: 1 if genotype &gt;= 1</span>
+        <span class="n">hap</span><span class="p">[</span><span class="mi">0</span><span class="p">::</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">g</span> <span class="o">&gt;=</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">xp</span><span class="o">.</span><span class="n">int8</span><span class="p">)</span>
+        <span class="c1"># haplotype 2: 1 if genotype &gt;= 2</span>
+        <span class="n">hap</span><span class="p">[</span><span class="mi">1</span><span class="p">::</span><span class="mi">2</span><span class="p">]</span> <span class="o">=</span> <span class="n">xp</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">g</span> <span class="o">&gt;=</span> <span class="mi">2</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">xp</span><span class="o">.</span><span class="n">int8</span><span class="p">)</span>
+
+        <span class="c1"># propagate missing</span>
+        <span class="n">hap</span><span class="p">[</span><span class="mi">0</span><span class="p">::</span><span class="mi">2</span><span class="p">][</span><span class="n">missing</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+        <span class="n">hap</span><span class="p">[</span><span class="mi">1</span><span class="p">::</span><span class="mi">2</span><span class="p">][</span><span class="n">missing</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+
+        <span class="k">return</span> <span class="n">HaplotypeMatrix</span><span class="p">(</span><span class="n">hap</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">positions</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">chrom_start</span><span class="p">,</span>
+                               <span class="bp">self</span><span class="o">.</span><span class="n">chrom_end</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="GenotypeMatrix.from_vcf">
+<a class="viewcode-back" href="../../api.html#pg_gpu.GenotypeMatrix.from_vcf">[docs]</a>
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">from_vcf</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">path</span><span class="p">):</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Construct from a VCF file.</span>
+
+<span class="sd">        Parameters</span>
+<span class="sd">        ----------</span>
+<span class="sd">        path : str</span>
+<span class="sd">            Path to VCF file.</span>
+
+<span class="sd">        Returns</span>
+<span class="sd">        -------</span>
+<span class="sd">        GenotypeMatrix</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="kn">import</span><span class="w"> </span><span class="nn">allel</span>
+        <span class="n">callset</span> <span class="o">=</span> <span class="n">allel</span><span class="o">.</span><span class="n">read_vcf</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="n">gt</span> <span class="o">=</span> <span class="n">callset</span><span class="p">[</span><span class="s1">&#39;calldata/GT&#39;</span><span class="p">]</span>  <span class="c1"># (n_variants, n_samples, 2)</span>
+        <span class="n">pos</span> <span class="o">=</span> <span class="n">callset</span><span class="p">[</span><span class="s1">&#39;variants/POS&#39;</span><span class="p">]</span>
+
+        <span class="c1"># sum alleles to get alt count (0/1/2)</span>
+        <span class="n">geno</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">gt</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">int8</span><span class="p">)</span>  <span class="c1"># (n_variants, n_samples)</span>
+        <span class="c1"># handle missing (-1 in either allele)</span>
+        <span class="n">missing</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">any</span><span class="p">(</span><span class="n">gt</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span>
+        <span class="n">geno</span><span class="p">[</span><span class="n">missing</span><span class="p">]</span> <span class="o">=</span> <span class="o">-</span><span class="mi">1</span>
+
+        <span class="c1"># transpose to (n_individuals, n_variants)</span>
+        <span class="n">geno</span> <span class="o">=</span> <span class="n">geno</span><span class="o">.</span><span class="n">T</span>
+
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="n">geno</span><span class="p">,</span> <span class="n">pos</span><span class="p">,</span> <span class="n">chrom_start</span><span class="o">=</span><span class="n">pos</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">chrom_end</span><span class="o">=</span><span class="n">pos</span><span class="p">[</span><span class="o">-</span><span class="mi">1</span><span class="p">])</span></div>
+</div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Andrew Kern.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

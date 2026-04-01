@@ -214,12 +214,42 @@ Distance
 Windowed Statistics (GPU-Native)
 --------------------------------
 
-These functions compute statistics across all genomic windows in a single
-GPU pass, avoiding Python loops over windows.
+The ``windowed_analysis()`` convenience function automatically routes
+through fused CUDA kernels for maximum performance. A single kernel
+launch processes all windows in parallel.
 
-.. autofunction:: pg_gpu.windowed_analysis.windowed_statistics
+.. autofunction:: pg_gpu.windowed_analysis.windowed_analysis
 
 .. autofunction:: pg_gpu.windowed_analysis.windowed_statistics_fused
+
+Supported Fused Windowed Statistics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Single-population (one kernel launch for all):
+
+- ``pi`` -- nucleotide diversity
+- ``theta_w`` -- Watterson's theta
+- ``tajimas_d`` -- Tajima's D
+- ``segregating_sites`` -- count of segregating sites
+- ``singletons`` -- count of singletons
+
+Two-population (one kernel launch for all):
+
+- ``fst`` -- Hudson's FST (ratio of averages)
+- ``fst_hudson`` -- alias for ``fst``
+- ``fst_wc`` -- Weir-Cockerham FST (haploid)
+- ``dxy`` -- absolute divergence
+- ``da`` -- net divergence (Dxy - mean within-pop pi)
+
+Selection scan statistics:
+
+- ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1`` -- Garud's H statistics per window (prefix-sum hashing + shared-memory sort)
+- ``mean_nsl`` -- mean nSL per window (per-site nSL + scatter binning)
+
+Legacy Functions
+~~~~~~~~~~~~~~~~
+
+.. autofunction:: pg_gpu.windowed_analysis.windowed_statistics
 
 GenotypeMatrix
 --------------

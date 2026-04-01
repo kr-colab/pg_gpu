@@ -1,0 +1,401 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="../../">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>pg_gpu.decomposition &mdash; pg_gpu 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="../../_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="../../_static/jquery.js?v=5d32c60e"></script>
+      <script src="../../_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="../../_static/documentation_options.js?v=01f34227"></script>
+      <script src="../../_static/doctools.js?v=9bcbadda"></script>
+      <script src="../../_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="../../_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="../../genindex.html" />
+    <link rel="search" title="Search" href="../../search.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="../../index.html" class="icon icon-home">
+            pg_gpu
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="../../search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../api.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../missing_data.html">Missing Data Handling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../changelog.html">Changelog</a></li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="../../index.html">pg_gpu</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="../../index.html" class="icon icon-home" aria-label="Home"></a></li>
+          <li class="breadcrumb-item"><a href="../index.html">Module code</a></li>
+      <li class="breadcrumb-item active">pg_gpu.decomposition</li>
+      <li class="wy-breadcrumbs-aside">
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <h1>Source code for pg_gpu.decomposition</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;</span>
+<span class="sd">GPU-accelerated dimensionality reduction and distance computation.</span>
+
+<span class="sd">Provides PCA, randomized PCA, PCoA, and pairwise genetic distance</span>
+<span class="sd">functions using CuPy for GPU acceleration.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">cupy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">cp</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Union</span><span class="p">,</span> <span class="n">Optional</span><span class="p">,</span> <span class="n">Tuple</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.haplotype_matrix</span><span class="w"> </span><span class="kn">import</span> <span class="n">HaplotypeMatrix</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">._utils</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_population_matrix</span> <span class="k">as</span> <span class="n">_get_population_matrix</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_prepare_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">scaler</span><span class="p">,</span> <span class="n">population</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Center and scale haplotype matrix for PCA.</span>
+
+<span class="sd">    Returns the prepared matrix X and its dimensions.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">population</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">population</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">haplotype_matrix</span>
+
+    <span class="k">if</span> <span class="n">matrix</span><span class="o">.</span><span class="n">device</span> <span class="o">==</span> <span class="s1">&#39;CPU&#39;</span><span class="p">:</span>
+        <span class="n">matrix</span><span class="o">.</span><span class="n">transfer_to_gpu</span><span class="p">()</span>
+
+    <span class="n">X</span> <span class="o">=</span> <span class="n">matrix</span><span class="o">.</span><span class="n">haplotypes</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">cp</span><span class="o">.</span><span class="n">any</span><span class="p">(</span><span class="n">X</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">):</span>
+        <span class="n">X</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">X</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">X</span><span class="p">)</span>
+    <span class="n">X</span> <span class="o">=</span> <span class="n">X</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
+
+    <span class="c1"># center</span>
+    <span class="n">mean</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+    <span class="n">X</span> <span class="o">-=</span> <span class="n">mean</span>
+
+    <span class="c1"># scale</span>
+    <span class="k">if</span> <span class="n">scaler</span> <span class="o">==</span> <span class="s1">&#39;patterson&#39;</span><span class="p">:</span>
+        <span class="n">p</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">matrix</span><span class="o">.</span><span class="n">haplotypes</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">matrix</span><span class="o">.</span><span class="n">haplotypes</span><span class="p">)</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">scale</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">p</span> <span class="o">*</span> <span class="p">(</span><span class="mi">1</span> <span class="o">-</span> <span class="n">p</span><span class="p">))</span>
+        <span class="n">valid</span> <span class="o">=</span> <span class="n">scale</span> <span class="o">&gt;</span> <span class="mi">0</span>
+        <span class="n">X</span><span class="p">[:,</span> <span class="n">valid</span><span class="p">]</span> <span class="o">/=</span> <span class="n">scale</span><span class="p">[</span><span class="n">valid</span><span class="p">]</span>
+        <span class="n">X</span><span class="p">[:,</span> <span class="o">~</span><span class="n">valid</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+    <span class="k">elif</span> <span class="n">scaler</span> <span class="o">==</span> <span class="s1">&#39;standard&#39;</span><span class="p">:</span>
+        <span class="n">std</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">std</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+        <span class="n">valid</span> <span class="o">=</span> <span class="n">std</span> <span class="o">&gt;</span> <span class="mi">0</span>
+        <span class="n">X</span><span class="p">[:,</span> <span class="n">valid</span><span class="p">]</span> <span class="o">/=</span> <span class="n">std</span><span class="p">[</span><span class="n">valid</span><span class="p">]</span>
+        <span class="n">X</span><span class="p">[:,</span> <span class="o">~</span><span class="n">valid</span><span class="p">]</span> <span class="o">=</span> <span class="mi">0</span>
+
+    <span class="k">return</span> <span class="n">X</span>
+
+
+<div class="viewcode-block" id="pca">
+<a class="viewcode-back" href="../../api.html#pg_gpu.decomposition.pca">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">pca</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+        <span class="n">n_components</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">10</span><span class="p">,</span>
+        <span class="n">scaler</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s1">&#39;patterson&#39;</span><span class="p">,</span>
+        <span class="n">population</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Principal Component Analysis on haplotype data.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">        Haplotype data. Rows are haplotypes, columns are variants.</span>
+<span class="sd">    n_components : int</span>
+<span class="sd">        Number of principal components to compute.</span>
+<span class="sd">    scaler : str or None</span>
+<span class="sd">        Scaling method before PCA:</span>
+<span class="sd">        &#39;patterson&#39; - scale by sqrt(p*(1-p)), Patterson et al. (2006)</span>
+<span class="sd">        &#39;standard&#39; - standardize to unit variance per variant</span>
+<span class="sd">        None - center only (subtract mean)</span>
+<span class="sd">    population : str or list, optional</span>
+<span class="sd">        Population subset to use.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    coords : ndarray, float64, shape (n_samples, n_components)</span>
+<span class="sd">        Sample coordinates in PC space.</span>
+<span class="sd">    explained_variance_ratio : ndarray, float64, shape (n_components,)</span>
+<span class="sd">        Proportion of variance explained by each component.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">X</span> <span class="o">=</span> <span class="n">_prepare_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">scaler</span><span class="p">,</span> <span class="n">population</span><span class="p">)</span>
+    <span class="n">n_samples</span><span class="p">,</span> <span class="n">n_variants</span> <span class="o">=</span> <span class="n">X</span><span class="o">.</span><span class="n">shape</span>
+    <span class="n">n_components</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">n_components</span><span class="p">,</span> <span class="nb">min</span><span class="p">(</span><span class="n">n_samples</span><span class="p">,</span> <span class="n">n_variants</span><span class="p">))</span>
+
+    <span class="n">U</span><span class="p">,</span> <span class="n">S</span><span class="p">,</span> <span class="n">Vt</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">svd</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">full_matrices</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+
+    <span class="n">coords</span> <span class="o">=</span> <span class="n">U</span><span class="p">[:,</span> <span class="p">:</span><span class="n">n_components</span><span class="p">]</span> <span class="o">*</span> <span class="n">S</span><span class="p">[:</span><span class="n">n_components</span><span class="p">]</span>
+
+    <span class="n">var</span> <span class="o">=</span> <span class="p">(</span><span class="n">S</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span> <span class="o">/</span> <span class="n">n_samples</span>
+    <span class="n">explained_variance_ratio</span> <span class="o">=</span> <span class="n">var</span><span class="p">[:</span><span class="n">n_components</span><span class="p">]</span> <span class="o">/</span> <span class="n">cp</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">var</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">coords</span><span class="o">.</span><span class="n">get</span><span class="p">(),</span> <span class="n">explained_variance_ratio</span><span class="o">.</span><span class="n">get</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="randomized_pca">
+<a class="viewcode-back" href="../../api.html#pg_gpu.decomposition.randomized_pca">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">randomized_pca</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+                   <span class="n">n_components</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">10</span><span class="p">,</span>
+                   <span class="n">scaler</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s1">&#39;patterson&#39;</span><span class="p">,</span>
+                   <span class="n">population</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+                   <span class="n">n_iter</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">3</span><span class="p">,</span>
+                   <span class="n">random_state</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Randomized PCA using truncated SVD approximation.</span>
+
+<span class="sd">    Faster than full PCA for large datasets where only a few</span>
+<span class="sd">    components are needed.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">        Haplotype data.</span>
+<span class="sd">    n_components : int</span>
+<span class="sd">        Number of components.</span>
+<span class="sd">    scaler : str or None</span>
+<span class="sd">        &#39;patterson&#39;, &#39;standard&#39;, or None.</span>
+<span class="sd">    population : str or list, optional</span>
+<span class="sd">        Population subset.</span>
+<span class="sd">    n_iter : int</span>
+<span class="sd">        Number of power iterations for accuracy.</span>
+<span class="sd">    random_state : int, optional</span>
+<span class="sd">        Random seed for reproducibility.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    coords : ndarray, float64, shape (n_samples, n_components)</span>
+<span class="sd">    explained_variance_ratio : ndarray, float64, shape (n_components,)</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">X</span> <span class="o">=</span> <span class="n">_prepare_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">scaler</span><span class="p">,</span> <span class="n">population</span><span class="p">)</span>
+    <span class="n">n_samples</span><span class="p">,</span> <span class="n">n_variants</span> <span class="o">=</span> <span class="n">X</span><span class="o">.</span><span class="n">shape</span>
+    <span class="n">n_components</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">n_components</span><span class="p">,</span> <span class="nb">min</span><span class="p">(</span><span class="n">n_samples</span><span class="p">,</span> <span class="n">n_variants</span><span class="p">))</span>
+
+    <span class="c1"># randomized SVD on GPU</span>
+    <span class="k">if</span> <span class="n">random_state</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">cp</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">seed</span><span class="p">(</span><span class="n">random_state</span><span class="p">)</span>
+
+    <span class="c1"># random projection</span>
+    <span class="n">k</span> <span class="o">=</span> <span class="n">n_components</span> <span class="o">+</span> <span class="mi">10</span>  <span class="c1"># oversampling</span>
+    <span class="n">k</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">k</span><span class="p">,</span> <span class="nb">min</span><span class="p">(</span><span class="n">n_samples</span><span class="p">,</span> <span class="n">n_variants</span><span class="p">))</span>
+    <span class="n">Omega</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">random</span><span class="o">.</span><span class="n">randn</span><span class="p">(</span><span class="n">n_variants</span><span class="p">,</span> <span class="n">k</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">cp</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+    <span class="n">Y</span> <span class="o">=</span> <span class="n">X</span> <span class="o">@</span> <span class="n">Omega</span>
+
+    <span class="c1"># power iteration for accuracy</span>
+    <span class="k">for</span> <span class="n">_</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">n_iter</span><span class="p">):</span>
+        <span class="n">Y</span> <span class="o">=</span> <span class="n">X</span> <span class="o">@</span> <span class="p">(</span><span class="n">X</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="n">Y</span><span class="p">)</span>
+
+    <span class="c1"># QR decomposition</span>
+    <span class="n">Q</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">qr</span><span class="p">(</span><span class="n">Y</span><span class="p">)</span>
+
+    <span class="c1"># project and SVD in reduced space</span>
+    <span class="n">B</span> <span class="o">=</span> <span class="n">Q</span><span class="o">.</span><span class="n">T</span> <span class="o">@</span> <span class="n">X</span>
+    <span class="n">Uhat</span><span class="p">,</span> <span class="n">S</span><span class="p">,</span> <span class="n">Vt</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">svd</span><span class="p">(</span><span class="n">B</span><span class="p">,</span> <span class="n">full_matrices</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span>
+    <span class="n">U</span> <span class="o">=</span> <span class="n">Q</span> <span class="o">@</span> <span class="n">Uhat</span>
+
+    <span class="n">coords</span> <span class="o">=</span> <span class="n">U</span><span class="p">[:,</span> <span class="p">:</span><span class="n">n_components</span><span class="p">]</span> <span class="o">*</span> <span class="n">S</span><span class="p">[:</span><span class="n">n_components</span><span class="p">]</span>
+
+    <span class="c1"># explained variance</span>
+    <span class="n">total_var</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">var</span><span class="p">(</span><span class="n">X</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">))</span>
+    <span class="n">var</span> <span class="o">=</span> <span class="p">(</span><span class="n">S</span><span class="p">[:</span><span class="n">n_components</span><span class="p">]</span> <span class="o">**</span> <span class="mi">2</span><span class="p">)</span> <span class="o">/</span> <span class="n">n_samples</span>
+    <span class="n">explained_variance_ratio</span> <span class="o">=</span> <span class="n">var</span> <span class="o">/</span> <span class="n">total_var</span>
+
+    <span class="k">return</span> <span class="n">coords</span><span class="o">.</span><span class="n">get</span><span class="p">(),</span> <span class="n">explained_variance_ratio</span><span class="o">.</span><span class="n">get</span><span class="p">()</span></div>
+
+
+
+<div class="viewcode-block" id="pairwise_distance">
+<a class="viewcode-back" href="../../api.html#pg_gpu.decomposition.pairwise_distance">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">pairwise_distance</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">:</span> <span class="n">HaplotypeMatrix</span><span class="p">,</span>
+                      <span class="n">metric</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s1">&#39;euclidean&#39;</span><span class="p">,</span>
+                      <span class="n">population</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="n">Union</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">list</span><span class="p">]]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compute pairwise distances between samples.</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    haplotype_matrix : HaplotypeMatrix</span>
+<span class="sd">        Haplotype data.</span>
+<span class="sd">    metric : str</span>
+<span class="sd">        Distance metric. Supported on GPU: &#39;euclidean&#39;, &#39;cityblock&#39;,</span>
+<span class="sd">        &#39;sqeuclidean&#39;. Falls back to scipy for other metrics.</span>
+<span class="sd">    population : str or list, optional</span>
+<span class="sd">        Population subset.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    dist : ndarray, float64, shape (n_samples * (n_samples - 1) // 2,)</span>
+<span class="sd">        Condensed distance matrix.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="k">if</span> <span class="n">population</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">_get_population_matrix</span><span class="p">(</span><span class="n">haplotype_matrix</span><span class="p">,</span> <span class="n">population</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">matrix</span> <span class="o">=</span> <span class="n">haplotype_matrix</span>
+
+    <span class="k">if</span> <span class="n">matrix</span><span class="o">.</span><span class="n">device</span> <span class="o">==</span> <span class="s1">&#39;CPU&#39;</span><span class="p">:</span>
+        <span class="n">matrix</span><span class="o">.</span><span class="n">transfer_to_gpu</span><span class="p">()</span>
+
+    <span class="n">X</span> <span class="o">=</span> <span class="n">matrix</span><span class="o">.</span><span class="n">haplotypes</span><span class="o">.</span><span class="n">astype</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
+    <span class="n">X</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">X</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">X</span><span class="p">)</span>
+    <span class="n">n</span> <span class="o">=</span> <span class="n">X</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+    <span class="k">if</span> <span class="n">metric</span> <span class="ow">in</span> <span class="p">(</span><span class="s1">&#39;euclidean&#39;</span><span class="p">,</span> <span class="s1">&#39;sqeuclidean&#39;</span><span class="p">,</span> <span class="s1">&#39;cityblock&#39;</span><span class="p">):</span>
+        <span class="n">idx_i</span><span class="p">,</span> <span class="n">idx_j</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">triu_indices</span><span class="p">(</span><span class="n">n</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+        <span class="n">n_pairs</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">idx_i</span><span class="p">)</span>
+
+        <span class="c1"># batch to avoid materializing huge (n_pairs, n_variants) arrays</span>
+        <span class="n">batch_size</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="nb">min</span><span class="p">(</span><span class="n">n_pairs</span><span class="p">,</span> <span class="mi">50000</span><span class="p">))</span>
+        <span class="n">dist_parts</span> <span class="o">=</span> <span class="p">[]</span>
+
+        <span class="k">for</span> <span class="n">start</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">n_pairs</span><span class="p">,</span> <span class="n">batch_size</span><span class="p">):</span>
+            <span class="n">end</span> <span class="o">=</span> <span class="nb">min</span><span class="p">(</span><span class="n">start</span> <span class="o">+</span> <span class="n">batch_size</span><span class="p">,</span> <span class="n">n_pairs</span><span class="p">)</span>
+            <span class="n">bi</span> <span class="o">=</span> <span class="n">idx_i</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">]</span>
+            <span class="n">bj</span> <span class="o">=</span> <span class="n">idx_j</span><span class="p">[</span><span class="n">start</span><span class="p">:</span><span class="n">end</span><span class="p">]</span>
+
+            <span class="k">if</span> <span class="n">metric</span> <span class="o">==</span> <span class="s1">&#39;cityblock&#39;</span><span class="p">:</span>
+                <span class="n">d</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">cp</span><span class="o">.</span><span class="n">abs</span><span class="p">(</span><span class="n">X</span><span class="p">[</span><span class="n">bi</span><span class="p">]</span> <span class="o">-</span> <span class="n">X</span><span class="p">[</span><span class="n">bj</span><span class="p">]),</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+            <span class="k">else</span><span class="p">:</span>
+                <span class="n">d</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">sum</span><span class="p">((</span><span class="n">X</span><span class="p">[</span><span class="n">bi</span><span class="p">]</span> <span class="o">-</span> <span class="n">X</span><span class="p">[</span><span class="n">bj</span><span class="p">])</span> <span class="o">**</span> <span class="mi">2</span><span class="p">,</span> <span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">)</span>
+                <span class="k">if</span> <span class="n">metric</span> <span class="o">==</span> <span class="s1">&#39;euclidean&#39;</span><span class="p">:</span>
+                    <span class="n">d</span> <span class="o">=</span> <span class="n">cp</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">d</span><span class="p">)</span>
+            <span class="n">dist_parts</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">d</span><span class="p">)</span>
+
+        <span class="k">return</span> <span class="n">cp</span><span class="o">.</span><span class="n">concatenate</span><span class="p">(</span><span class="n">dist_parts</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="c1"># fall back to scipy for exotic metrics</span>
+        <span class="kn">from</span><span class="w"> </span><span class="nn">scipy.spatial.distance</span><span class="w"> </span><span class="kn">import</span> <span class="n">pdist</span>
+        <span class="n">X_cpu</span> <span class="o">=</span> <span class="n">X</span><span class="o">.</span><span class="n">get</span><span class="p">()</span>
+        <span class="k">return</span> <span class="n">pdist</span><span class="p">(</span><span class="n">X_cpu</span><span class="p">,</span> <span class="n">metric</span><span class="o">=</span><span class="n">metric</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="pcoa">
+<a class="viewcode-back" href="../../api.html#pg_gpu.decomposition.pcoa">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">pcoa</span><span class="p">(</span><span class="n">dist</span><span class="p">,</span> <span class="n">n_components</span><span class="p">:</span> <span class="n">Optional</span><span class="p">[</span><span class="nb">int</span><span class="p">]</span> <span class="o">=</span> <span class="kc">None</span><span class="p">):</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Principal Coordinate Analysis (classical MDS).</span>
+
+<span class="sd">    Parameters</span>
+<span class="sd">    ----------</span>
+<span class="sd">    dist : array_like</span>
+<span class="sd">        Pairwise distances in condensed form (from pairwise_distance)</span>
+<span class="sd">        or as a square distance matrix.</span>
+<span class="sd">    n_components : int, optional</span>
+<span class="sd">        Number of dimensions to return. If None, returns all</span>
+<span class="sd">        dimensions with positive eigenvalues.</span>
+
+<span class="sd">    Returns</span>
+<span class="sd">    -------</span>
+<span class="sd">    coords : ndarray, float64, shape (n_samples, n_components)</span>
+<span class="sd">        Sample coordinates.</span>
+<span class="sd">    explained_variance_ratio : ndarray, float64, shape (n_components,)</span>
+<span class="sd">        Proportion of variance explained by each axis.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">scipy.spatial.distance</span><span class="w"> </span><span class="kn">import</span> <span class="n">squareform</span>
+
+    <span class="n">dist</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">dist</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="s1">&#39;f8&#39;</span><span class="p">)</span>
+
+    <span class="c1"># convert condensed to square if needed</span>
+    <span class="k">if</span> <span class="n">dist</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">D</span> <span class="o">=</span> <span class="n">squareform</span><span class="p">(</span><span class="n">dist</span><span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">D</span> <span class="o">=</span> <span class="n">dist</span>
+
+    <span class="n">n</span> <span class="o">=</span> <span class="n">D</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+
+    <span class="c1"># double-centering</span>
+    <span class="n">D_sq</span> <span class="o">=</span> <span class="n">D</span> <span class="o">**</span> <span class="mi">2</span>
+    <span class="n">row_mean</span> <span class="o">=</span> <span class="n">D_sq</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">col_mean</span> <span class="o">=</span> <span class="n">D_sq</span><span class="o">.</span><span class="n">mean</span><span class="p">(</span><span class="n">axis</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">keepdims</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">grand_mean</span> <span class="o">=</span> <span class="n">D_sq</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
+    <span class="n">F</span> <span class="o">=</span> <span class="o">-</span><span class="mf">0.5</span> <span class="o">*</span> <span class="p">(</span><span class="n">D_sq</span> <span class="o">-</span> <span class="n">row_mean</span> <span class="o">-</span> <span class="n">col_mean</span> <span class="o">+</span> <span class="n">grand_mean</span><span class="p">)</span>
+
+    <span class="c1"># eigendecomposition</span>
+    <span class="n">eigvals</span><span class="p">,</span> <span class="n">eigvecs</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">eigh</span><span class="p">(</span><span class="n">F</span><span class="p">)</span>
+
+    <span class="c1"># sort descending</span>
+    <span class="n">idx</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">argsort</span><span class="p">(</span><span class="n">eigvals</span><span class="p">)[::</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
+    <span class="n">eigvals</span> <span class="o">=</span> <span class="n">eigvals</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+    <span class="n">eigvecs</span> <span class="o">=</span> <span class="n">eigvecs</span><span class="p">[:,</span> <span class="n">idx</span><span class="p">]</span>
+
+    <span class="c1"># keep positive eigenvalues</span>
+    <span class="n">pos</span> <span class="o">=</span> <span class="n">eigvals</span> <span class="o">&gt;</span> <span class="mi">0</span>
+    <span class="n">eigvals</span> <span class="o">=</span> <span class="n">eigvals</span><span class="p">[</span><span class="n">pos</span><span class="p">]</span>
+    <span class="n">eigvecs</span> <span class="o">=</span> <span class="n">eigvecs</span><span class="p">[:,</span> <span class="n">pos</span><span class="p">]</span>
+
+    <span class="k">if</span> <span class="n">n_components</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">eigvals</span> <span class="o">=</span> <span class="n">eigvals</span><span class="p">[:</span><span class="n">n_components</span><span class="p">]</span>
+        <span class="n">eigvecs</span> <span class="o">=</span> <span class="n">eigvecs</span><span class="p">[:,</span> <span class="p">:</span><span class="n">n_components</span><span class="p">]</span>
+
+    <span class="c1"># project</span>
+    <span class="n">coords</span> <span class="o">=</span> <span class="n">eigvecs</span> <span class="o">*</span> <span class="n">np</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">eigvals</span><span class="p">)</span>
+
+    <span class="c1"># explained variance</span>
+    <span class="n">explained_variance_ratio</span> <span class="o">=</span> <span class="n">eigvals</span> <span class="o">/</span> <span class="n">np</span><span class="o">.</span><span class="n">sum</span><span class="p">(</span><span class="n">eigvals</span><span class="p">)</span>
+
+    <span class="k">return</span> <span class="n">coords</span><span class="p">,</span> <span class="n">explained_variance_ratio</span></div>
+
+</pre></div>
+
+           </div>
+          </div>
+          <footer>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Andrew Kern.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

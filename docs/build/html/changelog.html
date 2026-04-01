@@ -1,0 +1,231 @@
+
+
+<!DOCTYPE html>
+<html class="writer-html5" lang="en" data-content_root="./">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Changelog &mdash; pg_gpu 0.1.0 documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=b86133f3" />
+      <link rel="stylesheet" type="text/css" href="_static/css/theme.css?v=9edc463e" />
+
+  
+      <script src="_static/jquery.js?v=5d32c60e"></script>
+      <script src="_static/_sphinx_javascript_frameworks_compat.js?v=2cd50e6c"></script>
+      <script src="_static/documentation_options.js?v=01f34227"></script>
+      <script src="_static/doctools.js?v=9bcbadda"></script>
+      <script src="_static/sphinx_highlight.js?v=dc90522c"></script>
+    <script src="_static/js/theme.js"></script>
+    <link rel="index" title="Index" href="genindex.html" />
+    <link rel="search" title="Search" href="search.html" />
+    <link rel="prev" title="Examples" href="examples.html" /> 
+</head>
+
+<body class="wy-body-for-nav"> 
+  <div class="wy-grid-for-nav">
+    <nav data-toggle="wy-nav-shift" class="wy-nav-side">
+      <div class="wy-side-scroll">
+        <div class="wy-side-nav-search" >
+
+          
+          
+          <a href="index.html" class="icon icon-home">
+            pg_gpu
+          </a>
+<div role="search">
+  <form id="rtd-search-form" class="wy-form" action="search.html" method="get">
+    <input type="text" name="q" placeholder="Search docs" aria-label="Search docs" />
+    <input type="hidden" name="check_keywords" value="yes" />
+    <input type="hidden" name="area" value="default" />
+  </form>
+</div>
+        </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
+              <p class="caption" role="heading"><span class="caption-text">Contents:</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="installation.html">Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quick Start Guide</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api.html">API Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="missing_data.html">Missing Data Handling</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Changelog</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#v0-1-0-current">v0.1.0 (Current)</a><ul>
+<li class="toctree-l3"><a class="reference internal" href="#new-modules">New Modules</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#new-functions">New Functions</a></li>
+<li class="toctree-l3"><a class="reference internal" href="#infrastructure">Infrastructure</a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+        </div>
+      </div>
+    </nav>
+
+    <section data-toggle="wy-nav-shift" class="wy-nav-content-wrap"><nav class="wy-nav-top" aria-label="Mobile navigation menu" >
+          <i data-toggle="wy-nav-top" class="fa fa-bars"></i>
+          <a href="index.html">pg_gpu</a>
+      </nav>
+
+      <div class="wy-nav-content">
+        <div class="rst-content">
+          <div role="navigation" aria-label="Page navigation">
+  <ul class="wy-breadcrumbs">
+      <li><a href="index.html" class="icon icon-home" aria-label="Home"></a></li>
+      <li class="breadcrumb-item active">Changelog</li>
+      <li class="wy-breadcrumbs-aside">
+            <a href="_sources/changelog.rst.txt" rel="nofollow"> View page source</a>
+      </li>
+  </ul>
+  <hr/>
+</div>
+          <div role="main" class="document" itemscope="itemscope" itemtype="http://schema.org/Article">
+           <div itemprop="articleBody">
+             
+  <section id="changelog">
+<h1>Changelog<a class="headerlink" href="#changelog" title="Link to this heading"></a></h1>
+<section id="v0-1-0-current">
+<h2>v0.1.0 (Current)<a class="headerlink" href="#v0-1-0-current" title="Link to this heading"></a></h2>
+<section id="new-modules">
+<h3>New Modules<a class="headerlink" href="#new-modules" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong>Selection Scan Statistics</strong> (<code class="docutils literal notranslate"><span class="pre">pg_gpu.selection</span></code>)</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">ihs()</span></code> - Integrated Haplotype Score with CUDA kernel acceleration</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">xpehh()</span></code> - Cross-population Extended Haplotype Homozygosity</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">nsl()</span></code> - Number of Segregating sites by Length</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">xpnsl()</span></code> - Cross-population nSL</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">ehh_decay()</span></code> - Extended Haplotype Homozygosity decay</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">garud_h()</span></code> / <code class="docutils literal notranslate"><span class="pre">moving_garud_h()</span></code> - Garud’s H1/H12/H123/H2H1 statistics</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">standardize()</span></code> / <code class="docutils literal notranslate"><span class="pre">standardize_by_allele_count()</span></code> - Score normalization</p></li>
+<li><p>10-45x speedup over scikit-allel at typical dataset sizes</p></li>
+</ul>
+</li>
+<li><p><strong>Site Frequency Spectrum</strong> (<code class="docutils literal notranslate"><span class="pre">pg_gpu.sfs</span></code>)</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">sfs()</span></code> / <code class="docutils literal notranslate"><span class="pre">sfs_folded()</span></code> / <code class="docutils literal notranslate"><span class="pre">sfs_scaled()</span></code> / <code class="docutils literal notranslate"><span class="pre">sfs_folded_scaled()</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">joint_sfs()</span></code> / <code class="docutils literal notranslate"><span class="pre">joint_sfs_folded()</span></code> / <code class="docutils literal notranslate"><span class="pre">joint_sfs_scaled()</span></code> / <code class="docutils literal notranslate"><span class="pre">joint_sfs_folded_scaled()</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">fold_sfs()</span></code> / <code class="docutils literal notranslate"><span class="pre">fold_joint_sfs()</span></code> - Folding utilities</p></li>
+<li><p>Scaling utilities for neutral expectation comparison</p></li>
+</ul>
+</li>
+<li><p><strong>Admixture / F-Statistics</strong> (<code class="docutils literal notranslate"><span class="pre">pg_gpu.admixture</span></code>)</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">patterson_f2()</span></code> - Branch length between populations</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">patterson_f3()</span></code> - Three-population admixture test</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">patterson_d()</span></code> - ABBA-BABA (D-statistic / F4)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">moving_patterson_f3()</span></code> / <code class="docutils literal notranslate"><span class="pre">moving_patterson_d()</span></code> - Windowed variants</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">average_patterson_f3()</span></code> / <code class="docutils literal notranslate"><span class="pre">average_patterson_d()</span></code> - Block-jackknife with SE</p></li>
+</ul>
+</li>
+</ul>
+</section>
+<section id="new-functions">
+<h3>New Functions<a class="headerlink" href="#new-functions" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p><strong>LD Statistics</strong></p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">r()</span></code> / <code class="docutils literal notranslate"><span class="pre">r_squared()</span></code> - Pearson correlation from haplotype counts</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">locate_unlinked()</span></code> - GPU-accelerated LD pruning</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">windowed_r_squared()</span></code> - Percentile of r-squared in distance bins</p></li>
+</ul>
+</li>
+<li><p><strong>Diversity Statistics</strong></p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">heterozygosity_expected()</span></code> - Gene diversity per variant</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">heterozygosity_observed()</span></code> - Observed heterozygosity (diploid)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">inbreeding_coefficient()</span></code> - Wright’s F per variant</p></li>
+</ul>
+</li>
+<li><p><strong>Divergence Statistics</strong></p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">pbs()</span></code> - Population Branch Statistic (normalized PBSn1)</p></li>
+</ul>
+</li>
+<li><p><strong>Dimensionality Reduction</strong> (<code class="docutils literal notranslate"><span class="pre">pg_gpu.decomposition</span></code>)</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">pca()</span></code> - GPU-accelerated PCA via SVD (up to 56x faster than allel)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">randomized_pca()</span></code> - Truncated SVD approximation for large datasets</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pairwise_distance()</span></code> - GPU-accelerated with memory-safe batching</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">pcoa()</span></code> - Principal Coordinate Analysis</p></li>
+</ul>
+</li>
+<li><p><strong>GPU-Native Windowed Statistics</strong> (<code class="docutils literal notranslate"><span class="pre">pg_gpu.windowed_analysis</span></code>)</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">windowed_statistics()</span></code> - Compute pi, theta_w, tajimas_d, FST, Dxy across all windows in one GPU pass using scatter_add aggregation</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">windowed_statistics_fused()</span></code> - Fused CUDA kernel variant with one thread block per window</p></li>
+<li><p>Up to 4.3x speedup over allel for windowed FST at scale</p></li>
+</ul>
+</li>
+<li><p><strong>Visualization</strong> (<code class="docutils literal notranslate"><span class="pre">pg_gpu.plotting</span></code>)</p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">plot_sfs()</span></code>, <code class="docutils literal notranslate"><span class="pre">plot_joint_sfs()</span></code> - SFS bar plots and heatmaps</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">plot_pairwise_ld()</span></code>, <code class="docutils literal notranslate"><span class="pre">plot_ld_decay()</span></code> - LD heatmap and decay curves</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">plot_pca()</span></code> - PCA scatter with population labels</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">plot_pairwise_distance()</span></code> - Distance matrix heatmap</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">plot_windowed()</span></code>, <code class="docutils literal notranslate"><span class="pre">plot_windowed_panel()</span></code> - Genome-wide windowed stat plots</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">plot_haplotype_frequencies()</span></code>, <code class="docutils literal notranslate"><span class="pre">plot_variant_locator()</span></code> - Haplotype and variant viz</p></li>
+<li><p>Built on matplotlib + seaborn</p></li>
+</ul>
+</li>
+<li><p><strong>GenotypeMatrix</strong> (<code class="docutils literal notranslate"><span class="pre">pg_gpu.genotype_matrix</span></code>)</p>
+<ul>
+<li><p>Diploid genotype storage (0/1/2 alt allele counts)</p></li>
+<li><p>Conversion to/from HaplotypeMatrix, VCF loading</p></li>
+</ul>
+</li>
+<li><p><strong>diploSHIC-Derived Statistics</strong></p>
+<ul>
+<li><p><code class="docutils literal notranslate"><span class="pre">zns()</span></code>, <code class="docutils literal notranslate"><span class="pre">omega()</span></code> - Kelly’s ZnS and Kim &amp; Nielsen’s Omega (GPU prefix-sum Omega)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">mu_ld()</span></code> - Haplotype pattern exclusivity (RAiSD)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">mu_var()</span></code>, <code class="docutils literal notranslate"><span class="pre">mu_sfs()</span></code> - SNP density and SFS edge fraction (RAiSD)</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">theta_h()</span></code>, <code class="docutils literal notranslate"><span class="pre">max_daf()</span></code>, <code class="docutils literal notranslate"><span class="pre">haplotype_count()</span></code>, <code class="docutils literal notranslate"><span class="pre">daf_histogram()</span></code></p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">dist_var()</span></code>, <code class="docutils literal notranslate"><span class="pre">dist_skew()</span></code>, <code class="docutils literal notranslate"><span class="pre">dist_kurt()</span></code> - Pairwise distance moments</p></li>
+<li><p>Diploid variants: <code class="docutils literal notranslate"><span class="pre">zns_diploid()</span></code>, <code class="docutils literal notranslate"><span class="pre">omega_diploid()</span></code>, <code class="docutils literal notranslate"><span class="pre">garud_h_diploid()</span></code>, <code class="docutils literal notranslate"><span class="pre">diplotype_frequency_spectrum()</span></code>, <code class="docutils literal notranslate"><span class="pre">daf_histogram_diploid()</span></code></p></li>
+</ul>
+</li>
+</ul>
+</section>
+<section id="infrastructure">
+<h3>Infrastructure<a class="headerlink" href="#infrastructure" title="Link to this heading"></a></h3>
+<ul class="simple">
+<li><p>Migrated to pixi for unified environment management</p></li>
+<li><p>Shared <code class="docutils literal notranslate"><span class="pre">_utils.py</span></code> module for population extraction</p></li>
+<li><p>Comprehensive validation test suite against scikit-allel</p></li>
+</ul>
+</section>
+</section>
+</section>
+
+
+           </div>
+          </div>
+          <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
+        <a href="examples.html" class="btn btn-neutral float-left" title="Examples" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+    </div>
+
+  <hr/>
+
+  <div role="contentinfo">
+    <p>&#169; Copyright 2025, Andrew Kern.</p>
+  </div>
+
+  Built with <a href="https://www.sphinx-doc.org/">Sphinx</a> using a
+    <a href="https://github.com/readthedocs/sphinx_rtd_theme">theme</a>
+    provided by <a href="https://readthedocs.org">Read the Docs</a>.
+   
+
+</footer>
+        </div>
+      </div>
+    </section>
+  </div>
+  <script>
+      jQuery(function () {
+          SphinxRtdTheme.Navigation.enable(true);
+      });
+  </script> 
+
+</body>
+</html>

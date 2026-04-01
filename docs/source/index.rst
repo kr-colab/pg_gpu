@@ -25,11 +25,12 @@ reduction (PCA, PCoA).
 Key Features
 ~~~~~~~~~~~~
 
-* **Fast GPU computation** using CuPy with CUDA RawKernels for compute-intensive operations
-* **Comprehensive statistics**: LD (D, D-squared, Dz, pi2, r/r-squared), diversity (pi, theta, Tajima's D, heterozygosity, Fay & Wu's H), divergence (FST, Dxy, Da), selection scans (iHS, XP-EHH, nSL, XP-nSL, Garud's H, EHH decay), SFS (unfolded, folded, joint, scaled), admixture (Patterson's F2, F3, D)
+* **Fast GPU computation** using CuPy with fused CUDA kernels for compute-intensive operations
+* **Comprehensive statistics**: LD (D, D-squared, Dz, pi2, r/r-squared), diversity (pi, theta, Tajima's D, heterozygosity, Fay & Wu's H), divergence (FST Hudson/Weir-Cockerham/Nei, Dxy, Da), selection scans (iHS, XP-EHH, nSL, XP-nSL, Garud's H, EHH decay), SFS (unfolded, folded, joint, scaled), admixture (Patterson's F2, F3, D)
+* **Fused windowed analysis**: compute all statistics across all genomic windows in a single GPU pass -- up to 60x faster than scikit-allel
 * **Automatic missing data handling** across all modules
 * **Multi-population analyses** with flexible population specification
-* **Validated against scikit-allel** with comprehensive test suite
+* **Validated against scikit-allel** -- 29 statistics verified at machine precision using real Ag1000G data
 
 Installation
 ------------

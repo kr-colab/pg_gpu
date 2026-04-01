@@ -177,24 +177,54 @@ PCA and Distance
 Windowed Statistics (GPU-Native)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Compute statistics across all genomic windows in a single GPU pass:
+Compute statistics across all genomic windows in a single GPU pass via
+fused CUDA kernels. The ``windowed_analysis()`` convenience function
+automatically routes through fused kernels when possible.
 
 .. code-block:: python
 
-   from pg_gpu.windowed_analysis import windowed_statistics
+   from pg_gpu import windowed_analysis
 
-   # All single-pop stats in one call, no Python loop over windows
-   result = windowed_statistics(
-       h, bp_bins=[0, 10000, 20000, 30000, 40000, 50000],
-       statistics=('pi', 'theta_w', 'tajimas_d', 'segregating_sites')
+   # Single-population diversity stats (fused: single kernel launch)
+   results = windowed_analysis(
+       h, window_size=100_000,
+       statistics=['pi', 'theta_w', 'tajimas_d']
    )
-   # result['pi'], result['theta_w'], etc. are arrays with one value per window
+   # results is a DataFrame with columns: window_start, window_stop,
+   # n_variants, pi, theta_w, tajimas_d
 
-   # Two-population windowed FST + Dxy
-   result = windowed_statistics(
+   # Two-population divergence stats
+   results = windowed_analysis(
+       h, window_size=100_000,
+       statistics=['fst', 'fst_wc', 'dxy', 'da'],
+       populations=['pop1', 'pop2']
+   )
+
+   # Everything at once -- diversity, divergence, and selection scans
+   results = windowed_analysis(
+       h, window_size=100_000,
+       statistics=['pi', 'theta_w', 'tajimas_d', 'segregating_sites',
+                   'fst', 'fst_wc', 'dxy', 'da',
+                   'garud_h1', 'garud_h12', 'mean_nsl'],
+       populations=['pop1', 'pop2']
+   )
+
+Supported fused windowed statistics:
+
+- **Single-pop**: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``
+- **Two-pop**: ``fst``, ``fst_hudson``, ``fst_wc``, ``dxy``, ``da``
+- **Selection**: ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``, ``mean_nsl``
+
+For advanced usage with custom bin edges, use ``windowed_statistics_fused()``
+directly:
+
+.. code-block:: python
+
+   from pg_gpu.windowed_analysis import windowed_statistics_fused
+
+   result = windowed_statistics_fused(
        h, bp_bins=[0, 10000, 20000, 30000, 40000, 50000],
-       statistics=('fst', 'dxy'),
-       pop1='pop1', pop2='pop2'
+       statistics=('pi', 'theta_w', 'tajimas_d'),
    )
 
 Diploid Data

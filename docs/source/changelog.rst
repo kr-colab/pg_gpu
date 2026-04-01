@@ -1,8 +1,167 @@
 Changelog
 =========
 
-v0.1.0 (Current)
+v0.2.0 (Current)
 -----------------
+
+This release focuses on correctness auditing against scikit-allel, GPU kernel
+optimization, and comprehensive fused windowed analysis.
+
+Correctness Fixes
+~~~~~~~~~~~~~~~~~
+
+* **Divergence statistics audited against scikit-allel**
+
+  - Hudson FST: switched from average-of-ratios to ratio-of-averages
+  - Weir-Cockerham FST: corrected haploid variance components (h_bar=0), fixed s_squared divisor
+  - Nei FST: switched to ratio-of-averages
+  - All FST estimators and Da: removed incorrect clipping of negative values to zero
+  - All divergence stats now match scikit-allel at machine precision
+
+* **Diversity statistics fixes**
+
+  - ``theta_h()`` / ``theta_l()``: fixed inclusion of non-segregating sites (fixed derived and monomorphic)
+  - ``tajimas_d()``: fixed harmonic mean float-to-int truncation (199.999 -> 199 instead of 200)
+  - Same fix in ``normalized_fay_wus_h()`` and ``zeng_e()`` via ``_effective_n_and_S()``
+
+Performance Improvements
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+* **Fused windowed analysis** via ``windowed_analysis()``
+
+  All supported statistics now route through fused CUDA kernels when using
+  non-overlapping windows with ``missing_data='include'``. A single kernel
+  launch processes all windows in parallel.
+
+  Supported fused windowed stats:
+
+  - Single-pop: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``
+  - Two-pop: ``fst``, ``fst_hudson``, ``fst_wc``, ``dxy``, ``da``
+  - Selection: ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``, ``mean_nsl``
+
+  Windowed speedups at 5.3M variants (100kb windows, 200 haplotypes):
+
+  - pi + theta_w + tajimas_d: **60x** vs allel
+  - All 5 single-pop stats: **13-22x** vs allel
+  - All 12 stats together: **0.66s** total
+
+* **Fused iHS kernel**: one thread block per focal variant with bitmask-based
+  pair tracking and block-level EHH reductions. Eliminates O(n_variants^2)
+  histogram memory. Single kernel launch, no chunking.
+
+  - iHS: **6.7x** faster than allel at 255k variants
+  - Memory: O(n_variants) instead of O(n_variants^2)
+
+* **Vectorized haplotype operations** via GPU dot-product hashing
+
+  - ``haplotype_diversity()``: 37s -> 0.05s (**780x** internal speedup)
+  - ``garud_h()``: 9s -> 3ms (**3000x** internal speedup)
+  - ``moving_garud_h()``: 7.5s -> 50ms (**150x**), uses cumulative prefix sums
+    for O(1) per-window hash computation
+
+* **SFS optimization**: int32 bincount (30x faster than int64), ``cp.maximum``
+  for missing data clamping
+
+New Features
+~~~~~~~~~~~~
+
+* **New windowed statistics**
+
+  - ``da`` (net divergence) in fused two-pop kernel
+  - ``fst_wc`` (Weir-Cockerham) in fused two-pop kernel
+  - ``fst_hudson`` as explicit alias for ``fst`` in fused path
+  - ``garud_h1``/``garud_h12``/``garud_h123``/``garud_h2h1`` via fused kernel
+    with shared-memory odd-even sort
+  - ``mean_nsl`` via per-site nSL computation + scatter binning
+
+* **Cross-validation script** (``tests/validate_against_allel.py``)
+
+  Standalone script comparing 31 statistics against scikit-allel using real
+  Ag1000G data (1M variants, 200 haplotypes). Includes timing comparison table.
+  Run with: ``pixi run python tests/validate_against_allel.py``
+
+* **Example notebook** (``examples/pg_gpu_tour.ipynb``)
+
+  Interactive tour of all major features using Anopheles gambiae X chromosome
+  data: VCF loading, GPU transfer, SFS, diversity, divergence, windowed scans,
+  LD, PCA, and selection scans.
+
+Performance Summary (vs scikit-allel)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Scalar statistics at 1M variants, 200 haplotypes:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 15 15
+
+   * - Statistic
+     - allel (s)
+     - pg_gpu (s)
+     - Speedup
+   * - Weir-Cockerham FST
+     - 9.85
+     - 0.02
+     - **468x**
+   * - Patterson F2
+     - 0.15
+     - 0.009
+     - **18x**
+   * - nSL (255k variants)
+     - 8.1
+     - 0.56
+     - **15x**
+   * - Patterson F3
+     - 0.14
+     - 0.016
+     - **9x**
+   * - EHH decay (255k)
+     - 0.06
+     - 0.008
+     - **8x**
+   * - Hudson FST
+     - 0.12
+     - 0.017
+     - **7x**
+   * - iHS (255k variants)
+     - 9.9
+     - 1.5
+     - **7x**
+   * - Dxy
+     - 0.07
+     - 0.016
+     - **4x**
+
+Windowed statistics at 5.3M variants, 100kb windows:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 15 15 15
+
+   * - Statistic
+     - allel (s)
+     - pg_gpu (s)
+     - Speedup
+   * - pi + theta_w + tajimas_d
+     - 0.81
+     - 0.013
+     - **60x**
+   * - All 5 single-pop stats
+     - 0.81
+     - 0.013
+     - **60x**
+   * - FST (Hudson)
+     - 0.59
+     - 0.18
+     - **3x**
+   * - All 12 stats together
+     - n/a
+     - 0.66
+     - single call
+
+
+v0.1.0
+------
 
 New Modules
 ~~~~~~~~~~~
