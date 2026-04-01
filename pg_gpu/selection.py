@@ -538,7 +538,7 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
 def ehh_decay(haplotype_matrix: HaplotypeMatrix,
               truncate: bool = False,
               population: Optional[Union[str, list]] = None,
-              missing_data: str = 'exclude'):
+              missing_data: str = 'include'):
     """Compute EHH decay from the first variant.
 
     Parameters
@@ -550,8 +550,8 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or sample indices.
     missing_data : str
-        'exclude' - filter to sites with no missing data (default)
-        'include' - raise error if missing data present
+        'include' - missing sites skipped in prefix comparison (default)
+        'exclude' - filter to sites with no missing data
 
     Returns
     -------
@@ -576,9 +576,6 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
     n_hap = hap.shape[0]
     n_variants = hap.shape[1]
     n_pairs = (n_hap * (n_hap - 1)) // 2
-
-    if int(cp.min(hap).get()) < 0:
-        raise NotImplementedError('missing calls are not supported for ehh_decay')
 
     # compute pairwise shared prefix lengths on GPU
     spl = _pairwise_shared_prefix_lengths_gpu(hap)
@@ -1124,7 +1121,11 @@ void shared_prefix_length_kernel(const signed char* hap,
     int k = pair_k[pid];
 
     for (int v = 0; v < n_variants; v++) {
-        if (hap[j * n_variants + v] != hap[k * n_variants + v]) {
+        signed char a = hap[j * n_variants + v];
+        signed char b = hap[k * n_variants + v];
+        // skip missing (-1): no information, prefix continues
+        if (a < 0 || b < 0) continue;
+        if (a != b) {
             spl[pid] = v;
             return;
         }
