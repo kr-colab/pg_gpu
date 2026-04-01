@@ -113,7 +113,7 @@ def garud_h(matrix, population=None, missing_data='include'):
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples.
     missing_data : str
-        'include' - exclude haplotypes with any missing site
+        'include' - treat missing as wildcard (compatible with any allele)
         'exclude' - filter to sites with no missing data
 
     Returns
@@ -143,12 +143,8 @@ def garud_h(matrix, population=None, missing_data='include'):
     if missing_data == 'exclude':
         missing_per_var = cp.sum(hap < 0, axis=0)
         hap = hap[:, missing_per_var == 0]
-    else:
-        # exclude haplotypes with any missing
-        has_missing = cp.any(hap < 0, axis=1)
-        hap = hap[~has_missing]
 
-    f = _distinct_haplotype_frequencies(hap)
+    f = _distinct_haplotype_frequencies_missing(hap)
 
     return _garud_from_freqs(f)
 
@@ -203,7 +199,7 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
     for w_start in range(start, stop - size + 1, step):
         w_end = w_start + size
         hap_window = hap[:, w_start:w_end]
-        f = _distinct_haplotype_frequencies(hap_window)
+        f = _distinct_haplotype_frequencies_missing(hap_window)
         results.append(_garud_from_freqs(f))
 
     results = np.array(results, dtype='f8')
@@ -619,6 +615,32 @@ def _distinct_haplotype_frequencies(hap):
 
     freqs = counts / n_hap
     freqs = np.sort(freqs)[::-1]
+    return freqs
+
+
+def _distinct_haplotype_frequencies_missing(hap):
+    """Compute distinct haplotype frequencies treating -1 as wildcard.
+
+    Two haplotypes are considered identical if they match at all
+    positions where both are non-missing.
+
+    Parameters
+    ----------
+    hap : cupy.ndarray, shape (n_haplotypes, n_variants)
+
+    Returns
+    -------
+    freqs : ndarray, float64, sorted descending (CPU)
+    """
+    from .diversity import _cluster_haplotypes_with_missing
+    from collections import Counter
+
+    n_hap = hap.shape[0]
+    hap_cpu = hap.get().astype(np.int8) if isinstance(hap, cp.ndarray) else hap
+
+    labels = _cluster_haplotypes_with_missing(hap_cpu)
+    counts = Counter(labels)
+    freqs = np.array(sorted(counts.values(), reverse=True)) / n_hap
     return freqs
 
 
