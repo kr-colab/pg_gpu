@@ -57,21 +57,19 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
         missing_per_var = cp.sum(hap < 0, axis=0)
         complete = missing_per_var == 0
         hap = hap[:, complete]
-        X = hap.astype(cp.float64)
-    else:
-        # 'include' mode (default): mask missing, normalize per pair
-        valid_mask = (hap >= 0).astype(cp.float64)
-        X = cp.where(hap >= 0, hap, 0).astype(cp.float64)
 
-        row_sums = cp.sum(X, axis=1)
-        gram = X @ X.T
-        diffs_mat = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
+    # 'include' mode (default): mask missing, normalize per pair
+    valid_mask = (hap >= 0).astype(cp.float64)
+    X = cp.where(hap >= 0, hap, 0).astype(cp.float64)
 
-        # jointly-valid sites per pair
-        joint_valid = valid_mask @ valid_mask.T
-        # normalize: per-site average difference
-        diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
-        return _extract_upper_triangle(diffs_mat)
+    row_sums = cp.sum(X, axis=1)
+    gram = X @ X.T
+    diffs_mat = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
+
+    # jointly-valid sites per pair
+    joint_valid = valid_mask @ valid_mask.T
+    diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
+    return _extract_upper_triangle(diffs_mat)
 
 
 def pairwise_diffs_diploid(genotype_matrix, population=None,

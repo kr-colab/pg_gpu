@@ -1135,39 +1135,57 @@ def _bin_counts(bin_idx, n_bins):
     return cp.bincount(bin_idx[valid], minlength=n_bins)
 
 
-def _allele_sum(hap, has_missing=None):
-    """Sum of alleles per variant, clamping missing (-1) to 0.
+def _allele_sum_and_n(hap, has_missing=None):
+    """Sum of alleles and valid count per variant, skipping missing (-1).
 
     Parameters
     ----------
     hap : cupy.ndarray
     has_missing : bool, optional
         If known, skip the check. If None, checks for negatives.
+
+    Returns
+    -------
+    dac : cupy.ndarray  — derived allele count per variant
+    n_valid : cupy.ndarray or int — valid haplotypes per variant
     """
     if has_missing is None:
         has_missing = bool(int(cp.min(hap)) < 0)
     if has_missing:
-        hap = cp.maximum(hap, 0)
-    return cp.sum(hap, axis=0)
+        valid_mask = hap >= 0
+        dac = cp.sum(cp.where(valid_mask, hap, 0), axis=0)
+        n_valid = cp.sum(valid_mask, axis=0)
+    else:
+        dac = cp.sum(hap, axis=0)
+        n_valid = hap.shape[0]
+    return dac, n_valid
 
 
 def _per_variant_mpd(hap, n_hap):
     """Mean pairwise difference per variant (GPU)."""
-    dac = _allele_sum(hap).astype(cp.float64)
-    p = dac / n_hap
-    return 2.0 * p * (1.0 - p) * n_hap / (n_hap - 1)
+    dac, n_valid = _allele_sum_and_n(hap)
+    dac = dac.astype(cp.float64)
+    if isinstance(n_valid, int):
+        n = cp.float64(n_valid)
+    else:
+        n = n_valid.astype(cp.float64)
+    usable = n > 1
+    p = cp.where(usable, dac / n, 0.0)
+    mpd = cp.zeros_like(dac)
+    mpd[usable] = 2.0 * p[usable] * (1.0 - p[usable]) * n[usable] / (n[usable] - 1)
+    return mpd
 
 
 def _per_variant_is_seg(hap, n_hap_int):
     """Boolean: is variant segregating (GPU)."""
-    dac = _allele_sum(hap)
-    return (dac > 0) & (dac < n_hap_int)
+    dac, n_valid = _allele_sum_and_n(hap)
+    return (dac > 0) & (dac < n_valid)
 
 
 def _per_variant_is_singleton(hap, n_hap_int):
     """Boolean: is variant a singleton (GPU)."""
-    dac = _allele_sum(hap)
-    return (dac == 1) | (dac == n_hap_int - 1)
+    dac, n_valid = _allele_sum_and_n(hap)
+    return (dac == 1) | (dac == n_valid - 1)
 
 
 def _per_variant_fst_hudson_components(hap1, hap2, n1, n2):
@@ -1312,14 +1330,25 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
     _has_missing = bool(int(cp.min(hap)) < 0)
 
     # precompute allele counts once (shared across all stats)
-    dac = _allele_sum(hap, has_missing=_has_missing).astype(cp.float64)
-    p = dac / n_hap
+    dac, n_valid = _allele_sum_and_n(hap, has_missing=_has_missing)
+    dac = dac.astype(cp.float64)
+    if isinstance(n_valid, int):
+        n_v = cp.float64(n_valid)
+        usable = cp.ones(dac.shape, dtype=bool)
+    else:
+        n_v = n_valid.astype(cp.float64)
+        usable = n_v > 1
+    p = cp.where(usable, dac / n_v, 0.0)
     need_mpd = any(s in statistics for s in ('pi', 'tajimas_d'))
     need_seg = any(s in statistics for s in
                    ('theta_w', 'tajimas_d', 'segregating_sites'))
 
-    mpd = 2.0 * p * (1.0 - p) * n_hap / (n_hap - 1) if need_mpd else None
-    is_seg = (dac > 0) & (dac < n_hap_int) if need_seg else None
+    if need_mpd:
+        mpd = cp.zeros_like(dac)
+        mpd[usable] = 2.0 * p[usable] * (1.0 - p[usable]) * n_v[usable] / (n_v[usable] - 1) if not isinstance(n_valid, int) else 2.0 * p[usable] * (1.0 - p[usable]) * n_hap / (n_hap - 1)
+    else:
+        mpd = None
+    is_seg = (dac > 0) & (dac < n_v) if need_seg else None
 
     if 'pi' in statistics:
         pi_sum = _scatter_sum(mpd, bin_idx, n_windows)

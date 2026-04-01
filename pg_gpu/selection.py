@@ -154,7 +154,8 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
                    start: int = 0,
                    stop: Optional[int] = None,
                    step: Optional[int] = None,
-                   population: Optional[Union[str, list]] = None):
+                   population: Optional[Union[str, list]] = None,
+                   missing_data: str = 'include'):
     """Compute Garud's H statistics in moving windows of variants.
 
     Parameters
@@ -171,6 +172,9 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
         Step between windows. Defaults to size (non-overlapping).
     population : str or list, optional
         Population name or list of sample indices.
+    missing_data : str
+        'include' - treat missing as wildcard in pattern matching
+        'exclude' - filter to sites with no missing data
 
     Returns
     -------
@@ -188,6 +192,11 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     hap = matrix.haplotypes
+
+    if missing_data == 'exclude':
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        hap = hap[:, missing_per_var == 0]
+
     n_variants = hap.shape[1]
 
     if stop is None:

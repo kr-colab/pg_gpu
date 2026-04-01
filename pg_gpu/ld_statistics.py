@@ -205,7 +205,7 @@ def r_squared(counts: cp.ndarray,
     return r(counts, n_valid) ** 2
 
 
-def zns(r2_matrix_or_matrix):
+def zns(r2_matrix_or_matrix, missing_data='include'):
     """Kelly's ZnS: mean pairwise r-squared across all SNP pairs.
 
     Parameters
@@ -213,6 +213,9 @@ def zns(r2_matrix_or_matrix):
     r2_matrix_or_matrix : ndarray, HaplotypeMatrix, or GenotypeMatrix
         Square r-squared matrix, or a matrix object (dispatches to
         haploid or diploid r-squared computation automatically).
+    missing_data : str
+        'include' - per-site valid data for frequency computation
+        'exclude' - filter to sites with no missing data
 
     Returns
     -------
@@ -228,7 +231,7 @@ def zns(r2_matrix_or_matrix):
     return float((total / (m * (m - 1))).get())
 
 
-def omega(r2_matrix_or_matrix):
+def omega(r2_matrix_or_matrix, missing_data='include'):
     """Kim and Nielsen's Omega: max ratio of within-partition to
     cross-partition mean LD.
 
@@ -308,7 +311,7 @@ def omega(r2_matrix_or_matrix):
     return float(cp.max(omega_vals).get())
 
 
-def mu_ld(haplotype_matrix):
+def mu_ld(haplotype_matrix, missing_data='include'):
     """mu_LD: haplotype pattern exclusivity between left/right halves (RAiSD).
 
     Splits variants at midpoint and measures how exclusively haplotype
@@ -318,6 +321,9 @@ def mu_ld(haplotype_matrix):
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
+    missing_data : str
+        'include' - treat missing as wildcard in pattern matching
+        'exclude' - filter to sites with no missing data
 
     Returns
     -------
@@ -326,7 +332,12 @@ def mu_ld(haplotype_matrix):
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
-    hap = cp.maximum(haplotype_matrix.haplotypes, 0)
+    hap = haplotype_matrix.haplotypes
+
+    if missing_data == 'exclude':
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        hap = hap[:, missing_per_var == 0]
+
     n_hap, n_var = hap.shape
 
     if n_var < 2:
@@ -334,20 +345,20 @@ def mu_ld(haplotype_matrix):
 
     mid = n_var // 2
 
-    # transfer to CPU for unique-row hashing (no GPU equivalent for byte-string uniqueness)
     left = hap[:, :mid].get().astype(np.int8)
     right = hap[:, mid:].get().astype(np.int8)
 
-    left_bytes = [row.tobytes() for row in left]
-    right_bytes = [row.tobytes() for row in right]
+    from .diversity import _cluster_haplotypes_with_missing
+    left_labels = _cluster_haplotypes_with_missing(left)
+    right_labels = _cluster_haplotypes_with_missing(right)
 
     # for each distinct left pattern, count how many distinct right patterns it pairs with
     left_to_right = {}
     right_to_left = {}
     for i in range(n_hap):
-        lb, rb = left_bytes[i], right_bytes[i]
-        left_to_right.setdefault(lb, set()).add(rb)
-        right_to_left.setdefault(rb, set()).add(lb)
+        ll, rl = left_labels[i], right_labels[i]
+        left_to_right.setdefault(ll, set()).add(rl)
+        right_to_left.setdefault(rl, set()).add(ll)
 
     n_left = len(left_to_right)
     n_right = len(right_to_left)
@@ -355,7 +366,6 @@ def mu_ld(haplotype_matrix):
     if n_left == 0 or n_right == 0:
         return 0.0
 
-    # exclusive = pattern paired with only one pattern in the other half
     n_excl_left = sum(1 for v in left_to_right.values() if len(v) == 1)
     n_excl_right = sum(1 for v in right_to_left.values() if len(v) == 1)
 
@@ -406,16 +416,18 @@ def _r2_matrix_diploid(genotype_matrix):
     if not isinstance(geno, cp.ndarray):
         geno = cp.asarray(geno)
 
-    geno = cp.maximum(geno, 0).astype(cp.float64)
-    n_ind = geno.shape[0]
+    # mask missing data: compute per-site mean from valid data only
+    valid_mask = (geno >= 0).astype(cp.float64)
+    geno_clean = cp.where(geno >= 0, geno, 0).astype(cp.float64)
+    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
 
-    # center genotypes per variant
-    mean = cp.mean(geno, axis=0)
-    gn = geno - mean
+    mean = cp.where(n_valid > 0, cp.sum(geno_clean, axis=0) / n_valid, 0.0)
 
-    # variance per variant
+    # center, zeroing out missing entries
+    gn = (geno_clean - mean[None, :]) * valid_mask
+
+    # variance per variant (using valid counts)
     var = cp.sum(gn ** 2, axis=0)
-    valid = var > 0
 
     # correlation via matrix multiply
     cov = gn.T @ gn  # (n_var, n_var)
