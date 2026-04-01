@@ -869,42 +869,55 @@ def _compute_gaps(pos, map_pos=None, gap_scale=20000, max_gap=200000,
 # But max_ssl is bounded by n_variants, so the histogram is (n_variants, n_variants+1).
 # This is O(n_variants^2) memory which is fine for typical sizes (<10k variants).
 
+def _auto_ssl_cap(n_variants, n_histograms=2):
+    """Choose the largest SSL histogram width that fits in GPU memory.
+
+    Targets using at most 40% of free GPU memory for histograms.
+    Falls back to n_variants (exact) if memory allows.
+    """
+    free_bytes = cp.cuda.Device().mem_info[0]
+    budget = int(free_bytes * 0.4)
+    # Each histogram cell is int32 (4 bytes). Total cells = n_variants * hist_size * n_histograms
+    max_hist_size = budget // (n_variants * 4 * n_histograms)
+    cap = min(max_hist_size, n_variants + 1) - 1
+    # Floor at a reasonable minimum
+    return max(cap, 256)
+
+
 _ihh01_ssl_kernel = cp.RawKernel(r'''
 extern "C" __global__
 void ihh01_ssl_kernel(const signed char* h, int n_variants, int n_haplotypes,
                       const int* pair_j, const int* pair_k, int n_pairs,
                       int* hist_00, int* hist_11,
-                      int* count_0, int* count_1) {
+                      int* ssl_state,
+                      int hist_size) {
     int pid = blockDim.x * blockIdx.x + threadIdx.x;
     if (pid >= n_pairs) return;
 
     int j = pair_j[pid];
     int k = pair_k[pid];
-    int ssl = 0;
+    int ssl = ssl_state[pid];
 
     for (int i = 0; i < n_variants; i++) {
         signed char a1 = h[i * n_haplotypes + j];
         signed char a2 = h[i * n_haplotypes + k];
 
         if (a1 < 0 || a2 < 0) {
-            // missing: extend suffix
             ssl += 1;
         } else if (a1 == a2) {
             ssl += 1;
-            int bucket = ssl;
-            if (bucket > n_variants) bucket = n_variants;
+            int bucket = ssl < hist_size ? ssl : hist_size - 1;
             if (a1 == 0) {
-                atomicAdd(&hist_00[i * (n_variants + 1) + bucket], 1);
+                atomicAdd(&hist_00[i * hist_size + bucket], 1);
             } else {
-                atomicAdd(&hist_11[i * (n_variants + 1) + bucket], 1);
+                atomicAdd(&hist_11[i * hist_size + bucket], 1);
             }
         } else {
             ssl = 0;
         }
-
-        // Count alleles (only from first haplotype index to avoid double counting)
-        // We'll do this separately on the host for simplicity
     }
+
+    ssl_state[pid] = ssl;
 }
 ''', 'ihh01_ssl_kernel')
 
@@ -913,13 +926,13 @@ _ihh_ssl_kernel = cp.RawKernel(r'''
 extern "C" __global__
 void ihh_ssl_kernel(const signed char* h, int n_variants, int n_haplotypes,
                     const int* pair_j, const int* pair_k, int n_pairs,
-                    int* hist) {
+                    int* hist, int* ssl_state, int hist_size) {
     int pid = blockDim.x * blockIdx.x + threadIdx.x;
     if (pid >= n_pairs) return;
 
     int j = pair_j[pid];
     int k = pair_k[pid];
-    int ssl = 0;
+    int ssl = ssl_state[pid];
 
     for (int i = 0; i < n_variants; i++) {
         signed char a1 = h[i * n_haplotypes + j];
@@ -930,10 +943,11 @@ void ihh_ssl_kernel(const signed char* h, int n_variants, int n_haplotypes,
         } else {
             ssl += 1;
         }
-        int bucket = ssl;
-        if (bucket > n_variants) bucket = n_variants;
-        atomicAdd(&hist[i * (n_variants + 1) + bucket], 1);
+        int bucket = ssl < hist_size ? ssl : hist_size - 1;
+        atomicAdd(&hist[i * hist_size + bucket], 1);
     }
+
+    ssl_state[pid] = ssl;
 }
 ''', 'ihh_ssl_kernel')
 
@@ -1000,7 +1014,7 @@ def _ssl_hist_to_ihh(hist_row, n_pairs, variant_idx, gaps_cpu, min_ehh,
 # ---------------------------------------------------------------------------
 
 def _ihh01_scan_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
-                    include_edges=False):
+                    include_edges=False, max_ssl_cap=None):
     """Forward scan computing IHH for ref and alt allele classes.
 
     Uses a CUDA kernel for the SSL scan, then computes IHH from histograms.
@@ -1012,6 +1026,10 @@ def _ihh01_scan_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
     min_ehh : float
     min_maf : float
     include_edges : bool
+    max_ssl_cap : int or None
+        Maximum shared suffix length tracked in histograms. SSL values
+        beyond this are clamped to the last bin. If None, auto-set based
+        on available GPU memory.
 
     Returns
     -------
@@ -1020,58 +1038,77 @@ def _ihh01_scan_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
     """
     n_variants, n_haplotypes = h.shape
     n_pairs = (n_haplotypes * (n_haplotypes - 1)) // 2
-    hist_size = n_variants + 1
+
+    if max_ssl_cap is None:
+        max_ssl_cap = _auto_ssl_cap(n_variants, n_histograms=2)
+    hist_size = min(max_ssl_cap + 1, n_variants + 1)
+
+    # Determine chunk size: target ~2 GB per chunk for histograms
+    target_bytes = 2 * 1024**3
+    bytes_per_variant = hist_size * 4 * 2  # two histograms, int32
+    chunk_size = max(1, target_bytes // bytes_per_variant)
+    chunk_size = min(chunk_size, n_variants)
 
     pair_j, pair_k = _get_pair_indices(n_haplotypes)
-
-    hist_00 = cp.zeros((n_variants, hist_size), dtype=cp.int32)
-    hist_11 = cp.zeros((n_variants, hist_size), dtype=cp.int32)
-
     h_contig = cp.ascontiguousarray(h.astype(cp.int8))
+
+    # Count alleles per variant (on GPU, transfer once)
+    h_cpu = h_contig.get()
+    c0 = np.sum(h_cpu == 0, axis=1)
+    c1 = np.sum(h_cpu == 1, axis=1)
+    gaps_cpu = gaps.get()
 
     block = 256
     grid = (n_pairs + block - 1) // block
 
-    _ihh01_ssl_kernel((grid,), (block,),
-                      (h_contig, np.int32(n_variants), np.int32(n_haplotypes),
-                       pair_j, pair_k, np.int32(n_pairs),
-                       hist_00, hist_11,
-                       cp.zeros(n_variants, dtype=cp.int32),
-                       cp.zeros(n_variants, dtype=cp.int32)))
-
-    # transfer histograms and compute IHH on CPU
-    hist_00_cpu = hist_00.get()
-    hist_11_cpu = hist_11.get()
-    gaps_cpu = gaps.get()
-
-    # count alleles per variant
-    h_cpu = h_contig.get()
-    c0 = np.sum(h_cpu == 0, axis=1)
-    c1 = np.sum(h_cpu == 1, axis=1)
-
     vihh0 = np.full(n_variants, np.nan)
     vihh1 = np.full(n_variants, np.nan)
 
-    for i in range(n_variants):
-        total = c0[i] + c1[i]
-        if total == 0:
-            continue
-        maf = min(c0[i], c1[i]) / total
-        if maf < min_maf:
-            continue
+    # SSL state carried across chunks
+    ssl_state = cp.zeros(n_pairs, dtype=cp.int32)
 
-        n00 = int(np.sum(hist_00_cpu[i]))
-        n11 = int(np.sum(hist_11_cpu[i]))
+    for chunk_start in range(0, n_variants, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_variants)
+        c_len = chunk_end - chunk_start
 
-        vihh0[i] = _ssl_hist_to_ihh(hist_00_cpu[i], n00, i, gaps_cpu,
-                                     min_ehh, include_edges)
-        vihh1[i] = _ssl_hist_to_ihh(hist_11_cpu[i], n11, i, gaps_cpu,
-                                     min_ehh, include_edges)
+        hist_00 = cp.zeros((c_len, hist_size), dtype=cp.int32)
+        hist_11 = cp.zeros((c_len, hist_size), dtype=cp.int32)
+
+        h_chunk = h_contig[chunk_start:chunk_end]
+
+        _ihh01_ssl_kernel((grid,), (block,),
+                          (h_chunk, np.int32(c_len), np.int32(n_haplotypes),
+                           pair_j, pair_k, np.int32(n_pairs),
+                           hist_00, hist_11,
+                           ssl_state,
+                           np.int32(hist_size)))
+
+        hist_00_cpu = hist_00.get()
+        hist_11_cpu = hist_11.get()
+        del hist_00, hist_11
+
+        for ci in range(c_len):
+            i = chunk_start + ci
+            total = c0[i] + c1[i]
+            if total == 0:
+                continue
+            maf = min(c0[i], c1[i]) / total
+            if maf < min_maf:
+                continue
+
+            n00 = int(np.sum(hist_00_cpu[ci]))
+            n11 = int(np.sum(hist_11_cpu[ci]))
+
+            vihh0[i] = _ssl_hist_to_ihh(hist_00_cpu[ci], n00, i, gaps_cpu,
+                                         min_ehh, include_edges)
+            vihh1[i] = _ssl_hist_to_ihh(hist_11_cpu[ci], n11, i, gaps_cpu,
+                                         min_ehh, include_edges)
 
     return vihh0, vihh1
 
 
-def _ihh_scan_gpu(h, gaps, min_ehh=0.05, include_edges=False):
+def _ihh_scan_gpu(h, gaps, min_ehh=0.05, include_edges=False,
+                  max_ssl_cap=None):
     """Forward scan computing IHH across all pairs (for cross-pop stats).
 
     Parameters
@@ -1080,6 +1117,9 @@ def _ihh_scan_gpu(h, gaps, min_ehh=0.05, include_edges=False):
     gaps : cupy.ndarray, float64, shape (n_variants - 1,)
     min_ehh : float
     include_edges : bool
+    max_ssl_cap : int or None
+        Maximum shared suffix length tracked in histograms.
+        If None, auto-set based on available GPU memory.
 
     Returns
     -------
@@ -1087,28 +1127,48 @@ def _ihh_scan_gpu(h, gaps, min_ehh=0.05, include_edges=False):
     """
     n_variants, n_haplotypes = h.shape
     n_pairs = (n_haplotypes * (n_haplotypes - 1)) // 2
-    hist_size = n_variants + 1
+
+    if max_ssl_cap is None:
+        max_ssl_cap = _auto_ssl_cap(n_variants, n_histograms=1)
+    hist_size = min(max_ssl_cap + 1, n_variants + 1)
 
     pair_j, pair_k = _get_pair_indices(n_haplotypes)
 
-    hist = cp.zeros((n_variants, hist_size), dtype=cp.int32)
+    # Determine chunk size: target ~2 GB per chunk for histograms
+    target_bytes = 2 * 1024**3
+    bytes_per_variant = hist_size * 4  # one histogram, int32
+    chunk_size = max(1, target_bytes // bytes_per_variant)
+    chunk_size = min(chunk_size, n_variants)
+
+    pair_j, pair_k = _get_pair_indices(n_haplotypes)
     h_contig = cp.ascontiguousarray(h.astype(cp.int8))
+    gaps_cpu = gaps.get()
 
     block = 256
     grid = (n_pairs + block - 1) // block
 
-    _ihh_ssl_kernel((grid,), (block,),
-                    (h_contig, np.int32(n_variants), np.int32(n_haplotypes),
-                     pair_j, pair_k, np.int32(n_pairs), hist))
-
-    hist_cpu = hist.get()
-    gaps_cpu = gaps.get()
-
     vihh = np.empty(n_variants, dtype=np.float64)
+    ssl_state = cp.zeros(n_pairs, dtype=cp.int32)
 
-    for i in range(n_variants):
-        vihh[i] = _ssl_hist_to_ihh(hist_cpu[i], n_pairs, i, gaps_cpu,
-                                    min_ehh, include_edges)
+    for chunk_start in range(0, n_variants, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, n_variants)
+        c_len = chunk_end - chunk_start
+
+        hist = cp.zeros((c_len, hist_size), dtype=cp.int32)
+        h_chunk = h_contig[chunk_start:chunk_end]
+
+        _ihh_ssl_kernel((grid,), (block,),
+                        (h_chunk, np.int32(c_len), np.int32(n_haplotypes),
+                         pair_j, pair_k, np.int32(n_pairs), hist,
+                         ssl_state, np.int32(hist_size)))
+
+        hist_cpu = hist.get()
+        del hist
+
+        for ci in range(c_len):
+            i = chunk_start + ci
+            vihh[i] = _ssl_hist_to_ihh(hist_cpu[ci], n_pairs, i, gaps_cpu,
+                                        min_ehh, include_edges)
 
     return vihh
 

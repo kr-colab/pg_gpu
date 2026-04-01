@@ -429,7 +429,7 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
 
         # Harmonic mean of sample sizes for variance terms
         valid_n = n_valid_per_site[sites_with_data]
-        n_haplotypes = float(len(valid_n) / cp.sum(1.0 / valid_n).get())
+        n_haplotypes = round(float(len(valid_n) / cp.sum(1.0 / valid_n).get()))
 
         # Segregating sites
         hap_clean = cp.where(valid_mask, haplotypes, 0)
@@ -487,9 +487,10 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
         if not cp.any(valid_site_mask):
             return float("nan")
 
-        # Harmonic mean of sample sizes
-        n_haplotypes = float(len(n_valid_per_site[valid_site_mask]) /
-                           cp.sum(1.0 / n_valid_per_site[valid_site_mask]).get())
+        # Harmonic mean of sample sizes (round to avoid off-by-one from
+        # float truncation, e.g. 199.9999 -> int 199 instead of 200)
+        n_haplotypes = round(float(len(n_valid_per_site[valid_site_mask]) /
+                           cp.sum(1.0 / n_valid_per_site[valid_site_mask]).get()))
 
         # Count segregating sites considering missing data (vectorized)
         haplotypes = matrix.haplotypes
@@ -1201,8 +1202,9 @@ def _effective_n_and_S(matrix, missing_data):
     S = float(cp.sum(seg_mask).get())
 
     # harmonic mean of per-site sample sizes (across usable sites)
+    # round to avoid off-by-one from float truncation in downstream int()
     n_usable = n_valid[usable]
-    n_eff = float(len(n_usable)) / float(cp.sum(1.0 / n_usable).get())
+    n_eff = round(float(len(n_usable)) / float(cp.sum(1.0 / n_usable).get()))
 
     return n_eff, S, matrix
 
