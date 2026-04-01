@@ -36,22 +36,19 @@ def _derived_allele_counts(haplotype_matrix, missing_data='include'):
 
     if missing_data in ('include', 'pairwise'):
         valid_mask = hap >= 0
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.int64)
-        dac = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.int64)
+        n_valid = cp.sum(valid_mask.astype(cp.int32), axis=0).astype(cp.int64)
+        dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0).astype(cp.int64)
         return dac, n_valid
     elif missing_data == 'exclude':
-        missing_per_var = cp.sum(hap < 0, axis=0)
+        missing_per_var = cp.sum((hap < 0).astype(cp.int32), axis=0)
         complete = missing_per_var == 0
-        hap_clean = cp.where(hap >= 0, hap, 0)
-        dac = cp.sum(hap_clean, axis=0).astype(cp.int64)
-        # mask incomplete sites by setting dac to -1 (will be filtered)
+        dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0).astype(cp.int64)
         dac[~complete] = -1
         n = hap.shape[0]
         return dac, n
     else:
         n = hap.shape[0]
-        hap_clean = cp.where(hap >= 0, hap, 0)
-        dac = cp.sum(hap_clean, axis=0).astype(cp.int64)
+        dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0).astype(cp.int64)
         return dac, n
 
 
@@ -114,9 +111,9 @@ def sfs(haplotype_matrix: HaplotypeMatrix,
     if isinstance(n, cp.ndarray):
         max_n = int(cp.max(n).get()) if n.size > 0 else 0
     else:
-        max_n = n
+        max_n = int(n)
 
-    s = cp.bincount(dac, minlength=max_n + 1)
+    s = cp.bincount(dac.astype(cp.int32), minlength=max_n + 1)
     return s[:max_n + 1].get()
 
 
@@ -152,12 +149,12 @@ def sfs_folded(haplotype_matrix: HaplotypeMatrix,
         valid = ac[:, 1] >= 0  # dac >= 0
         ac = ac[valid]
 
-    mac = cp.amin(ac, axis=1)
+    mac = cp.amin(ac, axis=1).astype(cp.int32)
 
     if isinstance(n, cp.ndarray):
         max_n = int(cp.max(n).get()) if n.size > 0 else 0
     else:
-        max_n = n
+        max_n = int(n)
 
     x = max_n // 2 + 1
     s = cp.bincount(mac, minlength=x)[:x]
@@ -258,7 +255,7 @@ def joint_sfs(haplotype_matrix: HaplotypeMatrix,
 
     x = n1 + 1
     y = n2 + 1
-    tmp = (dac1 * y + dac2).astype(cp.int64)
+    tmp = (dac1 * y + dac2).astype(cp.int32)
     s = cp.bincount(tmp, minlength=x * y)
     return s[:x * y].reshape(x, y).get()
 
@@ -292,8 +289,8 @@ def joint_sfs_folded(haplotype_matrix: HaplotypeMatrix,
         ac1 = ac1[valid]
         ac2 = ac2[valid]
 
-    mac1 = cp.amin(ac1, axis=1)
-    mac2 = cp.amin(ac2, axis=1)
+    mac1 = cp.amin(ac1, axis=1).astype(cp.int32)
+    mac2 = cp.amin(ac2, axis=1).astype(cp.int32)
 
     if isinstance(n1, cp.ndarray):
         n1 = int(cp.max(n1).get()) if n1.size > 0 else 0
@@ -302,7 +299,7 @@ def joint_sfs_folded(haplotype_matrix: HaplotypeMatrix,
 
     x = n1 // 2 + 1
     y = n2 // 2 + 1
-    tmp = (mac1 * y + mac2).astype(cp.int64)
+    tmp = (mac1 * y + mac2).astype(cp.int32)
     s = cp.bincount(tmp, minlength=x * y)
     return s[:x * y].reshape(x, y).get()
 
