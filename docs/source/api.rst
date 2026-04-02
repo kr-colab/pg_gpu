@@ -258,6 +258,18 @@ GenotypeMatrix
    :members:
    :undoc-members:
 
+Moments Integration (LD Inference)
+-----------------------------------
+
+GPU-accelerated drop-in replacement for ``moments.LD.Parsing.compute_ld_statistics()``.
+Computes the 15 two-population LD statistics (DD, Dz, pi2) and 3 heterozygosity
+statistics on GPU, returning output in the exact format moments expects for
+demographic inference.
+
+Requires the ``moments`` pixi environment: ``pixi install -e moments``.
+
+.. autofunction:: pg_gpu.moments_ld.compute_ld_statistics
+
 Distance Distribution Statistics
 ---------------------------------
 

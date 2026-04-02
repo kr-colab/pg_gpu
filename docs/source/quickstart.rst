@@ -227,6 +227,55 @@ directly:
        statistics=('pi', 'theta_w', 'tajimas_d'),
    )
 
+Moments Integration (LD-Based Demographic Inference)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+pg_gpu provides a GPU-accelerated drop-in replacement for
+``moments.LD.Parsing.compute_ld_statistics()``, enabling fast computation
+of two-population LD statistics (DD, Dz, pi2) for demographic inference.
+The output format is identical to moments, so the downstream inference
+pipeline works unchanged.
+
+**Installation**: moments is in a separate pixi environment to keep the
+default install lightweight:
+
+.. code-block:: bash
+
+   pixi install -e moments
+   pixi run -e moments python my_script.py
+
+**Usage**:
+
+.. code-block:: python
+
+   from pg_gpu.moments_ld import compute_ld_statistics
+   import moments.LD
+
+   r_bins = [0, 1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5, 1e-4]
+
+   # GPU-accelerated LD parsing (drop-in replacement for moments)
+   ld_stats = {}
+   for i, vcf in enumerate(vcf_files):
+       ld_stats[i] = compute_ld_statistics(
+           vcf,
+           rec_map_file="genetic_map.txt",
+           pop_file="pops.txt",
+           pops=["pop0", "pop1"],
+           r_bins=r_bins,
+       )
+
+   # Standard moments inference (unchanged)
+   mv = moments.LD.Parsing.bootstrap_data(ld_stats)
+   demo_func = moments.LD.Demographics2D.split_mig
+   p_guess = [0.1, 2, 0.075, 2, 10000]
+
+   opt_params, LL = moments.LD.Inference.optimize_log_lbfgsb(
+       p_guess, [mv["means"], mv["varcovs"]], [demo_func], rs=r_bins,
+   )
+
+See ``examples/moments_integration_demo.py`` for a complete working example
+that simulates data, computes LD statistics, and runs inference.
+
 Diploid Data
 ~~~~~~~~~~~~
 
