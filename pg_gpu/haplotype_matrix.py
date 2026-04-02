@@ -2112,7 +2112,7 @@ def _compute_genotype_counts_for_pairs(genotypes, idx_i, idx_j, pop_indices=None
     Returns
     -------
     counts : cp.ndarray
-        Shape (n_pairs, 9), ordering: (n00, n10, n20, n01, n11, n21, n02, n12, n22)
+        Shape (n_pairs, 9), ordering: (n00, n01, n02, n10, n11, n12, n20, n21, n22)
     n_valid : cp.ndarray or None
         Shape (n_pairs,), valid individual counts per pair. None if no missing data.
     """
@@ -2864,16 +2864,17 @@ class _PopDataGeno:
                  'n', 'D_geno', 'pA', 'qA', 'pB', 'qB', 'fdA', 'fdB')
 
     def __init__(self, counts, n_valid):
-        # Map from our counting order (n00,n10,n20,n01,n11,n21,n02,n12,n22)
-        # to moments convention (g1=n22,g2=n21,g3=n20,...,g9=n00)
+        # Our counting: combo = geno_i*3+geno_j gives columns:
+        # col0=n00, col1=n01, col2=n02, col3=n10, col4=n11, col5=n12, col6=n20, col7=n21, col8=n22
+        # Moments convention: g1=n22, g2=n21, g3=n20, g4=n12, g5=n11, g6=n10, g7=n02, g8=n01, g9=n00
         self.g1 = counts[:, 8].astype(cp.float64)  # n22
-        self.g2 = counts[:, 5].astype(cp.float64)  # n21
-        self.g3 = counts[:, 2].astype(cp.float64)  # n20
-        self.g4 = counts[:, 7].astype(cp.float64)  # n12
+        self.g2 = counts[:, 7].astype(cp.float64)  # n21
+        self.g3 = counts[:, 6].astype(cp.float64)  # n20
+        self.g4 = counts[:, 5].astype(cp.float64)  # n12
         self.g5 = counts[:, 4].astype(cp.float64)  # n11
-        self.g6 = counts[:, 1].astype(cp.float64)  # n10
-        self.g7 = counts[:, 6].astype(cp.float64)  # n02
-        self.g8 = counts[:, 3].astype(cp.float64)  # n01
+        self.g6 = counts[:, 3].astype(cp.float64)  # n10
+        self.g7 = counts[:, 2].astype(cp.float64)  # n02
+        self.g8 = counts[:, 1].astype(cp.float64)  # n01
         self.g9 = counts[:, 0].astype(cp.float64)  # n00
         if n_valid is not None:
             self.n = n_valid.astype(cp.float64)
