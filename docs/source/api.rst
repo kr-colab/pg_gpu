@@ -220,6 +220,12 @@ Distance
 .. autofunction:: pg_gpu.decomposition.pairwise_distance
 .. autofunction:: pg_gpu.decomposition.pcoa
 
+Relatedness and Kinship
+-----------------------
+
+.. autofunction:: pg_gpu.relatedness.grm
+.. autofunction:: pg_gpu.relatedness.ibs
+
 Windowed Statistics (GPU-Native)
 --------------------------------
 
