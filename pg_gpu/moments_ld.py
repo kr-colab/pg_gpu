@@ -203,50 +203,37 @@ def _compute_ld_sums(hm, pops, bins, gen_dists_gpu, max_bp_dist):
     bin_sums = cp.zeros((n_bins, n_ld), dtype=cp.float64)
     total_pairs = len(idx_i)
 
-    # Use the optimized two-pop path when possible
-    if num_pops == 2:
-        for chunk_start in range(0, total_pairs, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, total_pairs)
-            ci = idx_i[chunk_start:chunk_end]
-            cj = idx_j[chunk_start:chunk_end]
-            cb = bin_inds[chunk_start:chunk_end]
+    stat_specs = _generate_stat_specs(num_pops) if num_pops != 2 else None
 
-            c1, nv1 = _compute_counts_for_pairs(hm.haplotypes, ci, cj, pop_indices[0])
-            c2, nv2 = _compute_counts_for_pairs(hm.haplotypes, ci, cj, pop_indices[1])
-            stats = _compute_two_pop_statistics_batch(c1, c2, nv1, nv2, ld_statistics)
+    for chunk_start in range(0, total_pairs, chunk_size):
+        chunk_end = min(chunk_start + chunk_size, total_pairs)
+        ci = idx_i[chunk_start:chunk_end]
+        cj = idx_j[chunk_start:chunk_end]
+        cb = bin_inds[chunk_start:chunk_end]
 
-            valid = (cb >= 0) & (cb < n_bins)
-            vb = cb[valid]
-            vs = stats[valid]
-            for k in range(n_ld):
-                cp.add.at(bin_sums[:, k], vb, vs[:, k])
+        counts_list = []
+        n_valid_list = []
+        for pidx in pop_indices:
+            c, nv = _compute_counts_for_pairs(hm.haplotypes, ci, cj, pidx)
+            counts_list.append(c)
+            n_valid_list.append(nv)
 
-            del c1, c2, nv1, nv2, stats
-    else:
-        stat_specs = _generate_stat_specs(num_pops)
-        for chunk_start in range(0, total_pairs, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, total_pairs)
-            ci = idx_i[chunk_start:chunk_end]
-            cj = idx_j[chunk_start:chunk_end]
-            cb = bin_inds[chunk_start:chunk_end]
-
-            counts_list = []
-            n_valid_list = []
-            for pidx in pop_indices:
-                c, nv = _compute_counts_for_pairs(hm.haplotypes, ci, cj, pidx)
-                counts_list.append(c)
-                n_valid_list.append(nv)
-
+        if num_pops == 2:
+            stats = _compute_two_pop_statistics_batch(
+                counts_list[0], counts_list[1],
+                n_valid_list[0], n_valid_list[1], ld_statistics)
+        else:
             stats = _compute_multi_pop_statistics_batch(
                 counts_list, n_valid_list, ld_statistics, stat_specs)
 
-            valid = (cb >= 0) & (cb < n_bins)
-            vb = cb[valid]
-            vs = stats[valid]
-            for k in range(n_ld):
-                cp.add.at(bin_sums[:, k], vb, vs[:, k])
+        valid = (cb >= 0) & (cb < n_bins)
+        vb = cb[valid]
+        vs = stats[valid]
+        # Vectorized scatter-add: single kernel launch for all stats
+        flat_idx = vb[:, None] * n_ld + cp.arange(n_ld)[None, :]
+        cp.add.at(bin_sums.ravel(), flat_idx.ravel(), vs.ravel())
 
-            del counts_list, n_valid_list, stats
+        del counts_list, n_valid_list, stats
 
     del idx_i, idx_j, bin_inds
     return bin_sums.get()

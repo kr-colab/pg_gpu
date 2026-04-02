@@ -2287,6 +2287,30 @@ def _generate_stat_specs(num_pops):
     return specs
 
 
+class _PopData:
+    """Precomputed per-population arrays for batch LD computation.
+
+    Intentionally duplicates formulas from ld_statistics.py to operate
+    on pre-split arrays, avoiding concatenation and function-call overhead.
+    """
+    __slots__ = ('c1', 'c2', 'c3', 'c4', 'n', 'D', 'pA', 'qA', 'pB', 'qB')
+
+    def __init__(self, counts, n_valid):
+        self.c1 = counts[:, 0].astype(cp.float64)
+        self.c2 = counts[:, 1].astype(cp.float64)
+        self.c3 = counts[:, 2].astype(cp.float64)
+        self.c4 = counts[:, 3].astype(cp.float64)
+        if n_valid is not None:
+            self.n = n_valid.astype(cp.float64)
+        else:
+            self.n = self.c1 + self.c2 + self.c3 + self.c4
+        self.D = self.c2 * self.c3 - self.c1 * self.c4
+        self.pA = self.c1 + self.c2
+        self.qA = self.c3 + self.c4
+        self.pB = self.c1 + self.c3
+        self.qB = self.c2 + self.c4
+
+
 def _compute_multi_pop_statistics_batch(counts_per_pop, n_valid_per_pop,
                                         ld_statistics_module, stat_specs):
     """Compute all LD statistics for N populations using pre-computed specs.
@@ -2301,7 +2325,7 @@ def _compute_multi_pop_statistics_batch(counts_per_pop, n_valid_per_pop,
     n_valid_per_pop : list of cp.ndarray or None
         List of P arrays, each shape (n_pairs,), or None entries
     ld_statistics_module : module
-        The ld_statistics module
+        Unused, kept for API compatibility with call sites.
     stat_specs : list
         From _generate_stat_specs()
 
@@ -2309,56 +2333,32 @@ def _compute_multi_pop_statistics_batch(counts_per_pop, n_valid_per_pop,
     -------
     cp.ndarray, shape (n_pairs, n_stats)
     """
-    n_pops = len(counts_per_pop)
     n_pairs = counts_per_pop[0].shape[0]
     n_stats = len(stat_specs)
 
-    # Precompute per-population arrays (avoids repeated slicing)
-    pop_c1 = [counts_per_pop[p][:, 0].astype(cp.float64) for p in range(n_pops)]
-    pop_c2 = [counts_per_pop[p][:, 1].astype(cp.float64) for p in range(n_pops)]
-    pop_c3 = [counts_per_pop[p][:, 2].astype(cp.float64) for p in range(n_pops)]
-    pop_c4 = [counts_per_pop[p][:, 3].astype(cp.float64) for p in range(n_pops)]
+    pops = [_PopData(counts_per_pop[p], n_valid_per_pop[p])
+            for p in range(len(counts_per_pop))]
 
-    has_missing = any(nv is not None for nv in n_valid_per_pop)
-    pop_n = []
-    for p in range(n_pops):
-        if has_missing and n_valid_per_pop[p] is not None:
-            pop_n.append(n_valid_per_pop[p].astype(cp.float64))
-        else:
-            pop_n.append(pop_c1[p] + pop_c2[p] + pop_c3[p] + pop_c4[p])
-
-    # Precompute D = c2*c3 - c1*c4 for each population (used by DD_between and Dz)
-    pop_D = [pop_c2[p] * pop_c3[p] - pop_c1[p] * pop_c4[p] for p in range(n_pops)]
-
-    # Precompute frequency sums used by Dz and pi2
-    # pA_i = c1+c2 (freq of allele A at locus 1, unnormalized)
-    # qA_i = c3+c4, pB_i = c1+c3, qB_i = c2+c4
-    pop_pA = [pop_c1[p] + pop_c2[p] for p in range(n_pops)]
-    pop_qA = [pop_c3[p] + pop_c4[p] for p in range(n_pops)]
-    pop_pB = [pop_c1[p] + pop_c3[p] for p in range(n_pops)]
-    pop_qB = [pop_c2[p] + pop_c4[p] for p in range(n_pops)]
-
-    # Collect all unique raw calls needed, then compute each once
+    # Compute each unique raw call once
     unique_calls = set()
     for _, calls in stat_specs:
         for _, stat_type, pop_indices in calls:
             unique_calls.add((stat_type, pop_indices))
 
     raw_cache = {}
-    zeros = cp.zeros(n_pairs, dtype=cp.float64)
+
+    # Batch-compute all Dz values via einsum + advanced indexing
+    dz_calls = [pi for st, pi in unique_calls if st == 'dz']
+    if dz_calls:
+        dz_results = _compute_all_dz(pops, dz_calls)
+        for pi, val in zip(dz_calls, dz_results):
+            raw_cache[('dz', pi)] = val
 
     for stat_type, pop_indices in unique_calls:
         if stat_type == 'dd':
-            raw_cache[('dd', pop_indices)] = _dd_raw(
-                pop_indices, pop_c1, pop_c2, pop_c3, pop_c4, pop_n, pop_D, zeros)
-        elif stat_type == 'dz':
-            raw_cache[('dz', pop_indices)] = _dz_raw(
-                pop_indices, pop_c1, pop_c2, pop_c3, pop_c4, pop_n, pop_D,
-                pop_pA, pop_qA, pop_pB, pop_qB, zeros)
+            raw_cache[('dd', pop_indices)] = _dd_raw(pop_indices, pops)
         elif stat_type == 'pi2':
-            raw_cache[('pi2', pop_indices)] = _pi2_raw(
-                pop_indices, pop_c1, pop_c2, pop_c3, pop_c4, pop_n,
-                pop_pA, pop_qA, pop_pB, pop_qB, pop_D, zeros)
+            raw_cache[('pi2', pop_indices)] = _pi2_raw(pop_indices, pops)
 
     # Assemble weighted sums from cached raw values
     result = cp.zeros((n_pairs, n_stats), dtype=cp.float64)
@@ -2370,84 +2370,172 @@ def _compute_multi_pop_statistics_batch(counts_per_pop, n_valid_per_pop,
             else:
                 result[:, stat_idx] = w * raw_cache[(st, pi)]
         else:
-            val = zeros.copy()
-            for w, st, pi in calls:
-                val += w * raw_cache[(st, pi)]
+            val = sum(w * raw_cache[(st, pi)] for w, st, pi in calls)
             result[:, stat_idx] = val
 
     return result
 
 
-def _dd_raw(pop_indices, c1, c2, c3, c4, n, D, zeros):
-    """Compute raw DD directly from precomputed per-population arrays."""
+def _dd_raw(pop_indices, pops):
+    """Compute raw DD from precomputed per-population arrays."""
     i, j = pop_indices
     if i == j:
-        numer = (c1[i] * (c1[i] - 1) * c4[i] * (c4[i] - 1)
-                 + c2[i] * (c2[i] - 1) * c3[i] * (c3[i] - 1)
-                 - 2 * c1[i] * c2[i] * c3[i] * c4[i])
-        denom = n[i] * (n[i] - 1) * (n[i] - 2) * (n[i] - 3)
-        valid = n[i] >= 4
+        p = pops[i]
+        numer = (p.c1 * (p.c1 - 1) * p.c4 * (p.c4 - 1)
+                 + p.c2 * (p.c2 - 1) * p.c3 * (p.c3 - 1)
+                 - 2 * p.c1 * p.c2 * p.c3 * p.c4)
+        denom = p.n * (p.n - 1) * (p.n - 2) * (p.n - 3)
+        valid = p.n >= 4
     else:
-        numer = D[i] * D[j]
-        denom = n[i] * (n[i] - 1) * n[j] * (n[j] - 1)
-        valid = (n[i] >= 2) & (n[j] >= 2)
-    result = zeros.copy()
-    result[valid] = numer[valid] / denom[valid]
-    return result
+        numer = pops[i].D * pops[j].D
+        denom = pops[i].n * (pops[i].n - 1) * pops[j].n * (pops[j].n - 1)
+        valid = (pops[i].n >= 2) & (pops[j].n >= 2)
+    return cp.where(valid, numer / cp.maximum(denom, 1), 0.0)
 
 
-def _dz_raw(pop_indices, c1, c2, c3, c4, n, D, pA, qA, pB, qB, zeros):
-    """Compute raw Dz directly from precomputed per-population arrays."""
-    p1, p2, p3 = pop_indices
-    if p1 == p2 == p3:
-        # Single population
-        diff = c1[p1] * c4[p1] - c2[p1] * c3[p1]
-        s_qA_pA = qA[p1] - pA[p1]  # (c3+c4) - (c1+c2)
-        s_qB_pB = qB[p1] - pB[p1]  # (c2+c4) - (c1+c3)
-        s_alt = (c2[p1] + c3[p1]) - (c1[p1] + c4[p1])
-        numer = diff * s_qA_pA * s_qB_pB + diff * s_alt + 2 * (c2[p1] * c3[p1] + c1[p1] * c4[p1])
-        denom = n[p1] * (n[p1] - 1) * (n[p1] - 2) * (n[p1] - 3)
-        valid = n[p1] >= 4
-    elif p1 == p2:  # Dz(i,i,j)
-        numer = (
-            (-pA[p1] + qA[p1])
-            * (-D[p1])
-            * (-c1[p3] + c2[p3] - c3[p3] + c4[p3])
-        )
-        denom = n[p3] * n[p1] * (n[p1] - 1) * (n[p1] - 2)
-        valid = (n[p1] >= 3) & (n[p3] >= 1)
-    elif p1 == p3:  # Dz(i,j,i)
-        numer = (
-            (-c1[p1] + c2[p1] - c3[p1] + c4[p1])
-            * (-D[p1])
-            * (-pA[p2] + qA[p2])
-        )
-        denom = n[p2] * n[p1] * (n[p1] - 1) * (n[p1] - 2)
-        valid = (n[p1] >= 3) & (n[p2] >= 1)
-    elif p2 == p3:  # Dz(i,j,j)
-        numer = ((-D[p1]) * (-c1[p2] + c2[p2] + c3[p2] - c4[p2])
-                 + (-D[p1]) * (-c1[p2] + c2[p2] - c3[p2] + c4[p2])
-                 * (-pA[p2] + qA[p2]))
-        denom = n[p1] * (n[p1] - 1) * n[p2] * (n[p2] - 1)
-        valid = (n[p1] >= 2) & (n[p2] >= 2)
-    else:  # Dz(i,j,k) all different
-        numer = -(
-            D[p1]
-            * (pA[p2] - qA[p2])
-            * (c1[p3] - c2[p3] + c3[p3] - c4[p3])
-        )
-        denom = n[p1] * (n[p1] - 1) * n[p2] * n[p3]
-        valid = (n[p1] >= 2) & (n[p2] >= 1) & (n[p3] >= 1)
-    result = zeros.copy()
-    result[valid] = numer[valid] / denom[valid]
-    return result
+def _safe_div(numer, denom, valid):
+    """Divide numer/denom where valid, zero elsewhere. No intermediate copy."""
+    return cp.where(valid, numer / cp.maximum(denom, 1), 0.0)
 
 
-def _pi2_raw(pop_indices, c1, c2, c3, c4, n, pA, qA, pB, qB, D, zeros):
-    """Compute raw pi2 directly from precomputed per-population arrays."""
+def _compute_all_dz(pops, dz_calls):
+    """Batch-compute all raw Dz values using einsum for all-different cases.
+
+    Groups calls by population pattern and vectorizes within each group,
+    reducing GPU kernel launches from O(n_calls) to O(n_groups).
+
+    Parameters
+    ----------
+    pops : list of _PopData
+    dz_calls : list of (p1, p2, p3) tuples
+
+    Returns
+    -------
+    list of cp.ndarray, one per call in dz_calls order
+    """
+    P = len(pops)
+    n_pairs = pops[0].n.shape[0]
+
+    # Stack per-pop arrays: shape (P, N)
+    D_stack = cp.stack([p.D for p in pops])
+    fdA_stack = cp.stack([p.pA - p.qA for p in pops])   # pA - qA
+    fdB_stack = cp.stack([p.pB - p.qB for p in pops])   # pB - qB = c1-c2+c3-c4
+    n_stack = cp.stack([p.n for p in pops])
+
+    # Group calls by case type
+    groups = {'same': [], 'p1p2': [], 'p1p3': [], 'p2p3': [], 'diff': []}
+    call_order = {}  # maps original index -> (group, index_within_group)
+    for idx, (p1, p2, p3) in enumerate(dz_calls):
+        if p1 == p2 == p3:
+            call_order[idx] = ('same', len(groups['same']))
+            groups['same'].append((p1, p2, p3))
+        elif p1 == p2:
+            call_order[idx] = ('p1p2', len(groups['p1p2']))
+            groups['p1p2'].append((p1, p2, p3))
+        elif p1 == p3:
+            call_order[idx] = ('p1p3', len(groups['p1p3']))
+            groups['p1p3'].append((p1, p2, p3))
+        elif p2 == p3:
+            call_order[idx] = ('p2p3', len(groups['p2p3']))
+            groups['p2p3'].append((p1, p2, p3))
+        else:
+            call_order[idx] = ('diff', len(groups['diff']))
+            groups['diff'].append((p1, p2, p3))
+
+    group_results = {}
+
+    # All-different: numer = -(D_i * fdA_j * fdB_k) via einsum
+    if groups['diff']:
+        # Full tensor: (P, P, P, N) -- only compute if P is small
+        if P <= 4:
+            # einsum: shape (P, P, P, N)
+            numer_tensor = -cp.einsum('in,jn,kn->ijkn', D_stack, fdA_stack, fdB_stack)
+            denom_tensor = (n_stack[:, None, None, :]
+                            * (n_stack[:, None, None, :] - 1)
+                            * n_stack[None, :, None, :]
+                            * n_stack[None, None, :, :])
+            valid_tensor = ((n_stack[:, None, None, :] >= 2)
+                            & (n_stack[None, :, None, :] >= 1)
+                            & (n_stack[None, None, :, :] >= 1))
+            full = cp.where(valid_tensor, numer_tensor / cp.maximum(denom_tensor, 1), 0.0)
+            results = [full[p1, p2, p3] for p1, p2, p3 in groups['diff']]
+            del numer_tensor, denom_tensor, valid_tensor, full
+        else:
+            # Fallback to advanced indexing for large P
+            ii = cp.array([t[0] for t in groups['diff']])
+            jj = cp.array([t[1] for t in groups['diff']])
+            kk = cp.array([t[2] for t in groups['diff']])
+            numer = -(D_stack[ii] * fdA_stack[jj] * fdB_stack[kk])
+            denom = (n_stack[ii] * (n_stack[ii] - 1) * n_stack[jj] * n_stack[kk])
+            valid = (n_stack[ii] >= 2) & (n_stack[jj] >= 1) & (n_stack[kk] >= 1)
+            batch = cp.where(valid, numer / cp.maximum(denom, 1), 0.0)
+            results = [batch[r] for r in range(len(groups['diff']))]
+            del numer, denom, valid, batch
+        group_results['diff'] = results
+
+    # Dz(i,i,j): numer = (-fdA_i) * (-D_i) * (-fdB_j) = -fdA_i * D_i * fdB_j
+    if groups['p1p2']:
+        ii = cp.array([t[0] for t in groups['p1p2']])
+        kk = cp.array([t[2] for t in groups['p1p2']])
+        numer = -fdA_stack[ii] * D_stack[ii] * fdB_stack[kk]
+        denom = n_stack[kk] * n_stack[ii] * (n_stack[ii] - 1) * (n_stack[ii] - 2)
+        valid = (n_stack[ii] >= 3) & (n_stack[kk] >= 1)
+        batch = cp.where(valid, numer / cp.maximum(denom, 1), 0.0)
+        group_results['p1p2'] = [batch[r] for r in range(len(groups['p1p2']))]
+
+    # Dz(i,j,i): numer = (-fdB_i) * (-D_i) * (-fdA_j) = -fdB_i * D_i * fdA_j
+    if groups['p1p3']:
+        ii = cp.array([t[0] for t in groups['p1p3']])
+        jj = cp.array([t[1] for t in groups['p1p3']])
+        numer = -fdB_stack[ii] * D_stack[ii] * fdA_stack[jj]
+        denom = n_stack[jj] * n_stack[ii] * (n_stack[ii] - 1) * (n_stack[ii] - 2)
+        valid = (n_stack[ii] >= 3) & (n_stack[jj] >= 1)
+        batch = cp.where(valid, numer / cp.maximum(denom, 1), 0.0)
+        group_results['p1p3'] = [batch[r] for r in range(len(groups['p1p3']))]
+
+    # Dz(i,j,j): two-term formula, computed per-call (can't easily batch)
+    if groups['p2p3']:
+        results = []
+        for p1, p2, p3 in groups['p2p3']:
+            a, b = pops[p1], pops[p2]
+            numer = ((-a.D) * (-b.c1 + b.c2 + b.c3 - b.c4)
+                     + (-a.D) * (-b.c1 + b.c2 - b.c3 + b.c4) * (b.qA - b.pA))
+            denom = a.n * (a.n - 1) * b.n * (b.n - 1)
+            valid = (a.n >= 2) & (b.n >= 2)
+            results.append(_safe_div(numer, denom, valid))
+        group_results['p2p3'] = results
+
+    # Dz(i,i,i): single-pop with correction terms, computed per-call
+    if groups['same']:
+        results = []
+        for p1, _, _ in groups['same']:
+            a = pops[p1]
+            diff = a.c1 * a.c4 - a.c2 * a.c3
+            numer = (diff * (a.qA - a.pA) * (a.qB - a.pB)
+                     + diff * ((a.c2 + a.c3) - (a.c1 + a.c4))
+                     + 2 * (a.c2 * a.c3 + a.c1 * a.c4))
+            denom = a.n * (a.n - 1) * (a.n - 2) * (a.n - 3)
+            valid = a.n >= 4
+            results.append(_safe_div(numer, denom, valid))
+        group_results['same'] = results
+
+    # Reassemble in original call order
+    output = [None] * len(dz_calls)
+    for idx in range(len(dz_calls)):
+        grp, pos = call_order[idx]
+        output[idx] = group_results[grp][pos]
+    return output
+
+
+def _pi2_raw(pop_indices, pops):
+    """Compute raw (un-averaged) pi2 from precomputed per-population arrays.
+
+    Callers via stat_specs are responsible for combining permutations
+    with appropriate weights to produce the symmetrized statistic.
+    """
     i, j, k, l = pop_indices
+    pi, pj, pk, pl = pops[i], pops[j], pops[k], pops[l]
 
-    # Count population occurrences
     pop_list = [i, j, k, l]
     pop_counts = {}
     for p in pop_list:
@@ -2456,168 +2544,157 @@ def _pi2_raw(pop_indices, c1, c2, c3, c4, n, pA, qA, pB, qB, D, zeros):
     max_count = max(pop_counts.values())
 
     if n_unique == 1:
-        # All same population
-        p = i
+        p = pi
         numer = (
-            pA[p] * pB[p] * qB[p] * qA[p]
-            - c1[p] * c4[p] * (-1 + c1[p] + 3*c2[p] + 3*c3[p] + c4[p])
-            - c2[p] * c3[p] * (-1 + 3*c1[p] + c2[p] + c3[p] + 3*c4[p])
+            p.pA * p.pB * p.qB * p.qA
+            - p.c1 * p.c4 * (-1 + p.c1 + 3*p.c2 + 3*p.c3 + p.c4)
+            - p.c2 * p.c3 * (-1 + 3*p.c1 + p.c2 + p.c3 + 3*p.c4)
         )
-        denom = n[p] * (n[p] - 1) * (n[p] - 2) * (n[p] - 3)
-        valid = n[p] >= 4
+        denom = p.n * (p.n - 1) * (p.n - 2) * (p.n - 3)
+        valid = p.n >= 4
 
     elif max_count == 3:
-        # Three same, one different
-        triple = [p for p, cnt in pop_counts.items() if cnt == 3][0]
-        single = [p for p, cnt in pop_counts.items() if cnt == 1][0]
-        t, s = triple, single
+        t = pops[[p for p, cnt in pop_counts.items() if cnt == 3][0]]
+        s = pops[[p for p, cnt in pop_counts.items() if cnt == 1][0]]
         numer = (
-            -(pA[t] * c4[t] * pB[s])
-            - (c2[t] * qA[t] * pB[s])
-            + (pA[t] * (c2[t] + c4[t]) * qA[t] * pB[s])
-            + (pA[t] * qA[t] * (-2*c2[s] - 2*c4[s]))
-            + (pA[t] * c4[t] * qB[s])
-            + (c2[t] * qA[t] * qB[s])
-            + (pA[t] * pB[t] * qA[t] * qB[s])
+            -(t.pA * t.c4 * s.pB)
+            - (t.c2 * t.qA * s.pB)
+            + (t.pA * (t.c2 + t.c4) * t.qA * s.pB)
+            + (t.pA * t.qA * (-2*s.c2 - 2*s.c4))
+            + (t.pA * t.c4 * s.qB)
+            + (t.c2 * t.qA * s.qB)
+            + (t.pA * t.pB * t.qA * s.qB)
         ) / 2.0
-        denom = n[s] * n[t] * (n[t] - 1) * (n[t] - 2)
-        valid = (n[t] >= 3) & (n[s] >= 1)
+        denom = s.n * t.n * (t.n - 1) * (t.n - 2)
+        valid = (t.n >= 3) & (s.n >= 1)
 
     elif i == j and k == l:
-        # pi2(i,i,k,k)
-        numer = pA[i] * qA[i] * pB[k] * qB[k]
-        denom = n[i] * (n[i] - 1) * n[k] * (n[k] - 1)
-        valid = (n[i] >= 2) & (n[k] >= 2)
+        numer = pi.pA * pi.qA * pk.pB * pk.qB
+        denom = pi.n * (pi.n - 1) * pk.n * (pk.n - 1)
+        valid = (pi.n >= 2) & (pk.n >= 2)
 
     elif i == j:
-        # pi2(i,i,k,l) where k != l
         numer = (
-            pA[i] * qA[i]
-            * (c2[k] * pB[l] + c4[k] * pB[l] + pB[k] * qB[l])
+            pi.pA * pi.qA
+            * (pk.c2 * pl.pB + pk.c4 * pl.pB + pk.pB * pl.qB)
         ) / 2.0
-        denom = n[i] * (n[i] - 1) * n[k] * n[l]
-        valid = (n[i] >= 2) & (n[k] >= 1) & (n[l] >= 1)
+        denom = pi.n * (pi.n - 1) * pk.n * pl.n
+        valid = (pi.n >= 2) & (pk.n >= 1) & (pl.n >= 1)
 
     elif k == l:
-        # pi2(i,j,k,k)
         numer = (
-            pB[k] * qB[k]
-            * (c3[i] * pA[j] + c4[i] * pA[j] + pA[i] * qA[j])
+            pk.pB * pk.qB
+            * (pi.c3 * pj.pA + pi.c4 * pj.pA + pi.pA * pj.qA)
         ) / 2.0
-        denom = n[k] * (n[k] - 1) * n[i] * n[j]
-        valid = (n[k] >= 2) & (n[i] >= 1) & (n[j] >= 1)
+        denom = pk.n * (pk.n - 1) * pi.n * pj.n
+        valid = (pk.n >= 2) & (pi.n >= 1) & (pj.n >= 1)
 
     elif (i == k and j == l) or (i == l and j == k):
-        # pi2(i,j,i,j) or pi2(i,j,j,i)
-        a, b = i, j
+        a, b = pi, pj
         numer = (
-            (qB[a] * qA[a] * pA[b] * pB[b]) / 4.0
-            + (pB[a] * qA[a] * pA[b] * qB[b]) / 4.0
-            + (pA[a] * qB[a] * pB[b] * qA[b]) / 4.0
-            + (pA[a] * pB[a] * qB[b] * qA[b]) / 4.0
+            (a.qB * a.qA * b.pA * b.pB) / 4.0
+            + (a.pB * a.qA * b.pA * b.qB) / 4.0
+            + (a.pA * a.qB * b.pB * b.qA) / 4.0
+            + (a.pA * a.pB * b.qB * b.qA) / 4.0
             + (
-                -(c2[a] * c3[a] * c1[b])
-                + c4[a] * c1[b]
-                - c2[a] * c4[a] * c1[b]
-                - c3[a] * c4[a] * c1[b]
-                - c4[a] ** 2 * c1[b]
-                - c4[a] * c1[b] ** 2
-                + c3[a] * c2[b]
-                - c1[a] * c3[a] * c2[b]
-                - c3[a] ** 2 * c2[b]
-                - c1[a] * c4[a] * c2[b]
-                - c3[a] * c4[a] * c2[b]
-                - c3[a] * c1[b] * c2[b]
-                - c4[a] * c1[b] * c2[b]
-                - c3[a] * c2[b] ** 2
-                + c2[a] * c3[b]
-                - c1[a] * c2[a] * c3[b]
-                - c2[a] ** 2 * c3[b]
-                - c1[a] * c4[a] * c3[b]
-                - c2[a] * c4[a] * c3[b]
-                - c2[a] * c1[b] * c3[b]
-                - c4[a] * c1[b] * c3[b]
-                - c1[a] * c2[b] * c3[b]
-                - c4[a] * c2[b] * c3[b]
-                - c2[a] * c3[b] ** 2
-                + c1[a] * c4[b]
-                - c1[a] ** 2 * c4[b]
-                - c1[a] * c2[a] * c4[b]
-                - c1[a] * c3[a] * c4[b]
-                - c2[a] * c3[a] * c4[b]
-                - c2[a] * c1[b] * c4[b]
-                - c3[a] * c1[b] * c4[b]
-                - c1[a] * c2[b] * c4[b]
-                - c3[a] * c2[b] * c4[b]
-                - c1[a] * c3[b] * c4[b]
-                - c2[a] * c3[b] * c4[b]
-                - c1[a] * c4[b] ** 2
+                -(a.c2 * a.c3 * b.c1)
+                + a.c4 * b.c1
+                - a.c2 * a.c4 * b.c1
+                - a.c3 * a.c4 * b.c1
+                - a.c4 ** 2 * b.c1
+                - a.c4 * b.c1 ** 2
+                + a.c3 * b.c2
+                - a.c1 * a.c3 * b.c2
+                - a.c3 ** 2 * b.c2
+                - a.c1 * a.c4 * b.c2
+                - a.c3 * a.c4 * b.c2
+                - a.c3 * b.c1 * b.c2
+                - a.c4 * b.c1 * b.c2
+                - a.c3 * b.c2 ** 2
+                + a.c2 * b.c3
+                - a.c1 * a.c2 * b.c3
+                - a.c2 ** 2 * b.c3
+                - a.c1 * a.c4 * b.c3
+                - a.c2 * a.c4 * b.c3
+                - a.c2 * b.c1 * b.c3
+                - a.c4 * b.c1 * b.c3
+                - a.c1 * b.c2 * b.c3
+                - a.c4 * b.c2 * b.c3
+                - a.c2 * b.c3 ** 2
+                + a.c1 * b.c4
+                - a.c1 ** 2 * b.c4
+                - a.c1 * a.c2 * b.c4
+                - a.c1 * a.c3 * b.c4
+                - a.c2 * a.c3 * b.c4
+                - a.c2 * b.c1 * b.c4
+                - a.c3 * b.c1 * b.c4
+                - a.c1 * b.c2 * b.c4
+                - a.c3 * b.c2 * b.c4
+                - a.c1 * b.c3 * b.c4
+                - a.c2 * b.c3 * b.c4
+                - a.c1 * b.c4 ** 2
             ) / 4.0
         )
-        denom = n[a] * (n[a] - 1) * n[b] * (n[b] - 1)
-        valid = (n[a] >= 2) & (n[b] >= 2)
+        denom = a.n * (a.n - 1) * b.n * (b.n - 1)
+        valid = (a.n >= 2) & (b.n >= 2)
 
     elif n_unique == 3:
-        # Shared population between pairs
         if i == k:
-            shared, o1, o2 = i, j, l
+            si, ai, bi = i, j, l
         elif i == l:
-            shared, o1, o2 = i, j, k
+            si, ai, bi = i, j, k
         elif j == k:
-            shared, o1, o2 = j, i, l
+            si, ai, bi = j, i, l
         elif j == l:
-            shared, o1, o2 = j, i, k
+            si, ai, bi = j, i, k
         else:
-            return zeros.copy()
-        s, a, b = shared, o1, o2
+            return cp.zeros(pi.n.shape[0], dtype=cp.float64)
+        s, a, b = pops[si], pops[ai], pops[bi]
         numer = (
-            c4[s] ** 2 * pA[a] * pB[b]
-            + c2[s] ** 2 * qA[a] * pB[b]
-            + (-1 + c1[s] + c3[s]) * (c3[s] * pA[a] + c1[s] * qA[a]) * qB[b]
-            + c4[s]
+            s.c4 ** 2 * a.pA * b.pB
+            + s.c2 ** 2 * a.qA * b.pB
+            + (-1 + s.c1 + s.c3) * (s.c3 * a.pA + s.c1 * a.qA) * b.qB
+            + s.c4
             * (
-                c1[s] * qA[a] * pB[b]
-                + c1[a]
+                s.c1 * a.qA * b.pB
+                + a.c1
                 * (
-                    (-1 + c3[s]) * c1[b]
-                    + c3[s] * c2[b]
-                    - c3[b]
-                    + c3[s] * c3[b]
-                    + c3[s] * c4[b]
-                    + c1[s] * qB[b]
+                    (-1 + s.c3) * b.c1
+                    + s.c3 * b.c2
+                    - b.c3
+                    + s.c3 * b.c3
+                    + s.c3 * b.c4
+                    + s.c1 * b.qB
                 )
-                + c2[a]
+                + a.c2
                 * (
-                    (-1 + c3[s]) * c1[b]
-                    + c3[s] * c2[b]
-                    - c3[b]
-                    + c3[s] * c3[b]
-                    + c3[s] * c4[b]
-                    + c1[s] * qB[b]
+                    (-1 + s.c3) * b.c1
+                    + s.c3 * b.c2
+                    - b.c3
+                    + s.c3 * b.c3
+                    + s.c3 * b.c4
+                    + s.c1 * b.qB
                 )
             )
-            + c2[s]
+            + s.c2
             * (
-                c4[s] * (pA[a] + qA[a]) * pB[b]
-                + c3[s]
-                * (c1[a] * pB[b] + c2[a] * pB[b] + qA[a] * qB[b])
-                + qA[a] * ((-1 + c1[s]) * c1[b] - c3[b] + c1[s] * (c2[b] + c3[b] + c4[b]))
+                s.c4 * (a.pA + a.qA) * b.pB
+                + s.c3
+                * (a.c1 * b.pB + a.c2 * b.pB + a.qA * b.qB)
+                + a.qA * ((-1 + s.c1) * b.c1 - b.c3 + s.c1 * (b.c2 + b.c3 + b.c4))
             )
         ) / 4.0
-        denom = n[s] * (n[s] - 1) * n[a] * n[b]
-        valid = (n[s] >= 2) & (n[a] >= 1) & (n[b] >= 1)
+        denom = s.n * (s.n - 1) * a.n * b.n
+        valid = (s.n >= 2) & (a.n >= 1) & (b.n >= 1)
 
     else:
-        # All 4 different populations
         numer = (
-            (qA[i] * pA[j] * qB[k] * pB[l]) / 4.0
-            + (pA[i] * qA[j] * qB[k] * pB[l]) / 4.0
-            + (qA[i] * pA[j] * pB[k] * qB[l]) / 4.0
-            + (pA[i] * qA[j] * pB[k] * qB[l]) / 4.0
+            (pi.qA * pj.pA * pk.qB * pl.pB) / 4.0
+            + (pi.pA * pj.qA * pk.qB * pl.pB) / 4.0
+            + (pi.qA * pj.pA * pk.pB * pl.qB) / 4.0
+            + (pi.pA * pj.qA * pk.pB * pl.qB) / 4.0
         )
-        denom = n[i] * n[j] * n[k] * n[l]
-        valid = (n[i] >= 1) & (n[j] >= 1) & (n[k] >= 1) & (n[l] >= 1)
+        denom = pi.n * pj.n * pk.n * pl.n
+        valid = (pi.n >= 1) & (pj.n >= 1) & (pk.n >= 1) & (pl.n >= 1)
 
-    result = zeros.copy()
-    result[valid] = numer[valid] / denom[valid]
-    return result
+    return _safe_div(numer, denom, valid)
