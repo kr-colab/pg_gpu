@@ -13,6 +13,7 @@ import cupy as cp
 from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
 from .diversity import PairwiseResult, _pairwise_pi_components
+from ._memutil import chunked_dac_and_n as _pop_dac_and_n
 
 
 def _pairwise_dxy_components(pop1_haps, pop2_haps, n_total_sites=None,
@@ -33,13 +34,12 @@ def _pairwise_dxy_components(pop1_haps, pop2_haps, n_total_sites=None,
     -------
     total_diffs, total_comps, total_missing, n_sites : float, float, float, int
     """
-    pop1_mask = pop1_haps >= 0
-    pop2_mask = pop2_haps >= 0
-    pop1_n = cp.sum(pop1_mask, axis=0).astype(cp.float64)
-    pop2_n = cp.sum(pop2_mask, axis=0).astype(cp.float64)
-
-    pop1_derived = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0).astype(cp.float64)
-    pop2_derived = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0).astype(cp.float64)
+    pop1_derived, pop1_n = _pop_dac_and_n(pop1_haps)
+    pop2_derived, pop2_n = _pop_dac_and_n(pop2_haps)
+    pop1_n = pop1_n.astype(cp.float64)
+    pop2_n = pop2_n.astype(cp.float64)
+    pop1_derived = pop1_derived.astype(cp.float64)
+    pop2_derived = pop2_derived.astype(cp.float64)
     pop1_ancestral = pop1_n - pop1_derived
     pop2_ancestral = pop2_n - pop2_derived
 
@@ -183,24 +183,15 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
         pop2_haps = pop2_haps[:, valid_sites]
 
     # Get allele frequencies - calculate from non-missing data per site
-    pop1_mask = pop1_haps >= 0
-    pop2_mask = pop2_haps >= 0
-    pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
-    pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
-    pop1_n = cp.sum(pop1_mask, axis=0)
-    pop2_n = cp.sum(pop2_mask, axis=0)
+    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
+    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
+    pop1_counts = pop1_counts.astype(cp.float64)
+    pop2_counts = pop2_counts.astype(cp.float64)
+    n1 = pop1_n.astype(cp.float64)
+    n2 = pop2_n.astype(cp.float64)
 
-    # Avoid division by zero
-    pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
-    pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
-    valid1 = pop1_n > 0
-    valid2 = pop2_n > 0
-    pop1_freqs[valid1] = pop1_counts[valid1] / pop1_n[valid1]
-    pop2_freqs[valid2] = pop2_counts[valid2] / pop2_n[valid2]
-
-    # Use actual sample sizes per site
-    n1 = pop1_n
-    n2 = pop2_n
+    pop1_freqs = cp.where(n1 > 0, pop1_counts / n1, 0.0)
+    pop2_freqs = cp.where(n2 > 0, pop2_counts / n2, 0.0)
 
     # Per-site within-population mean pairwise difference
     # mpd(p, n) = p*(1-p)*n/(n-1)  (unbiased heterozygosity)
@@ -283,19 +274,15 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
         pop2_haps = pop2_haps[:, valid_sites]
 
     # Get allele counts and frequencies from non-missing data per site
-    pop1_mask = pop1_haps >= 0
-    pop2_mask = pop2_haps >= 0
-    pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0).astype(float)
-    pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0).astype(float)
-    n1 = cp.sum(pop1_mask, axis=0).astype(float)
-    n2 = cp.sum(pop2_mask, axis=0).astype(float)
+    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
+    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
+    pop1_counts = pop1_counts.astype(cp.float64)
+    pop2_counts = pop2_counts.astype(cp.float64)
+    n1 = pop1_n.astype(cp.float64)
+    n2 = pop2_n.astype(cp.float64)
 
-    pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
-    pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
-    valid1 = n1 > 0
-    valid2 = n2 > 0
-    pop1_freqs[valid1] = pop1_counts[valid1] / n1[valid1]
-    pop2_freqs[valid2] = pop2_counts[valid2] / n2[valid2]
+    pop1_freqs = cp.where(n1 > 0, pop1_counts / n1, 0.0)
+    pop2_freqs = cp.where(n2 > 0, pop2_counts / n2, 0.0)
 
     # Number of populations
     r = 2
@@ -408,19 +395,15 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
         pop2_haps = pop2_haps[:, valid_sites]
 
     # Get allele frequencies from non-missing data per site
-    pop1_mask = pop1_haps >= 0
-    pop2_mask = pop2_haps >= 0
-    pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
-    pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
-    n1 = cp.sum(pop1_mask, axis=0)
-    n2 = cp.sum(pop2_mask, axis=0)
+    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
+    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
+    pop1_counts = pop1_counts.astype(cp.float64)
+    pop2_counts = pop2_counts.astype(cp.float64)
+    n1 = pop1_n.astype(cp.float64)
+    n2 = pop2_n.astype(cp.float64)
 
-    pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
-    pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
-    valid1 = n1 > 0
-    valid2 = n2 > 0
-    pop1_freqs[valid1] = pop1_counts[valid1] / n1[valid1]
-    pop2_freqs[valid2] = pop2_counts[valid2] / n2[valid2]
+    pop1_freqs = cp.where(n1 > 0, pop1_counts / n1, 0.0)
+    pop2_freqs = cp.where(n2 > 0, pop2_counts / n2, 0.0)
 
     # Within-population heterozygosity
     hs1 = 2.0 * pop1_freqs * (1 - pop1_freqs)
@@ -529,19 +512,15 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     n_sites = total_sites
 
     # Get allele frequencies from non-missing data per site
-    pop1_mask = pop1_haps >= 0
-    pop2_mask = pop2_haps >= 0
-    pop1_counts = cp.sum(cp.where(pop1_mask, pop1_haps, 0), axis=0)
-    pop2_counts = cp.sum(cp.where(pop2_mask, pop2_haps, 0), axis=0)
-    pop1_n = cp.sum(pop1_mask, axis=0)
-    pop2_n = cp.sum(pop2_mask, axis=0)
+    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
+    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
+    pop1_counts = pop1_counts.astype(cp.float64)
+    pop2_counts = pop2_counts.astype(cp.float64)
+    pop1_n = pop1_n.astype(cp.float64)
+    pop2_n = pop2_n.astype(cp.float64)
 
-    pop1_freqs = cp.zeros_like(pop1_counts, dtype=float)
-    pop2_freqs = cp.zeros_like(pop2_counts, dtype=float)
-    valid1 = pop1_n > 0
-    valid2 = pop2_n > 0
-    pop1_freqs[valid1] = pop1_counts[valid1] / pop1_n[valid1]
-    pop2_freqs[valid2] = pop2_counts[valid2] / pop2_n[valid2]
+    pop1_freqs = cp.where(pop1_n > 0, pop1_counts / pop1_n, 0.0)
+    pop2_freqs = cp.where(pop2_n > 0, pop2_counts / pop2_n, 0.0)
 
     # Calculate Dxy only for sites with data
     valid_mask = (pop1_n > 0) & (pop2_n > 0)
@@ -670,13 +649,11 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
     n_sites = total_sites
 
     # Calculate frequencies from non-missing data per site
-    pop_mask = pop_haplotypes >= 0
-    pop_counts = cp.sum(cp.where(pop_mask, pop_haplotypes, 0), axis=0)
-    n = cp.sum(pop_mask, axis=0)
+    pop_counts, n = _pop_dac_and_n(pop_haplotypes)
+    pop_counts = pop_counts.astype(cp.float64)
+    n = n.astype(cp.float64)
 
-    pop_freq = cp.zeros_like(pop_counts, dtype=float)
-    valid = n > 0
-    pop_freq[valid] = pop_counts[valid] / n[valid]
+    pop_freq = cp.where(n > 0, pop_counts / n, 0.0)
 
     # Pi = 2 * p * (1 - p) * n / (n - 1) for sites with n > 1
     pi_per_site = cp.zeros(total_sites)
@@ -843,9 +820,9 @@ def _pop_allele_counts(haplotype_matrix, pop, missing_data='include'):
         h = h[:, valid_sites]
 
     # Use per-site non-missing counts
-    valid_mask = h >= 0
-    n = cp.sum(valid_mask, axis=0).astype(cp.float64)
-    ac_1 = cp.sum(cp.where(valid_mask, h, 0), axis=0).astype(cp.float64)
+    ac_1, n = _pop_dac_and_n(h)
+    n = n.astype(cp.float64)
+    ac_1 = ac_1.astype(cp.float64)
     ac_0 = n - ac_1
     return ac_0, ac_1, n
 
