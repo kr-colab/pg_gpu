@@ -26,8 +26,8 @@ class TestLDValidationFull:
     def im_model_data(self):
         """Fixture for IM model test data."""
         # Check if test data exists
-        vcf_path = "data/im-parsing-example.vcf"
-        pop_file = "data/im_pop.txt"
+        vcf_path = "examples/data/im-parsing-example.vcf"
+        pop_file = "examples/data/im_pop.txt"
         
         if not os.path.exists(vcf_path) or not os.path.exists(pop_file):
             pytest.skip("IM model test data not available")

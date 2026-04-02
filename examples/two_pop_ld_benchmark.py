@@ -9,8 +9,8 @@ Usage:
     pixi run python examples/two_pop_ld_benchmark.py
 
 Requires:
-    data/im-parsing-example.vcf  (IM model simulation)
-    data/im_pop.txt              (population assignments)
+    examples/data/im-parsing-example.vcf  (IM model simulation)
+    examples/data/im_pop.txt              (population assignments)
 """
 
 import time
@@ -26,8 +26,8 @@ import allel
 from pg_gpu.haplotype_matrix import HaplotypeMatrix
 
 
-VCF_PATH = "data/im-parsing-example.vcf"
-POP_FILE = "data/im_pop.txt"
+VCF_PATH = "examples/data/im-parsing-example.vcf"
+POP_FILE = "examples/data/im_pop.txt"
 CACHE_DIR = Path("cache")
 POPS = ["deme0", "deme1"]
 BP_BINS = np.logspace(2, 6, 6)  # [100, 631, 3981, 25119, 158489, 1000000]

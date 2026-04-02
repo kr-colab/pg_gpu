@@ -16,4 +16,5 @@ pixi.lock
 
 reference_code/*
 docs/build/
+data/
 CLAUDE.md
