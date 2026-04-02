@@ -388,8 +388,11 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     missing_data : str
-        'include' - Use all sites, calculate from available data per site
-        'exclude' - Only use sites with no missing data
+        'include' - Use all sites, calculate from available data per site.
+            Uses harmonic mean of per-site sample sizes for variance terms.
+        'exclude' - Only use sites with no missing data.
+        'pairwise' - Uses pairwise pi and per-site theta_w with harmonic
+            mean sample sizes for variance terms.
 
     Returns
     -------
@@ -562,8 +565,9 @@ def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     missing_data : str
-        'include' - Calculate AFS using available data per site
-        'exclude' - Only use sites with no missing data
+        'include' - Calculate AFS using available data per site.
+        'exclude' - Only use sites with no missing data.
+        'pairwise' - Same as 'include' for AFS computation.
 
     Returns
     -------
@@ -670,8 +674,9 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     missing_data : str
-        'include' - Count sites as segregating based on non-missing data only
-        'exclude' - Only count sites with no missing data
+        'include' - Count sites as segregating based on non-missing data only.
+        'exclude' - Only count sites with no missing data.
+        'pairwise' - Same as 'include' for segregating site counting.
 
     Returns
     -------
@@ -754,8 +759,9 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     missing_data : str
-        'include' - Count singletons based on non-missing data only
-        'exclude' - Only count singletons at sites with no missing data
+        'include' - Count singletons based on non-missing data only.
+        'exclude' - Only count singletons at sites with no missing data.
+        'pairwise' - Same as 'include' for singleton counting.
 
     Returns
     -------
