@@ -17,7 +17,6 @@ Usage:
 
 import numpy as np
 import cupy as cp
-import cupyx
 import allel
 
 from .haplotype_matrix import HaplotypeMatrix
@@ -232,7 +231,7 @@ def _compute_ld_sums(hm, pop1, pop2, bins, gen_dists_gpu, max_bp_dist):
         vb = cb[valid]
         vs = stats[valid]
         for k in range(_N_LD):
-            cupyx.scatter_add(bin_sums[:, k], vb, vs[:, k])
+            cp.add.at(bin_sums[:, k], vb, vs[:, k])
 
         del c1, c2, nv1, nv2, stats
 

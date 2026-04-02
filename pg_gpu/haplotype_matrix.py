@@ -1233,7 +1233,6 @@ class HaplotypeMatrix:
             self.transfer_to_gpu()
 
         from pg_gpu import ld_statistics
-        import cupyx
 
         # Get positions and compute max distance
         pos = self.positions
@@ -1298,10 +1297,10 @@ class HaplotypeMatrix:
 
             # Accumulate sums
             for stat_idx in range(3):
-                cupyx.scatter_add(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
+                cp.add.at(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
 
             # Accumulate counts
-            cupyx.scatter_add(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
+            cp.add.at(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
 
             # Free chunk memory
             del counts, n_valid, chunk_stats
@@ -1782,13 +1781,12 @@ class HaplotypeMatrix:
             valid_bin_inds = chunk_bin_inds[valid_mask]
             valid_stats = chunk_stats[valid_mask]
 
-            # Accumulate sums using cupyx.scatter_add
-            import cupyx
+            # Accumulate sums per bin
             for stat_idx in range(15):
-                cupyx.scatter_add(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
+                cp.add.at(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
 
             # Accumulate counts
-            cupyx.scatter_add(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
+            cp.add.at(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
 
             # Free chunk memory
             del counts_pop1, counts_pop2, n_valid1, n_valid2, chunk_stats

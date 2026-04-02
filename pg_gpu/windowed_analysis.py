@@ -1586,10 +1586,9 @@ def _compute_fused_garud_h(haplotype_matrix, population,
 
 def _scatter_sum(values, bin_idx, n_bins):
     """Sum values into bins using scatter_add on GPU."""
-    import cupyx
     result = cp.zeros(n_bins, dtype=cp.float64)
     valid = (bin_idx >= 0) & (bin_idx < n_bins)
-    cupyx.scatter_add(result, bin_idx[valid], values[valid])
+    cp.add.at(result, bin_idx[valid], values[valid])
     return result
 
 
