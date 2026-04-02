@@ -111,9 +111,9 @@ def parse_ld_replicates(parser_func, label):
 
 
 def main():
-    print("=" * 65)
+    print("=" * 66)
     print("Demographic Inference from LD: pg_gpu + moments")
-    print("=" * 65)
+    print("=" * 66)
 
     # Step 1: Simulate data
     cache_file = os.path.join(DATA_DIR, "ld_stats_cache.pkl")
@@ -194,12 +194,12 @@ def main():
     ]
     names = ["N(deme0)", "N(deme1)", "Div. time (gen)", "Migration rate", "N(ancestral)"]
 
-    print("\n" + "=" * 65)
+    print("\n" + "=" * 66)
     if has_ci:
         print(f"{'Parameter':<20s} {'True':>10s} {'Inferred':>10s} {'95% CI':>22s}")
     else:
         print(f"{'Parameter':<20s} {'True':>10s} {'Inferred':>10s}")
-    print("-" * 65)
+    print("-" * 66)
     for name, true, est, lo, hi in zip(names, true_vals, physical, lower, upper):
         if name == "Migration rate":
             ci = f"[{lo:.6f}, {hi:.6f}]" if has_ci else ""
@@ -207,7 +207,7 @@ def main():
         else:
             ci = f"[{lo:.0f}, {hi:.0f}]" if has_ci else ""
             print(f"{name:<20s} {true:>10.0f} {est:>10.0f} {ci}")
-    print("=" * 65)
+    print("=" * 66)
 
     print(f"\nTiming summary:")
     print(f"  LD parsing (pg_gpu):  {t_gpu:>8.1f}s  ({NUM_REPS} replicates)")
