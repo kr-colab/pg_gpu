@@ -15,7 +15,7 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.8.1
         with:
           pixi-version: latest
-      - run: pixi install -e lint
+          environments: lint
       - run: pixi run -e lint ruff check pg_gpu/ tests/ examples/
 
   test-gpu:
