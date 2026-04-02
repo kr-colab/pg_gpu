@@ -3,9 +3,9 @@
 Demographic inference from LD statistics using pg_gpu + moments.
 
 Simulates 50 replicate 1Mb regions under an isolation-with-migration model
-using msprime, computes two-population LD statistics with pg_gpu (GPU-
-accelerated), then fits the demographic model using moments' inference
-engine. Compares timing of the LD parsing step: pg_gpu vs moments.
+using msprime, computes two-population LD statistics with pg_gpu,
+then fits the demographic model using moments' inference engine. 
+Compares timing of the LD parsing step: pg_gpu vs moments.
 
 The demographic model:
   - Ancestral population of size 10,000
@@ -90,48 +90,22 @@ def simulate_data():
         f.write(f"{SEQ_LEN}\t{REC_RATE * SEQ_LEN * 100}\n")
 
 
-def parse_ld_gpu():
-    """Parse LD statistics from all replicates using pg_gpu."""
+def parse_ld_replicates(parser_func, label):
+    """Parse LD statistics from all replicates using a given parser."""
     pop_file = os.path.join(DATA_DIR, "samples.txt")
     rec_map = os.path.join(DATA_DIR, "flat_map.txt")
+    pops = ["deme0", "deme1"]
 
     ld_stats = {}
     t0 = time.time()
     for ii in range(NUM_REPS):
         vcf_path = os.path.join(DATA_DIR, f"rep_{ii}.vcf")
-        ld_stats[ii] = compute_ld_statistics(
-            vcf_path,
-            rec_map_file=rec_map,
-            pop_file=pop_file,
-            pops=["deme0", "deme1"],
-            r_bins=R_BINS,
-            report=False,
+        ld_stats[ii] = parser_func(
+            vcf_path, rec_map_file=rec_map, pop_file=pop_file,
+            pops=pops, r_bins=R_BINS, report=False,
         )
     elapsed = time.time() - t0
-    print(f"  pg_gpu: {NUM_REPS} replicates in {elapsed:.1f}s "
-          f"({elapsed/NUM_REPS:.2f}s per rep)")
-    return ld_stats, elapsed
-
-
-def parse_ld_moments():
-    """Parse LD statistics from all replicates using moments (for timing comparison)."""
-    pop_file = os.path.join(DATA_DIR, "samples.txt")
-    rec_map = os.path.join(DATA_DIR, "flat_map.txt")
-
-    ld_stats = {}
-    t0 = time.time()
-    for ii in range(NUM_REPS):
-        vcf_path = os.path.join(DATA_DIR, f"rep_{ii}.vcf")
-        ld_stats[ii] = moments.LD.Parsing.compute_ld_statistics(
-            vcf_path,
-            rec_map_file=rec_map,
-            pop_file=pop_file,
-            pops=["deme0", "deme1"],
-            r_bins=R_BINS,
-            report=False,
-        )
-    elapsed = time.time() - t0
-    print(f"  moments: {NUM_REPS} replicates in {elapsed:.1f}s "
+    print(f"  {label}: {NUM_REPS} replicates in {elapsed:.1f}s "
           f"({elapsed/NUM_REPS:.2f}s per rep)")
     return ld_stats, elapsed
 
@@ -148,12 +122,12 @@ def main():
 
         # Step 2: Parse LD statistics with pg_gpu
         print(f"\nParsing LD statistics ({len(R_BINS)-1} recombination bins) ...")
-        ld_stats_gpu, t_gpu = parse_ld_gpu()
+        ld_stats_gpu, t_gpu = parse_ld_replicates(compute_ld_statistics, "pg_gpu")
 
-        # Optional moments comparison
         t_moments = None
         if COMPARE_MOMENTS:
-            _, t_moments = parse_ld_moments()
+            _, t_moments = parse_ld_replicates(
+                moments.LD.Parsing.compute_ld_statistics, "moments")
             print(f"  Speedup: {t_moments/t_gpu:.1f}x")
 
         with open(cache_file, "wb") as f:
