@@ -183,13 +183,17 @@ def plot_validation(gpu_stats, mom_stats, n_reps, gpu_times, mom_times,
                 if j < n_ld:
                     name = ld_names[j]
                     if name.startswith("DD"):
-                        dd_gpu.append(gv[j]); dd_mom.append(mv[j])
+                        dd_gpu.append(gv[j])
+                        dd_mom.append(mv[j])
                     elif name.startswith("Dz"):
-                        dz_gpu.append(gv[j]); dz_mom.append(mv[j])
+                        dz_gpu.append(gv[j])
+                        dz_mom.append(mv[j])
                     elif name.startswith("pi2"):
-                        pi2_gpu.append(gv[j]); pi2_mom.append(mv[j])
+                        pi2_gpu.append(gv[j])
+                        pi2_mom.append(mv[j])
                 else:
-                    h_gpu.append(gv[j]); h_mom.append(mv[j])
+                    h_gpu.append(gv[j])
+                    h_mom.append(mv[j])
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.5),
                                     gridspec_kw={'width_ratios': [2, 1]})

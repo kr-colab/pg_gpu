@@ -7,6 +7,9 @@ as moments for a two-population IM model dataset.
 Requires the 'moments' pixi environment: pixi run -e moments pytest tests/test_moments_ld.py
 """
 
+import os
+import tempfile
+
 import pytest
 import numpy as np
 
@@ -144,10 +147,6 @@ class TestMomentsCompatibility:
 # ---------------------------------------------------------------------------
 # Multi-population integration tests (3-pop, 4-pop)
 # ---------------------------------------------------------------------------
-
-import tempfile
-import os
-
 
 def _simulate_multipop_vcf(n_pops, n_samples=8, seq_len=30_000, seed=42):
     """Simulate a multi-population VCF and pop file using msprime."""
