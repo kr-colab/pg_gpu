@@ -33,6 +33,7 @@ from .haplotype_matrix import (
     _generate_stat_specs,
 )
 from .genotype_kernels import _compute_multi_pop_statistics_batch_geno
+from .haplotype_kernels import compute_multi_pop_statistics_batch_hap
 from .genotype_matrix import GenotypeMatrix
 from . import ld_statistics
 
@@ -303,7 +304,7 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
             stats = _compute_multi_pop_statistics_batch_geno(
                 counts_list, n_valid_list, None, stat_specs)
         else:
-            stats = _compute_multi_pop_statistics_batch(
+            stats = compute_multi_pop_statistics_batch_hap(
                 counts_list, n_valid_list, ld_statistics, stat_specs)
 
         valid = (cb >= 0) & (cb < n_bins)
