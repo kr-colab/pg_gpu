@@ -256,8 +256,9 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
 
 
 # ---------------------------------------------------------------------------
-# Batch dispatch functions
+# _HapPopFlat -- flattened per-pop arrays for fused kernel indexing
 # ---------------------------------------------------------------------------
+
 
 class _HapPopFlat:
     """Flattened per-pop arrays for fused haplotype kernel indexing."""
@@ -275,6 +276,11 @@ class _HapPopFlat:
         self.qA = cp.concatenate([p.qA for p in pops])
         self.pB = cp.concatenate([p.pB for p in pops])
         self.qB = cp.concatenate([p.qB for p in pops])
+
+
+# ---------------------------------------------------------------------------
+# Batch dispatch functions
+# ---------------------------------------------------------------------------
 
 
 def compute_all_dd_hap(pops, dd_calls):
