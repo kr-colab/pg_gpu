@@ -152,8 +152,9 @@ def compute_ld_statistics(
     het_stat_names = _het_names(num_pops)
 
     if use_genotypes:
-        ld_sums = _compute_ld_sums_genotype(mat, pops, bins, gen_dists_gpu, max_bp_dist)
-        het = _compute_heterozygosity_genotype(mat, pops)
+        ld_sums = _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
+                                    use_genotypes=True)
+        het = _compute_heterozygosity(mat, pops, use_genotypes=True)
     else:
         ld_sums = _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist)
         het = _compute_heterozygosity(mat, pops)
@@ -211,18 +212,53 @@ def _max_bp_for_r_dist(positions, gen_dists, max_r):
     return min(result, chrom_len)
 
 
-def _compute_ld_sums(hm, pops, bins, gen_dists_gpu, max_bp_dist):
-    """Compute LD statistic sums per bin on GPU for N populations."""
+def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
+                     use_genotypes=False):
+    """Compute LD statistic sums per bin on GPU for N populations.
+
+    Handles both haplotype (4-way) and genotype (9-way) count modes.
+    """
     num_pops = len(pops)
-    pos = hm.positions
+
+    if use_genotypes:
+        # Filter to variants biallelic across the union of specified populations
+        # (matches moments' behavior in _count_types_sparse lines 545-547)
+        # Sum per-pop to avoid materializing the full union genotype matrix
+        geno = mat.genotypes
+        xp = cp if isinstance(geno, cp.ndarray) else np
+        alt_sum = xp.zeros(mat.num_variants, dtype=xp.int64)
+        n_valid_filter = xp.zeros(mat.num_variants, dtype=xp.int64)
+        seen = set()
+        for pop in pops:
+            for idx in mat.sample_sets[pop]:
+                if idx in seen:
+                    continue
+                seen.add(idx)
+                row = geno[idx, :]
+                v = row >= 0
+                alt_sum += xp.where(v, row, 0).astype(xp.int64)
+                n_valid_filter += v.astype(xp.int64)
+        max_alt = 2 * n_valid_filter
+        keep = (alt_sum > 0) & (alt_sum < max_alt) & (n_valid_filter >= 2)
+        keep_idx = xp.where(keep)[0]
+        pos = mat.positions[keep_idx]
+        data_matrix = mat.genotypes[:, keep_idx]
+        count_fn = _compute_genotype_counts_for_pairs
+        stat_fn = _compute_multi_pop_statistics_batch_geno
+    else:
+        pos = mat.positions
+        data_matrix = mat.haplotypes
+        count_fn = _compute_counts_for_pairs
+        stat_fn = None  # handled by 2-pop fast path or multi-pop
+
     if not isinstance(pos, cp.ndarray):
         pos = cp.array(pos)
 
     n_bins = len(bins) - 1
     bins_gpu = cp.asarray(bins)
-    pop_indices = [hm.sample_sets[p] for p in pops]
-    max_hap = max(len(pi) for pi in pop_indices)
-    chunk_size = _estimate_ld_chunk_size(max_hap, num_pops=num_pops)
+    pop_indices = [mat.sample_sets[p] for p in pops]
+    max_samp = max(len(pi) for pi in pop_indices)
+    chunk_size = _estimate_ld_chunk_size(max_samp, num_pops=num_pops)
 
     ld_stat_names = _ld_names(num_pops)
     n_ld = len(ld_stat_names)
@@ -231,9 +267,12 @@ def _compute_ld_sums(hm, pops, bins, gen_dists_gpu, max_bp_dist):
     if len(idx_i) == 0:
         return np.zeros((n_bins, n_ld), dtype=np.float64)
 
-    # Bin by recombination or physical distance
     if gen_dists_gpu is not None:
-        distances = cp.abs(gen_dists_gpu[idx_j] - gen_dists_gpu[idx_i])
+        if use_genotypes:
+            filtered_gen_dists = gen_dists_gpu[keep_idx]
+            distances = cp.abs(filtered_gen_dists[idx_j] - filtered_gen_dists[idx_i])
+        else:
+            distances = cp.abs(gen_dists_gpu[idx_j] - gen_dists_gpu[idx_i])
     else:
         distances = pos[idx_j] - pos[idx_i]
     bin_inds = cp.digitize(distances, bins_gpu) - 1
@@ -241,8 +280,7 @@ def _compute_ld_sums(hm, pops, bins, gen_dists_gpu, max_bp_dist):
 
     bin_sums = cp.zeros((n_bins, n_ld), dtype=cp.float64)
     total_pairs = len(idx_i)
-
-    stat_specs = _generate_stat_specs(num_pops) if num_pops != 2 else None
+    stat_specs = _generate_stat_specs(num_pops) if (num_pops != 2 or use_genotypes) else None
 
     for chunk_start in range(0, total_pairs, chunk_size):
         chunk_end = min(chunk_start + chunk_size, total_pairs)
@@ -253,14 +291,17 @@ def _compute_ld_sums(hm, pops, bins, gen_dists_gpu, max_bp_dist):
         counts_list = []
         n_valid_list = []
         for pidx in pop_indices:
-            c, nv = _compute_counts_for_pairs(hm.haplotypes, ci, cj, pidx)
+            c, nv = count_fn(data_matrix, ci, cj, pidx)
             counts_list.append(c)
             n_valid_list.append(nv)
 
-        if num_pops == 2:
+        if not use_genotypes and num_pops == 2:
             stats = _compute_two_pop_statistics_batch(
                 counts_list[0], counts_list[1],
                 n_valid_list[0], n_valid_list[1], ld_statistics)
+        elif use_genotypes:
+            stats = _compute_multi_pop_statistics_batch_geno(
+                counts_list, n_valid_list, None, stat_specs)
         else:
             stats = _compute_multi_pop_statistics_batch(
                 counts_list, n_valid_list, ld_statistics, stat_specs)
@@ -268,7 +309,6 @@ def _compute_ld_sums(hm, pops, bins, gen_dists_gpu, max_bp_dist):
         valid = (cb >= 0) & (cb < n_bins)
         vb = cb[valid]
         vs = stats[valid]
-        # Vectorized scatter-add: single kernel launch for all stats
         flat_idx = vb[:, None] * n_ld + cp.arange(n_ld)[None, :]
         cp.add.at(bin_sums.ravel(), flat_idx.ravel(), vs.ravel())
 
@@ -278,148 +318,29 @@ def _compute_ld_sums(hm, pops, bins, gen_dists_gpu, max_bp_dist):
     return bin_sums.get()
 
 
-def _compute_heterozygosity(hm, pops):
-    """Compute H_i_j statistics on GPU for N populations (moments convention)."""
-    hap = hm.haplotypes
-    num_pops = len(pops)
+def _compute_heterozygosity(mat, pops, use_genotypes=False):
+    """Compute H_i_j statistics on GPU for N populations (moments convention).
 
-    # Pre-compute alt/ref counts and sample sizes per population
-    alt_counts = []
-    ref_counts = []
-    pop_sizes = []
-    for pop in pops:
-        pidx = hm.sample_sets[pop]
-        alt = cp.sum(cp.maximum(hap[pidx, :], 0).astype(cp.int32), axis=0).astype(cp.float64)
-        n = cp.float64(len(pidx))
-        alt_counts.append(alt)
-        ref_counts.append(n - alt)
-        pop_sizes.append(n)
-
-    result = {}
-    for ii in range(num_pops):
-        for jj in range(ii, num_pops):
-            if ii == jj:
-                val = float(cp.sum(
-                    2.0 * ref_counts[ii] * alt_counts[ii]
-                    / (pop_sizes[ii] * (pop_sizes[ii] - 1))
-                ).get())
-            else:
-                val = float(cp.sum(
-                    (ref_counts[ii] * alt_counts[jj] + alt_counts[ii] * ref_counts[jj])
-                    / (pop_sizes[ii] * pop_sizes[jj])
-                ).get())
-            result[f"H_{ii}_{jj}"] = val
-
-    return result
-
-
-def _compute_ld_sums_genotype(gm, pops, bins, gen_dists_gpu, max_bp_dist):
-    """Compute LD statistic sums per bin on GPU using genotype counts.
-
-    Matches moments' behavior: only variants that are biallelic within
-    every specified population are included in pair generation.
+    Works with both haplotype and genotype data by converting to allele
+    counts with the haploid sample size convention.
     """
     num_pops = len(pops)
 
-    # Filter to variants biallelic across the union of specified populations
-    # (matches moments' behavior in _count_types_sparse lines 545-547)
-    geno = gm.genotypes
-    xp = cp if isinstance(geno, cp.ndarray) else np
-    all_pop_idx = []
-    for pop in pops:
-        all_pop_idx.extend(gm.sample_sets[pop])
-    if isinstance(geno, cp.ndarray):
-        all_pop_idx = cp.array(sorted(set(all_pop_idx)), dtype=cp.int32)
-    else:
-        all_pop_idx = np.array(sorted(set(all_pop_idx)))
-    union_geno = geno[all_pop_idx, :]
-    valid = union_geno >= 0
-    alt_sum = xp.sum(xp.where(valid, union_geno, 0), axis=0)
-    n_valid = xp.sum(valid, axis=0)
-    max_alt = 2 * n_valid
-    keep = (alt_sum > 0) & (alt_sum < max_alt) & (n_valid >= 2)
-    keep_idx = xp.where(keep)[0]
-    pos = gm.positions[keep_idx]
-    if not isinstance(pos, cp.ndarray):
-        pos = cp.array(pos)
-
-    # Work with filtered genotypes for pair counting
-    filtered_geno = gm.genotypes[:, keep_idx]
-
-    n_bins = len(bins) - 1
-    bins_gpu = cp.asarray(bins)
-    pop_indices = [gm.sample_sets[p] for p in pops]
-    max_ind = max(len(pi) for pi in pop_indices)
-    chunk_size = _estimate_ld_chunk_size(max_ind, num_pops=num_pops)
-
-    ld_stat_names = _ld_names(num_pops)
-    n_ld = len(ld_stat_names)
-
-    idx_i, idx_j = _generate_pairs_within_distance(pos, max_bp_dist)
-    if len(idx_i) == 0:
-        return np.zeros((n_bins, n_ld), dtype=np.float64)
-
-    if gen_dists_gpu is not None:
-        filtered_gen_dists = gen_dists_gpu[keep_idx]
-        distances = cp.abs(filtered_gen_dists[idx_j] - filtered_gen_dists[idx_i])
-    else:
-        distances = pos[idx_j] - pos[idx_i]
-    bin_inds = cp.digitize(distances, bins_gpu) - 1
-    del distances
-
-    bin_sums = cp.zeros((n_bins, n_ld), dtype=cp.float64)
-    total_pairs = len(idx_i)
-    stat_specs = _generate_stat_specs(num_pops)
-
-    for chunk_start in range(0, total_pairs, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, total_pairs)
-        ci = idx_i[chunk_start:chunk_end]
-        cj = idx_j[chunk_start:chunk_end]
-        cb = bin_inds[chunk_start:chunk_end]
-
-        counts_list = []
-        n_valid_list = []
-        for pidx in pop_indices:
-            c, nv = _compute_genotype_counts_for_pairs(filtered_geno, ci, cj, pidx)
-            counts_list.append(c)
-            n_valid_list.append(nv)
-
-        stats = _compute_multi_pop_statistics_batch_geno(
-            counts_list, n_valid_list, None, stat_specs)
-
-        valid = (cb >= 0) & (cb < n_bins)
-        vb = cb[valid]
-        vs = stats[valid]
-        flat_idx = vb[:, None] * n_ld + cp.arange(n_ld)[None, :]
-        cp.add.at(bin_sums.ravel(), flat_idx.ravel(), vs.ravel())
-
-        del counts_list, n_valid_list, stats
-
-    del idx_i, idx_j, bin_inds
-    return bin_sums.get()
-
-
-def _compute_heterozygosity_genotype(gm, pops):
-    """Compute H_i_j statistics from diploid genotypes (moments convention).
-
-    Uses allele counts derived from genotype dosage (0/1/2) with the
-    haploid sample size convention (n_hap = 2 * n_diploid).
-    """
-    geno = gm.genotypes
-    num_pops = len(pops)
-
-    # Compute alt allele counts and haploid sample sizes per pop per site
     alt_counts = []
     ref_counts = []
     hap_sizes = []
     for pop in pops:
-        pidx = gm.sample_sets[pop]
-        if isinstance(pidx, list):
-            pidx = cp.array(pidx, dtype=cp.int32)
-        pop_geno = geno[pidx, :]
-        valid = pop_geno >= 0
-        alt = cp.sum(cp.where(valid, pop_geno, 0).astype(cp.int32), axis=0).astype(cp.float64)
-        n_hap = 2.0 * cp.sum(valid, axis=0).astype(cp.float64)
+        pidx = mat.sample_sets[pop]
+        if use_genotypes:
+            if isinstance(pidx, list):
+                pidx = cp.array(pidx, dtype=cp.int32)
+            pop_data = mat.genotypes[pidx, :]
+            valid = pop_data >= 0
+            alt = cp.sum(cp.where(valid, pop_data, 0).astype(cp.int32), axis=0).astype(cp.float64)
+            n_hap = 2.0 * cp.sum(valid, axis=0).astype(cp.float64)
+        else:
+            alt = cp.sum(cp.maximum(mat.haplotypes[pidx, :], 0).astype(cp.int32), axis=0).astype(cp.float64)
+            n_hap = cp.float64(len(pidx)) * cp.ones_like(alt)
         alt_counts.append(alt)
         ref_counts.append(n_hap - alt)
         hap_sizes.append(n_hap)
@@ -440,3 +361,5 @@ def _compute_heterozygosity_genotype(gm, pops):
             result[f"H_{ii}_{jj}"] = val
 
     return result
+
+

@@ -980,21 +980,7 @@ def _pi2_shared_pop(counts: cp.ndarray,
     i, j, k, l = populations
 
     def get_pop_data(pop_idx):
-        start = pop_idx * 4
-        pop_counts = counts[:, start:start+4]
-        if n_valid is not None:
-            if isinstance(n_valid, tuple):
-                if pop_idx < len(n_valid) and n_valid[pop_idx] is not None:
-                    pop_n = n_valid[pop_idx]
-                else:
-                    pop_n = cp.sum(pop_counts, axis=1)
-            elif hasattr(n_valid, 'ndim') and n_valid.ndim == 2:
-                pop_n = n_valid[:, pop_idx]
-            else:
-                pop_n = n_valid
-        else:
-            pop_n = cp.sum(pop_counts, axis=1)
-        return pop_counts[:, 0], pop_counts[:, 1], pop_counts[:, 2], pop_counts[:, 3], pop_n
+        return _get_pop_data(counts, n_valid, pop_idx)
 
     # Map to canonical form: cs1 = shared pop, cs2 = other from first pair,
     # cs3 = other from second pair
@@ -1063,21 +1049,7 @@ def _pi2_all_different(counts: cp.ndarray,
     i, j, k, l = populations
 
     def get_pop_data(pop_idx):
-        start = pop_idx * 4
-        pop_counts = counts[:, start:start+4]
-        if n_valid is not None:
-            if isinstance(n_valid, tuple):
-                if pop_idx < len(n_valid) and n_valid[pop_idx] is not None:
-                    pop_n = n_valid[pop_idx]
-                else:
-                    pop_n = cp.sum(pop_counts, axis=1)
-            elif hasattr(n_valid, 'ndim') and n_valid.ndim == 2:
-                pop_n = n_valid[:, pop_idx]
-            else:
-                pop_n = n_valid
-        else:
-            pop_n = cp.sum(pop_counts, axis=1)
-        return pop_counts[:, 0], pop_counts[:, 1], pop_counts[:, 2], pop_counts[:, 3], pop_n
+        return _get_pop_data(counts, n_valid, pop_idx)
 
     c11, c12, c13, c14, n1 = get_pop_data(i)
     c21, c22, c23, c24, n2 = get_pop_data(j)

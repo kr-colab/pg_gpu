@@ -2126,7 +2126,7 @@ def _compute_genotype_counts_for_pairs(genotypes, idx_i, idx_j, pop_indices=None
     geno_i = genotypes[:, idx_i]  # (n_ind, n_pairs)
     geno_j = genotypes[:, idx_j]
 
-    has_missing = cp.any(genotypes == -1)
+    has_missing = cp.any(geno_i < 0) or cp.any(geno_j < 0)
 
     if has_missing:
         valid_mask = (geno_i >= 0) & (geno_j >= 0)
