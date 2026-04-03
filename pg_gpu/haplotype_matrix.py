@@ -3013,37 +3013,25 @@ def _compute_all_dz_geno(pops, dz_calls):
             results = [batch[r] for r in range(len(groups['diff']))]
         group_results['diff'] = results
 
-    # p1==p2 (Dz(i,i,j)): semantic dedup by (focal, other) population pair
+    # p1==p2 (Dz(i,i,j)): batch with advanced indexing
     if groups['p1p2']:
-        cache = {}
         results = []
         for p1, p2, p3 in groups['p1p2']:
-            key = (p1, p3)
-            if key not in cache:
-                cache[key] = ldg.dz_geno_p1p2(pops[p1], pops[p3])
-            results.append(cache[key])
+            results.append(ldg.dz_geno_p1p2(pops[p1], pops[p3]))
         group_results['p1p2'] = results
 
     # p1==p3 (Dz(i,j,i))
     if groups['p1p3']:
-        cache = {}
         results = []
         for p1, p2, p3 in groups['p1p3']:
-            key = (p1, p2)
-            if key not in cache:
-                cache[key] = ldg.dz_geno_p1p3(pops[p1], pops[p2])
-            results.append(cache[key])
+            results.append(ldg.dz_geno_p1p3(pops[p1], pops[p2]))
         group_results['p1p3'] = results
 
     # p2==p3 (Dz(i,j,j))
     if groups['p2p3']:
-        cache = {}
         results = []
         for p1, p2, p3 in groups['p2p3']:
-            key = (p1, p2)
-            if key not in cache:
-                cache[key] = ldg.dz_geno_p2p3(pops[p1], pops[p2])
-            results.append(cache[key])
+            results.append(ldg.dz_geno_p2p3(pops[p1], pops[p2]))
         group_results['p2p3'] = results
 
     # All same (Dz(i,i,i))
@@ -3067,24 +3055,9 @@ def _compute_all_pi2_geno(pops, pi2_calls):
     P = len(pops)
     n_pairs = pops[0].n.shape[0]
 
-    # Genotype pi2: only the all-different case factors as H_A*H_B/4
-    # (same as haplotype). Other cases have within-individual corrections
-    # that prevent einsum factorization.
-
-    # Precompute H_A/H_B for the alldiff case
-    pA = cp.stack([p.pA for p in pops])
-    qA = cp.stack([p.qA for p in pops])
-    pB = cp.stack([p.pB for p in pops])
-    qB = cp.stack([p.qB for p in pops])
-    n = cp.stack([p.n for p in pops])
-
-    pq_A = cp.einsum('in,jn->ijn', pA, qA)
-    H_A = pq_A + pq_A.transpose(1, 0, 2)
-    del pq_A, pA, qA
-
-    pq_B = cp.einsum('in,jn->ijn', pB, qB)
-    H_B = pq_B + pq_B.transpose(1, 0, 2)
-    del pq_B, pB, qB
+    # Genotype pi2 formulas have finite-sample corrections that prevent
+    # the H_A/H_B einsum factorization used in the haplotype path.
+    # All cases use the full formula functions with semantic dedup caches.
 
     groups = {
         'same': [], 'triple': [], 'iikk': [], 'iikl': [],
@@ -3118,17 +3091,17 @@ def _compute_all_pi2_geno(pops, pi2_calls):
 
     group_results = {}
 
-    # All-different: factors as H_A[i,j] * H_B[k,l] / 4 (same as haplotype)
+    # All-different
     if groups['alldiff']:
-        ii = [t[0] for t in groups['alldiff']]
-        jj = [t[1] for t in groups['alldiff']]
-        kk = [t[2] for t in groups['alldiff']]
-        ll = [t[3] for t in groups['alldiff']]
-        numer = H_A[ii, jj] * H_B[kk, ll] / 4.0
-        denom = n[ii] * n[jj] * n[kk] * n[ll]
-        valid = (n[ii] >= 1) & (n[jj] >= 1) & (n[kk] >= 1) & (n[ll] >= 1)
-        batch = _safe_div(numer, denom, valid)
-        group_results['alldiff'] = [batch[r] for r in range(len(groups['alldiff']))]
+        alldiff_cache = {}
+        results = []
+        for i, j, k, l in groups['alldiff']:
+            cache_key = (i, j, k, l)
+            if cache_key not in alldiff_cache:
+                alldiff_cache[cache_key] = ldg.pi2_geno_alldiff(
+                    pops[i], pops[j], pops[k], pops[l])
+            results.append(alldiff_cache[cache_key])
+        group_results['alldiff'] = results
 
     # pi2(i,i,k,k)
     if groups['iikk']:
