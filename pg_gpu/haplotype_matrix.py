@@ -2853,6 +2853,143 @@ def _compute_all_dz(pops, dz_calls):
 # ---------------------------------------------------------------------------
 # Genotype (diploid) batch computation -- parallels haplotype path above
 # ---------------------------------------------------------------------------
+# Fused CUDA kernels for genotype pi2 -- one thread per output element.
+# Each kernel reads precomputed per-pop features from flattened arrays
+# indexed by flat_idx = pop * N_pairs + pair.
+# ---------------------------------------------------------------------------
+
+_PI2_ALLDIFF_KERN = cp.RawKernel(r'''
+extern "C" __global__ void k(const double*p,const double*r,const double*q,const double*s,
+    const int*I,const int*J,const int*K,const int*L,double*out,const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    out[t]=0.25*(p[I[t]]*r[J[t]]+r[I[t]]*p[J[t]])*(q[K[t]]*s[L[t]]+s[K[t]]*q[L[t]]);
+}''', "k", options=("-std=c++11",))
+
+_PI2_IIKK_KERN = cp.RawKernel(r'''
+extern "C" __global__ void k(const double*BL,const double*BR,
+    const int*I,const int*K,double*out,const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    out[t]=BL[I[t]]*BR[K[t]];
+}''', "k", options=("-std=c++11",))
+
+_PI2_IIKL_KERN = cp.RawKernel(r'''
+extern "C" __global__ void k(const double*BL,const double*q,const double*s,
+    const int*I,const int*K,const int*L,double*out,const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    int i=I[t],k=K[t],l=L[t];
+    out[t]=BL[i]*0.5*(q[k]*s[l]+s[k]*q[l]);
+}''', "k", options=("-std=c++11",))
+
+_PI2_IJKK_KERN = cp.RawKernel(r'''
+extern "C" __global__ void k(const double*p,const double*r,const double*BR,
+    const int*I,const int*J,const int*K,double*out,const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    int i=I[t],j=J[t],k=K[t];
+    out[t]=0.5*(p[i]*r[j]+r[i]*p[j])*BR[k];
+}''', "k", options=("-std=c++11",))
+
+_PI2_SHARED_KERN = cp.RawKernel(r'''
+extern "C" __global__ void k(const double*p,const double*r,const double*q,const double*s,
+    const double*C00,const double*C01,const double*C10,const double*C11,
+    const int*I,const int*J,const int*K,double*out,const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    int i=I[t],j=J[t],k=K[t];
+    double sk=s[k],qk=q[k];
+    out[t]=r[j]*(C00[i]*sk+C01[i]*qk)+p[j]*(C10[i]*sk+C11[i]*qk);
+}''', "k", options=("-std=c++11",))
+
+_PI2_IIIJ_KERN = cp.RawKernel(r'''
+extern "C" __global__ void k(const double*AQ3,const double*AS3,
+    const double*Q,const double*S,const double*nn,
+    const int*I,const int*J,double*out,const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    int i=I[t],j=J[t];
+    double ni=nn[i],nj=nn[j];
+    double d=ni*(ni-1.0)*(ni-2.0)*nj;
+    out[t]=(d>0.0)?(AQ3[i]*Q[j]+AS3[i]*S[j])/d:0.0;
+}''', "k", options=("-std=c++11",))
+
+_PI2_IJII_KERN = cp.RawKernel(r'''
+extern "C" __global__ void k(const double*BP3,const double*BR3,
+    const double*P,const double*R,const double*nn,
+    const int*I,const int*J,double*out,const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    int i=I[t],j=J[t];
+    double ni=nn[i],nj=nn[j];
+    double d=ni*(ni-1.0)*(ni-2.0)*nj;
+    out[t]=(d>0.0)?(BP3[i]*P[j]+BR3[i]*R[j])/d:0.0;
+}''', "k", options=("-std=c++11",))
+
+_PI2_IJIJ_KERN = cp.RawKernel(r'''
+extern "C" __global__ void k(
+    const double*P,const double*Q,const double*R,const double*S,
+    const double*X01,const double*X10,const double*X11,const double*Bsgn,
+    const double*nn,const int*I,const int*J,double*out,const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    int i=I[t],j=J[t];
+    double Pi=P[i],Qi=Q[i],Ri=R[i],Si=S[i],X01i=X01[i],X10i=X10[i],X11i=X11[i],Bi=Bsgn[i],ni=nn[i];
+    double Pj=P[j],Qj=Q[j],Rj=R[j],Sj=S[j],X01j=X01[j],X10j=X10[j],X11j=X11[j],Bj=Bsgn[j],nj=nn[j];
+    double PQi=Pi*Qi,PRi=Pi*Ri,PSi=Pi*Si,QRi=Qi*Ri,RSi=Ri*Si;
+    double PQj=Pj*Qj,PSj=Pj*Sj,QRj=Qj*Rj,RSj=Rj*Sj;
+    double Tcorri=Ri*(1.0+X01i-X10i),Ucorri=Si*(1.0+Ri);
+    double num=0.0;
+    num+=-0.25*RSi*Qj-0.25*X11i*PQj+0.25*RSi*PQj-0.25*Ri*PSj;
+    num+=-0.25*PQi*X11j-0.25*RSi*X11j+0.25*PSi*X11j+0.25*QRi*X11j;
+    num+=-0.25*PRi*Sj+0.25*Tcorri*Sj+0.25*X11i*PSj+0.25*QRi*PSj;
+    num+=0.25*Ucorri*Rj-0.25*X01i*QRj+0.25*PSi*QRj;
+    num+=-0.25*PSi*Rj-0.25*Pi*RSj+0.25*X01i*RSj+0.25*PQi*RSj;
+    num+=0.25*X11i*Bj+0.25*Bi*X11j-1.0*X11i*X11j;
+    double d=ni*(ni-1.0)*nj*(nj-1.0);
+    out[t]=(d>0.0)?num/d:0.0;
+}''', "k", options=("-std=c++11",))
+
+_PI2_IIII_KERN = cp.RawKernel(r'''
+extern "C" __global__
+void k(const double* __restrict__ g, double* __restrict__ out, const long long N){
+    const long long idx=(long long)blockDim.x*blockIdx.x+threadIdx.x;
+    if(idx>=N)return;
+    const double*row=g+9*idx;
+    double n1=row[0],n2=row[1],n3=row[2],n4=row[3],n5=row[4],n6=row[5],n7=row[6],n8=row[7],n9=row[8];
+    double ns=n1+n2+n3+n4+n5+n6+n7+n8+n9;
+    if(ns<4.0){out[idx]=0.0;return;}
+    double a1=n1+n2+n3+0.5*n4+0.5*n5+0.5*n6;
+    double a2=n1+0.5*n2+n4+0.5*n5+n7+0.5*n8;
+    double a3=0.5*n2+n3+0.5*n5+n6+0.5*n8+n9;
+    double a4=0.5*n4+0.5*n5+0.5*n6+n7+n8+n9;
+    double corr=(
+        (13.0*n2*n4-16.0*n1*n2*n4-11.0*n2*n2*n4+16.0*n3*n4-28.0*n1*n3*n4-24.0*n2*n3*n4)+
+        (-8.0*n3*n3*n4-11.0*n2*n4*n4-20.0*n3*n4*n4-6.0*n5+12.0*n1*n5-4.0*n1*n1*n5+17.0*n2*n5)+
+        (-20.0*n1*n2*n5-11.0*n2*n2*n5+12.0*n3*n5-28.0*n1*n3*n5-20.0*n2*n3*n5-4.0*n3*n3*n5)+
+        (17.0*n4*n5-20.0*n1*n4*n5-32.0*n2*n4*n5-40.0*n3*n4*n5-11.0*n4*n4*n5+11.0*n5*n5)+
+        (-16.0*n1*n5*n5-17.0*n2*n5*n5-16.0*n3*n5*n5-17.0*n4*n5*n5-6.0*n5*n5*n5+16.0*n1*n6-8.0*n1*n1*n6)+
+        (13.0*n2*n6-24.0*n1*n2*n6-11.0*n2*n2*n6-28.0*n1*n3*n6-16.0*n2*n3*n6+24.0*n4*n6)+
+        (-36.0*n1*n4*n6-38.0*n2*n4*n6-36.0*n3*n4*n6-20.0*n4*n4*n6+17.0*n5*n6-40.0*n1*n5*n6)+
+        (-32.0*n2*n5*n6-20.0*n3*n5*n6-42.0*n4*n5*n6-17.0*n5*n5*n6-20.0*n1*n6*n6-11.0*n2*n6*n6)+
+        (-20.0*n4*n6*n6-11.0*n5*n6*n6+16.0*n2*n7-28.0*n1*n2*n7-20.0*n2*n2*n7+16.0*n3*n7)+
+        (-48.0*n1*n3*n7-44.0*n2*n3*n7-16.0*n3*n3*n7-24.0*n2*n4*n7-44.0*n3*n4*n7)+
+        (12.0*n5*n7-28.0*n1*n5*n7-40.0*n2*n5*n7-48.0*n3*n5*n7-20.0*n4*n5*n7-16.0*n5*n5*n7)+
+        (16.0*n6*n7-48.0*n1*n6*n7-48.0*n2*n6*n7-44.0*n3*n6*n7-36.0*n4*n6*n7-40.0*n5*n6*n7)+
+        (-20.0*n6*n6*n7-8.0*n2*n7*n7-16.0*n3*n7*n7-4.0*n5*n7*n7-8.0*n6*n7*n7+16.0*n1*n8-8.0*n1*n1*n8)+
+        (24.0*n2*n8-36.0*n1*n2*n8-20.0*n2*n2*n8+16.0*n3*n8-48.0*n1*n3*n8-36.0*n2*n3*n8-8.0*n3*n3*n8)+
+        (13.0*n4*n8-24.0*n1*n4*n8-38.0*n2*n4*n8-48.0*n3*n4*n8-11.0*n4*n4*n8+17.0*n5*n8-40.0*n1*n5*n8)+
+        (-42.0*n2*n5*n8-40.0*n3*n5*n8-32.0*n4*n5*n8-17.0*n5*n5*n8+13.0*n6*n8-48.0*n1*n6*n8)+
+        (-38.0*n2*n6*n8-24.0*n3*n6*n8-38.0*n4*n6*n8-32.0*n5*n6*n8-11.0*n6*n6*n8-28.0*n1*n7*n8)+
+        (-36.0*n2*n7*n8-44.0*n3*n7*n8-16.0*n4*n7*n8-20.0*n5*n7*n8-24.0*n6*n7*n8-20.0*n1*n8*n8)+
+        (20.0*n2*n8*n8-20.0*n3*n8*n8-11.0*n4*n8*n8-11.0*n5*n8*n8-11.0*n6*n8*n8+16.0*n1*n9-16.0*n1*n1*n9)+
+        (16.0*n2*n9-44.0*n1*n2*n9-20.0*n2*n2*n9-48.0*n1*n3*n9-28.0*n2*n3*n9+16.0*n4*n9)+
+        (-44.0*n1*n4*n9-48.0*n2*n4*n9-48.0*n3*n4*n9-20.0*n4*n4*n9+12.0*n5*n9-48.0*n1*n5*n9)+
+        (-40.0*n2*n5*n9-28.0*n3*n5*n9-40.0*n4*n5*n9-16.0*n5*n5*n9-44.0*n1*n6*n9-24.0*n2*n6*n9)+
+        (-36.0*n4*n6*n9-20.0*n5*n6*n9-48.0*n1*n7*n9-48.0*n2*n7*n9-48.0*n3*n7*n9-28.0*n4*n7*n9)+
+        (-28.0*n5*n7*n9-28.0*n6*n7*n9-44.0*n1*n8*n9-36.0*n2*n8*n9-28.0*n3*n8*n9-24.0*n4*n8*n9)+
+        (-20.0*n5*n8*n9-16.0*n6*n8*n9-16.0*n1*n9*n9-8.0*n2*n9*n9-8.0*n4*n9*n9-4.0*n5*n9*n9)
+    )*(1.0/16.0);
+    out[idx]=(a1*a2*a3*a4+corr)/(ns*(ns-1.0)*(ns-2.0)*(ns-3.0));
+}''', "k", options=("-std=c++11",))
+
+
+def _launch_fused(kernel, args, M):
+    """Launch a fused kernel with M output elements."""
+    kernel(((int(M) + 255) // 256,), (256,), args)
 
 
 class _PopDataGeno:
@@ -2862,7 +2999,9 @@ class _PopDataGeno:
     """
     __slots__ = ('g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7', 'g8', 'g9',
                  'n', 'D_geno', 'pA', 'qA', 'pB', 'qB', 'fdA', 'fdB',
-                 'B_L', 'B_R', 'C00', 'C01', 'C10', 'C11')
+                 'B_L', 'B_R', 'C00', 'C01', 'C10', 'C11',
+                 'AQ3', 'AS3', 'BP3', 'BR3',
+                 'X01', 'X10', 'X11', 'Bsgn')
 
     def __init__(self, counts, n_valid):
         # Our counting: combo = geno_i*3+geno_j gives columns:
@@ -2912,6 +3051,28 @@ class _PopDataGeno:
         self.C01 = (self.pA*self.qB - x_Ab) / cp.maximum(nn1, 1)
         self.C10 = (self.qA*self.pB - x_aB) / cp.maximum(nn1, 1)
         self.C11 = (self.qA*self.qB - x_ab) / cp.maximum(nn1, 1)
+        # ijij features
+        self.X01 = x_Ab
+        self.X10 = x_aB
+        self.X11 = x_ab
+        self.Bsgn = x_AB - x_Ab - x_aB + x_ab
+        # Triple coefficients: pi2(i,i;i,j) uses AQ3,AS3; pi2(i,j;i,i) uses BP3,BR3
+        P, R, Q, S = self.pA, self.qA, self.pB, self.qB
+        L0 = self.g5 + 2*self.g6 + 2*self.g8 + 4*self.g9
+        L1 = self.g5 + 2*self.g6
+        M1 = self.g5 + 2*self.g8
+        negR3 = 3*self.g4 + 3*self.g5 + 3*self.g6 + 4*self.g7 + 4*self.g8 + 4*self.g9
+        negR5 = 5*self.g4 + 5*self.g5 + 5*self.g6 + 8*self.g7 + 8*self.g8 + 8*self.g9
+        beta5A = -2*self.g2 - 4*self.g3 + 4*self.g4 + self.g5 - 2*self.g6 + 8*self.g7 + 4*self.g8 + 4
+        beta6A = -self.g5 - 2*self.g6 - 4*self.g7 - 4*self.g8 - 4*self.g9
+        self.AQ3 = -(S*negR3)/8 + P*S*R/2 + (R*L0)/8 + L1/8 - (P*L0)/8
+        self.AS3 = -(Q*negR5)/8 + P*Q*R/2 + (R*beta5A)/8 + beta6A/8 + (P*L0)/8
+        negL3 = 3*self.g2 + 4*self.g3 + 3*self.g5 + 4*self.g6 + 3*self.g8 + 4*self.g9
+        negL5 = 5*self.g2 + 8*self.g3 + 5*self.g5 + 8*self.g6 + 5*self.g8 + 8*self.g9
+        beta5B = 4*self.g2 + 8*self.g3 - 2*self.g4 + self.g5 + 4*self.g6 - 4*self.g7 - 2*self.g8 + 4
+        beta6B = -4*self.g3 - self.g5 - 4*self.g6 - 2*self.g8 - 4*self.g9
+        self.BP3 = -(R*negL3)/8 + Q*S*R/2 + (S*L0)/8 + M1/8 - (Q*L0)/8
+        self.BR3 = -(P*negL5)/8 + P*Q*S/2 + (S*beta5B)/8 + beta6B/8 + (Q*L0)/8
 
 
 def _compute_multi_pop_statistics_batch_geno(counts_per_pop, n_valid_per_pop,
@@ -3066,42 +3227,67 @@ def _compute_all_dz_geno(pops, dz_calls):
 
 
 def _compute_all_pi2_geno(pops, pi2_calls):
-    """Batch-compute all raw pi2 values for genotype data.
+    """Batch-compute all raw pi2 values for genotype data using fused CUDA kernels.
 
-    Uses the kernel decomposition: precomputed A^L, A^R (off-diagonal),
-    B^L, B^R (same-pop diagonal), and C (overlap) kernels replace the
-    full polynomial formulas for 5 of 8 case types. Triple, ijij, and
-    single-pop cases still use the formula functions.
+    All 8 pi2 case types use fused RawKernels that compute one output
+    per thread with all arithmetic in registers. No CuPy temporaries.
     """
-    from . import ld_statistics_genotype as ldg
-
     P = len(pops)
-    n_pairs = pops[0].n.shape[0]
+    N = pops[0].n.shape[0]
 
-    # Stack per-pop kernel quantities for batched evaluation
-    pA_s = cp.stack([p.pA for p in pops])  # (P, N)
-    qA_s = cp.stack([p.qA for p in pops])
-    pB_s = cp.stack([p.pB for p in pops])
-    qB_s = cp.stack([p.qB for p in pops])
-    n_s = cp.stack([p.n for p in pops])
-    B_L_s = cp.stack([p.B_L for p in pops])
-    B_R_s = cp.stack([p.B_R for p in pops])
+    # Flatten per-pop features for fused kernel indexing: flat[pop*N + pair]
+    def flat(arrs):
+        return cp.ascontiguousarray(cp.concatenate(arrs))
 
-    groups = {
-        'same': [], 'triple': [], 'iikk': [], 'iikl': [],
-        'ijkk': [], 'ijij': [], 'shared': [], 'alldiff': [],
+    inv_n = [1.0 / p.n for p in pops]
+    F = {
+        'p': flat([pops[i].pA * inv_n[i] for i in range(P)]),
+        'r': flat([pops[i].qA * inv_n[i] for i in range(P)]),
+        'q': flat([pops[i].pB * inv_n[i] for i in range(P)]),
+        's': flat([pops[i].qB * inv_n[i] for i in range(P)]),
+        'BL': flat([p.B_L for p in pops]),
+        'BR': flat([p.B_R for p in pops]),
+        'C00': flat([p.C00 for p in pops]),
+        'C01': flat([p.C01 for p in pops]),
+        'C10': flat([p.C10 for p in pops]),
+        'C11': flat([p.C11 for p in pops]),
+        'P': flat([p.pA for p in pops]),
+        'Q': flat([p.pB for p in pops]),
+        'R': flat([p.qA for p in pops]),
+        'S': flat([p.qB for p in pops]),
+        'n': flat([p.n for p in pops]),
+        'X01': flat([p.X01 for p in pops]),
+        'X10': flat([p.X10 for p in pops]),
+        'X11': flat([p.X11 for p in pops]),
+        'Bsgn': flat([p.Bsgn for p in pops]),
+        'AQ3': flat([p.AQ3 for p in pops]),
+        'AS3': flat([p.AS3 for p in pops]),
+        'BP3': flat([p.BP3 for p in pops]),
+        'BR3': flat([p.BR3 for p in pops]),
     }
+
+    # Genotype counts in moments order for single-pop fused kernel
+    g_moments = flat([
+        cp.stack([p.g1, p.g2, p.g3, p.g4, p.g5, p.g6, p.g7, p.g8, p.g9], axis=-1)
+        for p in pops
+    ])  # (P*N, 9)
+
+    # Group calls by case type
+    groups = {k: [] for k in
+              ['same', 'triple_iiij', 'triple_ijii', 'iikk', 'iikl',
+               'ijkk', 'ijij', 'shared', 'alldiff']}
     call_order = {}
     for idx, (i, j, k, l) in enumerate(pi2_calls):
         cnt = {}
-        for p in (i, j, k, l):
-            cnt[p] = cnt.get(p, 0) + 1
+        for pp in (i, j, k, l):
+            cnt[pp] = cnt.get(pp, 0) + 1
         nu = len(cnt)
         mc = max(cnt.values())
         if nu == 1:
             key = 'same'
         elif mc == 3:
-            key = 'triple'
+            tp = [pp for pp, c in cnt.items() if c == 3][0]
+            key = 'triple_iiij' if (i == tp and j == tp) else 'triple_ijii'
         elif i == j and k == l:
             key = 'iikk'
         elif i == j:
@@ -3117,123 +3303,115 @@ def _compute_all_pi2_geno(pops, pi2_calls):
         call_order[idx] = (key, len(groups[key]))
         groups[key].append((i, j, k, l))
 
+    pair_range = cp.arange(N, dtype=cp.int32)
+
+    def expand(pop_arr):
+        """Expand pop indices to flat pair indices: pop*N + pair."""
+        return (pop_arr[:, None] * N + pair_range[None, :]).ravel()
+
+    def pop_arr(calls, pos):
+        return cp.array([c[pos] for c in calls], dtype=cp.int32)
+
+    def triple_pop(calls):
+        """Extract (triple_pop, single_pop) for each call."""
+        tp_list, sp_list = [], []
+        for c in calls:
+            cnt = {}
+            for pp in c:
+                cnt[pp] = cnt.get(pp, 0) + 1
+            tp_list.append([pp for pp, cc in cnt.items() if cc == 3][0])
+            sp_list.append([pp for pp, cc in cnt.items() if cc == 1][0])
+        return (cp.array(tp_list, dtype=cp.int32),
+                cp.array(sp_list, dtype=cp.int32))
+
     group_results = {}
 
-    # --- Kernel-based cases (no formula function calls) ---
+    # Launch each case type as a single fused kernel
+    for case in groups:
+        calls = groups[case]
+        if not calls:
+            continue
+        n_c = len(calls)
+        M = n_c * N
+        out = cp.empty(M, dtype=cp.float64)
 
-    # All-different: A_ij^L * A_kl^R
-    if groups['alldiff']:
-        # A^L via einsum: H_A[i,j] / (2*n_i*n_j)
-        pq_A = cp.einsum('in,jn->ijn', pA_s, qA_s)
-        H_A = pq_A + pq_A.transpose(1, 0, 2)
-        del pq_A
-        pq_B = cp.einsum('in,jn->ijn', pB_s, qB_s)
-        H_B = pq_B + pq_B.transpose(1, 0, 2)
-        del pq_B
-        nn_A = cp.einsum('in,jn->ijn', n_s, n_s)
-        nn_B = nn_A  # same n values, different locus
+        if case == 'alldiff':
+            fI, fJ = expand(pop_arr(calls, 0)), expand(pop_arr(calls, 1))
+            fK, fL = expand(pop_arr(calls, 2)), expand(pop_arr(calls, 3))
+            _launch_fused(_PI2_ALLDIFF_KERN,
+                          (F['p'], F['r'], F['q'], F['s'], fI, fJ, fK, fL, out, M), M)
 
-        ii = [t[0] for t in groups['alldiff']]
-        jj = [t[1] for t in groups['alldiff']]
-        kk = [t[2] for t in groups['alldiff']]
-        ll = [t[3] for t in groups['alldiff']]
-        A_L = H_A[ii, jj] / (2 * nn_A[ii, jj])
-        A_R = H_B[kk, ll] / (2 * nn_B[kk, ll])
-        batch = A_L * A_R
-        group_results['alldiff'] = [batch[r] for r in range(len(groups['alldiff']))]
-        del H_A, H_B, nn_A
+        elif case == 'iikk':
+            fI, fK = expand(pop_arr(calls, 0)), expand(pop_arr(calls, 2))
+            _launch_fused(_PI2_IIKK_KERN,
+                          (F['BL'], F['BR'], fI, fK, out, M), M)
 
-    # pi2(i,i;k,k): B_i^L * B_k^R
-    if groups['iikk']:
-        ii = [t[0] for t in groups['iikk']]
-        kk = [t[2] for t in groups['iikk']]
-        batch = B_L_s[ii] * B_R_s[kk]
-        group_results['iikk'] = [batch[r] for r in range(len(groups['iikk']))]
+        elif case == 'iikl':
+            fI = expand(pop_arr(calls, 0))
+            fK, fL = expand(pop_arr(calls, 2)), expand(pop_arr(calls, 3))
+            _launch_fused(_PI2_IIKL_KERN,
+                          (F['BL'], F['q'], F['s'], fI, fK, fL, out, M), M)
 
-    # pi2(i,i;k,l): B_i^L * A_kl^R
-    if groups['iikl']:
-        ii = [t[0] for t in groups['iikl']]
-        kk = [t[2] for t in groups['iikl']]
-        ll = [t[3] for t in groups['iikl']]
-        A_R = (pB_s[kk]*qB_s[ll] + qB_s[kk]*pB_s[ll]) / (2*n_s[kk]*n_s[ll])
-        batch = B_L_s[ii] * A_R
-        group_results['iikl'] = [batch[r] for r in range(len(groups['iikl']))]
+        elif case == 'ijkk':
+            fI, fJ = expand(pop_arr(calls, 0)), expand(pop_arr(calls, 1))
+            fK = expand(pop_arr(calls, 2))
+            _launch_fused(_PI2_IJKK_KERN,
+                          (F['p'], F['r'], F['BR'], fI, fJ, fK, out, M), M)
 
-    # pi2(i,j;k,k): A_ij^L * B_k^R
-    if groups['ijkk']:
-        ii = [t[0] for t in groups['ijkk']]
-        jj = [t[1] for t in groups['ijkk']]
-        kk = [t[2] for t in groups['ijkk']]
-        A_L = (pA_s[ii]*qA_s[jj] + qA_s[ii]*pA_s[jj]) / (2*n_s[ii]*n_s[jj])
-        batch = A_L * B_R_s[kk]
-        group_results['ijkk'] = [batch[r] for r in range(len(groups['ijkk']))]
-
-    # Overlap: u_j^T C_i v_k
-    if groups['shared']:
-        results = []
-        shared_cache = {}
-        for i, j, k, l in groups['shared']:
-            if i == k:
-                si, ai, bi = i, j, l
-            elif i == l:
-                si, ai, bi = i, j, k
-            elif j == k:
-                si, ai, bi = j, i, l
-            elif j == l:
-                si, ai, bi = j, i, k
-            else:
-                results.append(cp.zeros(n_pairs, dtype=cp.float64))
-                continue
-            cache_key = (si, ai, bi)
-            if cache_key not in shared_cache:
-                s = pops[si]
-                # u = [qA_a/n_a, pA_a/n_a], v = [qB_b/n_b, pB_b/n_b]
-                u0 = pops[ai].qA / pops[ai].n
-                u1 = pops[ai].pA / pops[ai].n
-                v0 = pops[bi].qB / pops[bi].n
-                v1 = pops[bi].pB / pops[bi].n
-                shared_cache[cache_key] = (
-                    u0 * (s.C00*v0 + s.C01*v1)
-                    + u1 * (s.C10*v0 + s.C11*v1))
-            results.append(shared_cache[cache_key])
-        group_results['shared'] = results
-
-    # --- Formula-based cases (complex within-individual corrections) ---
-
-    if groups['triple']:
-        trip_cache = {}
-        results = []
-        for i, j, k, l in groups['triple']:
-            cnt = {}
-            for p in (i, j, k, l):
-                cnt[p] = cnt.get(p, 0) + 1
-            tp = [p for p, c in cnt.items() if c == 3][0]
-            sp = [p for p, c in cnt.items() if c == 1][0]
-            first_pair_triple = (i == tp and j == tp)
-            cache_key = (tp, sp, first_pair_triple)
-            if cache_key not in trip_cache:
-                if first_pair_triple:
-                    trip_cache[cache_key] = ldg.pi2_geno_triple_123(pops[tp], pops[sp])
+        elif case == 'shared':
+            si_l, ai_l, bi_l = [], [], []
+            for i, j, k, l in calls:
+                if i == k:
+                    si, ai, bi = i, j, l
+                elif i == l:
+                    si, ai, bi = i, j, k
+                elif j == k:
+                    si, ai, bi = j, i, l
+                elif j == l:
+                    si, ai, bi = j, i, k
                 else:
-                    trip_cache[cache_key] = ldg.pi2_geno_triple_134(pops[tp], pops[sp])
-            results.append(trip_cache[cache_key])
-        group_results['triple'] = results
+                    si, ai, bi = 0, 0, 0
+                si_l.append(si)
+                ai_l.append(ai)
+                bi_l.append(bi)
+            fI = expand(cp.array(si_l, dtype=cp.int32))
+            fJ = expand(cp.array(ai_l, dtype=cp.int32))
+            fK = expand(cp.array(bi_l, dtype=cp.int32))
+            _launch_fused(_PI2_SHARED_KERN,
+                          (F['p'], F['r'], F['q'], F['s'],
+                           F['C00'], F['C01'], F['C10'], F['C11'],
+                           fI, fJ, fK, out, M), M)
 
-    if groups['ijij']:
-        ijij_cache = {}
-        results = []
-        for i, j, k, l in groups['ijij']:
-            cache_key = (i, j)
-            if cache_key not in ijij_cache:
-                ijij_cache[cache_key] = ldg.pi2_geno_ijij(pops[i], pops[j])
-            results.append(ijij_cache[cache_key])
-        group_results['ijij'] = results
+        elif case == 'triple_iiij':
+            tp_a, sp_a = triple_pop(calls)
+            fI, fJ = expand(tp_a), expand(sp_a)
+            _launch_fused(_PI2_IIIJ_KERN,
+                          (F['AQ3'], F['AS3'], F['Q'], F['S'], F['n'],
+                           fI, fJ, out, M), M)
 
-    if groups['same']:
-        results = []
-        for i, j, k, l in groups['same']:
-            results.append(ldg.pi2_geno_single(pops[i]))
-        group_results['same'] = results
+        elif case == 'triple_ijii':
+            tp_a, sp_a = triple_pop(calls)
+            fI, fJ = expand(tp_a), expand(sp_a)
+            _launch_fused(_PI2_IJII_KERN,
+                          (F['BP3'], F['BR3'], F['P'], F['R'], F['n'],
+                           fI, fJ, out, M), M)
+
+        elif case == 'ijij':
+            fI, fJ = expand(pop_arr(calls, 0)), expand(pop_arr(calls, 1))
+            _launch_fused(_PI2_IJIJ_KERN,
+                          (F['P'], F['Q'], F['R'], F['S'],
+                           F['X01'], F['X10'], F['X11'], F['Bsgn'], F['n'],
+                           fI, fJ, out, M), M)
+
+        elif case == 'same':
+            # Fused single-pop kernel operates on (M, 9) genotype counts
+            pop_indices = [c[0] for c in calls]
+            # Gather rows from g_moments for the requested pops
+            g_rows = cp.stack([g_moments[p * N:(p + 1) * N] for p in pop_indices])
+            g_flat = cp.ascontiguousarray(g_rows.reshape(M, 9))
+            _PI2_IIII_KERN(((M + 255) // 256,), (256,), (g_flat, out, M))
+
+        group_results[case] = [out[c * N:(c + 1) * N] for c in range(n_c)]
 
     output = [None] * len(pi2_calls)
     for idx in range(len(pi2_calls)):
