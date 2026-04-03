@@ -2853,5 +2853,5 @@ def _compute_all_dz(pops, dz_calls):
 # Genotype (diploid) batch computation moved to genotype_kernels.py
 from .genotype_kernels import (  # noqa: F401, E402
     _PopDataGeno,
-    _compute_multi_pop_statistics_batch_geno,
+    compute_multi_pop_statistics_batch_geno,
 )

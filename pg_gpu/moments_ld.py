@@ -31,7 +31,7 @@ from .haplotype_matrix import (
     _het_names,
     _generate_stat_specs,
 )
-from .genotype_kernels import _compute_multi_pop_statistics_batch_geno
+from .genotype_kernels import compute_multi_pop_statistics_batch_geno
 from .haplotype_kernels import compute_multi_pop_statistics_batch_hap
 from .genotype_matrix import GenotypeMatrix
 from . import ld_statistics
@@ -244,7 +244,7 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
         pos = mat.positions[keep_idx]
         data_matrix = mat.genotypes[:, keep_idx]
         count_fn = _compute_genotype_counts_for_pairs
-        stat_fn = _compute_multi_pop_statistics_batch_geno
+        stat_fn = compute_multi_pop_statistics_batch_geno
     else:
         pos = mat.positions
         data_matrix = mat.haplotypes
@@ -300,7 +300,7 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
                 counts_list[0], counts_list[1],
                 n_valid_list[0], n_valid_list[1], ld_statistics)
         elif use_genotypes:
-            stats = _compute_multi_pop_statistics_batch_geno(
+            stats = compute_multi_pop_statistics_batch_geno(
                 counts_list, n_valid_list, None, stat_specs)
         else:
             stats = compute_multi_pop_statistics_batch_hap(
