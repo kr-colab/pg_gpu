@@ -538,7 +538,7 @@ def compute_multi_pop_statistics_batch_hap(counts_per_pop, n_valid_per_pop,
 
     Drop-in replacement for _compute_multi_pop_statistics_batch.
     """
-    from .haplotype_matrix import _PopData
+    from .ld_pipeline import PopData as _PopData
 
     n_pairs = counts_per_pop[0].shape[0]
     n_stats = len(stat_specs)

@@ -21,15 +21,15 @@ import numpy as np
 import cupy as cp
 
 from .haplotype_matrix import HaplotypeMatrix
-from .haplotype_matrix import (
-    _generate_pairs_within_distance,
-    _compute_counts_for_pairs,
-    _compute_genotype_counts_for_pairs,
-    _compute_two_pop_statistics_batch,
-    _estimate_ld_chunk_size,
-    _ld_names,
-    _het_names,
-    _generate_stat_specs,
+from .ld_pipeline import (
+    generate_pairs_within_distance as _generate_pairs_within_distance,
+    compute_counts_for_pairs as _compute_counts_for_pairs,
+    compute_genotype_counts_for_pairs as _compute_genotype_counts_for_pairs,
+    compute_two_pop_statistics_batch as _compute_two_pop_statistics_batch,
+    estimate_ld_chunk_size as _estimate_ld_chunk_size,
+    ld_names as _ld_names,
+    het_names as _het_names,
+    generate_stat_specs as _generate_stat_specs,
 )
 from .genotype_kernels import compute_multi_pop_statistics_batch_geno
 from .haplotype_kernels import compute_multi_pop_statistics_batch_hap

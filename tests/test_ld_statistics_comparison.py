@@ -390,15 +390,15 @@ class TestMultiPopFormulas:
     def _validate_all_stats(self, n_pops, n_pairs=50):
         import cupy as cp
         from pg_gpu import ld_statistics as ld_mod
-        from pg_gpu.haplotype_matrix import (
-            _ld_names, _generate_stat_specs, _compute_multi_pop_statistics_batch)
+        from pg_gpu.haplotype_kernels import compute_multi_pop_statistics_batch_hap
+        from pg_gpu.ld_pipeline import ld_names as _ld_names, generate_stat_specs as _generate_stat_specs
 
         counts_list = self.make_random_counts(n_pops, n_pairs=n_pairs)
         ld_names = _ld_names(n_pops)
         stat_specs = _generate_stat_specs(n_pops)
         counts_gpu = [cp.array(c, dtype=cp.float64) for c in counts_list]
 
-        gpu_result = _compute_multi_pop_statistics_batch(
+        gpu_result = compute_multi_pop_statistics_batch_hap(
             counts_gpu, [None]*n_pops, ld_mod, stat_specs)
 
         for stat_idx, name in enumerate(ld_names):
