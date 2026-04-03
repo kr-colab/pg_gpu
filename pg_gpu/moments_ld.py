@@ -27,12 +27,12 @@ from .haplotype_matrix import (
     _compute_genotype_counts_for_pairs,
     _compute_two_pop_statistics_batch,
     _compute_multi_pop_statistics_batch,
-    _compute_multi_pop_statistics_batch_geno,
     _estimate_ld_chunk_size,
     _ld_names,
     _het_names,
     _generate_stat_specs,
 )
+from .genotype_kernels import _compute_multi_pop_statistics_batch_geno
 from .genotype_matrix import GenotypeMatrix
 from . import ld_statistics
 
