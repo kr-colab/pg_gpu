@@ -14,34 +14,6 @@ def _launch(kernel, args, M):
 
 
 # ---------------------------------------------------------------------------
-# Precompute per-pop features from 4-way haplotype counts
-# ---------------------------------------------------------------------------
-
-_HAP_PRECOMP_KERN = cp.RawKernel(r'''
-extern "C" __global__
-void k(const double* __restrict__ c1,
-       const double* __restrict__ c2,
-       const double* __restrict__ c3,
-       const double* __restrict__ c4,
-       const double* __restrict__ nn,
-       double* __restrict__ D,
-       double* __restrict__ pA,
-       double* __restrict__ qA,
-       double* __restrict__ pB,
-       double* __restrict__ qB,
-       const long long N)
-{
-    long long idx = (long long)blockDim.x * blockIdx.x + threadIdx.x;
-    if (idx >= N) return;
-    D[idx]  = c2[idx]*c3[idx] - c1[idx]*c4[idx];
-    pA[idx] = c1[idx] + c2[idx];
-    qA[idx] = c3[idx] + c4[idx];
-    pB[idx] = c1[idx] + c3[idx];
-    qB[idx] = c2[idx] + c4[idx];
-}
-''', "k", options=("-std=c++11",))
-
-# ---------------------------------------------------------------------------
 # DD kernels
 # ---------------------------------------------------------------------------
 
@@ -125,19 +97,6 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
     out[t]=(den>0.)?num/den:0.;
 }''', "k", options=("-std=c++11",))
 
-_DZ_DIFF_KERN = cp.RawKernel(r'''
-extern "C" __global__
-void k(const double*D,const double*pA,const double*qA,
-       const double*c1,const double*c2,const double*c3,const double*c4,
-       const int*I,const int*J,const int*K,double*out,const int M){
-    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=M)return;
-    int i=I[t],j=J[t],k=K[t];
-    double num=-(D[i]*(pA[j]-qA[j])*(c1[k]-c2[k]+c3[k]-c4[k]));
-    double den=nn_placeholder;
-    out[t]=0.;
-}''', "k", options=("-std=c++11",))
-
-# Fix: the distinct kernel needs nn array
 _DZ_DIFF_KERN = cp.RawKernel(r'''
 extern "C" __global__
 void k(const double*D,const double*nn,
@@ -306,16 +265,16 @@ class _HapPopFlat:
 
     def __init__(self, pops):
         P = len(pops)
-        self.c1 = cp.ascontiguousarray(cp.concatenate([p.c1 for p in pops]))
-        self.c2 = cp.ascontiguousarray(cp.concatenate([p.c2 for p in pops]))
-        self.c3 = cp.ascontiguousarray(cp.concatenate([p.c3 for p in pops]))
-        self.c4 = cp.ascontiguousarray(cp.concatenate([p.c4 for p in pops]))
-        self.n = cp.ascontiguousarray(cp.concatenate([p.n for p in pops]))
-        self.D = cp.ascontiguousarray(cp.concatenate([p.D for p in pops]))
-        self.pA = cp.ascontiguousarray(cp.concatenate([p.pA for p in pops]))
-        self.qA = cp.ascontiguousarray(cp.concatenate([p.qA for p in pops]))
-        self.pB = cp.ascontiguousarray(cp.concatenate([p.pB for p in pops]))
-        self.qB = cp.ascontiguousarray(cp.concatenate([p.qB for p in pops]))
+        self.c1 = cp.concatenate([p.c1 for p in pops])
+        self.c2 = cp.concatenate([p.c2 for p in pops])
+        self.c3 = cp.concatenate([p.c3 for p in pops])
+        self.c4 = cp.concatenate([p.c4 for p in pops])
+        self.n = cp.concatenate([p.n for p in pops])
+        self.D = cp.concatenate([p.D for p in pops])
+        self.pA = cp.concatenate([p.pA for p in pops])
+        self.qA = cp.concatenate([p.qA for p in pops])
+        self.pB = cp.concatenate([p.pB for p in pops])
+        self.qB = cp.concatenate([p.qB for p in pops])
 
 
 def compute_all_dd_hap(pops, dd_calls):

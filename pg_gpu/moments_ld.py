@@ -26,7 +26,6 @@ from .haplotype_matrix import (
     _compute_counts_for_pairs,
     _compute_genotype_counts_for_pairs,
     _compute_two_pop_statistics_batch,
-    _compute_multi_pop_statistics_batch,
     _estimate_ld_chunk_size,
     _ld_names,
     _het_names,
