@@ -59,7 +59,7 @@ class TestLDPlots:
         matrix, _, pos = sim_data
         r2 = matrix.pairwise_r2()
         if hasattr(r2, 'get'):
-            r2 = np.asarray(r2)
+            r2 = r2.get()
         ax = plotting.plot_pairwise_ld(r2, positions=pos)
         assert ax is not None
 

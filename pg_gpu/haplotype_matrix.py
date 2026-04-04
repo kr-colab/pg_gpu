@@ -749,67 +749,64 @@ class HaplotypeMatrix:
         return diversity.tajimas_d(self)
 
 
-    def pairwise_LD_v(self) -> cp.ndarray:
-        """
-        Optimized pairwise linkage disequilibrium (D statistic) computation
-        using matrix multiplication for CuPy acceleration.
-        """
-        # Ensure data is on GPU
-        if self.device == 'CPU':
-            self.transfer_to_gpu()
+    def _pairwise_ld_core(self, hap_clean=None, valid_mask=None):
+        """Shared computation for pairwise LD methods.
 
-        hap = self.haplotypes
-        valid_mask = (hap >= 0).astype(cp.float64)
-        hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)  # per-site
+        Computes allele frequencies, joint frequencies, and D matrix from
+        haplotype data, handling missing values.
 
-        # Allele frequencies from valid data only
-        p = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
-
-        # p_AB: joint frequency of derived at both sites
-        # Only count haplotypes valid at both sites
-        joint_n = valid_mask.T @ valid_mask  # (n_var, n_var)
-        joint_11 = hap_clean.T @ hap_clean
-        p_AB = cp.where(joint_n > 0, joint_11 / joint_n, 0.0)
-
-        p_Ap_B = cp.outer(p, p)
-        D = p_AB - p_Ap_B
-        cp.fill_diagonal(D, 0)
-
-        return D
-
-    def pairwise_r2(self) -> np.ndarray:
-        """
-        Calculate the pairwise r2 (correlation coefficient) for all pairs of variants
-        in the haplotype matrix.
+        Parameters
+        ----------
+        hap_clean : cupy.ndarray, optional
+            Pre-cleaned haplotype submatrix (missing set to 0). If None,
+            uses self.haplotypes.
+        valid_mask : cupy.ndarray, optional
+            Validity mask (1 where not missing). Must be provided iff
+            hap_clean is provided.
 
         Returns
         -------
-        ndarray, float64, shape (n_variants, n_variants)
+        D : cupy.ndarray, shape (m, m)
+            Pairwise D = p_AB - p_A*p_B.
+        p : cupy.ndarray, shape (m,)
+            Per-site allele frequencies.
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
-        hap = self.haplotypes
-        valid_mask = (hap >= 0).astype(cp.float64)
-        hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+        if hap_clean is None:
+            hap = self.haplotypes
+            valid_mask = (hap >= 0).astype(cp.float64)
+            hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
 
+        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
         p = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
 
         joint_n = valid_mask.T @ valid_mask
         joint_11 = hap_clean.T @ hap_clean
         p_AB = cp.where(joint_n > 0, joint_11 / joint_n, 0.0)
 
-        p_Ap_B = cp.outer(p, p)
-        D = p_AB - p_Ap_B
+        D = p_AB - cp.outer(p, p)
+        return D, p
 
+    def pairwise_LD_v(self) -> cp.ndarray:
+        """Pairwise linkage disequilibrium (D statistic) via matrix multiply."""
+        D, _ = self._pairwise_ld_core()
+        cp.fill_diagonal(D, 0)
+        return D
+
+    def pairwise_r2(self) -> cp.ndarray:
+        """Pairwise r-squared for all variant pairs.
+
+        Returns
+        -------
+        cupy.ndarray, float64, shape (n_variants, n_variants)
+        """
+        D, p = self._pairwise_ld_core()
         denom_squared = cp.outer(p * (1 - p), p * (1 - p))
         r2 = cp.where(denom_squared > 0, (D ** 2) / denom_squared, 0)
-
         cp.fill_diagonal(r2, 0)
-
-        return r2.get()
+        return r2
 
     def locate_unlinked(self, size=100, step=20, threshold=0.1):
         """Locate variants in approximate linkage equilibrium.
@@ -835,14 +832,9 @@ class HaplotypeMatrix:
             self.transfer_to_gpu()
 
         m = self.num_variants
-        n_hap = self.num_haplotypes
-
-        # allele frequencies from valid data
         hap = self.haplotypes
         valid_mask = (hap >= 0).astype(cp.float64)
         hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        p = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
 
         # pruning state kept on CPU to avoid per-scalar GPU transfers
         loc = np.ones(m, dtype=bool)
@@ -856,18 +848,12 @@ class HaplotypeMatrix:
 
             active_idx = np.where(active)[0] + w_start
             active_idx_gpu = cp.asarray(active_idx)
-            hw = hap_clean[:, active_idx_gpu]
-            vm = valid_mask[:, active_idx_gpu]
-            p_window = p[active_idx_gpu]
 
-            # pairwise r² within window via matrix multiply
-            joint_n = vm.T @ vm
-            joint_11 = hw.T @ hw
-            p_AB = cp.where(joint_n > 0, joint_11 / joint_n, 0.0)
-            p_Ap_B = cp.outer(p_window, p_window)
-            D = p_AB - p_Ap_B
-            denom = cp.outer(p_window * (1 - p_window),
-                             p_window * (1 - p_window))
+            D, p_w = self._pairwise_ld_core(
+                hap_clean[:, active_idx_gpu],
+                valid_mask[:, active_idx_gpu],
+            )
+            denom = cp.outer(p_w * (1 - p_w), p_w * (1 - p_w))
             r2_mat = cp.where(denom > 0, (D ** 2) / denom, 0.0)
             cp.fill_diagonal(r2_mat, 0.0)
 

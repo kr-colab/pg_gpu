@@ -116,7 +116,7 @@ class StatisticsComputer:
 
     # LD-based statistics
     LD_STATS = {
-        'ld_decay': lambda w, **kwargs: _compute_ld_decay(w.matrix, **kwargs),
+        'ld_decay': lambda w, **kwargs: _compute_mean_r2(w.matrix, **kwargs),
         'mean_r2': lambda w, max_dist: _compute_mean_r2(w.matrix, max_dist),
     }
 
@@ -725,54 +725,18 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
 
 
 
-def _compute_ld_decay(matrix: HaplotypeMatrix, bins: List[int],
-                     max_distance: int = 50000) -> float:
-    """Compute mean LD decay (mean r² across all distance bins)."""
-    # Simplified implementation - returns single summary value
-    # In practice, might want to return the full decay curve
+def _compute_mean_r2(matrix: HaplotypeMatrix, max_distance: int,
+                     **kwargs) -> float:
+    """Compute mean r² for variant pairs within a genomic distance."""
     r2_matrix = matrix.pairwise_r2()
     positions = matrix.positions
 
-    # Calculate pairwise distances
-    if matrix.device == 'GPU':
-        pos_i, pos_j = cp.meshgrid(positions, positions, indexing='ij')
-        distances = cp.abs(pos_j - pos_i)
-
-        # Get mean r² within max distance
-        mask = (distances > 0) & (distances <= max_distance)
-        if cp.any(mask):
-            mean_r2 = float(cp.mean(r2_matrix[mask]).get())
-        else:
-            mean_r2 = np.nan
-    else:
-        # CPU version
-        pos_i, pos_j = np.meshgrid(positions, positions, indexing='ij')
-        distances = np.abs(pos_j - pos_i)
-
-        mask = (distances > 0) & (distances <= max_distance)
-        if np.any(mask):
-            mean_r2 = float(np.mean(r2_matrix[mask]))
-        else:
-            mean_r2 = np.nan
-
-    return mean_r2
-
-
-def _compute_mean_r2(matrix: HaplotypeMatrix, max_distance: int) -> float:
-    """Compute mean r² within a distance."""
-    r2_matrix = matrix.pairwise_r2()
-    positions = matrix.positions
-
-    if matrix.device == 'GPU':
-        pos_i, pos_j = cp.meshgrid(positions, positions, indexing='ij')
-        distances = cp.abs(pos_j - pos_i)
-        mask = (distances > 0) & (distances <= max_distance)
-        return float(cp.mean(r2_matrix[mask]).get()) if cp.any(mask) else np.nan
-    else:
-        pos_i, pos_j = np.meshgrid(positions, positions, indexing='ij')
-        distances = np.abs(pos_j - pos_i)
-        mask = (distances > 0) & (distances <= max_distance)
-        return float(np.mean(r2_matrix[mask])) if np.any(mask) else np.nan
+    pos_i, pos_j = cp.meshgrid(positions, positions, indexing='ij')
+    distances = cp.abs(pos_j - pos_i)
+    mask = (distances > 0) & (distances <= max_distance)
+    if cp.any(mask):
+        return float(cp.mean(r2_matrix[mask]).get())
+    return np.nan
 
 
 # ---------------------------------------------------------------------------

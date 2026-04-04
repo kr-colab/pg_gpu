@@ -70,7 +70,7 @@ class TestRSquaredVsAllel:
         matrix = HaplotypeMatrix(hap, pos, 0, n_var * 1000)
 
         # method 1: pairwise_r2 matrix (uses freq-based formula)
-        r2_mat = matrix.pairwise_r2()
+        r2_mat = matrix.pairwise_r2().get()
         idx_i, idx_j = np.triu_indices(n_var, k=1)
         r2_from_mat = r2_mat[idx_i, idx_j]
 
@@ -93,7 +93,7 @@ class TestPairwiseR2:
         hap = np.random.randint(0, 2, (10, 20), dtype=np.int8)
         pos = np.arange(20) * 1000
         matrix = HaplotypeMatrix(hap, pos, 0, 20000)
-        r2 = matrix.pairwise_r2()
+        r2 = matrix.pairwise_r2().get()
         assert r2.shape == (20, 20)
         # diagonal should be 0
         np.testing.assert_array_almost_equal(np.diag(r2), 0.0)
@@ -105,7 +105,7 @@ class TestPairwiseR2:
         pos = np.arange(10) * 1000
         matrix = HaplotypeMatrix(hap, pos, 0, 10000)
 
-        r2_mat = matrix.pairwise_r2()
+        r2_mat = matrix.pairwise_r2().get()
         counts, n_valid = matrix.tally_gpu_haplotypes()
         r2_flat = ld_statistics.r_squared(counts, n_valid=n_valid).get()
 

@@ -413,8 +413,7 @@ def _resolve_r2_matrix(r2_matrix_or_matrix, missing_data='include'):
             seg_idx = cp.where(seg)[0]
             if len(seg_idx) < mat.num_variants:
                 mat = mat.get_subset(seg_idx)
-            # pairwise_r2 returns numpy; convert back for internal GPU ops
-            return cp.asarray(mat.pairwise_r2(), dtype=cp.float64)
+            return mat.pairwise_r2().astype(cp.float64)
         else:
             return _r2_matrix_diploid(mat)
     else:
