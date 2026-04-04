@@ -458,9 +458,11 @@ def zns(r2_matrix_or_matrix, missing_data='include'):
     missing_data : str
         'include' - per-site valid data for frequency computation
         'exclude' - filter to sites with no missing data
-        'project' - unbiased multinomial projection (Ragsdale & Gravel 2019);
-          computes mean σ_D² = D²/π² per pair using falling-factorial
-          estimators. Requires HaplotypeMatrix input.
+        'project' - unbiased multinomial projection estimators, computing
+          mean σ_D² = D²/π² per pair using falling-factorial corrections
+          for finite sample size. Requires HaplotypeMatrix input.
+          See: Ragsdale & Gravel (2019) "Unbiased estimation of linkage
+          disequilibrium from unphased data", MBE 37(3):923-932.
 
     Returns
     -------
@@ -534,7 +536,10 @@ def omega(r2_matrix_or_matrix, missing_data='include'):
     missing_data : str
         'include' - per-site valid data for frequency computation
         'exclude' - filter to sites with no missing data
-        'project' - unbiased multinomial projection (Ragsdale & Gravel 2019)
+        'project' - unbiased multinomial projection estimators, using
+          σ_D² = D²/π² instead of naive r². Requires HaplotypeMatrix input.
+          See: Ragsdale & Gravel (2019) "Unbiased estimation of linkage
+          disequilibrium from unphased data", MBE 37(3):923-932.
 
     Returns
     -------
