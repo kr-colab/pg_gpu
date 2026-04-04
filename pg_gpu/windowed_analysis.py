@@ -1450,7 +1450,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                    'haplotype_count'}
     garud_requested = any(s in statistics for s in garud_stats)
     if garud_requested:
-        _compute_fused_garud_h(haplotype_matrix, population,
+        _compute_fused_garud_h(matrix, population,
                                win_start, win_stop, n_windows, statistics,
                                results)
 
@@ -1465,7 +1465,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     if 'mean_nsl' in statistics:
         from . import selection as sel
-        nsl_gpu = cp.asarray(sel.nsl(haplotype_matrix, population=population))
+        nsl_gpu = cp.asarray(sel.nsl(matrix, population=population))
         valid = cp.isfinite(nsl_gpu) & in_range
         results['mean_nsl'] = _windowed_mean(nsl_gpu, bin_idx, valid, n_windows)
 
