@@ -30,6 +30,33 @@ def estimate_variant_chunk_size(n_hap, bytes_per_element=4, n_intermediates=3,
     return chunk
 
 
+def estimate_fused_chunk_size(n_hap, memory_fraction=0.35):
+    """Estimate max variants for a transposed int8 chunk in fused kernels.
+
+    Parameters
+    ----------
+    n_hap : int
+        Number of haplotypes.
+    memory_fraction : float
+        Fraction of free GPU memory to budget for the transposed copy.
+
+    Returns
+    -------
+    int
+        Number of variants per chunk.
+    """
+    free = cp.cuda.Device().mem_info[0]
+    budget = int(free * memory_fraction)
+    # Each variant needs n_hap bytes (int8) in the transposed copy
+    chunk = max(1, budget // max(n_hap, 1))
+    return chunk
+
+
+def free_gpu_pool():
+    """Release unused GPU memory back to the device."""
+    cp.get_default_memory_pool().free_all_blocks()
+
+
 def chunked_sum_int32(hap, axis=0):
     """Sum haplotype matrix along axis 0 using int32 chunks.
 

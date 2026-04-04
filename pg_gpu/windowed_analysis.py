@@ -748,7 +748,16 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         pop1 = populations[0] if populations and len(populations) >= 1 else None
         pop2 = populations[1] if populations and len(populations) >= 2 else None
 
-        result_dict = windowed_statistics_fused(
+        # Choose chunked or single-shot fused based on memory
+        n_hap = haplotype_matrix.num_haplotypes
+        n_var = haplotype_matrix.num_variants
+        transpose_bytes = n_var * n_hap  # int8
+        free_mem = cp.cuda.Device().mem_info[0]
+        use_chunked = transpose_bytes * 2 > free_mem * 0.7
+
+        fused_fn = (windowed_statistics_fused_chunked if use_chunked
+                     else windowed_statistics_fused)
+        result_dict = fused_fn(
             haplotype_matrix,
             bp_bins=bp_bins,
             statistics=tuple(statistics),
@@ -837,7 +846,7 @@ void fused_windowed_stats_v2(const signed char* hap_t,
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
         int dac = 0;
-        const signed char* row = hap_t + v * n_hap;
+        const signed char* row = hap_t + (long long)v * n_hap;
         for (int h = 0; h < n_hap; h++) {
             if (row[h] > 0) dac++;
         }
@@ -941,11 +950,11 @@ void fused_windowed_twopop(const signed char* hap1_t,
         int v = v_start + vi;
 
         int ac1_1 = 0, ac2_1 = 0;
-        const signed char* row1 = hap1_t + v * n_hap1;
+        const signed char* row1 = hap1_t + (long long)v * n_hap1;
         for (int h = 0; h < n_hap1; h++) {
             if (row1[h] > 0) ac1_1++;
         }
-        const signed char* row2 = hap2_t + v * n_hap2;
+        const signed char* row2 = hap2_t + (long long)v * n_hap2;
         for (int h = 0; h < n_hap2; h++) {
             if (row2[h] > 0) ac2_1++;
         }
@@ -1530,6 +1539,331 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     return results
 
 
+def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
+                                      bp_bins,
+                                      statistics=('pi', 'theta_w', 'tajimas_d'),
+                                      population=None,
+                                      pop1=None,
+                                      pop2=None,
+                                      per_base: bool = True,
+                                      is_accessible=None,
+                                      _win_starts=None,
+                                      _win_stops=None,
+                                      missing_data='include'):
+    """Chunked fused windowed statistics for data too large for a single pass.
+
+    Same interface and results as windowed_statistics_fused(), but splits the
+    variant axis into memory-safe chunks. Each chunk is transposed and fed to
+    the existing fused CUDA kernels. Partial results are accumulated across
+    chunks (all kernel outputs are additive sums, except max_daf which uses
+    element-wise max).
+    """
+    from ._utils import get_population_matrix
+    from ._memutil import estimate_fused_chunk_size, free_gpu_pool
+
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
+    if population is not None:
+        matrix = get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap_raw = matrix.haplotypes
+    n_hap = hap_raw.shape[0]
+    n_total_var = hap_raw.shape[1]
+
+    positions = matrix.positions
+    if not isinstance(positions, cp.ndarray):
+        positions = cp.asarray(positions)
+
+    # Window ranges (same setup as non-chunked)
+    if _win_starts is not None and _win_stops is not None:
+        ws_gpu = cp.asarray(_win_starts, dtype=cp.float64)
+        we_gpu = cp.asarray(_win_stops, dtype=cp.float64)
+        n_windows = len(ws_gpu)
+        win_start = cp.searchsorted(positions, ws_gpu, side='left').astype(cp.int64)
+        win_stop = cp.searchsorted(positions, we_gpu, side='left').astype(cp.int64)
+    else:
+        bp_bins_gpu = cp.asarray(bp_bins, dtype=cp.float64)
+        n_windows = len(bp_bins_gpu) - 1
+        win_start, win_stop = _compute_window_ranges(positions, bp_bins_gpu)
+        ws_gpu = bp_bins_gpu[:-1]
+        we_gpu = bp_bins_gpu[1:]
+
+    results = {
+        'window_start': ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu,
+        'window_stop': we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu,
+    }
+
+    if per_base:
+        window_bases = _compute_window_bases(
+            haplotype_matrix, results['window_start'],
+            results['window_stop'], is_accessible)
+
+    # Determine chunk size
+    chunk_size = estimate_fused_chunk_size(n_hap)
+    # Ensure chunk is at least large enough for the largest window
+    max_win_variants = int((win_stop - win_start).max().get()) if n_windows > 0 else 0
+    chunk_size = max(chunk_size, max_win_variants + 1)
+
+    # ── Single-pop stats via chunked fused kernel ────────────────────────
+    single_pop_stats = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
+                        'singletons', 'theta_h', 'fay_wu_h', 'max_daf'}
+    single_pop_requested = any(s in statistics for s in single_pop_stats)
+    if single_pop_requested:
+        # Accumulators
+        acc_mpd = cp.zeros(n_windows, dtype=cp.float64)
+        acc_seg = cp.zeros(n_windows, dtype=cp.float64)
+        acc_sing = cp.zeros(n_windows, dtype=cp.float64)
+        acc_count = cp.zeros(n_windows, dtype=cp.float64)
+        acc_theta_h = cp.zeros(n_windows, dtype=cp.float64)
+        acc_max_daf = cp.zeros(n_windows, dtype=cp.float64)
+
+        for c_start in range(0, n_total_var, chunk_size):
+            c_end = min(c_start + chunk_size, n_total_var)
+
+            # Find windows overlapping this chunk
+            overlap = (win_start < c_end) & (win_stop > c_start)
+            w_idx = cp.where(overlap)[0]
+            if len(w_idx) == 0:
+                continue
+
+            # Clip window ranges to chunk boundaries
+            clipped_start = cp.maximum(win_start[w_idx], c_start) - c_start
+            clipped_stop = cp.minimum(win_stop[w_idx], c_end) - c_start
+            n_overlap = len(w_idx)
+
+            # Transpose chunk
+            hap_chunk_t = cp.ascontiguousarray(
+                hap_raw[:, c_start:c_end].T.astype(cp.int8))
+            n_chunk_var = c_end - c_start
+
+            # Per-chunk outputs
+            out_mpd = cp.zeros(n_overlap, dtype=cp.float64)
+            out_seg = cp.zeros(n_overlap, dtype=cp.float64)
+            out_sing = cp.zeros(n_overlap, dtype=cp.float64)
+            out_count = cp.zeros(n_overlap, dtype=cp.float64)
+            out_theta_h = cp.zeros(n_overlap, dtype=cp.float64)
+            out_max_daf = cp.zeros(n_overlap, dtype=cp.float64)
+
+            _fused_windowed_kernel_v2(
+                (int(n_overlap),), (256,),
+                (hap_chunk_t, clipped_start, clipped_stop,
+                 np.int32(n_hap), np.int32(n_chunk_var), np.int32(n_overlap),
+                 out_mpd, out_seg, out_sing, out_count, out_theta_h,
+                 out_max_daf))
+
+            # Accumulate (all additive except max_daf)
+            cp.add.at(acc_mpd, w_idx, out_mpd)
+            cp.add.at(acc_seg, w_idx, out_seg)
+            cp.add.at(acc_sing, w_idx, out_sing)
+            cp.add.at(acc_count, w_idx, out_count)
+            cp.add.at(acc_theta_h, w_idx, out_theta_h)
+            acc_max_daf[w_idx] = cp.maximum(acc_max_daf[w_idx], out_max_daf)
+
+            del hap_chunk_t
+            free_gpu_pool()
+
+        # Post-processing (identical to non-chunked)
+        mpd_sum = acc_mpd.get()
+        seg_count = acc_seg.get()
+        sing_count = acc_sing.get()
+        var_count = acc_count.get()
+        theta_h_sum = acc_theta_h.get()
+        max_daf_arr = acc_max_daf.get()
+
+        results['n_variants'] = var_count.astype(int)
+
+        if 'pi' in statistics:
+            if per_base:
+                results['pi'] = np.where(window_bases > 0,
+                                         mpd_sum / window_bases, np.nan)
+            else:
+                results['pi'] = mpd_sum
+
+        if 'theta_w' in statistics:
+            a1 = np.sum(1.0 / np.arange(1, n_hap))
+            theta_abs = seg_count / a1
+            if per_base:
+                results['theta_w'] = np.where(window_bases > 0,
+                                              theta_abs / window_bases, np.nan)
+            else:
+                results['theta_w'] = theta_abs
+
+        if 'segregating_sites' in statistics:
+            results['segregating_sites'] = seg_count.astype(int)
+
+        if 'singletons' in statistics:
+            results['singletons'] = sing_count.astype(int)
+
+        if 'tajimas_d' in statistics:
+            n = n_hap
+            a1 = np.sum(1.0 / np.arange(1, n))
+            a2 = np.sum(1.0 / np.arange(1, n) ** 2)
+            b1 = (n + 1) / (3 * (n - 1))
+            b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
+            c1 = b1 - 1 / a1
+            c2 = b2 - (n + 2) / (a1 * n) + a2 / a1 ** 2
+            e1 = c1 / a1
+            e2 = c2 / (a1 ** 2 + a2)
+
+            S = seg_count
+            d_num = mpd_sum - S / a1
+            d_var = e1 * S + e2 * S * (S - 1)
+            d_std = np.sqrt(np.maximum(d_var, 0))
+            tajd = np.where(d_std > 0, d_num / d_std, np.nan)
+            tajd[S < 3] = np.nan
+            results['tajimas_d'] = tajd
+
+        if 'theta_h' in statistics:
+            if per_base:
+                results['theta_h'] = np.where(window_bases > 0,
+                                              theta_h_sum / window_bases, np.nan)
+            else:
+                results['theta_h'] = theta_h_sum
+
+        if 'fay_wu_h' in statistics:
+            results['fay_wu_h'] = mpd_sum - theta_h_sum
+
+        if 'max_daf' in statistics:
+            results['max_daf'] = max_daf_arr
+
+    # ── Two-pop stats via chunked fused kernel ───────────────────────────
+    two_pop_stats = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
+    two_pop_requested = any(s in statistics for s in two_pop_stats)
+    if two_pop_requested:
+        if pop1 is None or pop2 is None:
+            raise ValueError("pop1 and pop2 required for fst/dxy/da")
+
+        # Get population haplotype indices for GPU slicing
+        pop1_idx = matrix.sample_sets[pop1]
+        pop2_idx = matrix.sample_sets[pop2]
+        n1 = len(pop1_idx)
+        n2 = len(pop2_idx)
+        # Chunk size based on the larger population
+        twopop_chunk = estimate_fused_chunk_size(max(n1, n2))
+        twopop_chunk = max(twopop_chunk, max_win_variants + 1)
+
+        acc_fst_num = cp.zeros(n_windows, dtype=cp.float64)
+        acc_fst_den = cp.zeros(n_windows, dtype=cp.float64)
+        acc_dxy = cp.zeros(n_windows, dtype=cp.float64)
+        acc_pi1 = cp.zeros(n_windows, dtype=cp.float64)
+        acc_pi2 = cp.zeros(n_windows, dtype=cp.float64)
+        acc_wc_a = cp.zeros(n_windows, dtype=cp.float64)
+        acc_wc_ab = cp.zeros(n_windows, dtype=cp.float64)
+
+        for c_start in range(0, n_total_var, twopop_chunk):
+            c_end = min(c_start + twopop_chunk, n_total_var)
+
+            overlap = (win_start < c_end) & (win_stop > c_start)
+            w_idx = cp.where(overlap)[0]
+            if len(w_idx) == 0:
+                continue
+
+            clipped_start = cp.maximum(win_start[w_idx], c_start) - c_start
+            clipped_stop = cp.minimum(win_stop[w_idx], c_end) - c_start
+            n_overlap = len(w_idx)
+
+            hap1_t = cp.ascontiguousarray(
+                hap_raw[pop1_idx, c_start:c_end].T.astype(cp.int8))
+            hap2_t = cp.ascontiguousarray(
+                hap_raw[pop2_idx, c_start:c_end].T.astype(cp.int8))
+            n_chunk_var = c_end - c_start
+
+            out_fst_num = cp.zeros(n_overlap, dtype=cp.float64)
+            out_fst_den = cp.zeros(n_overlap, dtype=cp.float64)
+            out_dxy = cp.zeros(n_overlap, dtype=cp.float64)
+            out_pi1 = cp.zeros(n_overlap, dtype=cp.float64)
+            out_pi2 = cp.zeros(n_overlap, dtype=cp.float64)
+            out_wc_a = cp.zeros(n_overlap, dtype=cp.float64)
+            out_wc_ab = cp.zeros(n_overlap, dtype=cp.float64)
+
+            _fused_windowed_twopop_kernel(
+                (int(n_overlap),), (256,),
+                (hap1_t, hap2_t, clipped_start, clipped_stop,
+                 np.int32(n1), np.int32(n2),
+                 np.int32(n_chunk_var), np.int32(n_overlap),
+                 out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
+                 out_wc_a, out_wc_ab))
+
+            cp.add.at(acc_fst_num, w_idx, out_fst_num)
+            cp.add.at(acc_fst_den, w_idx, out_fst_den)
+            cp.add.at(acc_dxy, w_idx, out_dxy)
+            cp.add.at(acc_pi1, w_idx, out_pi1)
+            cp.add.at(acc_pi2, w_idx, out_pi2)
+            cp.add.at(acc_wc_a, w_idx, out_wc_a)
+            cp.add.at(acc_wc_ab, w_idx, out_wc_ab)
+
+            del hap1_t, hap2_t
+            free_gpu_pool()
+
+        if 'n_variants' not in results:
+            results['n_variants'] = (win_stop - win_start).get().astype(int)
+
+        fst_num = acc_fst_num.get()
+        fst_den = acc_fst_den.get()
+        dxy_sum = acc_dxy.get()
+        pi1_sum = acc_pi1.get()
+        pi2_sum = acc_pi2.get()
+        wc_a = acc_wc_a.get()
+        wc_ab = acc_wc_ab.get()
+
+        if 'fst' in statistics or 'fst_hudson' in statistics:
+            hudson_fst = np.where(fst_den > 0, fst_num / fst_den, np.nan)
+            if 'fst' in statistics:
+                results['fst'] = hudson_fst
+            if 'fst_hudson' in statistics:
+                results['fst_hudson'] = hudson_fst
+
+        if 'fst_wc' in statistics:
+            results['fst_wc'] = np.where(wc_ab > 0, wc_a / wc_ab, np.nan)
+
+        if 'dxy' in statistics:
+            if per_base:
+                results['dxy'] = np.where(window_bases > 0,
+                                          dxy_sum / window_bases, np.nan)
+            else:
+                results['dxy'] = dxy_sum
+
+        if 'da' in statistics:
+            if per_base:
+                da_sum = dxy_sum - (pi1_sum + pi2_sum) / 2.0
+                results['da'] = np.where(window_bases > 0,
+                                         da_sum / window_bases, np.nan)
+            else:
+                results['da'] = dxy_sum - (pi1_sum + pi2_sum) / 2.0
+
+    # Delegate Garud H / scatter-add stats / per-window LD to the
+    # non-chunked function (they already handle large data or operate
+    # per-window).
+    garud_stats = {'garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
+                   'haplotype_count'}
+    scatter_stats = {'mean_nsl', 'daf_hist', 'mu_sfs', 'snp_dist_mean',
+                     'snp_dist_var', 'snp_dist_min', 'snp_dist_max',
+                     'mu_var', 'zns', 'omega', 'mu_ld', 'dist_var',
+                     'dist_skew', 'dist_kurt'}
+    remaining = set(statistics) & (garud_stats | scatter_stats)
+    if remaining:
+        # Call the non-chunked function for just these stats;
+        # they don't need the full transposed matrix.
+        extra = windowed_statistics_fused(
+            haplotype_matrix, bp_bins=bp_bins,
+            statistics=tuple(remaining),
+            population=population, pop1=pop1, pop2=pop2,
+            per_base=per_base, is_accessible=is_accessible,
+            _win_starts=_win_starts, _win_stops=_win_stops,
+            missing_data=missing_data)
+        for k, v in extra.items():
+            if k not in results:
+                results[k] = v
+
+    return results
+
+
 def _windowed_mean(values, bin_idx, valid_mask, n_bins):
     """Compute mean of values per window bin, returning NaN for empty bins."""
     val_sum = _scatter_sum(values[valid_mask], bin_idx[valid_mask], n_bins)
@@ -1542,8 +1876,13 @@ def _windowed_mean(values, bin_idx, valid_mask, n_bins):
 def _compute_fused_garud_h(haplotype_matrix, population,
                             win_start, win_stop, n_windows, statistics,
                             results):
-    """Compute windowed Garud's H using prefix-sum hashing + fused GPU kernel."""
+    """Compute windowed Garud's H using prefix-sum hashing + fused GPU kernel.
+
+    For large data, processes windows in groups to avoid allocating
+    full-size prefix-sum arrays (which would be n_hap * n_var * 8 bytes).
+    """
     from ._utils import get_population_matrix
+    from ._memutil import free_gpu_pool
 
     if population is not None:
         matrix = get_population_matrix(haplotype_matrix, population)
@@ -1555,8 +1894,28 @@ def _compute_fused_garud_h(haplotype_matrix, population,
     hap = matrix.haplotypes  # (n_hap, n_var)
     n_hap, n_var = hap.shape
 
-    # Prefix-sum hashing: cumsum of hap * random_weights along variant axis
-    # float64 for prefix sums to avoid accumulation error over long ranges
+    # Memory check: prefix sums need 4 arrays of (n_hap, span+1) float64
+    # Use 30% of free memory as budget for prefix-sum arrays
+    free_mem = cp.cuda.Device().mem_info[0]
+    prefix_budget = int(free_mem * 0.3)
+    # Each variant column costs n_hap * 8 * 4 bytes (hw1, hw2, cs1, cs2)
+    cost_per_var = n_hap * 8 * 4
+    max_span = max(1, prefix_budget // cost_per_var)
+
+    # Check if full prefix sums fit in memory
+    if n_var <= max_span:
+        # Original single-pass path
+        _garud_h_single_pass(hap, n_hap, n_var, win_start, win_stop,
+                             n_windows, statistics, results)
+    else:
+        # Chunked path: process groups of windows
+        _garud_h_chunked(hap, n_hap, n_var, win_start, win_stop,
+                         n_windows, max_span, statistics, results)
+
+
+def _garud_h_single_pass(hap, n_hap, n_var, win_start, win_stop,
+                          n_windows, statistics, results):
+    """Garud H via full prefix-sum hashing (fits in memory)."""
     h_f64 = hap.astype(cp.float64)
     rng = cp.random.RandomState(seed=42)
     w1 = rng.standard_normal(n_var, dtype=cp.float64)
@@ -1569,16 +1928,98 @@ def _compute_fused_garud_h(haplotype_matrix, population,
     cp.cumsum(hw1, axis=1, out=cs1[:, 1:])
     cp.cumsum(hw2, axis=1, out=cs2[:, 1:])
 
-    # Compute per-window hashes: (n_windows, n_hap)
-    ws = win_start  # int64 GPU array
-    we = win_stop
-    all_h1 = (cs1[:, we] - cs1[:, ws]).T  # (n_windows, n_hap)
-    all_h2 = (cs2[:, we] - cs2[:, ws]).T
-
-    # Make contiguous for kernel
+    all_h1 = (cs1[:, win_stop] - cs1[:, win_start]).T
+    all_h2 = (cs2[:, win_stop] - cs2[:, win_start]).T
     all_h1 = cp.ascontiguousarray(all_h1)
     all_h2 = cp.ascontiguousarray(all_h2)
 
+    _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics, results)
+
+
+def _garud_h_chunked(hap, n_hap, n_var, win_start, win_stop,
+                      n_windows, max_span, statistics, results):
+    """Garud H processing windows in groups to limit memory."""
+    from ._memutil import free_gpu_pool
+
+    out_h1 = np.empty(n_windows, dtype=np.float64)
+    out_h12 = np.empty(n_windows, dtype=np.float64)
+    out_h123 = np.empty(n_windows, dtype=np.float64)
+    out_h2h1 = np.empty(n_windows, dtype=np.float64)
+    out_n_distinct = np.empty(n_windows, dtype=np.float64)
+
+    ws_cpu = win_start.get()
+    we_cpu = win_stop.get()
+
+    # Group windows by overlapping variant spans
+    processed = np.zeros(n_windows, dtype=bool)
+    wi = 0
+    while wi < n_windows:
+        # Find a group of consecutive windows that fit in max_span
+        group_var_start = int(ws_cpu[wi])
+        group_var_end = int(we_cpu[wi])
+        group_end = wi + 1
+        while group_end < n_windows:
+            candidate_end = int(we_cpu[group_end])
+            if candidate_end - group_var_start > max_span:
+                break
+            group_var_end = candidate_end
+            group_end += 1
+
+        span = group_var_end - group_var_start
+        n_group = group_end - wi
+
+        # Compute prefix sums over just this variant span
+        hap_span = hap[:, group_var_start:group_var_end].astype(cp.float64)
+        rng = cp.random.RandomState(seed=42)
+        w1 = rng.standard_normal(span, dtype=cp.float64)
+        w2 = rng.standard_normal(span, dtype=cp.float64)
+
+        hw1 = hap_span * w1[cp.newaxis, :]
+        hw2 = hap_span * w2[cp.newaxis, :]
+        cs1 = cp.zeros((n_hap, span + 1), dtype=cp.float64)
+        cs2 = cp.zeros((n_hap, span + 1), dtype=cp.float64)
+        cp.cumsum(hw1, axis=1, out=cs1[:, 1:])
+        cp.cumsum(hw2, axis=1, out=cs2[:, 1:])
+
+        # Local window indices relative to span start
+        local_ws = cp.asarray(ws_cpu[wi:group_end] - group_var_start)
+        local_we = cp.asarray(we_cpu[wi:group_end] - group_var_start)
+
+        all_h1 = (cs1[:, local_we] - cs1[:, local_ws]).T
+        all_h2 = (cs2[:, local_we] - cs2[:, local_ws]).T
+        all_h1 = cp.ascontiguousarray(all_h1)
+        all_h2 = cp.ascontiguousarray(all_h2)
+
+        # Launch kernel for this group
+        grp_results = {}
+        _launch_garud_kernel(all_h1, all_h2, n_hap, n_group,
+                             statistics, grp_results)
+
+        # Store group results
+        for stat_name, out_arr in [('garud_h1', out_h1), ('garud_h12', out_h12),
+                                    ('garud_h123', out_h123), ('garud_h2h1', out_h2h1),
+                                    ('haplotype_count', out_n_distinct)]:
+            if stat_name in grp_results:
+                out_arr[wi:group_end] = grp_results[stat_name]
+
+        del hap_span, hw1, hw2, cs1, cs2, all_h1, all_h2
+        free_gpu_pool()
+        wi = group_end
+
+    if 'garud_h1' in statistics:
+        results['garud_h1'] = out_h1
+    if 'garud_h12' in statistics:
+        results['garud_h12'] = out_h12
+    if 'garud_h123' in statistics:
+        results['garud_h123'] = out_h123
+    if 'garud_h2h1' in statistics:
+        results['garud_h2h1'] = out_h2h1
+    if 'haplotype_count' in statistics:
+        results['haplotype_count'] = out_n_distinct.astype(int)
+
+
+def _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics, results):
+    """Launch the Garud H GPU kernel and store results."""
     out_h1 = cp.empty(n_windows, dtype=cp.float64)
     out_h12 = cp.empty(n_windows, dtype=cp.float64)
     out_h123 = cp.empty(n_windows, dtype=cp.float64)
