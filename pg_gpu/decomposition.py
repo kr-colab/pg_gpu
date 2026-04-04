@@ -172,7 +172,16 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     n_samples, n_variants = X.shape
     n_components = min(n_components, min(n_samples, n_variants))
 
-    U, S, Vt = cp.linalg.svd(X, full_matrices=False)
+    try:
+        U, S, Vt = cp.linalg.svd(X, full_matrices=False)
+    except Exception as e:
+        if 'CUSOLVER' in str(type(e).__name__) or 'CUSOLVER' in str(e):
+            raise RuntimeError(
+                f"Full SVD failed on matrix of shape ({n_samples}, {n_variants}). "
+                f"This dataset is too large for exact PCA. "
+                f"Use randomized_pca() instead, which handles large datasets efficiently."
+            ) from e
+        raise
     coords = U[:, :n_components] * S[:n_components]
     var = (S ** 2) / n_samples
     explained_variance_ratio = var[:n_components] / cp.sum(var)
