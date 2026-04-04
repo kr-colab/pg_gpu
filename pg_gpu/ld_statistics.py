@@ -205,6 +205,83 @@ def r_squared(counts: cp.ndarray,
     return r(counts, n_valid) ** 2
 
 
+def _zns_tiled(mat, missing_data='include', tile_size=512):
+    """Compute ZnS without materializing the full r² matrix.
+
+    Uses tile-based accumulation: computes D and r² for B×B blocks and
+    sums r² per tile, keeping memory at O(B²) instead of O(m²).
+    """
+    from .haplotype_matrix import HaplotypeMatrix
+
+    if hasattr(mat, 'device') and mat.device == 'CPU':
+        mat.transfer_to_gpu()
+
+    # Filter missing data sites
+    if missing_data == 'exclude':
+        hap = mat.haplotypes
+        missing_per_var = cp.sum(hap < 0, axis=0)
+        valid = cp.where(missing_per_var == 0)[0]
+        mat = mat.get_subset(valid)
+
+    # Filter monomorphic sites
+    hap = mat.haplotypes
+    dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0)
+    n_valid_per_site = cp.sum((hap >= 0).astype(cp.int32), axis=0)
+    seg = (dac > 0) & (dac < n_valid_per_site)
+    seg_idx = cp.where(seg)[0]
+    if len(seg_idx) < mat.num_variants:
+        mat = mat.get_subset(seg_idx)
+
+    hap = mat.haplotypes
+    m = hap.shape[1]
+    if m < 2:
+        return 0.0
+
+    # Precompute shared arrays
+    valid_mask = (hap >= 0).astype(cp.float64)
+    hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    p = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
+    pq = p * (1 - p)
+
+    B = tile_size
+    total = 0.0
+
+    for i0 in range(0, m, B):
+        i1 = min(i0 + B, m)
+        hi = hap_clean[:, i0:i1]
+        vi = valid_mask[:, i0:i1]
+        pi = p[i0:i1]
+        pqi = pq[i0:i1]
+
+        for j0 in range(i0, m, B):
+            j1 = min(j0 + B, m)
+            hj = hap_clean[:, j0:j1]
+            vj = valid_mask[:, j0:j1]
+            pj = p[j0:j1]
+            pqj = pq[j0:j1]
+
+            # D for this tile
+            joint_n = vi.T @ vj
+            joint_11 = hi.T @ hj
+            p_AB = cp.where(joint_n > 0, joint_11 / joint_n, 0.0)
+            D = p_AB - cp.outer(pi, pj)
+
+            # r² for this tile
+            denom = cp.outer(pqi, pqj)
+            r2_tile = cp.where(denom > 0, (D ** 2) / denom, 0.0)
+
+            if i0 == j0:
+                # Diagonal block: zero the diagonal, count once
+                cp.fill_diagonal(r2_tile, 0.0)
+                total += float(cp.sum(r2_tile).get())
+            else:
+                # Off-diagonal block: count twice (upper + lower triangle)
+                total += 2.0 * float(cp.sum(r2_tile).get())
+
+    return total / (m * (m - 1))
+
+
 def zns(r2_matrix_or_matrix, missing_data='include'):
     """Kelly's ZnS: mean pairwise r-squared across all SNP pairs.
 
@@ -213,6 +290,8 @@ def zns(r2_matrix_or_matrix, missing_data='include'):
     r2_matrix_or_matrix : ndarray, HaplotypeMatrix, or GenotypeMatrix
         Square r-squared matrix, or a matrix object (dispatches to
         haploid or diploid r-squared computation automatically).
+        When a HaplotypeMatrix is passed, uses tiled computation to
+        avoid materializing the full m×m r² matrix.
     missing_data : str
         'include' - per-site valid data for frequency computation
         'exclude' - filter to sites with no missing data
@@ -222,6 +301,12 @@ def zns(r2_matrix_or_matrix, missing_data='include'):
     float
         Mean r-squared (excluding diagonal).
     """
+    from .haplotype_matrix import HaplotypeMatrix
+
+    # Streaming path for HaplotypeMatrix: O(B²) memory instead of O(m²)
+    if isinstance(r2_matrix_or_matrix, HaplotypeMatrix):
+        return _zns_tiled(r2_matrix_or_matrix, missing_data)
+
     r2_matrix = _resolve_r2_matrix(r2_matrix_or_matrix, missing_data)
 
     m = r2_matrix.shape[0]
