@@ -9,7 +9,7 @@ Missing Data Modes
 ------------------
 
 Every function that operates on genetic data accepts a ``missing_data``
-parameter with three options:
+parameter with three options (plus a fourth for LD statistics):
 
 **include** (default)
    Skip missing entries per site, computing statistics from observed
@@ -29,6 +29,20 @@ parameter with three options:
    observed data contribute proportionally more weight. Invariant sites
    can be included in the denominator when ``n_total_sites`` is set on
    the matrix (see :ref:`invariant-sites`).
+
+**project** (LD statistics only)
+   Unbiased multinomial projection estimators following Ragsdale & Gravel
+   (2019). For each pair of sites, counts the four haplotype
+   configurations among individuals observed at both sites, then applies
+   falling-factorial corrections to obtain unbiased estimates of D² and
+   pi2. The per-pair statistic is sigma_d^2 = D² / pi2, which avoids
+   the upward bias of naive r² that worsens with small or variable
+   sample sizes. Currently supported by ``zns()`` and ``omega()``.
+   Requires a ``HaplotypeMatrix`` as input (not a pre-computed r² array).
+
+   Reference: Ragsdale AP, Gravel S (2019) "Unbiased estimation of
+   linkage disequilibrium from unphased data." *Mol Biol Evol*
+   37(3):923-932.
 
 The old ``'ignore'`` mode (which treated missing as reference allele)
 has been removed because it silently biases allele frequencies.
@@ -115,48 +129,58 @@ Every public function accepts the ``missing_data`` parameter:
 
 .. list-table::
    :header-rows: 1
-   :widths: 30 15 15 15
+   :widths: 25 13 13 13 13
 
    * - Function
      - include
      - exclude
      - pairwise
+     - project
    * - Diversity (pi, theta_w, theta_h, theta_l)
      - per-site n
      - filter sites
      - sum/sum
+     - \-
    * - Neutrality tests (tajimas_d, fay_wus_h, H*, E, DH)
      - per-site n
      - filter sites
      - harmonic mean n
+     - \-
    * - Divergence (dxy, fst, da)
      - per-site n
      - filter sites
      - sum/sum
+     - \-
    * - SFS (sfs, joint_sfs, folded variants)
      - per-site n
      - filter sites
      - maps to include
+     - \-
    * - Admixture (patterson_d, f2, f3)
      - per-site n
      - NaN at missing
      - maps to include
+     - \-
    * - Selection scans (ihs, nsl, xpehh)
      - wildcard in SSL
      - filter sites
      - maps to include
+     - \-
    * - Haplotype stats (garud_h, haplotype_diversity)
      - wildcard match
      - filter sites
      - maps to include
+     - \-
    * - Distance (pairwise_diffs, pca)
      - per-pair norm
      - filter sites
      - maps to include
-   * - LD (zns, omega, mu_ld)
+     - \-
+   * - LD (zns, omega)
      - per-site n
      - filter sites
      - maps to include
+     - unbiased sigma_d^2
 
 Haplotype Identity and Missing Data
 ------------------------------------
@@ -228,7 +252,26 @@ Best Practices
 3. **Use exclude mode** when you need all samples to be comparable
    at exactly the same sites (e.g., for certain LD analyses).
 
-4. **Check missingness patterns** before analysis with
+4. **Use project mode** for LD statistics (ZnS, Omega) when sample
+   sizes are small or variable across sites. The unbiased estimators
+   correct the upward bias inherent in naive r², which can be
+   substantial when n < 50. This mode computes sigma_d^2 = D^2/pi2
+   using falling-factorial estimators (Ragsdale & Gravel 2019).
+
+   .. code-block:: python
+
+      from pg_gpu import ld_statistics
+
+      # Unbiased ZnS and Omega
+      zns = ld_statistics.zns(h, missing_data='project')
+      omega = ld_statistics.omega(h, missing_data='project')
+
+      # Also works in windowed analysis
+      from pg_gpu.windowed_analysis import windowed_analysis
+      results = windowed_analysis(h, statistics=['zns', 'omega'],
+                                  missing_data='project')
+
+5. **Check missingness patterns** before analysis with
    ``summarize_missing_data()`` and consider filtering sites with
    very high missing rates.
 
