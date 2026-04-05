@@ -9,6 +9,14 @@ HaplotypeMatrix
    :undoc-members:
    :show-inheritance:
 
+GenotypeMatrix
+--------------
+
+.. autoclass:: pg_gpu.GenotypeMatrix
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 LD Statistics
 -------------
 
@@ -250,14 +258,6 @@ Legacy Functions
 ~~~~~~~~~~~~~~~~
 
 .. autofunction:: pg_gpu.windowed_analysis.windowed_statistics
-
-GenotypeMatrix
---------------
-
-.. autoclass:: pg_gpu.GenotypeMatrix
-   :members:
-   :undoc-members:
-   :show-inheritance:
 
 Moments Integration (LD Inference)
 -----------------------------------

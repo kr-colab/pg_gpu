@@ -8,20 +8,28 @@ from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask
 
 
 class HaplotypeMatrix:
-    """
-    Represents a haplotype matrix, which is a matrix of haplotypes across multiple variants.
-    This class provides methods for manipulating and analyzing the haplotype matrix, including
-    extracting subsets based on positions, calculating allele frequency spectra, and computing
-    nucleotide diversity (π).
-    """
-    """
-    A class for representing a haplotype matrix.
+    """Haplotype matrix for population genetics analysis.
 
-    Attributes:
-        haplotypes (cp.ndarray): The genotype/haplotype matrix.
-        positions (cp.ndarray): The array of variant positions.
-        chrom_start (int): Chromosome start position.
-        chrom_end (int): Chromosome end position.
+    Stores phased haplotype data with variant positions and population
+    labels. Supports GPU-accelerated computation of diversity, divergence,
+    selection, and LD statistics.
+
+    Parameters
+    ----------
+    genotypes : ndarray, shape (n_haplotypes, n_variants)
+        Haplotype data (0/1 with -1 for missing).
+    positions : ndarray, shape (n_variants,)
+        Variant positions.
+    chrom_start, chrom_end : int, optional
+        Chromosome boundaries for span normalization.
+    sample_sets : dict, optional
+        Maps population names to lists of haplotype indices.
+    n_total_sites : int, optional
+        Total callable sites for pairwise-mode normalization.
+    samples : list, optional
+        Diploid sample names (from VCF).
+    accessible_mask : AccessibleMask, optional
+        Genome accessibility mask.
     """
     def __init__(self,
                  genotypes,
