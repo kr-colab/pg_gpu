@@ -433,6 +433,42 @@ class FrequencySpectrum:
 
         return numerator / np.sqrt(variance)
 
+    def suggest_projection_n(self, retain_fraction=0.95):
+        """Suggest a projection target that retains most sites.
+
+        Picks the largest n such that at least ``retain_fraction`` of
+        segregating sites have sample size >= n. This balances information
+        retention (larger n = more resolution) against site loss (sites
+        with n_valid < target are discarded by projection).
+
+        Parameters
+        ----------
+        retain_fraction : float
+            Fraction of segregating sites to retain (default 0.95).
+
+        Returns
+        -------
+        int
+            Suggested target sample size, or n_max if no missing data.
+        """
+        if len(self.sfs_by_n) <= 1:
+            return self.n_max
+
+        # Build cumulative site count from largest n downward
+        sorted_ns = sorted(self.sfs_by_n.keys(), reverse=True)
+        total_seg = self.n_segregating
+        if total_seg == 0:
+            return self.n_max
+
+        cumulative = 0
+        for ni in sorted_ns:
+            xi = self.sfs_by_n[ni]
+            cumulative += int(np.sum(xi[1:ni]))
+            if cumulative / total_seg >= retain_fraction:
+                return ni
+
+        return sorted_ns[-1]
+
     def project(self, target_n):
         """Project all SFS groups to a common sample size.
 
@@ -447,10 +483,11 @@ class FrequencySpectrum:
             New FrequencySpectrum with a single SFS at target_n.
         """
         projected = np.zeros(target_n + 1)
+        n_sites_dropped = 0
         for n, xi in self.sfs_by_n.items():
             if n < target_n:
-                raise ValueError(
-                    f"Cannot project: sample size {n} < target {target_n}")
+                n_sites_dropped += int(np.sum(xi))
+                continue
             projected += project_sfs(xi, n, target_n)
 
         result = object.__new__(FrequencySpectrum)
