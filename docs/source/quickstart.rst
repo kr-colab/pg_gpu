@@ -132,6 +132,15 @@ Divergence Statistics
    r1, r2 = divergence.dd_rank(h, 'pop1', 'pop2')        # Schrider et al. (2018)
    zx_val = divergence.zx(h, 'pop1', 'pop2')             # Schrider et al. (2018)
 
+   # Efficient: pre-compute distance matrix once, pass to multiple stats
+   dm = divergence.pairwise_distance_matrix(h, 'pop1', 'pop2')
+   snn = divergence.snn(h, 'pop1', 'pop2', distance_matrices=dm)
+   g = divergence.gmin(h, 'pop1', 'pop2', distance_matrices=dm)
+   dd1, dd2 = divergence.dd(h, 'pop1', 'pop2', distance_matrices=dm)
+
+   # Or compute all distance-based stats in one call
+   stats = divergence.distance_based_stats(h, 'pop1', 'pop2')
+
 Selection Scans
 ~~~~~~~~~~~~~~~
 
