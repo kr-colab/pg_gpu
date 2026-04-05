@@ -2,3 +2,10 @@ sphinx
 sphinx-rtd-theme
 numpy
 scipy
+matplotlib
+seaborn
+cupy
+scikit-allel
+tskit
+msprime
+zarr

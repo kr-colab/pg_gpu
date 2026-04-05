@@ -4,21 +4,8 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath('../..'))
 
-# Mock GPU/genomics dependencies for RTD (no CUDA on build server).
-# autodoc_mock_imports lets Sphinx parse source without importing these.
-autodoc_mock_imports = [
-    'cupy', 'cupy.cuda', 'cupy.cuda.memory', 'cupy.cuda.runtime',
-    'cupy._core', 'cupy._core.core',
-    'cupy_backends', 'cupy_backends.cuda', 'cupy_backends.cuda.api',
-    'cupy_backends.cuda.libs',
-    'allel', 'tskit', 'msprime', 'zarr',
-]
-
-try:
-    import pg_gpu
-    release = pg_gpu.__version__
-except Exception:
-    release = '0.1.0'
+import pg_gpu
+release = pg_gpu.__version__
 
 # Project information
 project = 'pg_gpu'
