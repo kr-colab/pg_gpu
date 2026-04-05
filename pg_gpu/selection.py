@@ -754,8 +754,8 @@ void nsl01_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
     int ssl = 0;
 
     for (int i = 0; i < n_variants; i++) {
-        signed char a1 = h[i * n_haplotypes + j];
-        signed char a2 = h[i * n_haplotypes + k];
+        signed char a1 = h[(long long)i * n_haplotypes + j];
+        signed char a2 = h[(long long)i * n_haplotypes + k];
 
         if (a1 < 0 || a2 < 0) {
             ssl += 1;
@@ -789,8 +789,8 @@ void nsl_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
     int ssl = 0;
 
     for (int i = 0; i < n_variants; i++) {
-        signed char a1 = h[i * n_haplotypes + j];
-        signed char a2 = h[i * n_haplotypes + k];
+        signed char a1 = h[(long long)i * n_haplotypes + j];
+        signed char a2 = h[(long long)i * n_haplotypes + k];
 
         if ((a1 != a2) && (a1 >= 0) && (a2 >= 0)) {
             ssl = 0;
@@ -989,7 +989,7 @@ void ihh01_fused_kernel(
     __syncthreads();
 
     for (int s = tid; s < n_haplotypes; s += nthreads) {
-        signed char a = h[vi * n_haplotypes + s];
+        signed char a = h[(long long)vi * n_haplotypes + s];
         if (a == 0)      atomicAdd(&s_n0, 1);
         else if (a == 1) atomicAdd(&s_n1, 1);
     }
@@ -1032,8 +1032,8 @@ void ihh01_fused_kernel(
 
     for (int p = 0; p < n_local; p++) {
         int gp = p_start + p;
-        signed char a1 = h[vi * n_haplotypes + pair_j[gp]];
-        signed char a2 = h[vi * n_haplotypes + pair_k[gp]];
+        signed char a1 = h[(long long)vi * n_haplotypes + pair_j[gp]];
+        signed char a2 = h[(long long)vi * n_haplotypes + pair_k[gp]];
         int w = p >> 5;            // p / 32
         unsigned int bit = 1u << (p & 31);  // p % 32
         if (a1 == 0 && a2 == 0) {
@@ -1056,8 +1056,8 @@ void ihh01_fused_kernel(
             if (!(alive[w] & bit)) continue;
 
             int gp = p_start + p;
-            signed char a1 = h[check_vi * n_haplotypes + pair_j[gp]];
-            signed char a2 = h[check_vi * n_haplotypes + pair_k[gp]];
+            signed char a1 = h[(long long)check_vi * n_haplotypes + pair_j[gp]];
+            signed char a2 = h[(long long)check_vi * n_haplotypes + pair_k[gp]];
 
             if (a1 >= 0 && a2 >= 0 && a1 != a2) {
                 alive[w] &= ~bit;    // pair diverged
@@ -1263,8 +1263,8 @@ void ihh01_ssl_pervar_kernel(
 
     for (int ci = 0; ci < chunk_len; ci++) {
         int vi = chunk_start + ci;  // global variant index
-        signed char h1 = h[vi * n_haplotypes + j];
-        signed char h2 = h[vi * n_haplotypes + k];
+        signed char h1 = h[(long long)vi * n_haplotypes + j];
+        signed char h2 = h[(long long)vi * n_haplotypes + k];
 
         if ((h1 != h2) && (h1 >= 0) && (h2 >= 0)) {
             ssl = 0;
@@ -1299,8 +1299,8 @@ void ihh_ssl_kernel(const signed char* h, int n_variants, int n_haplotypes,
     int ssl = ssl_state[pid];
 
     for (int i = 0; i < n_variants; i++) {
-        signed char a1 = h[i * n_haplotypes + j];
-        signed char a2 = h[i * n_haplotypes + k];
+        signed char a1 = h[(long long)i * n_haplotypes + j];
+        signed char a2 = h[(long long)i * n_haplotypes + k];
 
         if ((a1 != a2) && (a1 >= 0) && (a2 >= 0)) {
             ssl = 0;
@@ -1709,8 +1709,8 @@ void shared_prefix_length_kernel(const signed char* hap,
     int k = pair_k[pid];
 
     for (int v = 0; v < n_variants; v++) {
-        signed char a = hap[j * n_variants + v];
-        signed char b = hap[k * n_variants + v];
+        signed char a = hap[(long long)j * n_variants + v];
+        signed char b = hap[(long long)k * n_variants + v];
         // skip missing (-1): no information, prefix continues
         if (a < 0 || b < 0) continue;
         if (a != b) {
