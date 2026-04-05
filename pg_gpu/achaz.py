@@ -18,7 +18,6 @@ Gutenkunst, R.N. et al. (2009). Inferring the joint demographic history
 """
 
 import numpy as np
-import cupy as cp
 from functools import lru_cache
 from typing import Optional, Union, Callable, Dict
 
@@ -104,19 +103,6 @@ def _weights_minus_eta1_star(n):
     return w
 
 
-def _weights_achaz_exponent(n, p):
-    """Achaz exponential weight: v_i = i^p (generalized)."""
-    k = np.arange(n + 1, dtype=np.float64)
-    w = np.zeros(n + 1)
-    w[1:n] = k[1:n] ** p
-    # Normalize so sum(w * k) gives theta
-    wk = w[1:n] * k[1:n]
-    if np.sum(wk) > 0:
-        w[1:n] = w[1:n] / np.sum(wk)
-        w[1:n] = w[1:n] * k[1:n]  # alpha_i = w_i * i / sum(w_j * j)
-    return w
-
-
 # Registry of built-in weight functions
 WEIGHT_REGISTRY: Dict[str, Callable] = {
     'watterson': _weights_watterson,
@@ -136,16 +122,15 @@ WEIGHT_REGISTRY: Dict[str, Callable] = {
 # Fu (1995) sigma_ij covariance structure
 # ---------------------------------------------------------------------------
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=64)
 def _harmonic_sums(n):
     """Precompute harmonic sums H[i] = sum(1/j for j=1..i) for i=0..n."""
     H = np.zeros(n + 1)
-    for i in range(1, n + 1):
-        H[i] = H[i - 1] + 1.0 / i
+    H[1:] = np.cumsum(1.0 / np.arange(1, n + 1))
     return H
 
 
-@lru_cache(maxsize=32)
+@lru_cache(maxsize=64)
 def compute_sigma_ij(n):
     """Compute the Fu (1995) covariance matrix sigma_ij for sample size n.
 
@@ -337,7 +322,6 @@ class FrequencySpectrum:
         # Add invariant sites if n_total_sites is provided
         self.n_total_sites = n_total_sites
         if n_total_sites is not None and self.n_max > 0:
-            n_variant_sites = sum(int(np.sum(xi)) for xi in self.sfs_by_n.values())
             n_invariant = n_total_sites - self.n_segregating
             if n_invariant > 0 and self.n_max in self.sfs_by_n:
                 self.sfs_by_n[self.n_max][0] += n_invariant
@@ -432,10 +416,9 @@ class FrequencySpectrum:
 
         # beta_n = sum_i sum_j (i*j * Omega_i * Omega_j * sigma_ij)
         sigma = compute_sigma_ij(n_eff)
-        beta_n = 0.0
-        for i in range(n_eff - 1):
-            for j in range(n_eff - 1):
-                beta_n += (i + 1) * (j + 1) * Omega[i] * Omega[j] * sigma[i, j]
+        ij = k[:, np.newaxis] * k[np.newaxis, :]  # (n-1, n-1)
+        OO = Omega[:, np.newaxis] * Omega[np.newaxis, :]  # (n-1, n-1)
+        beta_n = float(np.sum(ij * OO * sigma))
 
         # Estimate theta and theta^2 from S (Watterson's estimator)
         S = self.n_segregating
