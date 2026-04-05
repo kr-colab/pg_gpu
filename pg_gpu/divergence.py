@@ -955,3 +955,338 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
         ret = ret / norm
 
     return ret
+
+
+# ---------------------------------------------------------------------------
+# Two-population distance-based statistics
+# ---------------------------------------------------------------------------
+
+def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
+                               missing_data='include'):
+    """Compute the full pairwise distance matrix between two populations.
+
+    Returns the n1 x n2 matrix of Hamming distances between all pairs
+    of haplotypes from pop1 and pop2, computed on GPU.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
+
+    Returns
+    -------
+    dist_between : ndarray, float64, shape (n1, n2)
+        Pairwise distances between populations.
+    dist_within1 : ndarray, float64, shape (n1, n1)
+        Pairwise distances within pop1.
+    dist_within2 : ndarray, float64, shape (n2, n2)
+        Pairwise distances within pop2.
+    """
+    from ._memutil import estimate_variant_chunk_size
+
+    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
+    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
+
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
+    hap = haplotype_matrix.haplotypes
+    all_idx = list(pop1_idx) + list(pop2_idx)
+    n1 = len(pop1_idx)
+    n2 = len(pop2_idx)
+    n_total = n1 + n2
+
+    # Chunk over variants to build the distance matrix
+    chunk_size = estimate_variant_chunk_size(n_total, bytes_per_element=8,
+                                             n_intermediates=2)
+
+    gram = cp.zeros((n_total, n_total), dtype=cp.float64)
+    joint_valid = cp.zeros((n_total, n_total), dtype=cp.float64)
+    row_sums = cp.zeros(n_total, dtype=cp.float64)
+    n_var = hap.shape[1]
+
+    for start in range(0, n_var, chunk_size):
+        end = min(start + chunk_size, n_var)
+        h_chunk = hap[all_idx, start:end]
+        v_chunk = (h_chunk >= 0).astype(cp.float64)
+        x_chunk = cp.where(h_chunk >= 0, h_chunk, 0).astype(cp.float64)
+        row_sums += cp.sum(x_chunk, axis=1)
+        gram += x_chunk @ x_chunk.T
+        joint_valid += v_chunk @ v_chunk.T
+        del h_chunk, v_chunk, x_chunk
+
+    # Hamming distance: diffs_ij = sum_i + sum_j - 2 * gram_ij
+    diffs = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
+
+    # Normalize by jointly valid sites (per-site average differences)
+    if missing_data != 'exclude':
+        diffs = cp.where(joint_valid > 0, diffs / joint_valid, 0.0) * n_var
+    diffs_cpu = diffs.get()
+
+    dist_between = diffs_cpu[:n1, n1:]
+    dist_within1 = diffs_cpu[:n1, :n1]
+    dist_within2 = diffs_cpu[n1:, n1:]
+
+    return dist_between, dist_within1, dist_within2
+
+
+def snn(haplotype_matrix: HaplotypeMatrix,
+        pop1: Union[str, list],
+        pop2: Union[str, list],
+        missing_data: str = 'include') -> float:
+    """Hudson's nearest-neighbor statistic (Snn).
+
+    For each haplotype, determines whether its nearest neighbor is from
+    the same population. Snn is the fraction of haplotypes whose nearest
+    neighbor is conspecific. Under panmixia Snn ~ 0.5; under population
+    structure Snn -> 1.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
+
+    Returns
+    -------
+    float
+        Snn statistic in [0, 1].
+
+    References
+    ----------
+    Hudson, R.R. (2000). A New Statistic for Detecting Genetic
+    Differentiation. Genetics, 155(4), 2011-2014.
+    """
+    dist_between, dist_within1, dist_within2 = _pairwise_distance_matrix(
+        haplotype_matrix, pop1, pop2, missing_data)
+    n1, n2 = dist_between.shape
+
+    count = 0.0
+    total = n1 + n2
+
+    # Pop1 haplotypes
+    for i in range(n1):
+        # Min distance within pop1 (exclude self)
+        within = dist_within1[i].copy()
+        within[i] = np.inf
+        min_within = np.min(within)
+        min_between = np.min(dist_between[i])
+
+        if min_within < min_between:
+            count += 1.0
+        elif min_within == min_between:
+            # Tie: proportion of nearest neighbors that are conspecific
+            n_within = np.sum(within == min_within)
+            n_between = np.sum(dist_between[i] == min_between)
+            count += n_within / (n_within + n_between)
+
+    # Pop2 haplotypes
+    for j in range(n2):
+        within = dist_within2[j].copy()
+        within[j] = np.inf
+        min_within = np.min(within)
+        min_between = np.min(dist_between[:, j])
+
+        if min_within < min_between:
+            count += 1.0
+        elif min_within == min_between:
+            n_within = np.sum(within == min_within)
+            n_between = np.sum(dist_between[:, j] == min_between)
+            count += n_within / (n_within + n_between)
+
+    return count / total
+
+
+def dxy_min(haplotype_matrix: HaplotypeMatrix,
+            pop1: Union[str, list],
+            pop2: Union[str, list],
+            missing_data: str = 'include') -> float:
+    """Minimum pairwise distance between two populations.
+
+    The Hamming distance of the closest pair of haplotypes across
+    the two populations. Used in Gmin (Geneva et al.) and dd
+    (Schrider et al.) statistics.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
+
+    Returns
+    -------
+    float
+        Minimum pairwise distance.
+
+    References
+    ----------
+    Geneva, A.J. et al. (2015). A new method to scan genomes for
+    introgression in a secondary contact model. PLoS ONE, 10(4).
+    """
+    dist_between, _, _ = _pairwise_distance_matrix(
+        haplotype_matrix, pop1, pop2, missing_data)
+    return float(np.min(dist_between))
+
+
+def gmin(haplotype_matrix: HaplotypeMatrix,
+         pop1: Union[str, list],
+         pop2: Union[str, list],
+         missing_data: str = 'include') -> float:
+    """Geneva's Gmin: ratio of minimum to mean between-population distance.
+
+    Gmin = Dxy_min / Dxy_mean. Low values indicate unusually similar
+    haplotypes across populations relative to average divergence,
+    suggesting recent gene flow or shared ancestral variation.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
+
+    Returns
+    -------
+    float
+        Gmin ratio.
+
+    References
+    ----------
+    Geneva, A.J. et al. (2015). A new method to scan genomes for
+    introgression in a secondary contact model. PLoS ONE, 10(4).
+    """
+    dist_between, _, _ = _pairwise_distance_matrix(
+        haplotype_matrix, pop1, pop2, missing_data)
+    mean_dxy = float(np.mean(dist_between))
+    min_dxy = float(np.min(dist_between))
+    if mean_dxy == 0:
+        return float('nan')
+    return min_dxy / mean_dxy
+
+
+def dd(haplotype_matrix: HaplotypeMatrix,
+       pop1: Union[str, list],
+       pop2: Union[str, list],
+       missing_data: str = 'include') -> Tuple[float, float]:
+    """Relative minimum divergence (dd1, dd2).
+
+    dd1 = Dxy_min / pi1, dd2 = Dxy_min / pi2. Low values indicate
+    that the closest between-population pair is unusually similar
+    relative to within-population diversity.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
+
+    Returns
+    -------
+    dd1 : float
+        Dxy_min / pi(pop1).
+    dd2 : float
+        Dxy_min / pi(pop2).
+
+    References
+    ----------
+    Schrider, D.R. et al. (2018). Supervised Machine Learning for
+    Population Genetics: A New Paradigm. Trends in Genetics, 34(4).
+    """
+    from . import diversity
+
+    dist_between, _, _ = _pairwise_distance_matrix(
+        haplotype_matrix, pop1, pop2, missing_data)
+    min_dxy = float(np.min(dist_between))
+
+    pi1 = diversity.pi(haplotype_matrix, population=pop1,
+                       span_normalize=False, missing_data=missing_data)
+    pi2 = diversity.pi(haplotype_matrix, population=pop2,
+                       span_normalize=False, missing_data=missing_data)
+
+    dd1 = min_dxy / pi1 if pi1 > 0 else float('nan')
+    dd2 = min_dxy / pi2 if pi2 > 0 else float('nan')
+    return dd1, dd2
+
+
+def dd_rank(haplotype_matrix: HaplotypeMatrix,
+            pop1: Union[str, list],
+            pop2: Union[str, list],
+            missing_data: str = 'include') -> Tuple[float, float]:
+    """Rank of Dxy_min in within-population pairwise distance distributions.
+
+    For each population, computes the fraction of within-population
+    pairwise distances that are <= Dxy_min. Low values indicate the
+    closest between-population pair is more similar than most
+    within-population pairs, suggesting introgression.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
+
+    Returns
+    -------
+    rank1 : float
+        Fraction of pop1 within-pop distances <= Dxy_min.
+    rank2 : float
+        Fraction of pop2 within-pop distances <= Dxy_min.
+
+    References
+    ----------
+    Schrider, D.R. et al. (2018). Supervised Machine Learning for
+    Population Genetics: A New Paradigm. Trends in Genetics, 34(4).
+    """
+    dist_between, dist_within1, dist_within2 = _pairwise_distance_matrix(
+        haplotype_matrix, pop1, pop2, missing_data)
+    min_dxy = float(np.min(dist_between))
+
+    # Extract upper triangle of within-pop distances (exclude diagonal)
+    idx1 = np.triu_indices(dist_within1.shape[0], k=1)
+    within1 = dist_within1[idx1]
+    idx2 = np.triu_indices(dist_within2.shape[0], k=1)
+    within2 = dist_within2[idx2]
+
+    rank1 = float(np.mean(within1 <= min_dxy)) if len(within1) > 0 else float('nan')
+    rank2 = float(np.mean(within2 <= min_dxy)) if len(within2) > 0 else float('nan')
+    return rank1, rank2
+
+
+def zx(haplotype_matrix: HaplotypeMatrix,
+       pop1: Union[str, list],
+       pop2: Union[str, list],
+       missing_data: str = 'include') -> float:
+    """ZnS ratio: within-population LD relative to total LD.
+
+    Zx = (ZnS_pop1 + ZnS_pop2) / (2 * ZnS_total). Values > 1 indicate
+    stronger LD within populations than across the combined sample,
+    consistent with population structure or recent admixture.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
+
+    Returns
+    -------
+    float
+        Zx ratio.
+
+    References
+    ----------
+    Schrider, D.R. et al. (2018). Supervised Machine Learning for
+    Population Genetics: A New Paradigm. Trends in Genetics, 34(4).
+    """
+    from . import ld_statistics
+    from ._utils import get_population_matrix
+
+    m1 = get_population_matrix(haplotype_matrix, pop1)
+    m2 = get_population_matrix(haplotype_matrix, pop2)
+    z1 = ld_statistics.zns(m1, missing_data=missing_data)
+    z2 = ld_statistics.zns(m2, missing_data=missing_data)
+    z_total = ld_statistics.zns(haplotype_matrix, missing_data=missing_data)
+
+    if z_total == 0:
+        return float('nan')
+    return (z1 + z2) / (2 * z_total)
