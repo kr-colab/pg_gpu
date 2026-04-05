@@ -20,7 +20,9 @@ from . import decomposition
 from . import plotting
 from . import distance_stats
 from . import relatedness
+from . import achaz
 from .accessible import AccessibleMask, bed_to_mask, parse_bed
+from .achaz import FrequencySpectrum
 from .genotype_matrix import GenotypeMatrix
 from .haplotype_matrix import HaplotypeMatrix
 from .windowed_analysis import WindowedAnalyzer, windowed_analysis
