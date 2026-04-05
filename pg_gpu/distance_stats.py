@@ -21,6 +21,55 @@ def _extract_upper_triangle(mat):
     return result.get() if hasattr(result, 'get') else result
 
 
+def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
+    """Compute full pairwise Hamming distance matrix on GPU.
+
+    Internal helper returning the raw cupy distance matrix. Used by
+    pairwise_diffs_haploid (condensed numpy output) and divergence
+    two-population statistics (full cupy matrix with pop blocks).
+
+    Parameters
+    ----------
+    hap : cupy.ndarray, shape (n_haplotypes, n_variants)
+        Haplotype data already on GPU, optionally pre-filtered.
+    missing_data : str
+        'include' - raw counts at jointly non-missing sites
+        'normalize' - per-site average (divide by jointly valid count)
+
+    Returns
+    -------
+    diffs_mat : cupy.ndarray, float64, shape (n_hap, n_hap)
+        Pairwise distance matrix on GPU.
+    """
+    from ._memutil import estimate_variant_chunk_size
+    n_hap, n_var = hap.shape
+    chunk_size = estimate_variant_chunk_size(n_hap, bytes_per_element=8,
+                                             n_intermediates=2)
+
+    gram = cp.zeros((n_hap, n_hap), dtype=cp.float64)
+    row_sums = cp.zeros(n_hap, dtype=cp.float64)
+    joint_valid = cp.zeros((n_hap, n_hap), dtype=cp.float64) if missing_data == 'normalize' else None
+
+    for start in range(0, n_var, chunk_size):
+        end = min(start + chunk_size, n_var)
+        h_chunk = hap[:, start:end]
+        x_chunk = cp.where(h_chunk >= 0, h_chunk, 0).astype(cp.float64)
+        row_sums += cp.sum(x_chunk, axis=1)
+        gram += x_chunk @ x_chunk.T
+        if joint_valid is not None:
+            v_chunk = (h_chunk >= 0).astype(cp.float64)
+            joint_valid += v_chunk @ v_chunk.T
+            del v_chunk
+        del h_chunk, x_chunk
+
+    diffs_mat = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
+
+    if joint_valid is not None:
+        diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
+
+    return diffs_mat
+
+
 def pairwise_diffs_haploid(haplotype_matrix, population=None,
                            missing_data='include'):
     """Compute pairwise Hamming distances between haplotypes on GPU.
@@ -59,29 +108,7 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
         complete = missing_per_var == 0
         hap = hap[:, complete]
 
-    # 'include' mode (default): mask missing, normalize per pair
-    # Chunk over variants to avoid OOM from float64 intermediates
-    from ._memutil import estimate_variant_chunk_size
-    n_hap, n_var = hap.shape
-    chunk_size = estimate_variant_chunk_size(n_hap, bytes_per_element=8,
-                                             n_intermediates=2)
-
-    gram = cp.zeros((n_hap, n_hap), dtype=cp.float64)
-    joint_valid = cp.zeros((n_hap, n_hap), dtype=cp.float64)
-    row_sums = cp.zeros(n_hap, dtype=cp.float64)
-
-    for start in range(0, n_var, chunk_size):
-        end = min(start + chunk_size, n_var)
-        h_chunk = hap[:, start:end]
-        v_chunk = (h_chunk >= 0).astype(cp.float64)
-        x_chunk = cp.where(h_chunk >= 0, h_chunk, 0).astype(cp.float64)
-        row_sums += cp.sum(x_chunk, axis=1)
-        gram += x_chunk @ x_chunk.T
-        joint_valid += v_chunk @ v_chunk.T
-        del h_chunk, v_chunk, x_chunk
-
-    diffs_mat = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
-    diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
+    diffs_mat = _pairwise_diffs_matrix_gpu(hap, missing_data='normalize')
     return _extract_upper_triangle(diffs_mat)
 
 

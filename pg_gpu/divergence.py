@@ -963,10 +963,11 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
 
 def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
                                missing_data='include'):
-    """Compute the full pairwise distance matrix between two populations.
+    """Compute pairwise distance matrices between and within two populations.
 
-    Returns the n1 x n2 matrix of Hamming distances between all pairs
-    of haplotypes from pop1 and pop2, computed on GPU.
+    Uses the shared _pairwise_diffs_matrix_gpu helper from distance_stats
+    for the chunked GPU gram matrix computation. Returns cupy arrays for
+    downstream GPU operations.
 
     Parameters
     ----------
@@ -976,14 +977,11 @@ def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
 
     Returns
     -------
-    dist_between : ndarray, float64, shape (n1, n2)
-        Pairwise distances between populations.
-    dist_within1 : ndarray, float64, shape (n1, n1)
-        Pairwise distances within pop1.
-    dist_within2 : ndarray, float64, shape (n2, n2)
-        Pairwise distances within pop2.
+    dist_between : cupy.ndarray, float64, shape (n1, n2)
+    dist_within1 : cupy.ndarray, float64, shape (n1, n1)
+    dist_within2 : cupy.ndarray, float64, shape (n2, n2)
     """
-    from ._memutil import estimate_variant_chunk_size
+    from .distance_stats import _pairwise_diffs_matrix_gpu
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -991,53 +989,20 @@ def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
-    hap = haplotype_matrix.haplotypes
+    hap_gpu = cp.asarray(haplotype_matrix.haplotypes)
     all_idx = list(pop1_idx) + list(pop2_idx)
     n1 = len(pop1_idx)
-    n2 = len(pop2_idx)
-    n_total = n1 + n2
 
-    hap_sub = hap[all_idx, :]
+    hap_sub = hap_gpu[all_idx, :]
 
     if missing_data == 'exclude':
-        # Drop sites with any missing data across both populations
         any_missing = cp.any(hap_sub < 0, axis=0)
-        complete = ~any_missing
-        hap_sub = hap_sub[:, complete]
+        hap_sub = hap_sub[:, ~any_missing]
 
-    n_var = hap_sub.shape[1]
+    # Raw Hamming distances (not normalized) — appropriate for ratio/rank stats
+    diffs = _pairwise_diffs_matrix_gpu(hap_sub, missing_data='include')
 
-    # Chunk over variants to build the distance matrix
-    chunk_size = estimate_variant_chunk_size(n_total, bytes_per_element=8,
-                                             n_intermediates=2)
-
-    gram = cp.zeros((n_total, n_total), dtype=cp.float64)
-    joint_valid = cp.zeros((n_total, n_total), dtype=cp.float64)
-    row_sums = cp.zeros(n_total, dtype=cp.float64)
-
-    for start in range(0, n_var, chunk_size):
-        end = min(start + chunk_size, n_var)
-        h_chunk = hap_sub[:, start:end]
-        v_chunk = (h_chunk >= 0).astype(cp.float64)
-        x_chunk = cp.where(h_chunk >= 0, h_chunk, 0).astype(cp.float64)
-        row_sums += cp.sum(x_chunk, axis=1)
-        gram += x_chunk @ x_chunk.T
-        joint_valid += v_chunk @ v_chunk.T
-        del h_chunk, v_chunk, x_chunk
-
-    # Raw Hamming distances: count of differing sites at jointly valid positions.
-    # For 'exclude' mode, joint_valid == n_var for all pairs (complete sites only).
-    # For 'include' mode, this is the raw count at non-missing sites per pair.
-    # Ratios (Gmin, dd, ddRank) and comparisons (Snn) are scale-invariant,
-    # so raw counts are appropriate.
-    diffs = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
-    diffs_cpu = diffs.get()
-
-    dist_between = diffs_cpu[:n1, n1:]
-    dist_within1 = diffs_cpu[:n1, :n1]
-    dist_within2 = diffs_cpu[n1:, n1:]
-
-    return dist_between, dist_within1, dist_within2
+    return diffs[:n1, n1:], diffs[:n1, :n1], diffs[n1:, n1:]
 
 
 def snn(haplotype_matrix: HaplotypeMatrix,
@@ -1071,40 +1036,30 @@ def snn(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix, pop1, pop2, missing_data)
     n1, n2 = dist_between.shape
 
-    count = 0.0
-    total = n1 + n2
+    def _snn_one_pop(within, between):
+        """Vectorized Snn for one population block on GPU."""
+        w = within.copy()
+        cp.fill_diagonal(w, cp.inf)
+        min_within = cp.min(w, axis=1)
+        min_between = cp.min(between, axis=1)
 
-    # Pop1 haplotypes
-    for i in range(n1):
-        # Min distance within pop1 (exclude self)
-        within = dist_within1[i].copy()
-        within[i] = np.inf
-        min_within = np.min(within)
-        min_between = np.min(dist_between[i])
+        # Nearest neighbor is within-pop: score = 1
+        score = (min_within < min_between).astype(cp.float64)
 
-        if min_within < min_between:
-            count += 1.0
-        elif min_within == min_between:
-            # Tie: proportion of nearest neighbors that are conspecific
-            n_within = np.sum(within == min_within)
-            n_between = np.sum(dist_between[i] == min_between)
-            count += n_within / (n_within + n_between)
+        # Ties: score = n_within_ties / (n_within_ties + n_between_ties)
+        tied = min_within == min_between
+        if cp.any(tied):
+            n_within_ties = cp.sum(w == min_within[:, None], axis=1)
+            n_between_ties = cp.sum(between == min_between[:, None], axis=1)
+            tie_score = n_within_ties / (n_within_ties + n_between_ties)
+            score = cp.where(tied, tie_score, score)
 
-    # Pop2 haplotypes
-    for j in range(n2):
-        within = dist_within2[j].copy()
-        within[j] = np.inf
-        min_within = np.min(within)
-        min_between = np.min(dist_between[:, j])
+        return float(cp.sum(score).get())
 
-        if min_within < min_between:
-            count += 1.0
-        elif min_within == min_between:
-            n_within = np.sum(within == min_within)
-            n_between = np.sum(dist_between[:, j] == min_between)
-            count += n_within / (n_within + n_between)
+    count = _snn_one_pop(dist_within1, dist_between)
+    count += _snn_one_pop(dist_within2, dist_between.T)
 
-    return count / total
+    return count / (n1 + n2)
 
 
 def dxy_min(haplotype_matrix: HaplotypeMatrix,
@@ -1135,7 +1090,7 @@ def dxy_min(haplotype_matrix: HaplotypeMatrix,
     """
     dist_between, _, _ = _pairwise_distance_matrix(
         haplotype_matrix, pop1, pop2, missing_data)
-    return float(np.min(dist_between))
+    return float(cp.min(dist_between).get())
 
 
 def gmin(haplotype_matrix: HaplotypeMatrix,
@@ -1166,8 +1121,8 @@ def gmin(haplotype_matrix: HaplotypeMatrix,
     """
     dist_between, _, _ = _pairwise_distance_matrix(
         haplotype_matrix, pop1, pop2, missing_data)
-    mean_dxy = float(np.mean(dist_between))
-    min_dxy = float(np.min(dist_between))
+    mean_dxy = float(cp.mean(dist_between).get())
+    min_dxy = float(cp.min(dist_between).get())
     if mean_dxy == 0:
         return float('nan')
     return min_dxy / mean_dxy
@@ -1205,7 +1160,7 @@ def dd(haplotype_matrix: HaplotypeMatrix,
 
     dist_between, _, _ = _pairwise_distance_matrix(
         haplotype_matrix, pop1, pop2, missing_data)
-    min_dxy = float(np.min(dist_between))
+    min_dxy = float(cp.min(dist_between).get())
 
     pi1 = diversity.pi(haplotype_matrix, population=pop1,
                        span_normalize=False, missing_data=missing_data)
@@ -1248,16 +1203,16 @@ def dd_rank(haplotype_matrix: HaplotypeMatrix,
     """
     dist_between, dist_within1, dist_within2 = _pairwise_distance_matrix(
         haplotype_matrix, pop1, pop2, missing_data)
-    min_dxy = float(np.min(dist_between))
+    min_dxy = cp.min(dist_between)
 
     # Extract upper triangle of within-pop distances (exclude diagonal)
-    idx1 = np.triu_indices(dist_within1.shape[0], k=1)
+    idx1 = cp.triu_indices(dist_within1.shape[0], k=1)
     within1 = dist_within1[idx1]
-    idx2 = np.triu_indices(dist_within2.shape[0], k=1)
+    idx2 = cp.triu_indices(dist_within2.shape[0], k=1)
     within2 = dist_within2[idx2]
 
-    rank1 = float(np.mean(within1 <= min_dxy)) if len(within1) > 0 else float('nan')
-    rank2 = float(np.mean(within2 <= min_dxy)) if len(within2) > 0 else float('nan')
+    rank1 = float(cp.mean((within1 <= min_dxy).astype(cp.float64)).get()) if len(within1) > 0 else float('nan')
+    rank2 = float(cp.mean((within2 <= min_dxy).astype(cp.float64)).get()) if len(within2) > 0 else float('nan')
     return rank1, rank2
 
 
@@ -1299,3 +1254,76 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     if z_total == 0:
         return float('nan')
     return (z1 + z2) / (2 * z_total)
+
+
+def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
+                          pop1: Union[str, list],
+                          pop2: Union[str, list],
+                          missing_data: str = 'include') -> Dict[str, float]:
+    """Compute all distance-based two-population statistics at once.
+
+    Shares the pairwise distance matrix computation across Snn, Gmin,
+    dd, and dd_rank, avoiding redundant GPU work.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
+
+    Returns
+    -------
+    dict
+        Keys: snn, dxy_min, gmin, dd1, dd2, dd_rank1, dd_rank2.
+    """
+    from . import diversity
+
+    dist_between, dist_within1, dist_within2 = _pairwise_distance_matrix(
+        haplotype_matrix, pop1, pop2, missing_data)
+    n1, n2 = dist_between.shape
+
+    min_dxy = float(cp.min(dist_between).get())
+    mean_dxy = float(cp.mean(dist_between).get())
+
+    # Snn (GPU)
+    def _snn_one_pop(within, between):
+        w = within.copy()
+        cp.fill_diagonal(w, cp.inf)
+        min_w = cp.min(w, axis=1)
+        min_b = cp.min(between, axis=1)
+        score = (min_w < min_b).astype(cp.float64)
+        tied = min_w == min_b
+        if cp.any(tied):
+            nw = cp.sum(w == min_w[:, None], axis=1)
+            nb = cp.sum(between == min_b[:, None], axis=1)
+            tie_score = nw / (nw + nb)
+            score = cp.where(tied, tie_score, score)
+        return float(cp.sum(score).get())
+
+    snn_val = (_snn_one_pop(dist_within1, dist_between)
+               + _snn_one_pop(dist_within2, dist_between.T)) / (n1 + n2)
+
+    # dd_rank (GPU)
+    min_dxy_gpu = cp.min(dist_between)
+    idx1 = cp.triu_indices(n1, k=1)
+    within1 = dist_within1[idx1]
+    idx2 = cp.triu_indices(n2, k=1)
+    within2 = dist_within2[idx2]
+    rank1 = float(cp.mean((within1 <= min_dxy_gpu).astype(cp.float64)).get()) if len(within1) > 0 else float('nan')
+    rank2 = float(cp.mean((within2 <= min_dxy_gpu).astype(cp.float64)).get()) if len(within2) > 0 else float('nan')
+
+    # dd
+    pi1 = diversity.pi(haplotype_matrix, population=pop1,
+                       span_normalize=False, missing_data=missing_data)
+    pi2 = diversity.pi(haplotype_matrix, population=pop2,
+                       span_normalize=False, missing_data=missing_data)
+
+    return {
+        'snn': snn_val,
+        'dxy_min': min_dxy,
+        'gmin': min_dxy / mean_dxy if mean_dxy > 0 else float('nan'),
+        'dd1': min_dxy / pi1 if pi1 > 0 else float('nan'),
+        'dd2': min_dxy / pi2 if pi2 > 0 else float('nan'),
+        'dd_rank1': rank1,
+        'dd_rank2': rank2,
+    }
