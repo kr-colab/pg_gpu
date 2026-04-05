@@ -77,8 +77,10 @@ pixi run python examples/performance_comparison.py
    - `pg_gpu/relatedness.py`: GRM, IBS
    - `pg_gpu/windowed_analysis.py`: Fused CUDA kernels for windowed statistics
    - `pg_gpu/moments_ld.py`: Drop-in replacement for moments.LD.Parsing (requires moments env)
-3. **Accessible Site Masks** (`pg_gpu/accessible.py`): BED file parsing and `AccessibleMask` class for genome accessibility. Dense boolean arrays with lazy prefix-sum for O(1) windowed range queries. Integrated into HaplotypeMatrix, GenotypeMatrix, and windowed analysis.
-4. **Memory Management** (`pg_gpu/_memutil.py`): Adaptive chunked GPU processing. All modules use `chunked_dac_and_n` for memory-safe allele counting. Large operations auto-detect available GPU memory and chunk accordingly.
+   - `pg_gpu/achaz.py`: Achaz (2009) generalized theta estimation framework
+3. **Achaz Framework** (`pg_gpu/achaz.py`): All frequency-spectrum-based theta estimators are linear combinations of the SFS. The `FrequencySpectrum` class computes the SFS once on GPU and derives all estimators as dot products. Includes weight vectors for 8 standard estimators, Fu (1995) covariance structure for neutrality test variance, SFS projection via hypergeometric sampling (Gutenkunst et al. 2009), and custom weight vector support. Use `diversity.diversity_stats_fast()` for batch computation or `FrequencySpectrum` directly for custom estimators.
+4. **Accessible Site Masks** (`pg_gpu/accessible.py`): BED file parsing and `AccessibleMask` class for genome accessibility. Dense boolean arrays with lazy prefix-sum for O(1) windowed range queries. Integrated into HaplotypeMatrix, GenotypeMatrix, and windowed analysis.
+5. **Memory Management** (`pg_gpu/_memutil.py`): Adaptive chunked GPU processing. All modules use `chunked_dac_and_n` for memory-safe allele counting. Large operations auto-detect available GPU memory and chunk accordingly.
 
 ### Key Design Patterns
 

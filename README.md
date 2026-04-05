@@ -59,6 +59,42 @@ results = windowed_analysis(hm, statistics=["pi", "theta_w", "tajimas_d"],
                             window_size=50000, step_size=10000)
 ```
 
+## Achaz Framework
+
+Compute all theta estimators and neutrality tests from a single SFS pass using the
+[Achaz (2009)](https://doi.org/10.1534/genetics.109.104042) generalized framework:
+
+```python
+from pg_gpu import FrequencySpectrum
+
+# Build SFS (one GPU pass)
+fs = FrequencySpectrum(hm, population="pop1")
+
+# All standard estimators as weight vector dot products
+fs.theta("pi")          # nucleotide diversity
+fs.theta("watterson")   # Watterson's theta
+fs.theta("theta_h")     # Fay & Wu's theta_H
+fs.theta("theta_l")     # Zeng's theta_L
+fs.theta("eta1")        # singleton-based theta (Fu & Li)
+
+# Neutrality tests
+fs.tajimas_d()          # Tajima's D
+fs.fay_wu_h()           # Fay & Wu's H
+
+# All at once (8 thetas + 4 tests)
+fs.all_thetas()
+fs.all_tests()
+
+# SFS projection for missing data handling
+fs_projected = fs.project(target_n=50)
+
+# Custom weight vector
+fs.theta(lambda n: my_weights(n))
+
+# Batch computation (uses Achaz internally)
+diversity.diversity_stats_fast(hm, population="pop1")
+```
+
 ## Loading Data
 
 ```python
