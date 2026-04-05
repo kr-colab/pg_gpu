@@ -287,7 +287,7 @@ Example Workflow
 
    # Inspect missing data
    summary = h.summarize_missing_data()
-   print(f"Missing: {summary['fraction_missing']:.1%}")
+   print(f"Missing: {summary['missing_freq_overall']:.1%}")
 
    # Filter extreme missingness
    h = h.filter_variants_by_missing(max_missing_freq=0.5)
