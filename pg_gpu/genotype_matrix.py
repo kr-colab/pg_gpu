@@ -240,19 +240,27 @@ class GenotypeMatrix:
         hap = hap_matrix.haplotypes
         xp = cp if isinstance(hap, cp.ndarray) else np
 
-        # pair consecutive haplotypes
         h1 = hap[0::2]  # even indices
         h2 = hap[1::2]  # odd indices
+        n_ind = h1.shape[0]
+        n_var = h1.shape[1]
 
-        # handle missing: if either haplotype is missing, genotype is missing
+        # Chunk over variants to avoid OOM from boolean intermediates
+        geno = xp.empty((n_ind, n_var), dtype=xp.int8)
         if xp is cp:
-            missing = (h1 < 0) | (h2 < 0)
-            geno = (xp.maximum(h1, 0) + xp.maximum(h2, 0)).astype(xp.int8)
-            geno[missing] = -1
+            free_mem = cp.cuda.Device().mem_info[0]
+            # Each variant needs ~4 * n_ind bytes for intermediates
+            chunk = max(1, int(free_mem * 0.3 / (n_ind * 4)))
         else:
-            missing = (h1 < 0) | (h2 < 0)
-            geno = (np.maximum(h1, 0) + np.maximum(h2, 0)).astype(np.int8)
-            geno[missing] = -1
+            chunk = n_var
+
+        for vs in range(0, n_var, chunk):
+            ve = min(vs + chunk, n_var)
+            c1 = h1[:, vs:ve]
+            c2 = h2[:, vs:ve]
+            missing = (c1 < 0) | (c2 < 0)
+            geno[:, vs:ve] = (xp.maximum(c1, 0) + xp.maximum(c2, 0)).astype(xp.int8)
+            geno[:, vs:ve][missing] = -1
 
         # remap sample_sets: haplotype indices -> individual indices
         new_sample_sets = None

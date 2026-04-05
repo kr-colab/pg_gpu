@@ -2,24 +2,26 @@
 
 Issues identified from full-arm Ag1000G benchmarking (3R: 10.9M variants x 2940 haplotypes).
 
-## Critical: xpehh regression (0.1x vs allel)
+## FIXED: xpehh regression
 
-`selection.xpehh` uses `_ihh_scan_gpu` which sizes histograms to `n_variants` (10.9M).
-This makes each chunk only ~46 variants, resulting in 237K kernel launches.
-`ihs` avoids this via a binary `_ihh01_scan_gpu` path. xpehh needs the same
-optimization or a capped histogram size.
+Capped histogram size at 50K variants (was n_variants). Now 1.7x faster
+than allel at full-arm scale (279s vs 485s, was 4085s).
 
-- File: `pg_gpu/selection.py`, `_ihh_scan_gpu()` line ~1466
-- Impact: 4085s vs 485s (allel), 8x slower
+## FIXED: GenotypeMatrix construction OOM
 
-## OOM: GenotypeMatrix construction at full-arm scale
+Chunked diploid conversion over variant axis. Now builds in 4.8s at
+full-arm scale.
 
-`GenotypeMatrix.from_haplotype_matrix()` creates boolean intermediates
-(h1 < 0) | (h2 < 0) that OOM when haplotype matrix is already on GPU.
-Blocks: grm, ibs, pairwise_diffs, dist_var.
+## OOM: grm, ibs, pairwise_diffs, dist_var at full-arm scale
 
-- File: `pg_gpu/genotype_matrix.py`, `from_haplotype_matrix()` line ~249
-- Fix: chunk the diploid conversion over the variant axis
+These functions create float64 intermediates of the full genotype/haplotype
+matrix (n_ind x n_var in float64 = ~16GB). Each needs chunked computation
+over the variant axis.
+
+- `relatedness.grm()`: casts to float64 for frequency centering
+- `relatedness.ibs()`: creates float64 difference matrix
+- `distance_stats.pairwise_diffs_haploid()`: float64 for hamming distance
+- `distance_stats.dist_var()`: calls pairwise_diffs
 
 ## OOM: randomized_pca at full-arm scale
 

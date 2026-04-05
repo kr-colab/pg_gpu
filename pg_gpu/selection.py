@@ -1403,7 +1403,7 @@ def _ihh01_scan_hist_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
     n_pairs = (n_haplotypes * (n_haplotypes - 1)) // 2
 
     if max_ssl_cap is None:
-        max_ssl_cap = n_variants
+        max_ssl_cap = min(n_variants, 50_000)
     hist_size = min(max_ssl_cap + 1, n_variants + 1)
 
     pair_j, pair_k = _get_pair_indices(n_haplotypes)
@@ -1477,7 +1477,8 @@ def _ihh_scan_gpu(h, gaps, min_ehh=0.05, include_edges=False,
     min_ehh : float
     include_edges : bool
     max_ssl_cap : int or None
-        Maximum SSL tracked in histograms. If None, uses n_variants (exact).
+        Maximum SSL tracked in histograms. If None, caps at 50K variants
+        (shared haplotype segments rarely extend further in real data).
 
     Returns
     -------
@@ -1487,7 +1488,7 @@ def _ihh_scan_gpu(h, gaps, min_ehh=0.05, include_edges=False,
     n_pairs = (n_haplotypes * (n_haplotypes - 1)) // 2
 
     if max_ssl_cap is None:
-        max_ssl_cap = n_variants
+        max_ssl_cap = min(n_variants, 50_000)
     hist_size = min(max_ssl_cap + 1, n_variants + 1)
 
     pair_j, pair_k = _get_pair_indices(n_haplotypes)
