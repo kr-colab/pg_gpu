@@ -1278,8 +1278,6 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
     dict
         Keys: snn, dxy_min, gmin, dd1, dd2, dd_rank1, dd_rank2.
     """
-    from . import diversity
-
     dist_between, dist_within1, dist_within2 = _pairwise_distance_matrix(
         haplotype_matrix, pop1, pop2, missing_data)
     n1, n2 = dist_between.shape
@@ -1314,11 +1312,11 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
     rank1 = float(cp.mean((within1 <= min_dxy_gpu).astype(cp.float64)).get()) if len(within1) > 0 else float('nan')
     rank2 = float(cp.mean((within2 <= min_dxy_gpu).astype(cp.float64)).get()) if len(within2) > 0 else float('nan')
 
-    # dd
-    pi1 = diversity.pi(haplotype_matrix, population=pop1,
-                       span_normalize=False, missing_data=missing_data)
-    pi2 = diversity.pi(haplotype_matrix, population=pop2,
-                       span_normalize=False, missing_data=missing_data)
+    # dd: compute pi from within-pop distance matrices directly
+    # pi = mean of upper triangle of within-pop distance matrix
+    # (each entry is raw Hamming distance; pi = mean pairwise diffs)
+    pi1 = float(cp.mean(within1).get()) if len(within1) > 0 else 0.0
+    pi2 = float(cp.mean(within2).get()) if len(within2) > 0 else 0.0
 
     return {
         'snn': snn_val,
