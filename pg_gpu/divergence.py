@@ -1005,10 +1005,9 @@ def _resolve_distance_matrices(haplotype_matrix, pop1, pop2,
     -------
     dist_between, dist_within1, dist_within2 : cupy.ndarray
     """
-    n1 = len(_get_population_indices(haplotype_matrix, pop1))
-    n2 = len(_get_population_indices(haplotype_matrix, pop2))
-
     if distance_matrices is not None:
+        n1 = len(_get_population_indices(haplotype_matrix, pop1))
+        n2 = len(_get_population_indices(haplotype_matrix, pop2))
         db, dw1, dw2 = distance_matrices
         if db.shape != (n1, n2):
             raise ValueError(
@@ -1345,14 +1344,13 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix, pop1, pop2, missing_data)
     n1, n2 = dist_between.shape
 
-    min_dxy = float(cp.min(dist_between).get())
+    min_dxy_gpu = cp.min(dist_between)
+    min_dxy = float(min_dxy_gpu.get())
     mean_dxy = float(cp.mean(dist_between).get())
 
     snn_val = (_snn_one_pop(dist_within1, dist_between)
                + _snn_one_pop(dist_within2, dist_between.T)) / (n1 + n2)
 
-    # dd_rank (GPU)
-    min_dxy_gpu = cp.min(dist_between)
     idx1 = cp.triu_indices(n1, k=1)
     within1 = dist_within1[idx1]
     idx2 = cp.triu_indices(n2, k=1)
@@ -1360,9 +1358,6 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
     rank1 = float(cp.mean((within1 <= min_dxy_gpu).astype(cp.float64)).get()) if len(within1) > 0 else float('nan')
     rank2 = float(cp.mean((within2 <= min_dxy_gpu).astype(cp.float64)).get()) if len(within2) > 0 else float('nan')
 
-    # dd: compute pi from within-pop distance matrices directly
-    # pi = mean of upper triangle of within-pop distance matrix
-    # (each entry is raw Hamming distance; pi = mean pairwise diffs)
     pi1 = float(cp.mean(within1).get()) if len(within1) > 0 else 0.0
     pi2 = float(cp.mean(within2).get()) if len(within2) > 0 else 0.0
 
