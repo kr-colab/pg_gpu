@@ -14,23 +14,25 @@ Every standard theta estimator can be written as a weighted sum of the SFS:
 
 .. math::
 
-   \hat{\theta}_\omega = \frac{1}{\sum_i \omega_i} \sum_{i=1}^{n-1} \omega_i \cdot i \cdot \xi_i
+   \hat{\theta}_w = \sum_{i=1}^{n-1} w_i \cdot \xi_i
 
 where :math:`\xi_i` is the number of variants with derived allele count
-:math:`i` in a sample of :math:`n` haplotypes, and :math:`\omega_i` is a
-weight vector specific to each estimator.
+:math:`i` in a sample of :math:`n` haplotypes, and :math:`w_i` is a
+weight vector specific to each estimator. The weight vectors in pg_gpu
+incorporate all normalization factors (sample size corrections, frequency
+weighting) so that theta is simply a dot product of weights and SFS counts.
 
 Different weight vectors recover different estimators:
 
-==================== ========================== ====================
-Estimator            Weight :math:`\omega_i`    Reference
-==================== ========================== ====================
-Watterson's theta    :math:`1`                  Watterson 1975
-Pi (nuc. diversity)  :math:`i(n-i)/\binom{n}{2}` Tajima 1983
-Theta H              :math:`i^2/\binom{n}{2}`   Fay & Wu 2000
-Theta L              :math:`i`                  Zeng et al. 2006
-Eta1 (singletons)    :math:`\delta_{i,1}`       Fu & Li 1993
-==================== ========================== ====================
+======================== ============================================= ====================
+Estimator                Weight :math:`w_i`                            Reference
+======================== ============================================= ====================
+Watterson's theta        :math:`1 / a_1` where :math:`a_1 = \sum 1/j` Watterson 1975
+Pi (nuc. diversity)      :math:`2i(n-i) / n(n-1)`                     Tajima 1983
+Theta H                  :math:`2i^2 / n(n-1)`                        Fay & Wu 2000
+Theta L                  :math:`i / (n-1)`                             Zeng et al. 2006
+Eta1 (singletons)        :math:`\delta_{i,1} / a_1`                   Fu & Li 1993
+======================== ============================================= ====================
 
 Neutrality tests are contrasts between two estimators:
 

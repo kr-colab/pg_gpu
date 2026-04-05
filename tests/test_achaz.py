@@ -260,6 +260,55 @@ class TestNeutralModelValidation:
         assert abs(mean_d) < 0.5, f"Mean Tajima's D = {mean_d:.3f}"
 
 
+class TestEdgeCases:
+    """Test edge cases: small n, no segregating sites, etc."""
+
+    def test_n_equals_2(self):
+        """Minimum viable sample size."""
+        hap = np.array([[0, 1, 0], [1, 0, 1]], dtype=np.int8)
+        pos = np.array([100, 200, 300], dtype=np.int32)
+        hm = HaplotypeMatrix(hap, pos)
+        fs = FrequencySpectrum(hm)
+        assert np.isfinite(fs.theta('pi'))
+        assert np.isfinite(fs.theta('watterson'))
+        # Tajima's D needs S >= 3; with 3 variants and n=2,
+        # all have dac=1, so S=3 if all segregating
+        d = fs.tajimas_d()
+        assert np.isfinite(d) or np.isnan(d)  # either is acceptable
+
+    def test_no_segregating_sites(self):
+        """All sites monomorphic."""
+        hap = np.zeros((10, 50), dtype=np.int8)
+        pos = np.arange(50, dtype=np.int32)
+        hm = HaplotypeMatrix(hap, pos)
+        fs = FrequencySpectrum(hm)
+        assert fs.n_segregating == 0
+        assert fs.theta('pi') == 0.0
+        assert fs.theta('watterson') == 0.0
+        assert np.isnan(fs.tajimas_d())
+
+    def test_single_segregating_site(self):
+        """Only one segregating site."""
+        hap = np.zeros((10, 50), dtype=np.int8)
+        hap[0, 25] = 1  # one singleton
+        pos = np.arange(50, dtype=np.int32)
+        hm = HaplotypeMatrix(hap, pos)
+        fs = FrequencySpectrum(hm)
+        assert fs.n_segregating == 1
+        assert fs.theta('pi') > 0
+        assert np.isnan(fs.tajimas_d())  # S < 3
+
+    def test_projection_to_n2(self):
+        """Project down to minimum sample size."""
+        hap = np.random.randint(0, 2, (20, 100), dtype=np.int8)
+        pos = np.arange(100, dtype=np.int32)
+        hm = HaplotypeMatrix(hap, pos)
+        fs = FrequencySpectrum(hm)
+        proj = fs.project(2)
+        assert proj.n_max == 2
+        assert np.isfinite(proj.theta('pi'))
+
+
 class TestMissingData:
     """Test behavior with missing data."""
 
