@@ -222,19 +222,23 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
         return 0.0
 
 
-def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
+def fst_weir_cockerham(haplotype_matrix,
                        pop1: Union[str, list],
                        pop2: Union[str, list],
                        missing_data: str = 'include') -> float:
     """
     Compute Weir & Cockerham's (1984) FST estimator.
 
-    This is the method of moments estimator that accounts for sampling variance.
+    This is the method of moments estimator that accounts for sampling
+    variance. When given diploid data (HaplotypeMatrix with paired
+    haplotypes or GenotypeMatrix), computes all three variance components
+    (a, b, c) including within-individual heterozygosity.
 
     Parameters
     ----------
-    haplotype_matrix : HaplotypeMatrix
-        The haplotype data
+    haplotype_matrix : HaplotypeMatrix or GenotypeMatrix
+        The haplotype or genotype data. For HaplotypeMatrix, consecutive
+        haplotype pairs are treated as diploid individuals.
     pop1 : str or list
         First population
     pop2 : str or list
@@ -248,72 +252,106 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
     float
         Weir & Cockerham's FST estimate
     """
-    # pairwise uses same ratio-of-sums as include for W-C
+    from .genotype_matrix import GenotypeMatrix
+
     if missing_data == 'pairwise':
         missing_data = 'include'
 
-    # Get population indices
+    if hasattr(haplotype_matrix, 'device') and haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
 
-    # Ensure data is on GPU if available
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
+    hap = haplotype_matrix.haplotypes if isinstance(haplotype_matrix, HaplotypeMatrix) else None
+    geno = haplotype_matrix.genotypes if isinstance(haplotype_matrix, GenotypeMatrix) else None
 
-    # Get haplotype data
-    pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
-    pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
+    if hap is not None:
+        pop1_haps = hap[pop1_idx, :]
+        pop2_haps = hap[pop2_idx, :]
 
-    # Handle missing data
-    if missing_data == 'exclude':
-        # Only use sites with no missing data
-        valid_sites = cp.all(pop1_haps >= 0, axis=0) & cp.all(pop2_haps >= 0, axis=0)
-        if not cp.any(valid_sites):
-            return 0.0
-        pop1_haps = pop1_haps[:, valid_sites]
-        pop2_haps = pop2_haps[:, valid_sites]
+        if missing_data == 'exclude':
+            valid_sites = cp.all(pop1_haps >= 0, axis=0) & cp.all(pop2_haps >= 0, axis=0)
+            if not cp.any(valid_sites):
+                return 0.0
+            pop1_haps = pop1_haps[:, valid_sites]
+            pop2_haps = pop2_haps[:, valid_sites]
 
-    # Get allele counts and frequencies from non-missing data per site
-    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
-    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
+        # Allele counts from haplotypes
+        pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
+        pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
+
+        # Build diploid genotypes for heterozygosity (pair consecutive haplotypes)
+        n1_dip = len(pop1_idx) // 2
+        n2_dip = len(pop2_idx) // 2
+        if n1_dip > 0 and n2_dip > 0:
+            # Compute per-site observed het for each population
+            h1_a = pop1_haps[0::2, :]  # first allele
+            h1_b = pop1_haps[1::2, :]  # second allele
+            valid1 = (h1_a >= 0) & (h1_b >= 0)
+            het1 = (h1_a != h1_b) & valid1
+            n_called1 = cp.sum(valid1, axis=0).astype(cp.float64)
+            h_bar1 = cp.where(n_called1 > 0, cp.sum(het1, axis=0).astype(cp.float64) / n_called1, 0.0)
+
+            h2_a = pop2_haps[0::2, :]
+            h2_b = pop2_haps[1::2, :]
+            valid2 = (h2_a >= 0) & (h2_b >= 0)
+            het2 = (h2_a != h2_b) & valid2
+            n_called2 = cp.sum(valid2, axis=0).astype(cp.float64)
+            h_bar2 = cp.where(n_called2 > 0, cp.sum(het2, axis=0).astype(cp.float64) / n_called2, 0.0)
+
+            # Use diploid sample sizes for W-C (number of individuals, not haplotypes)
+            n1 = n_called1
+            n2 = n_called2
+        else:
+            # Haploid fallback: no diploid structure available
+            n1 = pop1_n.astype(cp.float64)
+            n2 = pop2_n.astype(cp.float64)
+            h_bar1 = cp.zeros_like(n1)
+            h_bar2 = cp.zeros_like(n2)
+            n1_dip = 0
+            n2_dip = 0
+    else:
+        # GenotypeMatrix path
+        pop1_geno = geno[pop1_idx, :]
+        pop2_geno = geno[pop2_idx, :]
+        raise NotImplementedError("GenotypeMatrix path for W-C FST not yet implemented")
+
     pop1_counts = pop1_counts.astype(cp.float64)
     pop2_counts = pop2_counts.astype(cp.float64)
-    n1 = pop1_n.astype(cp.float64)
-    n2 = pop2_n.astype(cp.float64)
+    n1 = n1.astype(cp.float64)
+    n2 = n2.astype(cp.float64)
 
-    pop1_freqs = cp.where(n1 > 0, pop1_counts / n1, 0.0)
-    pop2_freqs = cp.where(n2 > 0, pop2_counts / n2, 0.0)
+    # Allele frequencies (using diploid sample sizes = n_individuals)
+    pop1_freqs = cp.where(n1 > 0, pop1_counts / (2.0 * n1), 0.0)
+    pop2_freqs = cp.where(n2 > 0, pop2_counts / (2.0 * n2), 0.0)
 
-    # Number of populations
-    r = 2
-
-    # Total sample size and average sample size (in haplotypes)
+    r = 2.0
     n_total = n1 + n2
-    n_bar = n_total / float(r)
+    n_bar = n_total / r
 
-    # Sample size scaling factor n_C (per site)
-    # n_C = (n_total - sum(n_i^2)/n_total) / (r - 1)
+    # n_C: sample size correction factor
     nc = cp.zeros_like(n_total)
     valid = n_total > 0
     nc[valid] = (n_total[valid] - (n1[valid]**2 + n2[valid]**2) / n_total[valid]) / (r - 1)
 
-    # Average allele frequency weighted by sample size
+    # Weighted average allele frequency
     p_bar = cp.zeros_like(pop1_freqs)
     valid = n_total > 0
     p_bar[valid] = (n1[valid] * pop1_freqs[valid] + n2[valid] * pop2_freqs[valid]) / n_total[valid]
 
     # Sample variance of allele frequencies
-    # s^2 = sum(n_i * (p_i - p_bar)^2) / ((r-1) * n_bar)
     s_squared = cp.zeros_like(p_bar)
     valid = n_bar > 0
     s_squared[valid] = (n1[valid] * (pop1_freqs[valid] - p_bar[valid])**2 +
                        n2[valid] * (pop2_freqs[valid] - p_bar[valid])**2) / ((r - 1) * n_bar[valid])
 
-    # For haploid data, observed heterozygosity h_bar = 0
-    # This simplifies the W-C variance components:
-    #   a = (n_bar/n_C) * (s^2 - (1/(n_bar-1)) * (p_bar*(1-p_bar) - (r-1)*s^2/r))
-    #   b = (n_bar/(n_bar-1)) * (p_bar*(1-p_bar) - (r-1)*s^2/r)
-    #   c = 0
+    # Average observed heterozygosity weighted by sample size
+    h_bar = cp.zeros_like(p_bar)
+    valid = n_total > 0
+    h_bar[valid] = (n1[valid] * h_bar1[valid] + n2[valid] * h_bar2[valid]) / n_total[valid]
+
+    # W-C variance components (Eqs 2, 3, 4 from Weir & Cockerham 1984)
     a = cp.zeros_like(p_bar)
     b = cp.zeros_like(p_bar)
     c = cp.zeros_like(p_bar)
@@ -323,22 +361,20 @@ def fst_weir_cockerham(haplotype_matrix: HaplotypeMatrix,
     s2 = s_squared[valid]
     nb = n_bar[valid]
     ncc = nc[valid]
+    hb = h_bar[valid]
 
-    a[valid] = (nb / ncc) * (s2 - (1.0 / (nb - 1)) * (pq - (r - 1) * s2 / r))
-    b[valid] = (nb / (nb - 1)) * (pq - (r - 1) * s2 / r)
+    a[valid] = (nb / ncc) * (s2 - (1.0 / (nb - 1)) * (pq - (r - 1) * s2 / r - hb / 4.0))
+    b[valid] = (nb / (nb - 1)) * (pq - (r - 1) * s2 / r - (2 * nb - 1) * hb / (4.0 * nb))
+    c[valid] = hb / 2.0
 
-    # Calculate FST for each locus - only for sites with sufficient data
-    valid_mask = ((a + b + c) > 0) & (n1 > 0) & (n2 > 0)
-    fst_per_snp = cp.zeros_like(a)
-    fst_per_snp[valid_mask] = a[valid_mask] / (a[valid_mask] + b[valid_mask] + c[valid_mask])
-
-    # Global FST estimate (ratio of averages)
+    # Global FST = sum(a) / sum(a + b + c)
+    valid_mask = (n1 > 0) & (n2 > 0)
     if cp.any(valid_mask):
-        global_fst = float(cp.sum(a[valid_mask]).get() /
-                          cp.sum(a[valid_mask] + b[valid_mask] + c[valid_mask]).get())
-        return global_fst
-    else:
-        return 0.0
+        sum_a = float(cp.sum(a[valid_mask]).get())
+        sum_abc = float(cp.sum((a + b + c)[valid_mask]).get())
+        if sum_abc > 0:
+            return sum_a / sum_abc
+    return 0.0
 
 
 def fst_nei(haplotype_matrix: HaplotypeMatrix,
