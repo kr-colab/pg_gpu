@@ -124,6 +124,14 @@ Divergence Statistics
    # Population Branch Statistic (3 populations)
    pbs_vals = divergence.pbs(h, 'pop1', 'pop2', 'pop3', window_size=50)
 
+   # Distance-based two-population statistics
+   snn = divergence.snn(h, 'pop1', 'pop2')              # Hudson (2000)
+   dmin = divergence.dxy_min(h, 'pop1', 'pop2')          # Geneva et al. (2015)
+   g = divergence.gmin(h, 'pop1', 'pop2')                # Geneva et al. (2015)
+   dd1, dd2 = divergence.dd(h, 'pop1', 'pop2')           # Schrider et al. (2018)
+   r1, r2 = divergence.dd_rank(h, 'pop1', 'pop2')        # Schrider et al. (2018)
+   zx_val = divergence.zx(h, 'pop1', 'pop2')             # Schrider et al. (2018)
+
 Selection Scans
 ~~~~~~~~~~~~~~~
 

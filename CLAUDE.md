@@ -68,7 +68,7 @@ pixi run python examples/performance_comparison.py
    - Accessible site masks from BED files (non-destructive property-based filtering)
 2. **GPU Statistics Modules**:
    - `pg_gpu/diversity.py`: Within-population diversity (pi, theta_w, theta_h, theta_l, tajimas_d, fay_wus_h, etc.)
-   - `pg_gpu/divergence.py`: Between-population divergence (fst_hudson, fst_weir_cockerham, fst_nei, dxy, da, pbs)
+   - `pg_gpu/divergence.py`: Between-population divergence (fst_hudson, fst_weir_cockerham, fst_nei, dxy, da, pbs, snn, dxy_min, gmin, dd, dd_rank, zx)
    - `pg_gpu/selection.py`: Selection scans (ihs, nsl, xpehh, xpnsl, garud_h, ehh_decay)
    - `pg_gpu/sfs.py`: Site frequency spectra (sfs, joint_sfs, folded variants, scaling)
    - `pg_gpu/ld_statistics.py`: Two-locus LD statistics (dd, dz, pi2)

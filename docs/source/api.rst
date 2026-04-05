@@ -130,6 +130,16 @@ Convenience Functions
 .. autofunction:: pg_gpu.divergence.pairwise_fst
 .. autofunction:: pg_gpu.divergence.pbs
 
+Distance-Based Two-Population Statistics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autofunction:: pg_gpu.divergence.snn
+.. autofunction:: pg_gpu.divergence.dxy_min
+.. autofunction:: pg_gpu.divergence.gmin
+.. autofunction:: pg_gpu.divergence.dd
+.. autofunction:: pg_gpu.divergence.dd_rank
+.. autofunction:: pg_gpu.divergence.zx
+
 Selection Scan Statistics
 -------------------------
 
