@@ -215,7 +215,8 @@ def main():
         allel_fn(['h1'], lambda: allel.haplotype_diversity(_allel_cache['h1']))))
     benchmarks.append(("diversity.heterozygosity_expected",
         lambda: diversity.heterozygosity_expected(hm, population="pop1"),
-        allel_fn(['ac1'], lambda: np.mean(allel.heterozygosity_expected(_allel_cache['ac1'].to_frequencies(), ploidy=2)))))
+        allel_fn(['g'], lambda: np.mean(allel.heterozygosity_expected(
+            _allel_cache['g'].count_alleles(subpop=pop1_dip).to_frequencies(), ploidy=2)))))
     benchmarks.append(("diversity.heterozygosity_observed",
         lambda: diversity.heterozygosity_observed(hm, population="pop1"),
         allel_fn(['g'], lambda: np.mean(allel.heterozygosity_observed(_allel_cache['g'].subset(sel1=list(range(N_DIP_PER_POP))))))))
@@ -224,7 +225,7 @@ def main():
         allel_fn(['g'], lambda: np.nanmean(allel.inbreeding_coefficient(_allel_cache['g'].subset(sel1=list(range(N_DIP_PER_POP))))))))
     benchmarks.append(("diversity.allele_freq_spectrum",
         lambda: diversity.allele_frequency_spectrum(hm, population="pop1"),
-        allel_fn(['ac1'], lambda: allel.sfs(_allel_cache['ac1'][:, 1]))))
+        allel_fn(['g'], lambda: allel.sfs(_allel_cache['g'].count_alleles(subpop=pop1_dip)[:, 1]))))
     benchmarks.append(("diversity.segregating_sites",
         lambda: diversity.segregating_sites(hm, population="pop1"),
         None))
@@ -350,16 +351,22 @@ def main():
     benchmarks.append(("windowed pi+tw+td (50kb)",
         lambda: windowed_analysis(hm, window_size=50_000,
             statistics=["pi", "theta_w", "tajimas_d"]),
-        allel_fn(['pos', 'ac'], lambda: (
-            allel.windowed_diversity(_allel_cache['pos'], _allel_cache['ac'], size=50_000, start=win_start, stop=win_stop),
-            allel.windowed_watterson_theta(_allel_cache['pos'], _allel_cache['ac'], size=50_000, start=win_start, stop=win_stop),
-            allel.windowed_tajima_d(_allel_cache['pos'], _allel_cache['ac'], size=50_000, start=win_start, stop=win_stop)))))
+        allel_fn(['pos', 'g'], lambda: (
+            allel.windowed_diversity(_allel_cache['pos'], _allel_cache['g'].count_alleles(), size=50_000, start=win_start, stop=win_stop),
+            allel.windowed_watterson_theta(_allel_cache['pos'], _allel_cache['g'].count_alleles(), size=50_000, start=win_start, stop=win_stop),
+            allel.windowed_tajima_d(_allel_cache['pos'], _allel_cache['g'].count_alleles(), size=50_000, start=win_start, stop=win_stop)))))
     benchmarks.append(("windowed fst+dxy (50kb)",
         lambda: windowed_analysis(hm, window_size=50_000,
             statistics=["fst", "dxy"], populations=["pop1", "pop2"]),
-        allel_fn(['pos', 'ac1', 'ac2'], lambda: (
-            allel.windowed_hudson_fst(_allel_cache['pos'], _allel_cache['ac1'], _allel_cache['ac2'], size=50_000, start=win_start, stop=win_stop),
-            allel.windowed_divergence(_allel_cache['pos'], _allel_cache['ac1'], _allel_cache['ac2'], size=50_000, start=win_start, stop=win_stop)))))
+        allel_fn(['pos', 'g'], lambda: (
+            allel.windowed_hudson_fst(_allel_cache['pos'],
+                _allel_cache['g'].count_alleles(subpop=pop1_dip),
+                _allel_cache['g'].count_alleles(subpop=pop2_dip),
+                size=50_000, start=win_start, stop=win_stop),
+            allel.windowed_divergence(_allel_cache['pos'],
+                _allel_cache['g'].count_alleles(subpop=pop1_dip),
+                _allel_cache['g'].count_alleles(subpop=pop2_dip),
+                size=50_000, start=win_start, stop=win_stop)))))
     benchmarks.append(("windowed all 7 (100kb)",
         lambda: windowed_analysis(hm, window_size=100_000,
             statistics=["pi", "theta_w", "tajimas_d", "fst", "fst_wc", "dxy", "da"],
