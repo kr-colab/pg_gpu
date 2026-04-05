@@ -90,19 +90,6 @@ pixi run python examples/performance_comparison.py
 - **All public functions return NumPy arrays** (not CuPy). GPU stays internal.
 - **Vectorized Algorithms**: All diversity and divergence functions use fully vectorized GPU operations (no Python loops over variants)
 
-### GPU Performance Patterns
-
-These patterns are used consistently across pg_gpu and should be followed in new code:
-
-- **Stay on GPU until the final result**: Intermediate computations use cupy throughout. Only call `.get()` at the end to return a numpy scalar or array. Never bounce data between CPU and GPU mid-computation.
-- **Chunk over the variant axis, not the sample axis**: GPU kernels parallelize well across samples (matrix multiply rows) but large variant counts cause OOM. Use `_memutil.estimate_variant_chunk_size()` to determine safe chunk sizes, iterate over variant chunks, and accumulate results (e.g., gram matrix, allele counts) across chunks.
-- **Accept both numpy and cupy input**: Shared helpers like `_pairwise_diffs_matrix_gpu` and `chunked_dac_and_n` detect input type and transfer chunks to GPU on-the-fly when given numpy. This avoids requiring the full matrix on GPU.
-- **Avoid full-matrix GPU transfer when only a subset is needed**: For population-specific stats, extract the population subset (numpy fancy index on CPU), then chunk-transfer the subset to GPU. Don't `transfer_to_gpu()` the full matrix when only a few hundred haplotypes are needed.
-- **Use `cp.asarray()` for CPU→GPU, `.get()` for GPU→CPU**: `cp.asarray()` on a cupy array is a no-op. On numpy it copies to GPU. Use `isinstance(x, np.ndarray)` to detect.
-- **Batch related statistics**: When multiple statistics share expensive intermediates (e.g., distance matrix, allele counts), provide a batch function (`distance_based_stats()`, `diversity_stats_fast()`) that computes the shared intermediate once.
-- **Cast pointer arithmetic to `long long` in CUDA kernels**: For arrays with >2^31 elements (e.g., 2940 haplotypes x 10M variants), `int` pointer arithmetic overflows. Always use `(long long)idx * stride` in RawKernel code.
-- **Free GPU memory between chunks**: Call `_memutil.free_gpu_pool()` after deleting large temporaries to release memory back to the device for the next chunk.
-
 ### Data Flow
 
 1. Load haplotype data → HaplotypeMatrix (from VCF, tree sequence, or Zarr)
