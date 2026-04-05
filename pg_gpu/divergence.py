@@ -230,15 +230,14 @@ def fst_weir_cockerham(haplotype_matrix,
     Compute Weir & Cockerham's (1984) FST estimator.
 
     This is the method of moments estimator that accounts for sampling
-    variance. When given diploid data (HaplotypeMatrix with paired
-    haplotypes or GenotypeMatrix), computes all three variance components
-    (a, b, c) including within-individual heterozygosity.
+    variance. Computes all three variance components (a, b, c) including
+    within-individual heterozygosity from paired haplotypes.
 
     Parameters
     ----------
-    haplotype_matrix : HaplotypeMatrix or GenotypeMatrix
-        The haplotype or genotype data. For HaplotypeMatrix, consecutive
-        haplotype pairs are treated as diploid individuals.
+    haplotype_matrix : HaplotypeMatrix
+        Haplotype data. Consecutive haplotype pairs are treated as
+        diploid individuals for the heterozygosity component.
     pop1 : str or list
         First population
     pop2 : str or list
@@ -252,8 +251,6 @@ def fst_weir_cockerham(haplotype_matrix,
     float
         Weir & Cockerham's FST estimate
     """
-    from .genotype_matrix import GenotypeMatrix
-
     if missing_data == 'pairwise':
         missing_data = 'include'
 
@@ -263,64 +260,41 @@ def fst_weir_cockerham(haplotype_matrix,
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
 
-    hap = haplotype_matrix.haplotypes if isinstance(haplotype_matrix, HaplotypeMatrix) else None
-    geno = haplotype_matrix.genotypes if isinstance(haplotype_matrix, GenotypeMatrix) else None
+    hap = haplotype_matrix.haplotypes
+    pop1_haps = hap[pop1_idx, :]
+    pop2_haps = hap[pop2_idx, :]
 
-    if hap is not None:
-        pop1_haps = hap[pop1_idx, :]
-        pop2_haps = hap[pop2_idx, :]
+    if missing_data == 'exclude':
+        valid_sites = cp.all(pop1_haps >= 0, axis=0) & cp.all(pop2_haps >= 0, axis=0)
+        if not cp.any(valid_sites):
+            return 0.0
+        pop1_haps = pop1_haps[:, valid_sites]
+        pop2_haps = pop2_haps[:, valid_sites]
 
-        if missing_data == 'exclude':
-            valid_sites = cp.all(pop1_haps >= 0, axis=0) & cp.all(pop2_haps >= 0, axis=0)
-            if not cp.any(valid_sites):
-                return 0.0
-            pop1_haps = pop1_haps[:, valid_sites]
-            pop2_haps = pop2_haps[:, valid_sites]
-
-        # Allele counts from haplotypes
-        pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
-        pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
-
-        # Build diploid genotypes for heterozygosity (pair consecutive haplotypes)
-        n1_dip = len(pop1_idx) // 2
-        n2_dip = len(pop2_idx) // 2
-        if n1_dip > 0 and n2_dip > 0:
-            # Compute per-site observed het for each population
-            h1_a = pop1_haps[0::2, :]  # first allele
-            h1_b = pop1_haps[1::2, :]  # second allele
-            valid1 = (h1_a >= 0) & (h1_b >= 0)
-            het1 = (h1_a != h1_b) & valid1
-            n_called1 = cp.sum(valid1, axis=0).astype(cp.float64)
-            h_bar1 = cp.where(n_called1 > 0, cp.sum(het1, axis=0).astype(cp.float64) / n_called1, 0.0)
-
-            h2_a = pop2_haps[0::2, :]
-            h2_b = pop2_haps[1::2, :]
-            valid2 = (h2_a >= 0) & (h2_b >= 0)
-            het2 = (h2_a != h2_b) & valid2
-            n_called2 = cp.sum(valid2, axis=0).astype(cp.float64)
-            h_bar2 = cp.where(n_called2 > 0, cp.sum(het2, axis=0).astype(cp.float64) / n_called2, 0.0)
-
-            # Use diploid sample sizes for W-C (number of individuals, not haplotypes)
-            n1 = n_called1
-            n2 = n_called2
-        else:
-            # Haploid fallback: no diploid structure available
-            n1 = pop1_n.astype(cp.float64)
-            n2 = pop2_n.astype(cp.float64)
-            h_bar1 = cp.zeros_like(n1)
-            h_bar2 = cp.zeros_like(n2)
-            n1_dip = 0
-            n2_dip = 0
-    else:
-        # GenotypeMatrix path
-        pop1_geno = geno[pop1_idx, :]
-        pop2_geno = geno[pop2_idx, :]
-        raise NotImplementedError("GenotypeMatrix path for W-C FST not yet implemented")
-
+    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
+    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
     pop1_counts = pop1_counts.astype(cp.float64)
     pop2_counts = pop2_counts.astype(cp.float64)
-    n1 = n1.astype(cp.float64)
-    n2 = n2.astype(cp.float64)
+
+    # Compute per-site observed heterozygosity from paired haplotypes
+    def _pop_het(pop_haps):
+        ha = pop_haps[0::2, :]
+        hb = pop_haps[1::2, :]
+        valid = (ha >= 0) & (hb >= 0)
+        het = (ha != hb) & valid
+        n_called = cp.sum(valid, axis=0).astype(cp.float64)
+        h_bar = cp.where(n_called > 0,
+                         cp.sum(het, axis=0).astype(cp.float64) / n_called, 0.0)
+        return h_bar, n_called
+
+    if len(pop1_idx) >= 2 and len(pop2_idx) >= 2:
+        h_bar1, n1 = _pop_het(pop1_haps)
+        h_bar2, n2 = _pop_het(pop2_haps)
+    else:
+        n1 = pop1_n.astype(cp.float64)
+        n2 = pop2_n.astype(cp.float64)
+        h_bar1 = cp.zeros_like(n1)
+        h_bar2 = cp.zeros_like(n2)
 
     # Allele frequencies (using diploid sample sizes = n_individuals)
     pop1_freqs = cp.where(n1 > 0, pop1_counts / (2.0 * n1), 0.0)

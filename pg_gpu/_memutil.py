@@ -54,6 +54,7 @@ def estimate_fused_chunk_size(n_hap, memory_fraction=0.35):
 
 def free_gpu_pool():
     """Release unused GPU memory back to the device."""
+    cp.cuda.Stream.null.synchronize()
     cp.get_default_memory_pool().free_all_blocks()
 
 

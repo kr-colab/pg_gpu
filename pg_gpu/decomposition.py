@@ -306,9 +306,7 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
 
     # explained variance
     if isinstance(X, _DeferredPCA):
-        # total_var = trace(X @ X.T) / n_samples = sum of all squared values / n_samples
-        # We can get this from the gram matrix trace
-        gram = X.chunked_gram()
+        # Reuse gram from above (already computed for eigendecomposition)
         total_var = cp.trace(gram) / n_samples
     else:
         total_var = cp.sum(cp.var(X, axis=0))
