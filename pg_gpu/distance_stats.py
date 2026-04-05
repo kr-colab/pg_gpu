@@ -45,7 +45,6 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     diffs_mat : cupy.ndarray, float64, shape (n_hap, n_hap)
         Pairwise distance matrix on GPU.
     """
-    import numpy as np
     from ._memutil import estimate_variant_chunk_size
 
     n_hap, n_var = hap.shape

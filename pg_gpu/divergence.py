@@ -961,6 +961,29 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
 # Two-population distance-based statistics
 # ---------------------------------------------------------------------------
 
+def _snn_one_pop(within, between):
+    """Score one population block for Hudson's Snn on GPU.
+
+    For each haplotype, checks whether its nearest neighbor is within-pop
+    (score 1), between-pop (score 0), or tied (fractional score).
+    """
+    w = within.copy()
+    cp.fill_diagonal(w, cp.inf)
+    min_within = cp.min(w, axis=1)
+    min_between = cp.min(between, axis=1)
+
+    score = (min_within < min_between).astype(cp.float64)
+
+    tied = min_within == min_between
+    if cp.any(tied):
+        n_within_ties = cp.sum(w == min_within[:, None], axis=1)
+        n_between_ties = cp.sum(between == min_between[:, None], axis=1)
+        tie_score = n_within_ties / (n_within_ties + n_between_ties)
+        score = cp.where(tied, tie_score, score)
+
+    return float(cp.sum(score).get())
+
+
 def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
                                missing_data='include'):
     """Compute pairwise distance matrices between and within two populations.
@@ -985,7 +1008,7 @@ def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
-    all_idx = list(pop1_idx) + list(pop2_idx)
+    all_idx = pop1_idx + pop2_idx
     n1 = len(pop1_idx)
 
     # Extract population subset on whatever device the data lives on.
@@ -996,7 +1019,6 @@ def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     hap_sub = hap[all_idx, :]
 
     if missing_data == 'exclude':
-        import numpy as np
         xp = cp if isinstance(hap_sub, cp.ndarray) else np
         any_missing = xp.any(hap_sub < 0, axis=0)
         hap_sub = hap_sub[:, ~any_missing]
@@ -1037,26 +1059,6 @@ def snn(haplotype_matrix: HaplotypeMatrix,
     dist_between, dist_within1, dist_within2 = _pairwise_distance_matrix(
         haplotype_matrix, pop1, pop2, missing_data)
     n1, n2 = dist_between.shape
-
-    def _snn_one_pop(within, between):
-        """Vectorized Snn for one population block on GPU."""
-        w = within.copy()
-        cp.fill_diagonal(w, cp.inf)
-        min_within = cp.min(w, axis=1)
-        min_between = cp.min(between, axis=1)
-
-        # Nearest neighbor is within-pop: score = 1
-        score = (min_within < min_between).astype(cp.float64)
-
-        # Ties: score = n_within_ties / (n_within_ties + n_between_ties)
-        tied = min_within == min_between
-        if cp.any(tied):
-            n_within_ties = cp.sum(w == min_within[:, None], axis=1)
-            n_between_ties = cp.sum(between == min_between[:, None], axis=1)
-            tie_score = n_within_ties / (n_within_ties + n_between_ties)
-            score = cp.where(tied, tie_score, score)
-
-        return float(cp.sum(score).get())
 
     count = _snn_one_pop(dist_within1, dist_between)
     count += _snn_one_pop(dist_within2, dist_between.T)
@@ -1284,21 +1286,6 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
 
     min_dxy = float(cp.min(dist_between).get())
     mean_dxy = float(cp.mean(dist_between).get())
-
-    # Snn (GPU)
-    def _snn_one_pop(within, between):
-        w = within.copy()
-        cp.fill_diagonal(w, cp.inf)
-        min_w = cp.min(w, axis=1)
-        min_b = cp.min(between, axis=1)
-        score = (min_w < min_b).astype(cp.float64)
-        tied = min_w == min_b
-        if cp.any(tied):
-            nw = cp.sum(w == min_w[:, None], axis=1)
-            nb = cp.sum(between == min_b[:, None], axis=1)
-            tie_score = nw / (nw + nb)
-            score = cp.where(tied, tie_score, score)
-        return float(cp.sum(score).get())
 
     snn_val = (_snn_one_pop(dist_within1, dist_between)
                + _snn_one_pop(dist_within2, dist_between.T)) / (n1 + n2)
