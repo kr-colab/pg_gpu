@@ -997,6 +997,16 @@ def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     n2 = len(pop2_idx)
     n_total = n1 + n2
 
+    hap_sub = hap[all_idx, :]
+
+    if missing_data == 'exclude':
+        # Drop sites with any missing data across both populations
+        any_missing = cp.any(hap_sub < 0, axis=0)
+        complete = ~any_missing
+        hap_sub = hap_sub[:, complete]
+
+    n_var = hap_sub.shape[1]
+
     # Chunk over variants to build the distance matrix
     chunk_size = estimate_variant_chunk_size(n_total, bytes_per_element=8,
                                              n_intermediates=2)
@@ -1004,11 +1014,10 @@ def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     gram = cp.zeros((n_total, n_total), dtype=cp.float64)
     joint_valid = cp.zeros((n_total, n_total), dtype=cp.float64)
     row_sums = cp.zeros(n_total, dtype=cp.float64)
-    n_var = hap.shape[1]
 
     for start in range(0, n_var, chunk_size):
         end = min(start + chunk_size, n_var)
-        h_chunk = hap[all_idx, start:end]
+        h_chunk = hap_sub[:, start:end]
         v_chunk = (h_chunk >= 0).astype(cp.float64)
         x_chunk = cp.where(h_chunk >= 0, h_chunk, 0).astype(cp.float64)
         row_sums += cp.sum(x_chunk, axis=1)
@@ -1016,12 +1025,12 @@ def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
         joint_valid += v_chunk @ v_chunk.T
         del h_chunk, v_chunk, x_chunk
 
-    # Hamming distance: diffs_ij = sum_i + sum_j - 2 * gram_ij
+    # Raw Hamming distances: count of differing sites at jointly valid positions.
+    # For 'exclude' mode, joint_valid == n_var for all pairs (complete sites only).
+    # For 'include' mode, this is the raw count at non-missing sites per pair.
+    # Ratios (Gmin, dd, ddRank) and comparisons (Snn) are scale-invariant,
+    # so raw counts are appropriate.
     diffs = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
-
-    # Normalize by jointly valid sites (per-site average differences)
-    if missing_data != 'exclude':
-        diffs = cp.where(joint_valid > 0, diffs / joint_valid, 0.0) * n_var
     diffs_cpu = diffs.get()
 
     dist_between = diffs_cpu[:n1, n1:]

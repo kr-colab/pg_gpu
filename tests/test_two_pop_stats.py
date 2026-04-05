@@ -101,6 +101,41 @@ class TestDdRank:
         assert 0.0 <= r2 <= 1.0
 
 
+class TestMissingData:
+    def test_include_mode_with_missing(self):
+        """Stats should work with missing data in include mode."""
+        np.random.seed(42)
+        hap = np.random.randint(0, 2, (20, 100), dtype=np.int8)
+        hap[0, :10] = -1
+        hap[10, 20:30] = -1
+        pos = np.arange(100, dtype=np.int32)
+        hm = HaplotypeMatrix(hap, pos)
+        hm.sample_sets = {'p1': list(range(10)), 'p2': list(range(10, 20))}
+
+        assert np.isfinite(divergence.snn(hm, 'p1', 'p2'))
+        assert np.isfinite(divergence.dxy_min(hm, 'p1', 'p2'))
+        assert np.isfinite(divergence.gmin(hm, 'p1', 'p2'))
+        dd1, dd2 = divergence.dd(hm, 'p1', 'p2')
+        assert np.isfinite(dd1) and np.isfinite(dd2)
+        r1, r2 = divergence.dd_rank(hm, 'p1', 'p2')
+        assert 0 <= r1 <= 1 and 0 <= r2 <= 1
+
+    def test_exclude_mode(self):
+        """Exclude mode should drop incomplete sites."""
+        np.random.seed(42)
+        hap = np.random.randint(0, 2, (20, 100), dtype=np.int8)
+        hap[0, :10] = -1
+        pos = np.arange(100, dtype=np.int32)
+        hm = HaplotypeMatrix(hap, pos)
+        hm.sample_sets = {'p1': list(range(10)), 'p2': list(range(10, 20))}
+
+        val_include = divergence.snn(hm, 'p1', 'p2', missing_data='include')
+        val_exclude = divergence.snn(hm, 'p1', 'p2', missing_data='exclude')
+        # Both should be valid; may differ due to different site sets
+        assert np.isfinite(val_include)
+        assert np.isfinite(val_exclude)
+
+
 class TestZx:
     def test_finite(self, two_pop_hm):
         val = divergence.zx(two_pop_hm, 'pop1', 'pop2')
