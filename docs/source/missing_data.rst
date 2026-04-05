@@ -300,3 +300,42 @@ Example Workflow
    # Or use default include mode
    tajd = diversity.tajimas_d(h)
    fwh = diversity.fay_wus_h(h)
+
+Achaz Framework and SFS Projection
+-----------------------------------
+
+The :doc:`achaz_framework` provides an additional approach to missing data
+through SFS projection. When computing theta estimators from the site
+frequency spectrum, sites with different sample sizes can be handled in
+two ways:
+
+**Group by sample size (recommended default):** The ``FrequencySpectrum``
+class groups variants by their per-site sample size and applies
+sample-size-specific weight vectors to each group. This uses all available
+data without discarding any sites.
+
+**Hypergeometric projection:** Project all SFS contributions to a common
+sample size using the hypergeometric distribution (Gutenkunst et al. 2009).
+This is useful when a clean SFS at a single sample size is needed (e.g.,
+for demographic inference with moments or dadi, or for cross-population
+comparison at matched n).
+
+.. code-block:: python
+
+   from pg_gpu import FrequencySpectrum
+
+   fs = FrequencySpectrum(h, population="pop1")
+
+   # Group-by-n: uses all data (default)
+   pi_include = fs.theta("pi")
+
+   # Projection: suggest a target retaining 95% of sites
+   target_n = fs.suggest_projection_n(retain_fraction=0.95)
+   fs_proj = fs.project(target_n)
+   pi_proj = fs_proj.theta("pi")
+
+Simulation-based validation shows both approaches are unbiased under the
+standard neutral model at missing rates from 0--40%. The exclude strategy
+(``missing_data='exclude'``) is catastrophically biased above 1% missing
+in samples of 100 haplotypes. See ``debug/verify_missing_data_projection.py``
+for the full validation and figures.

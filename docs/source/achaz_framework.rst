@@ -96,26 +96,79 @@ Define your own estimator with any weight function:
 The weight function takes the sample size ``n`` and returns an array of
 length ``n + 1``. Only indices 1 through n-1 are used (segregating sites).
 
-SFS Projection
---------------
+Missing Data Strategies
+-----------------------
 
-For datasets with missing data (variable per-site sample sizes), project
-the SFS to a common sample size using hypergeometric sampling
-(`Gutenkunst et al. 2009 <https://doi.org/10.1371/journal.pgen.1000695>`_):
+When data contain missing genotypes (encoded as -1), different sites have
+different effective sample sizes. pg_gpu offers three strategies for
+handling this in theta estimation:
+
+**Group by sample size (default):** Variants are grouped by their per-site
+sample size and theta is estimated using sample-size-specific weights for
+each group, retaining all data without discarding any sites. This is the
+default ``missing_data='include'`` behavior.
 
 .. code-block:: python
 
-   # With missing data, sites have different sample sizes
-   fs = FrequencySpectrum(h, population="pop1", missing_data="include")
+   fs = FrequencySpectrum(h, missing_data="include")  # default
+   pi = fs.theta("pi")  # uses all sites with n_valid >= 2
 
-   # Project to a common sample size
-   fs_proj = fs.project(target_n=50)
+**Hypergeometric projection:** Each variant's SFS contribution is projected
+down to a common sample size using the hypergeometric distribution
+(`Gutenkunst et al. 2009 <https://doi.org/10.1371/journal.pgen.1000695>`_),
+producing a clean SFS at a single n at the cost of discarding sites with
+too few observations.
 
-   # All estimators now use the projected SFS
+.. code-block:: python
+
+   fs = FrequencySpectrum(h, missing_data="include")
+
+   # Let pg_gpu suggest a target that retains 95% of sites
+   target = fs.suggest_projection_n(retain_fraction=0.95)
+
+   # Project to the suggested sample size
+   fs_proj = fs.project(target)
    pi_proj = fs_proj.theta("pi")
 
-This enables principled cross-population comparison when populations have
-different amounts of missing data.
+**Exclude incomplete sites:** Only sites with zero missing data across all
+haplotypes are retained. At even modest missing rates in large samples this
+discards nearly all data and produces catastrophically biased estimates.
+Not recommended.
+
+.. code-block:: python
+
+   fs = FrequencySpectrum(h, missing_data="exclude")  # drops incomplete sites
+
+Simulation-based validation (``debug/verify_missing_data_projection.py``)
+shows that both the group-by-n and projection approaches are unbiased at
+all missing rates tested (0--40%), while the exclude strategy is
+catastrophically biased above 1% missing in a sample of 100 haplotypes.
+
+Choosing a Projection Target
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When projection is needed (e.g., for cross-population comparison at matched
+sample sizes, or as input to demographic inference tools like moments or
+dadi), use ``suggest_projection_n()`` to pick a target:
+
+.. code-block:: python
+
+   fs = FrequencySpectrum(h, missing_data="include")
+
+   # Retain 95% of segregating sites (default)
+   n95 = fs.suggest_projection_n(retain_fraction=0.95)
+
+   # More conservative: retain 99%
+   n99 = fs.suggest_projection_n(retain_fraction=0.99)
+
+   # Project and compute
+   fs_proj = fs.project(n95)
+   stats = fs_proj.all_thetas()
+
+The method picks the largest n such that at least ``retain_fraction`` of
+segregating sites have per-site sample size >= n. Sites below the target
+are dropped during projection. If there is no missing data, it returns
+the full sample size.
 
 Batch Computation
 -----------------
