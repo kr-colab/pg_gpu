@@ -456,18 +456,16 @@ def zns(r2_matrix_or_matrix, missing_data='include'):
         When a HaplotypeMatrix is passed, uses tiled computation to
         avoid materializing the full m×m r² matrix.
     missing_data : str
-        'include' - per-site valid data for frequency computation
-        'exclude' - filter to sites with no missing data
-        'project' - unbiased multinomial projection estimators, computing
-          mean σ_D² = D²/π² per pair using falling-factorial corrections
-          for finite sample size. Requires HaplotypeMatrix input.
-          See: Ragsdale & Gravel (2019) "Unbiased estimation of linkage
-          disequilibrium from unphased data", MBE 37(3):923-932.
+        ``'include'`` (default) uses per-site valid data for frequency
+        computation. ``'exclude'`` filters to sites with no missing data.
+        ``'project'`` uses unbiased multinomial projection estimators,
+        computing mean sigma_D^2 = D^2/pi^2 per pair with falling-factorial
+        corrections (Ragsdale & Gravel 2019). Requires HaplotypeMatrix input.
 
     Returns
     -------
     float
-        Mean r-squared (or mean σ_D² for 'project' mode).
+        Mean r-squared (or mean sigma_D^2 for 'project' mode).
     """
     from .haplotype_matrix import HaplotypeMatrix
 
@@ -534,12 +532,10 @@ def omega(r2_matrix_or_matrix, missing_data='include'):
         Square r-squared matrix, or a matrix object (dispatches to
         haploid or diploid r-squared computation automatically).
     missing_data : str
-        'include' - per-site valid data for frequency computation
-        'exclude' - filter to sites with no missing data
-        'project' - unbiased multinomial projection estimators, using
-          σ_D² = D²/π² instead of naive r². Requires HaplotypeMatrix input.
-          See: Ragsdale & Gravel (2019) "Unbiased estimation of linkage
-          disequilibrium from unphased data", MBE 37(3):923-932.
+        ``'include'`` (default) uses per-site valid data for frequency
+        computation. ``'exclude'`` filters to sites with no missing data.
+        ``'project'`` uses unbiased sigma_D^2 = D^2/pi^2 instead of naive
+        r^2 (Ragsdale & Gravel 2019). Requires HaplotypeMatrix input.
 
     Returns
     -------

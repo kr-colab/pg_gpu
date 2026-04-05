@@ -114,12 +114,12 @@ def pi(haplotype_matrix: HaplotypeMatrix,
     span_normalize : bool
         If True, normalize by genomic span; if False, return raw diversity
     missing_data : str
-        'include' - Use all sites, calculate pi from available data per site
-        'exclude' - Only use sites with no missing data
-        'pairwise' - Comparison-counting normalization (pixy-style):
-            pi = sum(diffs) / sum(comps) across all sites.
-            Sites with more observed data contribute proportionally more.
-            Invariant sites are included in the denominator when available.
+        ``'include'`` (default) uses per-site valid data.
+        ``'exclude'`` filters to sites with no missing data.
+        ``'pairwise'`` uses comparison-counting normalization (pixy-style):
+        pi = sum(diffs) / sum(comps) across all sites, where sites with
+        more observed data contribute proportionally more and invariant
+        sites are included in the denominator when available.
     span_denominator : str
         'total' - Use total genomic span (chrom_end - chrom_start)
         'sites' - Use number of sites analyzed
@@ -228,10 +228,10 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
     span_normalize : bool
         If True, normalize by genomic span; if False, return raw theta
     missing_data : str
-        'include' - Use all sites, calculate from available data per site
-        'exclude' - Only use sites with no missing data
-        'pairwise' - Per-site 1/a(n_i) for segregating sites, normalized
-            by n_total_sites when invariant info is available.
+        ``'include'`` (default) uses per-site valid data.
+        ``'exclude'`` filters to sites with no missing data.
+        ``'pairwise'`` uses per-site 1/a(n_i) for segregating sites,
+        normalized by n_total_sites when invariant info is available.
     span_denominator : str
         'total' - Use total genomic span (chrom_end - chrom_start)
         'sites' - Use number of sites analyzed
@@ -371,11 +371,11 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     missing_data : str
-        'include' - Use all sites, calculate from available data per site.
-            Uses harmonic mean of per-site sample sizes for variance terms.
-        'exclude' - Only use sites with no missing data.
-        'pairwise' - Uses pairwise pi and per-site theta_w with harmonic
-            mean sample sizes for variance terms.
+        ``'include'`` (default) uses per-site valid data with harmonic
+        mean of per-site sample sizes for variance terms.
+        ``'exclude'`` filters to sites with no missing data.
+        ``'pairwise'`` uses pairwise pi and per-site theta_w with
+        harmonic mean sample sizes for variance terms.
 
     Returns
     -------
@@ -1205,9 +1205,9 @@ def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     missing_data : str
-        'include' or 'pairwise' - per-site sample sizes, harmonic mean n
-            for variance terms
-        'exclude' - only sites with no missing data
+        ``'include'`` (default) or ``'pairwise'`` uses per-site sample
+        sizes with harmonic mean n for variance terms.
+        ``'exclude'`` filters to sites with no missing data.
 
     Returns
     -------
@@ -1278,9 +1278,9 @@ def zeng_e(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     missing_data : str
-        'include' or 'pairwise' - per-site sample sizes, harmonic mean n
-            for variance terms
-        'exclude' - only sites with no missing data
+        ``'include'`` (default) or ``'pairwise'`` uses per-site sample
+        sizes with harmonic mean n for variance terms.
+        ``'exclude'`` filters to sites with no missing data.
 
     Returns
     -------

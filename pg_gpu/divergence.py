@@ -465,10 +465,9 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     per_site : bool
         If True, return per-site values; if False, return mean
     missing_data : str
-        'include' - Use all sites, calculate from available data per site
-        'exclude' - Only use sites with no missing data
-        'pairwise' - Comparison-counting normalization (pixy-style):
-            dxy = sum(diffs) / sum(comps) across all sites.
+        ``'include'`` (default) uses per-site valid data.
+        ``'exclude'`` filters to sites with no missing data.
+        ``'pairwise'`` uses comparison-counting normalization (pixy-style).
     span_denominator : bool
         If True, normalize by total sites; if False, normalize by sites with data
     return_components : bool

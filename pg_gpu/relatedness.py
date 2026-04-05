@@ -106,8 +106,8 @@ def ibs(genotype_matrix_or_haplotype_matrix,
     between all pairs of individuals. Equivalent to PLINK's --distance
     ibs matrix.
 
-    For each site, IBS between individuals i and j is:
-        IBS = (2 - |g_i - g_j|) / 2
+    For each site, IBS between individuals i and j is
+    ``IBS = (2 - abs(g_i - g_j)) / 2``.
 
     The matrix contains the mean IBS across all jointly-called sites.
 
