@@ -1213,8 +1213,10 @@ def dd(haplotype_matrix: HaplotypeMatrix,
 
     References
     ----------
-    Schrider, D.R. et al. (2018). Supervised Machine Learning for
-    Population Genetics: A New Paradigm. Trends in Genetics, 34(4).
+    Schrider, D.R., Ayroles, J., Matute, D.R. & Kern, A.D. (2018).
+    Supervised machine learning reveals introgressed loci in the genomes
+    of Drosophila simulans and D. sechellia. PLoS Genetics, 14(4),
+    e1007341. https://doi.org/10.1371/journal.pgen.1007341
     """
     from . import diversity
 
@@ -1261,8 +1263,10 @@ def dd_rank(haplotype_matrix: HaplotypeMatrix,
 
     References
     ----------
-    Schrider, D.R. et al. (2018). Supervised Machine Learning for
-    Population Genetics: A New Paradigm. Trends in Genetics, 34(4).
+    Schrider, D.R., Ayroles, J., Matute, D.R. & Kern, A.D. (2018).
+    Supervised machine learning reveals introgressed loci in the genomes
+    of Drosophila simulans and D. sechellia. PLoS Genetics, 14(4),
+    e1007341. https://doi.org/10.1371/journal.pgen.1007341
     """
     dist_between, dist_within1, dist_within2 = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
@@ -1302,8 +1306,10 @@ def zx(haplotype_matrix: HaplotypeMatrix,
 
     References
     ----------
-    Schrider, D.R. et al. (2018). Supervised Machine Learning for
-    Population Genetics: A New Paradigm. Trends in Genetics, 34(4).
+    Schrider, D.R., Ayroles, J., Matute, D.R. & Kern, A.D. (2018).
+    Supervised machine learning reveals introgressed loci in the genomes
+    of Drosophila simulans and D. sechellia. PLoS Genetics, 14(4),
+    e1007341. https://doi.org/10.1371/journal.pgen.1007341
     """
     from . import ld_statistics
     from ._utils import get_population_matrix
