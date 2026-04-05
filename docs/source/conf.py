@@ -4,13 +4,22 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath('../..'))
 
-import pg_gpu
+# Mock GPU dependencies for RTD builds (no GPU on build server)
+autodoc_mock_imports = [
+    'cupy', 'cupy.cuda', 'cupy._core',
+    'cupy_backends', 'cupy_backends.cuda',
+]
+
+try:
+    import pg_gpu
+    release = pg_gpu.__version__
+except Exception:
+    release = '0.1.0'
 
 # Project information
 project = 'pg_gpu'
 copyright = '2025, Andrew Kern'
 author = 'Andrew Kern'
-release = pg_gpu.__version__
 
 # Extensions
 extensions = [
