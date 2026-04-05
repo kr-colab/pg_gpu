@@ -9,8 +9,8 @@ build:
     pre_install:
       - pip install uv
     install:
-      - uv pip install --system -r docs/requirements.txt
-      - uv pip install --system --no-deps .
+      - uv pip install -r docs/requirements.txt
+      - uv pip install --no-deps .
 
 sphinx:
   configuration: docs/source/conf.py
