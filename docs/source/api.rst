@@ -326,3 +326,10 @@ Haplotype Structure
 
 .. autofunction:: pg_gpu.plotting.plot_haplotype_frequencies
 .. autofunction:: pg_gpu.plotting.plot_variant_locator
+
+Achaz Framework
+---------------
+
+.. automodule:: pg_gpu.achaz
+   :members:
+   :undoc-members:

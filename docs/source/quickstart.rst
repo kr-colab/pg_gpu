@@ -280,6 +280,55 @@ auto-dispatch based on input type:
    # Distance distribution moments
    var, skew, kurt = distance_stats.dist_moments(gm)
 
+Achaz Framework
+~~~~~~~~~~~~~~~~
+
+The Achaz (2009) framework treats all frequency-spectrum-based theta estimators
+as linear combinations of the site frequency spectrum (SFS). Compute the SFS
+once on GPU, then derive all estimators as trivial dot products. This is
+faster when computing multiple statistics and enables custom estimators.
+
+.. code-block:: python
+
+   from pg_gpu import FrequencySpectrum
+
+   # Build SFS from haplotype data (one GPU pass)
+   fs = FrequencySpectrum(h, population="pop1")
+
+   # Standard theta estimators
+   fs.theta("pi")          # nucleotide diversity (Tajima 1983)
+   fs.theta("watterson")   # Watterson's theta (Watterson 1975)
+   fs.theta("theta_h")     # Fay & Wu's theta_H (Fay & Wu 2000)
+   fs.theta("theta_l")     # theta_L (Zeng et al. 2006)
+   fs.theta("eta1")        # singleton-based theta (Fu & Li 1993)
+
+   # Neutrality tests (with proper variance)
+   fs.tajimas_d()                    # Tajima's D
+   fs.fay_wu_h()                     # Fay & Wu's H (unnormalized)
+   fs.fay_wu_h(normalized=True)      # Fay & Wu's H* (Zeng et al. 2006)
+   fs.zeng_e()                       # Zeng's E
+
+   # All at once
+   fs.all_thetas()   # dict of 8 theta estimators
+   fs.all_tests()    # dict of 4 neutrality tests
+
+   # Custom weight vector: any function w(n) -> array
+   def rare_variant_weights(n):
+       import numpy as np
+       w = np.zeros(n + 1)
+       w[1:4] = 1.0  # weight only singletons, doubletons, tripletons
+       return w / np.sum(w[1:n])
+   fs.theta(rare_variant_weights)
+
+   # SFS projection for missing data (Gutenkunst et al. 2009)
+   fs_projected = fs.project(target_n=50)
+   fs_projected.theta("pi")
+
+   # Batch computation via diversity module
+   from pg_gpu import diversity
+   stats = diversity.diversity_stats_fast(h, population="pop1")
+   # Returns all 12 statistics in one call
+
 Missing Data
 ~~~~~~~~~~~~
 
