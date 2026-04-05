@@ -60,15 +60,27 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
         hap = hap[:, complete]
 
     # 'include' mode (default): mask missing, normalize per pair
-    valid_mask = (hap >= 0).astype(cp.float64)
-    X = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+    # Chunk over variants to avoid OOM from float64 intermediates
+    from ._memutil import estimate_variant_chunk_size
+    n_hap, n_var = hap.shape
+    chunk_size = estimate_variant_chunk_size(n_hap, bytes_per_element=8,
+                                             n_intermediates=2)
 
-    row_sums = cp.sum(X, axis=1)
-    gram = X @ X.T
+    gram = cp.zeros((n_hap, n_hap), dtype=cp.float64)
+    joint_valid = cp.zeros((n_hap, n_hap), dtype=cp.float64)
+    row_sums = cp.zeros(n_hap, dtype=cp.float64)
+
+    for start in range(0, n_var, chunk_size):
+        end = min(start + chunk_size, n_var)
+        h_chunk = hap[:, start:end]
+        v_chunk = (h_chunk >= 0).astype(cp.float64)
+        x_chunk = cp.where(h_chunk >= 0, h_chunk, 0).astype(cp.float64)
+        row_sums += cp.sum(x_chunk, axis=1)
+        gram += x_chunk @ x_chunk.T
+        joint_valid += v_chunk @ v_chunk.T
+        del h_chunk, v_chunk, x_chunk
+
     diffs_mat = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
-
-    # jointly-valid sites per pair
-    joint_valid = valid_mask @ valid_mask.T
     diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
     return _extract_upper_triangle(diffs_mat)
 
@@ -112,15 +124,27 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
         geno = geno[:, complete]
 
     # 'include' mode (default): mask missing, normalize per pair
-    valid_mask = (geno >= 0).astype(cp.float64)
-    geno_clean = cp.where(geno >= 0, geno, 0)
+    # Chunk over variants to avoid OOM from float64 indicator matrices
+    from ._memutil import estimate_variant_chunk_size
+    n_ind, n_var = geno.shape
+    chunk_size = estimate_variant_chunk_size(n_ind, bytes_per_element=8,
+                                             n_intermediates=4)
 
-    I0 = (geno_clean == 0).astype(cp.float64) * valid_mask
-    I1 = (geno_clean == 1).astype(cp.float64) * valid_mask
-    I2 = (geno_clean == 2).astype(cp.float64) * valid_mask
+    matches = cp.zeros((n_ind, n_ind), dtype=cp.float64)
+    joint_valid = cp.zeros((n_ind, n_ind), dtype=cp.float64)
 
-    matches = I0 @ I0.T + I1 @ I1.T + I2 @ I2.T
-    joint_valid = valid_mask @ valid_mask.T
+    for start in range(0, n_var, chunk_size):
+        end = min(start + chunk_size, n_var)
+        g_chunk = geno[:, start:end]
+        v_chunk = (g_chunk >= 0).astype(cp.float64)
+        gc = cp.where(g_chunk >= 0, g_chunk, 0)
+        i0 = (gc == 0).astype(cp.float64) * v_chunk
+        i1 = (gc == 1).astype(cp.float64) * v_chunk
+        i2 = (gc == 2).astype(cp.float64) * v_chunk
+        matches += i0 @ i0.T + i1 @ i1.T + i2 @ i2.T
+        joint_valid += v_chunk @ v_chunk.T
+        del g_chunk, v_chunk, gc, i0, i1, i2
+
     diffs_mat = joint_valid - matches
     diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
 

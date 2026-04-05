@@ -91,31 +91,73 @@ class _DeferredPCA:
         self.scaler = scaler
         self.shape = hap.shape
 
+    def _scale_chunk(self, start, end):
+        """Prepare a scaled float64 chunk of the matrix."""
+        chunk = self.hap[:, start:end]
+        # Check this chunk for missing (avoids full-matrix boolean allocation)
+        has_missing_chunk = bool(cp.any(chunk < 0).get())
+        if has_missing_chunk:
+            valid = chunk >= 0
+            x = cp.where(valid, chunk, 0).astype(cp.float64)
+            x = cp.where(valid, x, self.site_mean[start:end])
+        else:
+            x = chunk.astype(cp.float64)
+        x -= self.site_mean[start:end]
+        if self.scaler == 'patterson' and self.scale is not None:
+            x /= self.scale[start:end]
+        return x
+
+    @property
+    def _chunk_size(self):
+        from ._memutil import estimate_variant_chunk_size
+        return estimate_variant_chunk_size(self.shape[0], bytes_per_element=8,
+                                           n_intermediates=2)
+
     def chunked_gram(self):
         """Compute X @ X.T via chunked processing."""
-        from ._memutil import estimate_variant_chunk_size
-        n_samples, n_var = self.hap.shape
-        chunk_size = estimate_variant_chunk_size(n_samples, bytes_per_element=8,
-                                                  n_intermediates=2)
+        n_samples, n_var = self.shape
         C = cp.zeros((n_samples, n_samples), dtype=cp.float64)
-        has_missing = bool(cp.any(self.hap < 0).get())
-
-        for start in range(0, n_var, chunk_size):
-            end = min(start + chunk_size, n_var)
-            chunk = self.hap[:, start:end]
-            if has_missing:
-                valid = chunk >= 0
-                x = cp.where(valid, chunk, 0).astype(cp.float64)
-                x = cp.where(valid, x, self.site_mean[start:end])
-            else:
-                x = chunk.astype(cp.float64)
-            x -= self.site_mean[start:end]
-            if self.scaler == 'patterson' and self.scale is not None:
-                x /= self.scale[start:end]
+        for start in range(0, n_var, self._chunk_size):
+            end = min(start + self._chunk_size, n_var)
+            x = self._scale_chunk(start, end)
             C += x @ x.T
             del x
-
         return C
+
+    def __matmul__(self, other):
+        """Compute X @ other via chunked processing."""
+        n_samples, n_var = self.shape
+        result = cp.zeros((n_samples, other.shape[1]), dtype=cp.float64)
+        for start in range(0, n_var, self._chunk_size):
+            end = min(start + self._chunk_size, n_var)
+            x = self._scale_chunk(start, end)
+            result += x @ other[start:end, :]
+            del x
+        return result
+
+    @property
+    def T(self):
+        """Return a transposed view for X.T @ Y operations."""
+        return _DeferredPCATranspose(self)
+
+
+class _DeferredPCATranspose:
+    """Transpose view of _DeferredPCA for X.T @ Y operations."""
+
+    def __init__(self, parent):
+        self.parent = parent
+        self.shape = (parent.shape[1], parent.shape[0])
+
+    def __matmul__(self, other):
+        """Compute X.T @ other via chunked processing."""
+        n_samples, n_var = self.parent.shape
+        result = cp.zeros((n_var, other.shape[1]), dtype=cp.float64)
+        for start in range(0, n_var, self.parent._chunk_size):
+            end = min(start + self.parent._chunk_size, n_var)
+            x = self.parent._scale_chunk(start, end)
+            result[start:end, :] = x.T @ other
+            del x
+        return result
 
 
 def pca(haplotype_matrix: HaplotypeMatrix,
@@ -243,14 +285,33 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     Q, _ = cp.linalg.qr(Y)
 
     # project and SVD in reduced space
-    B = Q.T @ X
-    Uhat, S, Vt = cp.linalg.svd(B, full_matrices=False)
+    if isinstance(X, _DeferredPCA):
+        # B = Q.T @ X has shape (k, n_var) — too wide for cuSOLVER SVD.
+        # Instead compute B @ B.T = Q.T @ (X @ X.T) @ Q = Q.T @ gram @ Q
+        # and eigendecompose the small (k, k) matrix.
+        gram = X.chunked_gram()  # (n_samples, n_samples)
+        M = Q.T @ gram @ Q  # (k, k)
+        eigvals, eigvecs = cp.linalg.eigh(M)
+        idx = cp.argsort(eigvals)[::-1]
+        eigvals = eigvals[idx]
+        eigvecs = eigvecs[:, idx]
+        S = cp.sqrt(cp.maximum(eigvals, 0))
+        Uhat = eigvecs
+    else:
+        B = Q.T @ X
+        Uhat, S, Vt = cp.linalg.svd(B, full_matrices=False)
     U = Q @ Uhat
 
     coords = U[:, :n_components] * S[:n_components]
 
     # explained variance
-    total_var = cp.sum(cp.var(X, axis=0))
+    if isinstance(X, _DeferredPCA):
+        # total_var = trace(X @ X.T) / n_samples = sum of all squared values / n_samples
+        # We can get this from the gram matrix trace
+        gram = X.chunked_gram()
+        total_var = cp.trace(gram) / n_samples
+    else:
+        total_var = cp.sum(cp.var(X, axis=0))
     var = (S[:n_components] ** 2) / n_samples
     explained_variance_ratio = var / total_var
 
