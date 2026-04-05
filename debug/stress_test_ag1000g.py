@@ -193,15 +193,23 @@ def main():
     benchmarks = []
 
     # --- Diversity ---
+    # Diploid sample indices for allel (fair: include allele counting in timing)
+    pop1_dip = list(range(N_DIP_PER_POP))
+    pop2_dip = list(range(N_DIP_PER_POP, 2 * N_DIP_PER_POP))
+    pop3_dip = list(range(2 * N_DIP_PER_POP, 3 * N_DIP_PER_POP))
+
     benchmarks.append(("diversity.pi",
         lambda: diversity.pi(hm, population="pop1"),
-        allel_fn(['ac1'], lambda: allel.mean_pairwise_difference(_allel_cache['ac1']))))
+        allel_fn(['g'], lambda: allel.mean_pairwise_difference(
+            _allel_cache['g'].count_alleles(subpop=pop1_dip)))))
     benchmarks.append(("diversity.theta_w",
         lambda: diversity.theta_w(hm, population="pop1"),
-        allel_fn(['pos', 'ac1'], lambda: allel.watterson_theta(_allel_cache['pos'], _allel_cache['ac1']))))
+        allel_fn(['pos', 'g'], lambda: allel.watterson_theta(
+            _allel_cache['pos'], _allel_cache['g'].count_alleles(subpop=pop1_dip)))))
     benchmarks.append(("diversity.tajimas_d",
         lambda: diversity.tajimas_d(hm, population="pop1"),
-        allel_fn(['ac1'], lambda: allel.tajima_d(_allel_cache['ac1']))))
+        allel_fn(['g'], lambda: allel.tajima_d(
+            _allel_cache['g'].count_alleles(subpop=pop1_dip)))))
     benchmarks.append(("diversity.haplotype_diversity",
         lambda: diversity.haplotype_diversity(hm, population="pop1"),
         allel_fn(['h1'], lambda: allel.haplotype_diversity(_allel_cache['h1']))))
@@ -243,14 +251,19 @@ def main():
     # --- Divergence ---
     benchmarks.append(("divergence.fst_hudson",
         lambda: divergence.fst_hudson(hm, "pop1", "pop2"),
-        allel_fn(['ac1', 'ac2'], lambda: allel.hudson_fst(_allel_cache['ac1'], _allel_cache['ac2']))))
+        allel_fn(['g'], lambda: allel.hudson_fst(
+            _allel_cache['g'].count_alleles(subpop=pop1_dip),
+            _allel_cache['g'].count_alleles(subpop=pop2_dip)))))
     benchmarks.append(("divergence.fst_weir_cockerham",
         lambda: divergence.fst_weir_cockerham(hm, "pop1", "pop2"),
         allel_fn(['g'], lambda: allel.weir_cockerham_fst(_allel_cache['g'],
-            [list(range(N_DIP_PER_POP)), list(range(N_DIP_PER_POP, 2*N_DIP_PER_POP))]))))
+            [pop1_dip, pop2_dip]))))
     benchmarks.append(("divergence.dxy",
         lambda: divergence.dxy(hm, "pop1", "pop2"),
-        allel_fn(['pos', 'ac1', 'ac2'], lambda: allel.sequence_divergence(_allel_cache['pos'], _allel_cache['ac1'], _allel_cache['ac2']))))
+        allel_fn(['pos', 'g'], lambda: allel.sequence_divergence(
+            _allel_cache['pos'],
+            _allel_cache['g'].count_alleles(subpop=pop1_dip),
+            _allel_cache['g'].count_alleles(subpop=pop2_dip)))))
     benchmarks.append(("divergence.fst_nei",
         lambda: divergence.fst_nei(hm, "pop1", "pop2"), None))
     benchmarks.append(("divergence.da",
@@ -261,13 +274,15 @@ def main():
     # --- SFS ---
     benchmarks.append(("sfs.sfs",
         lambda: sfs.sfs(hm, population="pop1"),
-        allel_fn(['ac1'], lambda: allel.sfs(_allel_cache['ac1'][:, 1]))))
+        allel_fn(['g'], lambda: allel.sfs(_allel_cache['g'].count_alleles(subpop=pop1_dip)[:, 1]))))
     benchmarks.append(("sfs.sfs_folded",
         lambda: sfs.sfs_folded(hm, population="pop1"),
-        allel_fn(['ac1'], lambda: allel.sfs_folded(_allel_cache['ac1']))))
+        allel_fn(['g'], lambda: allel.sfs_folded(_allel_cache['g'].count_alleles(subpop=pop1_dip)))))
     benchmarks.append(("sfs.joint_sfs",
         lambda: sfs.joint_sfs(hm, pop1="pop1", pop2="pop2"),
-        allel_fn(['ac1', 'ac2'], lambda: allel.joint_sfs(_allel_cache['ac1'][:, 1], _allel_cache['ac2'][:, 1]))))
+        allel_fn(['g'], lambda: allel.joint_sfs(
+            _allel_cache['g'].count_alleles(subpop=pop1_dip)[:, 1],
+            _allel_cache['g'].count_alleles(subpop=pop2_dip)[:, 1]))))
 
     # --- Selection ---
     benchmarks.append(("selection.garud_h",
@@ -289,13 +304,22 @@ def main():
     # --- Admixture ---
     benchmarks.append(("admixture.patterson_f2",
         lambda: admixture.patterson_f2(hm, "pop1", "pop2"),
-        allel_fn(['ac1', 'ac2'], lambda: allel.patterson_f2(_allel_cache['ac1'], _allel_cache['ac2']))))
+        allel_fn(['g'], lambda: allel.patterson_f2(
+            _allel_cache['g'].count_alleles(subpop=pop1_dip),
+            _allel_cache['g'].count_alleles(subpop=pop2_dip)))))
     benchmarks.append(("admixture.patterson_f3",
         lambda: admixture.patterson_f3(hm, "pop1", "pop2", "pop3"),
-        allel_fn(['ac1', 'ac2', 'ac3'], lambda: allel.patterson_f3(_allel_cache['ac1'], _allel_cache['ac2'], _allel_cache['ac3']))))
+        allel_fn(['g'], lambda: allel.patterson_f3(
+            _allel_cache['g'].count_alleles(subpop=pop1_dip),
+            _allel_cache['g'].count_alleles(subpop=pop2_dip),
+            _allel_cache['g'].count_alleles(subpop=pop3_dip)))))
     benchmarks.append(("admixture.patterson_d",
         lambda: admixture.patterson_d(hm, "pop1", "pop2", "pop3", "pop1"),
-        allel_fn(['ac1', 'ac2', 'ac3'], lambda: allel.patterson_d(_allel_cache['ac1'], _allel_cache['ac2'], _allel_cache['ac3'], _allel_cache['ac1']))))
+        allel_fn(['g'], lambda: allel.patterson_d(
+            _allel_cache['g'].count_alleles(subpop=pop1_dip),
+            _allel_cache['g'].count_alleles(subpop=pop2_dip),
+            _allel_cache['g'].count_alleles(subpop=pop3_dip),
+            _allel_cache['g'].count_alleles(subpop=pop1_dip)))))
 
     # --- Decomposition ---
     # randomized_pca needs O(n_hap * n_var * 8) intermediates; OOM at full-arm scale
