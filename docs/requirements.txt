@@ -9,3 +9,4 @@ scikit-allel
 tskit
 msprime
 zarr
+tqdm
