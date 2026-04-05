@@ -136,6 +136,38 @@ class TestMissingData:
         assert np.isfinite(val_exclude)
 
 
+class TestPrecomputedDistanceMatrices:
+    """Test passing pre-computed distance matrices to avoid recomputation."""
+
+    def test_precomputed_matches_fresh(self, two_pop_hm):
+        dm = divergence.pairwise_distance_matrix(two_pop_hm, 'pop1', 'pop2')
+        snn_fresh = divergence.snn(two_pop_hm, 'pop1', 'pop2')
+        snn_pre = divergence.snn(two_pop_hm, 'pop1', 'pop2', distance_matrices=dm)
+        assert snn_fresh == snn_pre
+
+        dmin_fresh = divergence.dxy_min(two_pop_hm, 'pop1', 'pop2')
+        dmin_pre = divergence.dxy_min(two_pop_hm, 'pop1', 'pop2', distance_matrices=dm)
+        assert dmin_fresh == dmin_pre
+
+        g_fresh = divergence.gmin(two_pop_hm, 'pop1', 'pop2')
+        g_pre = divergence.gmin(two_pop_hm, 'pop1', 'pop2', distance_matrices=dm)
+        assert g_fresh == g_pre
+
+        dd_fresh = divergence.dd(two_pop_hm, 'pop1', 'pop2')
+        dd_pre = divergence.dd(two_pop_hm, 'pop1', 'pop2', distance_matrices=dm)
+        assert dd_fresh == dd_pre
+
+        rank_fresh = divergence.dd_rank(two_pop_hm, 'pop1', 'pop2')
+        rank_pre = divergence.dd_rank(two_pop_hm, 'pop1', 'pop2', distance_matrices=dm)
+        assert rank_fresh == rank_pre
+
+    def test_wrong_shape_raises(self, two_pop_hm):
+        import cupy as cp
+        bad_dm = (cp.zeros((5, 5)), cp.zeros((5, 5)), cp.zeros((5, 5)))
+        with pytest.raises(ValueError, match="does not match"):
+            divergence.snn(two_pop_hm, 'pop1', 'pop2', distance_matrices=bad_dm)
+
+
 class TestZx:
     def test_finite(self, two_pop_hm):
         val = divergence.zx(two_pop_hm, 'pop1', 'pop2')

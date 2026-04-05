@@ -984,13 +984,57 @@ def _snn_one_pop(within, between):
     return float(cp.sum(score).get())
 
 
-def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
-                               missing_data='include'):
+def _resolve_distance_matrices(haplotype_matrix, pop1, pop2,
+                                missing_data='include',
+                                distance_matrices=None):
+    """Resolve or compute pairwise distance matrices.
+
+    If distance_matrices is provided, validates shapes against populations.
+    Otherwise computes from scratch.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
+    distance_matrices : tuple of (dist_between, dist_within1, dist_within2), optional
+        Pre-computed cupy distance matrices from a prior call to
+        pairwise_distance_matrix or distance_based_stats.
+
+    Returns
+    -------
+    dist_between, dist_within1, dist_within2 : cupy.ndarray
+    """
+    n1 = len(_get_population_indices(haplotype_matrix, pop1))
+    n2 = len(_get_population_indices(haplotype_matrix, pop2))
+
+    if distance_matrices is not None:
+        db, dw1, dw2 = distance_matrices
+        if db.shape != (n1, n2):
+            raise ValueError(
+                f"distance_matrices between-pop shape {db.shape} does not "
+                f"match populations ({n1}, {n2})")
+        if dw1.shape != (n1, n1):
+            raise ValueError(
+                f"distance_matrices within-pop1 shape {dw1.shape} does not "
+                f"match pop1 size ({n1}, {n1})")
+        if dw2.shape != (n2, n2):
+            raise ValueError(
+                f"distance_matrices within-pop2 shape {dw2.shape} does not "
+                f"match pop2 size ({n2}, {n2})")
+        return db, dw1, dw2
+
+    return pairwise_distance_matrix(haplotype_matrix, pop1, pop2, missing_data)
+
+
+def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
+                              missing_data='include'):
     """Compute pairwise distance matrices between and within two populations.
 
-    Uses the shared _pairwise_diffs_matrix_gpu helper from distance_stats
-    for the chunked GPU gram matrix computation. Returns cupy arrays for
-    downstream GPU operations.
+    Returns three cupy distance matrices: between-population,
+    within-pop1, and within-pop2. Pre-compute once and pass to
+    individual stats via the ``distance_matrices`` parameter to
+    avoid redundant GPU work.
 
     Parameters
     ----------
@@ -1032,7 +1076,8 @@ def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
 def snn(haplotype_matrix: HaplotypeMatrix,
         pop1: Union[str, list],
         pop2: Union[str, list],
-        missing_data: str = 'include') -> float:
+        missing_data: str = 'include',
+        distance_matrices=None) -> float:
     """Hudson's nearest-neighbor statistic (Snn).
 
     For each haplotype, determines whether its nearest neighbor is from
@@ -1045,6 +1090,10 @@ def snn(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     pop1, pop2 : str or list
     missing_data : str
+    distance_matrices : tuple, optional
+        Pre-computed (dist_between, dist_within1, dist_within2) from
+        pairwise_distance_matrix. Avoids recomputation when calling
+        multiple stats on the same population pair.
 
     Returns
     -------
@@ -1056,8 +1105,8 @@ def snn(haplotype_matrix: HaplotypeMatrix,
     Hudson, R.R. (2000). A New Statistic for Detecting Genetic
     Differentiation. Genetics, 155(4), 2011-2014.
     """
-    dist_between, dist_within1, dist_within2 = _pairwise_distance_matrix(
-        haplotype_matrix, pop1, pop2, missing_data)
+    dist_between, dist_within1, dist_within2 = _resolve_distance_matrices(
+        haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     n1, n2 = dist_between.shape
 
     count = _snn_one_pop(dist_within1, dist_between)
@@ -1069,7 +1118,8 @@ def snn(haplotype_matrix: HaplotypeMatrix,
 def dxy_min(haplotype_matrix: HaplotypeMatrix,
             pop1: Union[str, list],
             pop2: Union[str, list],
-            missing_data: str = 'include') -> float:
+            missing_data: str = 'include',
+            distance_matrices=None) -> float:
     """Minimum pairwise distance between two populations.
 
     The Hamming distance of the closest pair of haplotypes across
@@ -1081,6 +1131,8 @@ def dxy_min(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     pop1, pop2 : str or list
     missing_data : str
+    distance_matrices : tuple, optional
+        Pre-computed distance matrices.
 
     Returns
     -------
@@ -1092,15 +1144,16 @@ def dxy_min(haplotype_matrix: HaplotypeMatrix,
     Geneva, A.J. et al. (2015). A new method to scan genomes for
     introgression in a secondary contact model. PLoS ONE, 10(4).
     """
-    dist_between, _, _ = _pairwise_distance_matrix(
-        haplotype_matrix, pop1, pop2, missing_data)
+    dist_between, _, _ = _resolve_distance_matrices(
+        haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     return float(cp.min(dist_between).get())
 
 
 def gmin(haplotype_matrix: HaplotypeMatrix,
          pop1: Union[str, list],
          pop2: Union[str, list],
-         missing_data: str = 'include') -> float:
+         missing_data: str = 'include',
+         distance_matrices=None) -> float:
     """Geneva's Gmin: ratio of minimum to mean between-population distance.
 
     Gmin = Dxy_min / Dxy_mean. Low values indicate unusually similar
@@ -1112,6 +1165,8 @@ def gmin(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     pop1, pop2 : str or list
     missing_data : str
+    distance_matrices : tuple, optional
+        Pre-computed distance matrices.
 
     Returns
     -------
@@ -1123,8 +1178,8 @@ def gmin(haplotype_matrix: HaplotypeMatrix,
     Geneva, A.J. et al. (2015). A new method to scan genomes for
     introgression in a secondary contact model. PLoS ONE, 10(4).
     """
-    dist_between, _, _ = _pairwise_distance_matrix(
-        haplotype_matrix, pop1, pop2, missing_data)
+    dist_between, _, _ = _resolve_distance_matrices(
+        haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     mean_dxy = float(cp.mean(dist_between).get())
     min_dxy = float(cp.min(dist_between).get())
     if mean_dxy == 0:
@@ -1135,7 +1190,8 @@ def gmin(haplotype_matrix: HaplotypeMatrix,
 def dd(haplotype_matrix: HaplotypeMatrix,
        pop1: Union[str, list],
        pop2: Union[str, list],
-       missing_data: str = 'include') -> Tuple[float, float]:
+       missing_data: str = 'include',
+       distance_matrices=None) -> Tuple[float, float]:
     """Relative minimum divergence (dd1, dd2).
 
     dd1 = Dxy_min / pi1, dd2 = Dxy_min / pi2. Low values indicate
@@ -1147,6 +1203,8 @@ def dd(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     pop1, pop2 : str or list
     missing_data : str
+    distance_matrices : tuple, optional
+        Pre-computed distance matrices.
 
     Returns
     -------
@@ -1162,8 +1220,8 @@ def dd(haplotype_matrix: HaplotypeMatrix,
     """
     from . import diversity
 
-    dist_between, _, _ = _pairwise_distance_matrix(
-        haplotype_matrix, pop1, pop2, missing_data)
+    dist_between, _, _ = _resolve_distance_matrices(
+        haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     min_dxy = float(cp.min(dist_between).get())
 
     pi1 = diversity.pi(haplotype_matrix, population=pop1,
@@ -1179,7 +1237,8 @@ def dd(haplotype_matrix: HaplotypeMatrix,
 def dd_rank(haplotype_matrix: HaplotypeMatrix,
             pop1: Union[str, list],
             pop2: Union[str, list],
-            missing_data: str = 'include') -> Tuple[float, float]:
+            missing_data: str = 'include',
+            distance_matrices=None) -> Tuple[float, float]:
     """Rank of Dxy_min in within-population pairwise distance distributions.
 
     For each population, computes the fraction of within-population
@@ -1192,6 +1251,8 @@ def dd_rank(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     pop1, pop2 : str or list
     missing_data : str
+    distance_matrices : tuple, optional
+        Pre-computed distance matrices.
 
     Returns
     -------
@@ -1205,8 +1266,8 @@ def dd_rank(haplotype_matrix: HaplotypeMatrix,
     Schrider, D.R. et al. (2018). Supervised Machine Learning for
     Population Genetics: A New Paradigm. Trends in Genetics, 34(4).
     """
-    dist_between, dist_within1, dist_within2 = _pairwise_distance_matrix(
-        haplotype_matrix, pop1, pop2, missing_data)
+    dist_between, dist_within1, dist_within2 = _resolve_distance_matrices(
+        haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     min_dxy = cp.min(dist_between)
 
     # Extract upper triangle of within-pop distances (exclude diagonal)
@@ -1280,7 +1341,7 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
     dict
         Keys: snn, dxy_min, gmin, dd1, dd2, dd_rank1, dd_rank2.
     """
-    dist_between, dist_within1, dist_within2 = _pairwise_distance_matrix(
+    dist_between, dist_within1, dist_within2 = pairwise_distance_matrix(
         haplotype_matrix, pop1, pop2, missing_data)
     n1, n2 = dist_between.shape
 
