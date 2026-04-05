@@ -28,10 +28,14 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     pairwise_diffs_haploid (condensed numpy output) and divergence
     two-population statistics (full cupy matrix with pop blocks).
 
+    Accepts numpy or cupy input. When given numpy, transfers variant
+    chunks to GPU on-the-fly so the full matrix never needs to reside
+    on GPU at once.
+
     Parameters
     ----------
-    hap : cupy.ndarray, shape (n_haplotypes, n_variants)
-        Haplotype data already on GPU, optionally pre-filtered.
+    hap : numpy.ndarray or cupy.ndarray, shape (n_haplotypes, n_variants)
+        Haplotype data, optionally pre-filtered.
     missing_data : str
         'include' - raw counts at jointly non-missing sites
         'normalize' - per-site average (divide by jointly valid count)
@@ -41,22 +45,26 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     diffs_mat : cupy.ndarray, float64, shape (n_hap, n_hap)
         Pairwise distance matrix on GPU.
     """
+    import numpy as np
     from ._memutil import estimate_variant_chunk_size
+
     n_hap, n_var = hap.shape
+    is_numpy = isinstance(hap, np.ndarray)
     chunk_size = estimate_variant_chunk_size(n_hap, bytes_per_element=8,
                                              n_intermediates=2)
 
     gram = cp.zeros((n_hap, n_hap), dtype=cp.float64)
     row_sums = cp.zeros(n_hap, dtype=cp.float64)
-    joint_valid = cp.zeros((n_hap, n_hap), dtype=cp.float64) if missing_data == 'normalize' else None
+    need_valid = missing_data == 'normalize'
+    joint_valid = cp.zeros((n_hap, n_hap), dtype=cp.float64) if need_valid else None
 
     for start in range(0, n_var, chunk_size):
         end = min(start + chunk_size, n_var)
-        h_chunk = hap[:, start:end]
+        h_chunk = cp.asarray(hap[:, start:end]) if is_numpy else hap[:, start:end]
         x_chunk = cp.where(h_chunk >= 0, h_chunk, 0).astype(cp.float64)
         row_sums += cp.sum(x_chunk, axis=1)
         gram += x_chunk @ x_chunk.T
-        if joint_valid is not None:
+        if need_valid:
             v_chunk = (h_chunk >= 0).astype(cp.float64)
             joint_valid += v_chunk @ v_chunk.T
             del v_chunk

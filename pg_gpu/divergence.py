@@ -985,18 +985,20 @@ def _pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
-
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
-
-    hap_gpu = cp.asarray(haplotype_matrix.haplotypes)
     all_idx = list(pop1_idx) + list(pop2_idx)
     n1 = len(pop1_idx)
 
-    hap_sub = hap_gpu[all_idx, :]
+    # Extract population subset on whatever device the data lives on.
+    # _pairwise_diffs_matrix_gpu accepts both numpy and cupy, chunking
+    # CPU data to GPU on-the-fly so the full matrix never needs to
+    # reside on GPU at once.
+    hap = haplotype_matrix.haplotypes
+    hap_sub = hap[all_idx, :]
 
     if missing_data == 'exclude':
-        any_missing = cp.any(hap_sub < 0, axis=0)
+        import numpy as np
+        xp = cp if isinstance(hap_sub, cp.ndarray) else np
+        any_missing = xp.any(hap_sub < 0, axis=0)
         hap_sub = hap_sub[:, ~any_missing]
 
     # Raw Hamming distances (not normalized) — appropriate for ratio/rank stats
