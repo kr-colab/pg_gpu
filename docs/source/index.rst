@@ -9,9 +9,9 @@ GPU-accelerated population genetics statistics for Python.
 
    installation
    quickstart
-   achaz_framework
    api
    missing_data
+   achaz_framework
    examples
    moments_integration
    changelog

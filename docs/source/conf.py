@@ -4,17 +4,40 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath('../..'))
 
-# Mock GPU dependencies for RTD builds (no GPU on build server)
+# Mock GPU dependencies for RTD builds (no GPU on build server).
+# When cupy is unavailable, pg_gpu.__init__ raises RuntimeError.
+# Mock cupy so all pg_gpu modules can be imported by autodoc.
 autodoc_mock_imports = [
-    'cupy', 'cupy.cuda', 'cupy._core',
-    'cupy_backends', 'cupy_backends.cuda',
+    'cupy',
+    'cupy.cuda',
+    'cupy.cuda.memory',
+    'cupy.cuda.runtime',
+    'cupy._core',
+    'cupy._core.core',
+    'cupy_backends',
+    'cupy_backends.cuda',
+    'cupy_backends.cuda.api',
+    'cupy_backends.cuda.libs',
+    'allel',
+    'tskit',
+    'zarr',
+    'scipy',
+    'scipy.special',
+    'scipy.spatial',
+    'scipy.spatial.distance',
 ]
 
-try:
-    import pg_gpu
-    release = pg_gpu.__version__
-except Exception:
+on_rtd = os.environ.get('READTHEDOCS') == 'True'
+
+if on_rtd:
+    # On RTD, pg_gpu can't be imported (no GPU). Set version manually.
     release = '0.1.0'
+else:
+    try:
+        import pg_gpu
+        release = pg_gpu.__version__
+    except Exception:
+        release = '0.1.0'
 
 # Project information
 project = 'pg_gpu'
