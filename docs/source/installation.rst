@@ -29,7 +29,9 @@ and documentation tools (sphinx).
 
 Moments Integration
 ~~~~~~~~~~~~~~~~~~~
-
+pg_gpu offers seamless integration with the `moments` demographic inference library,
+allowing users to leverage GPU acceleration for calculating
+LD statistics (a painpoint for demographic inference) while using moments for model fitting and inference.
 The `moments <https://moments.readthedocs.io/>`_ demographic inference library
 is available in a separate pixi environment to keep the default install
 lightweight:
