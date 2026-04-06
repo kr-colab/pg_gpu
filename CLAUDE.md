@@ -66,6 +66,7 @@ pixi run python examples/performance_comparison.py
    - Conversion between CPU/GPU
    - Missing data handling (-1 encoded)
    - Accessible site masks from BED files (non-destructive property-based filtering)
+   - I/O: `from_vcf`, `from_zarr` (auto-detects VCZ and scikit-allel layouts), `from_ts`, `to_zarr`, `vcf_to_zarr`
 2. **GPU Statistics Modules**:
    - `pg_gpu/diversity.py`: Within-population diversity (pi, theta_w, theta_h, theta_l, tajimas_d, fay_wus_h, etc.)
    - `pg_gpu/divergence.py`: Between-population divergence (fst_hudson, fst_weir_cockerham, fst_nei, dxy, da, pbs, snn, dxy_min, gmin, dd, dd_rank, zx)
@@ -77,6 +78,7 @@ pixi run python examples/performance_comparison.py
    - `pg_gpu/relatedness.py`: GRM, IBS
    - `pg_gpu/windowed_analysis.py`: Fused CUDA kernels for windowed statistics
    - `pg_gpu/moments_ld.py`: Drop-in replacement for moments.LD.Parsing (requires moments env)
+   - `pg_gpu/zarr_io.py`: Zarr I/O with auto-detection of VCZ (bio2zarr) and scikit-allel layouts; VCF-to-zarr conversion via bio2zarr
    - `pg_gpu/achaz.py`: Achaz (2009) generalized theta estimation framework
 3. **Achaz Framework** (`pg_gpu/achaz.py`): All frequency-spectrum-based theta estimators are linear combinations of the SFS. The `FrequencySpectrum` class computes the SFS once on GPU and derives all estimators as dot products. Includes weight vectors for 8 standard estimators, Fu (1995) covariance structure for neutrality test variance, SFS projection via hypergeometric sampling (Gutenkunst et al. 2009), and custom weight vector support. Use `diversity.diversity_stats_fast()` for batch computation or `FrequencySpectrum` directly for custom estimators.
 4. **Accessible Site Masks** (`pg_gpu/accessible.py`): BED file parsing and `AccessibleMask` class for genome accessibility. Dense boolean arrays with lazy prefix-sum for O(1) windowed range queries. Integrated into HaplotypeMatrix, GenotypeMatrix, and windowed analysis.
@@ -92,7 +94,7 @@ pixi run python examples/performance_comparison.py
 
 ### Data Flow
 
-1. Load haplotype data → HaplotypeMatrix (from VCF, tree sequence, or Zarr)
+1. Load haplotype data → HaplotypeMatrix (from VCF, tree sequence, or Zarr). Zarr supports VCZ (bio2zarr) and scikit-allel layouts with auto-detection. Use `vcf_to_zarr()` for multicore VCF conversion via bio2zarr.
 2. Optionally attach accessible mask (`hm.set_accessible_mask("mask.bed", chrom="chr1")`)
 3. Transfer to GPU (`hm.transfer_to_gpu()`)
 4. Compute statistics using GPU kernels (properties return filtered data transparently)

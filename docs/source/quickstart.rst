@@ -40,23 +40,45 @@ manually via ``sample_sets``:
        "pop2": [4, 5, 6, 7]
    }
 
-Fast Reloading with Zarr
-~~~~~~~~~~~~~~~~~~~~~~~~~
+Working with Zarr
+~~~~~~~~~~~~~~~~~~
 
-For large datasets, save to Zarr format after the first VCF load. Subsequent
-loads are significantly faster.
+pg_gpu supports the VCZ zarr format (via `bio2zarr <https://sgkit-dev.github.io/bio2zarr/>`_)
+as well as legacy scikit-allel zarr stores. The format is auto-detected on read.
+
+**Converting VCF to Zarr** (recommended for large datasets):
 
 .. code-block:: python
 
-   # First time: load from VCF, save as Zarr
-   h = HaplotypeMatrix.from_vcf("data.vcf.gz")
-   h.to_zarr("data.zarr")
+   # Convert VCF to VCZ zarr (uses bio2zarr, supports multicore)
+   HaplotypeMatrix.vcf_to_zarr(
+       "data.vcf.gz", "data.zarr",
+       worker_processes=8,   # parallel conversion
+   )
 
-   # Subsequent runs: much faster
+   # Load from zarr (much faster than VCF for repeated access)
    h = HaplotypeMatrix.from_zarr("data.zarr")
 
-   # Region queries work on Zarr too
+**Region queries and multi-chromosome stores:**
+
+.. code-block:: python
+
+   # Region queries work on all zarr layouts
    h = HaplotypeMatrix.from_zarr("data.zarr", region="chr1:1000000-2000000")
+
+   # Chromosome-grouped stores (e.g., Ag1000G) require a region
+   h = HaplotypeMatrix.from_zarr("ag1000g.zarr", region="3L:1-10000000")
+
+**Quick save/reload** (for intermediate results):
+
+.. code-block:: python
+
+   # Save to VCZ format (default)
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz")
+   h.to_zarr("data.zarr", contig_name="chr1")
+
+   # Or legacy scikit-allel format
+   h.to_zarr("data.zarr", format="scikit-allel")
 
 LD Statistics
 ~~~~~~~~~~~~~
