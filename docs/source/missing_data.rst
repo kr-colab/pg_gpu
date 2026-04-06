@@ -301,6 +301,78 @@ Example Workflow
    tajd = diversity.tajimas_d(h)
    fwh = diversity.fay_wus_h(h)
 
+Accessible Site Masks
+---------------------
+
+Genome accessibility masks (from BED files) define which sites are
+callable in a sequencing experiment. This matters for normalization:
+if only 60% of a region is accessible, per-base diversity estimates
+should divide by the accessible base count, not the total span.
+
+pg_gpu integrates accessibility masks into ``HaplotypeMatrix`` and
+``GenotypeMatrix`` as a non-destructive filter. When a mask is set,
+the ``haplotypes`` and ``positions`` properties transparently return
+only variants within accessible regions. The original data is preserved
+and the mask can be swapped or removed at any time.
+
+.. code-block:: python
+
+   from pg_gpu import HaplotypeMatrix
+
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz")
+   print(h.num_variants)  # e.g. 50,000
+
+   # Attach a mask -- only variants in accessible regions are visible
+   h.set_accessible_mask("accessibility.bed", chrom="3L")
+   print(h.num_variants)  # e.g. 42,000 (filtered)
+
+   # n_total_sites is automatically set to the accessible base count
+   print(h.n_total_sites)  # e.g. 30,000,000
+
+   # Masks can also be set at load time
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz",
+                                 accessible_bed="accessibility.bed")
+   h = HaplotypeMatrix.from_zarr("data.zarr", region="3L:1-10000000",
+                                  accessible_bed="accessibility.bed")
+
+   # Remove the mask to restore all variants
+   h.remove_accessible_mask()
+   print(h.num_variants)  # back to 50,000
+
+**Key behaviors:**
+
+* ``set_accessible_mask()`` is non-destructive and returns ``self``
+  for chaining. It automatically sets ``n_total_sites`` to the count
+  of accessible bases, enabling correct pairwise-mode normalization.
+
+* ``get_span('accessible')`` returns the accessible base count for a
+  region. This is used internally for per-base normalization of
+  diversity and divergence statistics.
+
+* The mask stays on CPU and uses a lazy prefix-sum for O(1) range
+  queries, so windowed analysis over many windows is efficient.
+
+* ``get_subset()`` and ``get_population_matrix()`` read from the
+  filtered properties, so child matrices automatically contain only
+  accessible variants.
+
+**Interaction with missing data modes:**
+
+Accessibility masks and missing data modes are complementary. The mask
+controls *which variants are visible* (a site-level filter based on
+genome quality), while ``missing_data`` controls *how missing genotypes
+at visible sites are handled* (a sample-level concern). Both can be
+active simultaneously:
+
+.. code-block:: python
+
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz",
+                                 accessible_bed="mask.bed")
+
+   # Accessible mask filters to callable regions,
+   # pairwise mode handles per-sample missingness within those regions
+   pi = diversity.pi(h, missing_data='pairwise')
+
 Achaz Framework and SFS Projection
 -----------------------------------
 
