@@ -304,95 +304,175 @@ def _zns_gram(mat, missing_data='include'):
     """Compute ZnS via Gram matrix trick: O(n^2*m) instead of O(n*m^2).
 
     For m segregating sites and n haplotypes, the standard approach
-    computes all m*(m-1)/2 pairwise r^2 values.  Instead we use:
+    computes all m*(m-1)/2 pairwise r^2 values.  Instead we form
 
-        sum_ij r^2(i,j) = ||S^T S||_F^2 = ||K||_F^2
+        K = S S^T    (n x n,  much smaller than the m x m R = S^T S)
 
-    where S is the (n x m) standardized haplotype matrix and K = S S^T
-    is only (n x n).  For typical popgen data (n ~ 200, m ~ 50000)
-    this is orders of magnitude faster.
+    where S is the (n x m) standardized haplotype matrix with
+    S_ki = (h_ki - p_i) / sqrt(p_i * q_i) for valid entries and 0 for
+    missing entries (mean imputation).
 
-    Only valid when there is no missing data (all haplotypes observed
-    at all segregating sites).  Falls back to tiled when missing data
-    is present or when 'project' mode is requested.
+    With missing data and small m (n*m^2 < budget), falls back to the
+    exact tiled O(m^2) path.  For large m, uses mean imputation with
+    a MCAR correction factor.
+
+    Computation is chunked over columns (sites) so that only an
+    (n_hap x chunk_size) slice of S is ever in GPU memory at once,
+    making this safe for chromosome-scale data.
+
+    Falls back to tiled O(m^2) computation only for 'project' mode
+    (unbiased multinomial projection estimators).
     """
-    hap_clean, valid_mask, m = _prepare_segregating(mat, missing_data)
+    from ._memutil import (chunked_dac_and_n, estimate_variant_chunk_size,
+                           free_gpu_pool)
+
+    if hasattr(mat, 'device') and mat.device == 'CPU':
+        mat.transfer_to_gpu()
+
+    # --- exclude mode: drop sites with any missing data ----------------
+    if missing_data == 'exclude':
+        hap = mat.haplotypes
+        n_hap_ex, n_var_ex = hap.shape
+        csz = estimate_variant_chunk_size(n_hap_ex, 4, 1)
+        miss = cp.empty(n_var_ex, dtype=cp.int64)
+        for s in range(0, n_var_ex, csz):
+            e = min(s + csz, n_var_ex)
+            miss[s:e] = cp.sum((hap[:, s:e] < 0).astype(cp.int32), axis=0)
+        keep = cp.where(miss == 0)[0]
+        if len(keep) < n_var_ex:
+            mat = mat.get_subset(keep)
+
+    # --- filter to segregating sites (memory-safe, keeps int8) ---------
+    hap = mat.haplotypes  # int8 on GPU
+    dac, n_valid = chunked_dac_and_n(hap)
+    seg = (dac > 0) & (dac < n_valid)
+    seg_idx = cp.where(seg)[0]
+    m = len(seg_idx)
     if m < 2:
         return 0.0
+    if m < mat.num_variants:
+        mat = mat.get_subset(seg_idx)
+        hap = mat.haplotypes
+        dac, n_valid = chunked_dac_and_n(hap)
 
-    # Check for missing data or projection mode -> fallback
+    n_hap = hap.shape[0]
+
+    # --- project mode: fall back to tiled (different estimator) --------
     if missing_data == 'project':
+        valid_mask = (hap >= 0).astype(cp.float64)
+        hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
         return _zns_tiled_impl(hap_clean, valid_mask, m, missing_data)
 
-    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-    n_hap = hap_clean.shape[0]
-
-    has_missing = bool((n_valid < n_hap).any().get())
-    if has_missing:
-        return _zns_tiled_impl(hap_clean, valid_mask, m, missing_data)
-
-    # Fast path: no missing data
-    # S_ij = (h_ij - p_j) / sqrt(p_j * (1 - p_j))  (standardized)
-    n = float(n_hap)
-    p = cp.sum(hap_clean, axis=0) / n
+    # --- per-site frequency stats (1-D vectors, O(m) memory) ----------
+    p = dac.astype(cp.float64) / n_valid.astype(cp.float64)
     pq = p * (1.0 - p)
-    # Filter out monomorphic (shouldn't happen after _prepare_segregating, but safe)
     good = pq > 0
     if int(cp.sum(good).get()) < 2:
         return 0.0
-
     inv_sqrt_pq = cp.where(good, 1.0 / cp.sqrt(pq), 0.0)
-    S = (hap_clean - p) * inv_sqrt_pq  # (n_hap, m)
 
-    # K = S @ S.T  -- (n_hap, n_hap), much smaller than S.T @ S (m, m)
-    K = S @ S.T  # O(n^2 * m)
+    has_missing = bool((n_valid < n_hap).any().get())
 
-    # sum_ij r^2 = ||K||_F^2 = sum of all K_ij^2
-    # But this includes diagonal (i==i) terms which are r^2(i,i) = 1
-    # so subtract m diagonal terms: trace(K^2) includes self-correlations
-    sum_r2_with_diag = float(cp.sum(K * K).get())
-    # Diagonal of S^T S has entries sum_k S_ki^2 = (sum (h-p)^2)/pq = n*pq/pq = n? No.
-    # Actually K_ij = sum_s S_is * S_js, so K_ii = sum_s S_is^2 = ||S_i||^2.
-    # ||K||_F^2 = trace(K^T K) = trace((S S^T)^2) = sum_ij (sum_s r(i,s)*r(j,s))^2...
-    # Wait, I need to be more careful. S^T S is the correlation matrix R.
-    # R_ij = (1/n) * sum_k S_ki * S_kj when S is centered but not scaled by 1/sqrt(n).
-    # Let me redo: r(i,j) = D(i,j) / sqrt(pq_i * pq_j)
-    # D(i,j) = (1/n) * h_i . h_j - p_i * p_j = (1/n) * sum_k (h_ki - p_i)(h_kj - p_j)
-    #         (since sum(h_k - p) = 0 for centered data... wait, h is 0/1 and p = mean)
-    # Actually h_ki are 0/1, so sum_k h_ki = n*p_i. So:
-    # sum_k (h_ki - p_i)(h_kj - p_j) = h_i . h_j - n*p_i*p_j = n*D(i,j)
-    # So r(i,j) = D(i,j)/sqrt(pq_i*pq_j) = (1/n) * sum_k S_ki * S_kj
-    # where S_ki = (h_ki - p_i)/sqrt(pq_i).
-    # So r(i,j) = (1/n) * (S^T S)_{ij}, i.e. R = (1/n) * S^T S.
-    # r^2(i,j) = (1/n^2) * ((S^T S)_{ij})^2
-    # sum_{i!=j} r^2 = (1/n^2) * (||S^T S||_F^2 - sum_i (S^T S)_{ii}^2)
-    # And ||S^T S||_F^2 = ||S S^T||_F^2 = ||K||_F^2 where K = S S^T.
+    # For missing data with manageable m, the tiled path gives exact
+    # per-pair r^2.  For large m the Gram path with MCAR correction
+    # is the only feasible option.  Crossover: tiled is O(n*m^2),
+    # Gram is O(n^2*m); use tiled when n*m^2 < budget (~10s on GPU).
+    if has_missing:
+        budget = 5e11  # ~50s of FLOPs
+        if float(n_hap) * float(m) * float(m) < budget:
+            valid_mask = (hap >= 0).astype(cp.float64)
+            hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+            return _zns_tiled_exact(hap_clean, valid_mask, m)
 
-    # K = S S^T is (n_hap, n_hap).
-    # ||K||_F^2 = sum_ij K_ij^2
-    # diag of S^T S: (S^T S)_{ii} = ||S_col_i||^2 = sum_k ((h_ki - p_i)/sqrt(pq_i))^2
-    #    = (1/pq_i) * sum_k (h_ki - p_i)^2 = (1/pq_i) * n * pq_i = n
-    # So (S^T S)_{ii} = n for all i.
-    # sum_i (S^T S)_{ii}^2 = m * n^2
-    # sum_{i!=j} r^2 = (1/n^2) * (||K||_F^2 - m * n^2) = ||K||_F^2/n^2 - m
+    # Diagonal correction: (S^T S)_{ii} = n_i, so sum_i (S^T S)_{ii}^2
+    n = float(n_hap)
+    diag_sum_sq = float(cp.sum(n_valid.astype(cp.float64) ** 2).get())
 
-    sum_r2 = sum_r2_with_diag / (n * n) - m
+    # --- chunked Gram matrix accumulation K = S S^T --------------------
+    chunk_size = estimate_variant_chunk_size(
+        n_hap, bytes_per_element=8, n_intermediates=3)
 
-    return sum_r2 / (m * (m - 1))
+    K = cp.zeros((n_hap, n_hap), dtype=cp.float64)
+    for col_start in range(0, m, chunk_size):
+        col_end = min(col_start + chunk_size, m)
+        hap_chunk = hap[:, col_start:col_end]
+        p_c = p[col_start:col_end]
+        isq_c = inv_sqrt_pq[col_start:col_end]
+
+        if has_missing:
+            valid_c = hap_chunk >= 0
+            h_f = cp.where(valid_c, hap_chunk, 0).astype(cp.float64)
+            S_chunk = (h_f - p_c * valid_c.astype(cp.float64)) * isq_c
+            del h_f, valid_c
+        else:
+            S_chunk = (hap_chunk.astype(cp.float64) - p_c) * isq_c
+
+        K += S_chunk @ S_chunk.T
+        del S_chunk
+
+    free_gpu_pool()
+
+    # --- compute ZnS from K -------------------------------------------
+    # r(i,j) = (1/n) * (S^T S)_{ij}
+    # sum_{i!=j} r^2 = (||K||_F^2 - diag_sum_sq) / n^2
+    frob_sq = float(cp.sum(K * K).get())
+    sum_r2 = (frob_sq - diag_sum_sq) / (n * n)
+    zns = sum_r2 / (m * (m - 1))
+
+    if has_missing:
+        # Mean imputation divides by n instead of n_both(i,j) per pair,
+        # biasing each r^2 by ~(n_both/n)^2.  Under MCAR with per-site
+        # valid counts n_i, n_both(i,j) ~ n_i*n_j/n, giving a global
+        # correction of (n^2 * E[1/n_i^2])^2.
+        inv_nv_sq = (1.0 / n_valid.astype(cp.float64)) ** 2
+        c = n * n * float(cp.mean(inv_nv_sq).get())
+        correction = c * c
+        zns *= correction
+        if correction > 1.05:
+            import warnings
+            warnings.warn(
+                f"ZnS: Gram path applied MCAR correction of "
+                f"{correction:.2f}x (~{(correction-1)*100:.0f}% "
+                f"missing-data adjustment, {m:,} sites). "
+                f"Use missing_data='exclude' for exact results.",
+                stacklevel=3)
+
+    return zns
+
+
+def _zns_tiled_exact(hap_clean, valid_mask, m, tile_size=512):
+    """Tiled ZnS with exact per-pair r^2 (non-projection)."""
+    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    p = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
+    pq = p * (1 - p)
+    B = tile_size
+    total = 0.0
+
+    for i0 in range(0, m, B):
+        i1 = min(i0 + B, m)
+        hi = hap_clean[:, i0:i1]
+        vi = valid_mask[:, i0:i1]
+        for j0 in range(i0, m, B):
+            j1 = min(j0 + B, m)
+            hj = hap_clean[:, j0:j1]
+            vj = valid_mask[:, j0:j1]
+            r2_tile = _tile_r2_naive(
+                hi, vi, hj, vj,
+                p[i0:i1], pq[i0:i1], p[j0:j1], pq[j0:j1])
+            if i0 == j0:
+                cp.fill_diagonal(r2_tile, 0.0)
+                total += float(cp.sum(r2_tile).get())
+            else:
+                total += 2.0 * float(cp.sum(r2_tile).get())
+
+    return total / (m * (m - 1))
 
 
 def _zns_tiled_impl(hap_clean, valid_mask, m, missing_data, tile_size=512):
-    """Tiled ZnS computation (fallback for missing data / projection)."""
-    use_projection = (missing_data == 'project')
+    """Tiled ZnS computation (fallback for 'project' mode)."""
     B = tile_size
     total = 0.0
     n_pairs = 0
-
-    if not use_projection:
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        p = cp.where(n_valid > 0,
-                     cp.sum(hap_clean, axis=0) / n_valid, 0.0)
-        pq = p * (1 - p)
 
     for i0 in range(0, m, B):
         i1 = min(i0 + B, m)
@@ -404,36 +484,23 @@ def _zns_tiled_impl(hap_clean, valid_mask, m, missing_data, tile_size=512):
             hj = hap_clean[:, j0:j1]
             vj = valid_mask[:, j0:j1]
 
-            if use_projection:
-                tile, valid = _tile_sigma_d2(hi, vi, hj, vj)
-                if i0 == j0:
-                    cp.fill_diagonal(tile, 0.0)
-                    cp.fill_diagonal(valid, False)
-                    total += float(cp.sum(tile).get())
-                    n_pairs += int(cp.sum(valid).get())
-                else:
-                    total += 2.0 * float(cp.sum(tile).get())
-                    n_pairs += 2 * int(cp.sum(valid).get())
+            tile, valid = _tile_sigma_d2(hi, vi, hj, vj)
+            if i0 == j0:
+                cp.fill_diagonal(tile, 0.0)
+                cp.fill_diagonal(valid, False)
+                total += float(cp.sum(tile).get())
+                n_pairs += int(cp.sum(valid).get())
             else:
-                r2_tile = _tile_r2_naive(
-                    hi, vi, hj, vj,
-                    p[i0:i1], pq[i0:i1], p[j0:j1], pq[j0:j1])
-                if i0 == j0:
-                    cp.fill_diagonal(r2_tile, 0.0)
-                    total += float(cp.sum(r2_tile).get())
-                else:
-                    total += 2.0 * float(cp.sum(r2_tile).get())
+                total += 2.0 * float(cp.sum(tile).get())
+                n_pairs += 2 * int(cp.sum(valid).get())
 
-    if use_projection:
-        return total / n_pairs if n_pairs > 0 else 0.0
-    return total / (m * (m - 1))
+    return total / n_pairs if n_pairs > 0 else 0.0
 
 
 def _zns_tiled(mat, missing_data='include', tile_size=512):
-    """Compute ZnS without materializing the full r² matrix.
+    """Compute ZnS via Gram matrix trick (O(n^2*m), chunked).
 
-    Uses Gram matrix trick when no missing data is present (O(n^2*m)),
-    falls back to tile-based accumulation otherwise.
+    Falls back to tiled accumulation for 'project' mode only.
     """
     return _zns_gram(mat, missing_data)
 
@@ -530,11 +597,14 @@ def zns(r2_matrix_or_matrix, missing_data='include'):
     r2_matrix_or_matrix : ndarray, HaplotypeMatrix, or GenotypeMatrix
         Square r-squared matrix, or a matrix object (dispatches to
         haploid or diploid r-squared computation automatically).
-        When a HaplotypeMatrix is passed, uses tiled computation to
-        avoid materializing the full m×m r² matrix.
+        When a HaplotypeMatrix is passed, uses Gram matrix trick
+        (O(n^2 m) instead of O(n m^2), chunked over sites for constant
+        GPU memory usage).
     missing_data : str
         ``'include'`` (default) uses per-site valid data for frequency
-        computation. ``'exclude'`` filters to sites with no missing data.
+        computation; missing entries are mean-imputed (contribute zero
+        to the standardized matrix).
+        ``'exclude'`` filters to sites with no missing data.
         ``'project'`` uses unbiased multinomial projection estimators,
         computing mean sigma_D^2 = D^2/pi^2 per pair with falling-factorial
         corrections (Ragsdale & Gravel 2019). Requires HaplotypeMatrix input.
@@ -546,7 +616,7 @@ def zns(r2_matrix_or_matrix, missing_data='include'):
     """
     from .haplotype_matrix import HaplotypeMatrix
 
-    # Streaming path for HaplotypeMatrix: O(B²) memory instead of O(m²)
+    # Gram matrix path for HaplotypeMatrix: O(n²) memory, chunked over sites
     if isinstance(r2_matrix_or_matrix, HaplotypeMatrix):
         return _zns_tiled(r2_matrix_or_matrix, missing_data)
 
