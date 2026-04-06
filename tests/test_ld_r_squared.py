@@ -163,3 +163,68 @@ class TestWindowedRSquared:
         valid = ~np.isnan(result)
         assert np.all(result[valid] >= 0)
         assert np.all(result[valid] <= 1)
+
+
+class TestDPrime:
+    """Test Lewontin's D' statistic."""
+
+    def test_d_prime_perfect_ld(self):
+        """Perfect positive LD: D' = 1."""
+        counts = cp.array([[5, 0, 0, 5]], dtype=cp.int32)
+        dp = ld_statistics.d_prime(counts)
+        np.testing.assert_allclose(dp.get(), [1.0], rtol=1e-10)
+
+    def test_d_prime_perfect_negative_ld(self):
+        """Perfect negative LD: D' = -1."""
+        counts = cp.array([[0, 5, 5, 0]], dtype=cp.int32)
+        dp = ld_statistics.d_prime(counts)
+        np.testing.assert_allclose(dp.get(), [-1.0], rtol=1e-10)
+
+    def test_d_prime_no_ld(self):
+        """Independent loci: D' = 0."""
+        counts = cp.array([[25, 25, 25, 25]], dtype=cp.int32)
+        dp = ld_statistics.d_prime(counts)
+        np.testing.assert_allclose(dp.get(), [0.0], atol=1e-10)
+
+    def test_d_prime_range(self):
+        """D' should be in [-1, 1]."""
+        np.random.seed(42)
+        n_hap = 40
+        n_var = 20
+        hap = np.random.randint(0, 2, (n_hap, n_var), dtype=np.int8)
+        pos = np.arange(n_var) * 1000
+        matrix = HaplotypeMatrix(hap, pos, 0, n_var * 1000)
+        counts, n_valid = matrix.tally_gpu_haplotypes()
+        dp = ld_statistics.d_prime(counts, n_valid=n_valid).get()
+        valid = ~np.isnan(dp)
+        assert np.all(dp[valid] >= -1.0 - 1e-10)
+        assert np.all(dp[valid] <= 1.0 + 1e-10)
+
+    def test_d_prime_monomorphic_is_nan(self):
+        """Monomorphic at one locus: D' undefined."""
+        counts = cp.array([[5, 5, 0, 0]], dtype=cp.int32)
+        dp = ld_statistics.d_prime(counts)
+        assert np.isnan(dp.get()[0])
+
+    def test_d_prime_batch(self):
+        """Multiple pairs computed in parallel."""
+        counts = cp.array([
+            [5, 0, 0, 5],     # perfect positive
+            [25, 25, 25, 25],  # independent
+            [0, 5, 5, 0],     # perfect negative
+        ], dtype=cp.int32)
+        dp = ld_statistics.d_prime(counts)
+        expected = [1.0, 0.0, -1.0]
+        np.testing.assert_allclose(dp.get(), expected, atol=1e-10)
+
+    def test_d_prime_asymmetric_frequencies(self):
+        """D' with unequal allele frequencies."""
+        # p_A=0.8, p_B=0.3, D>0
+        # n11=28, n10=52, n01=2, n00=18 -> n=100
+        # p_A=0.8, q_A=0.2, p_B=0.3, q_B=0.7
+        # D = (28*18 - 52*2)/10000 = (504-104)/10000 = 0.04
+        # D_max = min(0.8*0.7, 0.2*0.3) = min(0.56, 0.06) = 0.06
+        # D' = 0.04/0.06 = 2/3
+        counts = cp.array([[28, 52, 2, 18]], dtype=cp.int32)
+        dp = ld_statistics.d_prime(counts)
+        np.testing.assert_allclose(dp.get(), [2.0 / 3.0], rtol=1e-10)

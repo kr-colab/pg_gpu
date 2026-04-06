@@ -205,6 +205,47 @@ def r_squared(counts: cp.ndarray,
     return r(counts, n_valid) ** 2
 
 
+def d_prime(counts: cp.ndarray,
+            n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
+    """Compute Lewontin's D' (normalized linkage disequilibrium).
+
+    D' = D / D_max, where D_max depends on the sign of D:
+        If D >= 0: D_max = min(p_A * q_B, q_A * p_B)
+        If D <  0: D_max = min(p_A * p_B, q_A * q_B)
+
+    Parameters
+    ----------
+    counts : cp.ndarray, shape (N, 4)
+        Haplotype counts [n11, n10, n01, n00] for each variant pair.
+    n_valid : cp.ndarray, optional
+        Valid sample counts per pair. Shape (N,).
+
+    Returns
+    -------
+    cp.ndarray, float64, shape (N,)
+        D' values in [-1, 1]. NaN where computation is undefined
+        (monomorphic at either locus or D_max is zero).
+    """
+    c11, c10, c01, c00 = counts[:, 0], counts[:, 1], counts[:, 2], counts[:, 3]
+    n = n_valid.astype(cp.float64) if n_valid is not None else cp.sum(counts, axis=1).astype(cp.float64)
+
+    p_A = (c11 + c10) / n
+    q_A = 1.0 - p_A
+    p_B = (c11 + c01) / n
+    q_B = 1.0 - p_B
+    D = (c11 * c00 - c10 * c01).astype(cp.float64) / (n * n)
+
+    D_max_pos = cp.minimum(p_A * q_B, q_A * p_B)
+    D_max_neg = cp.minimum(p_A * p_B, q_A * q_B)
+    D_max = cp.where(D >= 0, D_max_pos, D_max_neg)
+
+    valid_mask = D_max > 0
+    result = cp.full(n.shape[0], cp.nan, dtype=cp.float64)
+    result[valid_mask] = D[valid_mask] / D_max[valid_mask]
+
+    return result
+
+
 def _prepare_segregating(mat, missing_data='include'):
     """Filter to segregating sites and return cleaned arrays.
 
