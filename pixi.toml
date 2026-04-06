@@ -14,9 +14,11 @@ scikit-allel = ">=1.3"
 msprime = ">=1.0"
 h5py = ">=3.0"
 tqdm = ">=4.0"
+zarr = ">=2.16"
 
 [pypi-dependencies]
 pg_gpu = { path = ".", editable = true }
+bio2zarr = { version = ">=0.1", extras = ["vcf"] }
 
 [feature.gpu.dependencies]
 cupy = ">=13.0"
