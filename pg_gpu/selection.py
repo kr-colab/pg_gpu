@@ -487,10 +487,10 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     gaps = _compute_gaps(pos, map_pos, gap_scale, max_gap, is_accessible)
     gaps_gpu = cp.asarray(gaps)
 
-    # Auto-select kernel: fused kernel uses 128-bit bitmask per thread,
-    # limiting it to ~256 haplotypes. Histogram approach scales better and
-    # is required above that threshold.
-    scan_fn = _ihh01_scan_hist_gpu if n_haplotypes > 256 else _ihh01_scan_gpu
+    # Histogram kernel: one thread per pair scanning all variants independently,
+    # no per-step synchronization. Faster than the fused (one block per variant)
+    # kernel at all haplotype counts.
+    scan_fn = _ihh01_scan_hist_gpu
 
     # forward scan
     ihh0_fwd, ihh1_fwd = scan_fn(hap, gaps_gpu, min_ehh, min_maf,
