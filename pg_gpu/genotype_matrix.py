@@ -361,6 +361,89 @@ class GenotypeMatrix:
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
         return gm
 
+    @classmethod
+    def from_zarr(cls, path, region=None, accessible_bed=None,
+                  include_invariant=False):
+        """Construct a GenotypeMatrix from a Zarr store.
+
+        Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
+
+        Parameters
+        ----------
+        path : str
+            Path to Zarr store directory.
+        region : str, optional
+            Genomic region 'chrom:start-end'.
+        accessible_bed : str, optional
+            Path to a BED file defining accessible/callable regions.
+        include_invariant : bool
+            If True, set n_total_sites from loaded variant count.
+
+        Returns
+        -------
+        GenotypeMatrix
+        """
+        from .zarr_io import read_genotypes
+
+        data = read_genotypes(path, region)
+        gt = data['gt']  # (n_variants, n_samples, ploidy)
+        positions = data['positions']
+        samples = data['samples']
+
+        missing = np.any(gt < 0, axis=2)
+        geno = np.sum(np.maximum(gt, 0), axis=2).astype(np.int8)
+        geno[missing] = -1
+        geno = geno.T  # (n_individuals, n_variants)
+
+        n_total_sites = geno.shape[1] if include_invariant else None
+        chrom = region.split(':')[0] if region else None
+
+        gm = cls(geno, positions, chrom_start=int(positions[0]),
+                 chrom_end=int(positions[-1]),
+                 n_total_sites=n_total_sites,
+                 samples=list(samples) if samples else None)
+        if accessible_bed is not None:
+            gm.set_accessible_mask(accessible_bed, chrom=chrom)
+        return gm
+
+    def to_zarr(self, zarr_path, format='vcz', contig_name=None):
+        """Save genotype data to Zarr format.
+
+        Parameters
+        ----------
+        zarr_path : str
+            Output Zarr store path.
+        format : str
+            ``'vcz'`` (default) or ``'scikit-allel'``.
+        contig_name : str, optional
+            Chromosome name for VCZ format.
+        """
+        from .zarr_io import write_vcz, write_allel
+
+        geno = self.genotypes if isinstance(self.genotypes, np.ndarray) \
+            else self.genotypes.get()
+        pos = self.positions if isinstance(self.positions, np.ndarray) \
+            else self.positions.get()
+
+        # Expand (n_individuals, n_variants) to (n_variants, n_samples, 2)
+        n_ind, n_var = geno.shape
+        g = geno.T  # (n_var, n_ind)
+        gt = np.zeros((n_var, n_ind, 2), dtype=np.int8)
+        gt[:, :, 0] = (g >= 1).view(np.int8)
+        gt[:, :, 1] = (g >= 2).view(np.int8)
+        missing = g < 0
+        gt[missing] = -1
+
+        if format == 'vcz':
+            write_vcz(zarr_path, gt, pos, self.samples,
+                      contig_name=contig_name)
+        elif format == 'scikit-allel':
+            write_allel(zarr_path, gt, pos, self.samples)
+        else:
+            raise ValueError(
+                f"Unknown format: {format!r}. Use 'vcz' or 'scikit-allel'."
+            )
+
     def load_pop_file(self, pop_file, pops=None):
         """Load population assignments from a tab-delimited file.
 

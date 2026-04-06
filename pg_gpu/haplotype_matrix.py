@@ -309,9 +309,9 @@ class HaplotypeMatrix:
                   accessible_bed: str = None):
         """Construct a HaplotypeMatrix from a Zarr store.
 
-        Zarr provides fast columnar access, especially for large datasets.
-        Create a Zarr store from VCF using allel.vcf_to_zarr() or
-        HaplotypeMatrix.vcf_to_zarr().
+        Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
+        Layout is auto-detected. For multi-chromosome stores, region
+        must be specified.
 
         Parameters
         ----------
@@ -326,23 +326,12 @@ class HaplotypeMatrix:
         -------
         HaplotypeMatrix
         """
-        import zarr
-        store = zarr.open(path, mode='r')
+        from .zarr_io import read_genotypes
 
-        positions = np.array(store['variants/POS'])
-        gt = np.array(store['calldata/GT'])
-        sample_names = list(store['samples']) if 'samples' in store else None
-
-        # Apply region filter if specified
-        chrom = None
-        if region is not None:
-            chrom, coords = region.split(':')
-            start, end = [int(x) for x in coords.split('-')]
-            mask = (positions >= start) & (positions < end)
-            positions = positions[mask]
-            gt = gt[mask]
-            if len(positions) == 0:
-                raise ValueError(f"No variants in region {region}")
+        data = read_genotypes(path, region)
+        gt = data['gt']
+        positions = data['positions']
+        sample_names = data['samples']
 
         num_variants, num_samples, ploidy = gt.shape
         assert ploidy == 2
@@ -352,31 +341,72 @@ class HaplotypeMatrix:
         haplotypes[:, num_samples:] = gt[:, :, 1]
         haplotypes = haplotypes.T
 
-        hm = cls(haplotypes, positions, positions[0], positions[-1],
+        chrom = region.split(':')[0] if region else None
+        hm = cls(haplotypes, positions, int(positions[0]), int(positions[-1]),
                  samples=sample_names)
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
         return hm
 
-    def to_zarr(self, zarr_path: str):
-        """Save haplotype data to Zarr format for fast reloading.
+    def to_zarr(self, zarr_path: str, format: str = 'vcz',
+                contig_name: str = None):
+        """Save haplotype data to Zarr format.
 
         Parameters
         ----------
         zarr_path : str
             Output Zarr store path.
+        format : str
+            ``'vcz'`` (default) for bio2zarr-compatible VCZ layout,
+            ``'scikit-allel'`` for legacy layout.
+        contig_name : str, optional
+            Chromosome/contig name to store in VCZ format.
         """
-        import zarr
-        store = zarr.open(zarr_path, mode='w')
-        hap = self.haplotypes if isinstance(self.haplotypes, np.ndarray) else self.haplotypes.get()
-        pos = self.positions if isinstance(self.positions, np.ndarray) else self.positions.get()
+        from .zarr_io import write_vcz, write_allel
 
+        hap = self.haplotypes if isinstance(self.haplotypes, np.ndarray) \
+            else self.haplotypes.get()
+        pos = self.positions if isinstance(self.positions, np.ndarray) \
+            else self.positions.get()
         gt = self._haplotypes_to_gt(hap)
-        store.create_dataset('calldata/GT', shape=gt.shape, dtype=gt.dtype, data=gt)
-        store.create_dataset('variants/POS', shape=pos.shape, dtype=pos.dtype, data=pos)
-        if self.samples is not None:
-            s = np.array(self.samples, dtype='U')
-            store.create_dataset('samples', shape=s.shape, dtype=s.dtype, data=s)
+
+        if format == 'vcz':
+            write_vcz(zarr_path, gt, pos, self.samples,
+                      contig_name=contig_name)
+        elif format == 'scikit-allel':
+            write_allel(zarr_path, gt, pos, self.samples)
+        else:
+            raise ValueError(
+                f"Unknown format: {format!r}. Use 'vcz' or 'scikit-allel'."
+            )
+
+    @staticmethod
+    def vcf_to_zarr(vcf_paths, zarr_path, worker_processes=None,
+                    icf_path=None, max_memory='4GB', show_progress=True):
+        """Convert VCF file(s) to VCZ-format Zarr store using bio2zarr.
+
+        Parameters
+        ----------
+        vcf_paths : str or list of str
+            Path(s) to VCF/BCF files (bgzipped + indexed).
+        zarr_path : str
+            Output Zarr store path.
+        worker_processes : int, optional
+            Number of worker processes. Defaults to os.cpu_count().
+        icf_path : str, optional
+            Directory for intermediate columnar format files.
+            Defaults to ``<zarr_path>.icf_tmp`` (same filesystem as output).
+            ICF files can be 1-3x the VCF size.
+        max_memory : str
+            Maximum memory for encoding step. Default '4GB'.
+        show_progress : bool
+            Show progress bars. Default True.
+        """
+        from .zarr_io import vcf_to_zarr
+        vcf_to_zarr(vcf_paths, zarr_path,
+                     worker_processes=worker_processes,
+                     icf_path=icf_path, max_memory=max_memory,
+                     show_progress=show_progress)
 
     @staticmethod
     def _haplotypes_to_gt(hap):

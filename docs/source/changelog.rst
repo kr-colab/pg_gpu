@@ -1,7 +1,7 @@
 Changelog
 =========
 
-v0.2.0 (Current)
+v0.1.0 (Current)
 -----------------
 
 This release focuses on correctness auditing against scikit-allel, GPU kernel
@@ -36,6 +36,11 @@ Data Loading and I/O
 
 * **Zarr support** -- ``to_zarr()`` / ``from_zarr()`` for fast columnar data
   storage. Significantly faster than VCF for repeated loading.
+
+* **Bio2zarr VCZ format** -- ``from_zarr()`` auto-detects VCZ (bio2zarr),
+  scikit-allel, and chromosome-grouped zarr layouts. ``vcf_to_zarr()`` provides
+  multicore VCF-to-zarr conversion via bio2zarr. ``to_zarr()`` now writes VCZ
+  format by default. ``GenotypeMatrix`` gains ``from_zarr()`` / ``to_zarr()``.
 
 * **Population file loading** -- ``load_pop_file('pops.txt')`` assigns populations
   from a tab-delimited file using stored sample names.
