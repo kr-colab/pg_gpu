@@ -169,6 +169,30 @@ class TestZnSOmega:
         z_r2 = ld_statistics.zns(r2, estimator='r2')
         assert z_auto == z_r2
 
+    def test_zns_r2_gram_matches_pairwise_matrix(self, hap_data):
+        observed = ld_statistics.zns(hap_data, estimator='r2')
+        expected = ld_statistics.zns(hap_data.pairwise_r2(), estimator='r2')
+        np.testing.assert_allclose(observed, expected, rtol=1e-10,
+                                   atol=1e-12)
+
+    def test_zns_r2_include_uses_pairwise_complete_counts(self):
+        # Site 1 has p=1/2 marginally, but p=1/4 on the four samples
+        # observed at both sites. Pairwise-complete r² is therefore 1/3;
+        # the old mixed-marginal calculation incorrectly returned zero.
+        hap = np.array([
+            [0, 0],
+            [0, 0],
+            [1, 0],
+            [1, 1],
+            [-1, 1],
+            [-1, 1],
+        ], dtype=np.int8)
+        matrix = HaplotypeMatrix(hap, np.array([0, 100]), 0, 200)
+        observed = ld_statistics.zns(
+            matrix, missing_data='include', estimator='r2')
+        np.testing.assert_allclose(observed, 1.0 / 3.0,
+                                   rtol=1e-10, atol=1e-12)
+
     def test_zns_sigma_d2_requires_haplotype_matrix(self, hap_data):
         r2 = hap_data.pairwise_r2()
         with pytest.raises(ValueError, match="HaplotypeMatrix"):

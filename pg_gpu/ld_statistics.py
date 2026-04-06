@@ -246,30 +246,45 @@ def d_prime(counts: cp.ndarray,
     return out
 
 
-def _prepare_segregating(mat, missing_data='include'):
-    """Filter to segregating sites and return cleaned arrays.
-
-    Returns (hap_clean, valid_mask, m) or (None, None, 0) if < 2 sites.
-    """
+def _segregating_haplotypes(mat, missing_data='include'):
+    """Return segregating haplotypes without a full dtype expansion."""
     if hasattr(mat, 'device') and mat.device == 'CPU':
         mat.transfer_to_gpu()
 
-    if missing_data == 'exclude':
-        hap = mat.haplotypes
-        missing_per_var = cp.sum(hap < 0, axis=0)
-        valid = cp.where(missing_per_var == 0)[0]
-        mat = mat.get_subset(valid)
-
     hap = mat.haplotypes
-    dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0)
-    n_valid_per_site = cp.sum((hap >= 0).astype(cp.int32), axis=0)
+    n_hap, n_var = hap.shape
+    from ._memutil import estimate_variant_chunk_size
+
+    chunk_size = estimate_variant_chunk_size(
+        n_hap, bytes_per_element=1, n_intermediates=2)
+    dac = cp.empty(n_var, dtype=cp.int64)
+    n_valid_per_site = cp.empty(n_var, dtype=cp.int64)
+    for start in range(0, n_var, chunk_size):
+        end = min(start + chunk_size, n_var)
+        chunk = hap[:, start:end]
+        dac[start:end] = cp.sum(cp.maximum(chunk, 0), axis=0,
+                               dtype=cp.int64)
+        n_valid_per_site[start:end] = cp.sum(chunk >= 0, axis=0,
+                                             dtype=cp.int64)
+
     seg = (dac > 0) & (dac < n_valid_per_site)
+    if missing_data == 'exclude':
+        seg &= n_valid_per_site == n_hap
     seg_idx = cp.where(seg)[0]
-    if len(seg_idx) < mat.num_variants:
-        mat = mat.get_subset(seg_idx)
+    m = len(seg_idx)
+    if m < 2:
+        return None, 0
+    if m < n_var:
+        hap = hap[:, seg_idx]
+    return hap, m
 
-    hap = mat.haplotypes
-    m = hap.shape[1]
+
+def _prepare_segregating(mat, missing_data='include'):
+    """Filter to segregating sites and return cleaned float arrays.
+
+    Returns (hap_clean, valid_mask, m) or (None, None, 0) if < 2 sites.
+    """
+    hap, m = _segregating_haplotypes(mat, missing_data)
     if m < 2:
         return None, None, 0
 
@@ -306,6 +321,17 @@ def _tile_r2_naive(hi, vi, hj, vj, pi, pqi, pj, pqj):
     D = p_AB - cp.outer(pi, pj)
     denom = cp.outer(pqi, pqj)
     return cp.where(denom > 0, (D ** 2) / denom, 0.0)
+
+
+def _tile_r2_counts(hi, vi, hj, vj):
+    """Compute r² from pairwise-complete four-way counts."""
+    c1, c2, c3, c4, n = _tile_counts(hi, vi, hj, vj)
+    n_safe = cp.where(n > 0, n, 1.0)
+    p_i = (c1 + c2) / n_safe
+    p_j = (c1 + c3) / n_safe
+    D = c1 / n_safe - p_i * p_j
+    denom = p_i * (1.0 - p_i) * p_j * (1.0 - p_j)
+    return cp.where((denom > 0) & (n >= 2), D ** 2 / denom, 0.0)
 
 
 def _tile_sigma_d2(hi, vi, hj, vj):
@@ -531,6 +557,41 @@ def rogers_huff_r_squared(matrix, tile_size: Optional[int] = None
     return rogers_huff_r(matrix, tile_size=tile_size) ** 2
 
 
+def _zns_gram(mat, missing_data='include'):
+    """Compute exact r² ZnS with a chunked haplotype Gram matrix."""
+    from ._memutil import estimate_variant_chunk_size
+
+    hap, m = _segregating_haplotypes(mat, missing_data)
+    if m < 2:
+        return 0.0
+
+    n_hap = hap.shape[0]
+    n = float(n_hap)
+    p = cp.sum(hap, axis=0, dtype=cp.float64) / n
+    pq = p * (1.0 - p)
+    inv_sqrt_pq = cp.where(pq > 0, 1.0 / cp.sqrt(pq), 0.0)
+    chunk_size = estimate_variant_chunk_size(
+        n_hap, bytes_per_element=8, n_intermediates=2)
+
+    gram = cp.zeros((n_hap, n_hap), dtype=cp.float64)
+    diagonal_sq = 0.0
+    for start in range(0, m, chunk_size):
+        end = min(start + chunk_size, m)
+        standardized = hap[:, start:end].astype(cp.float64)
+        standardized -= p[start:end]
+        standardized *= inv_sqrt_pq[start:end]
+        gram += standardized @ standardized.T
+        diagonal = cp.sum(standardized * standardized, axis=0)
+        diagonal_sq += float(cp.sum(diagonal * diagonal).get())
+        del standardized
+
+    # ||S S.T||_F == ||S.T S||_F.  Subtract the actual diagonal rather
+    # than assuming it is exactly n, then normalize S.T S to correlation.
+    frobenius_sq = float(cp.sum(gram * gram).get())
+    sum_r2 = max((frobenius_sq - diagonal_sq) / (n * n), 0.0)
+    return min(sum_r2 / (m * (m - 1)), 1.0)
+
+
 def _zns_tiled(mat, missing_data='include', tile_size=512):
     """Compute ZnS without materializing the full r² matrix.
 
@@ -550,12 +611,6 @@ def _zns_tiled(mat, missing_data='include', tile_size=512):
     B = tile_size
     total = 0.0
     n_pairs = 0
-
-    if not use_projection:
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        p = cp.where(n_valid > 0,
-                     cp.sum(hap_clean, axis=0) / n_valid, 0.0)
-        pq = p * (1 - p)
 
     for i0 in range(0, m, B):
         i1 = min(i0 + B, m)
@@ -578,9 +633,7 @@ def _zns_tiled(mat, missing_data='include', tile_size=512):
                     total += 2.0 * float(cp.sum(tile).get())
                     n_pairs += 2 * int(cp.sum(valid).get())
             else:
-                r2_tile = _tile_r2_naive(
-                    hi, vi, hj, vj,
-                    p[i0:i1], pq[i0:i1], p[j0:j1], pq[j0:j1])
+                r2_tile = _tile_r2_counts(hi, vi, hj, vj)
                 if i0 == j0:
                     cp.fill_diagonal(r2_tile, 0.0)
                     total += float(cp.sum(r2_tile).get())
@@ -684,8 +737,9 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     r2_matrix_or_matrix : ndarray, HaplotypeMatrix, or GenotypeMatrix
         Square r-squared matrix, or a matrix object (dispatches to
         haploid or diploid r-squared computation automatically).
-        When a HaplotypeMatrix is passed, uses tiled computation to
-        avoid materializing the full m×m r² matrix.
+        For a HaplotypeMatrix with complete data, ``estimator='r2'``
+        uses a chunked Gram-matrix fast path. Missing ``'include'`` data
+        uses exact pairwise-complete count tiles instead.
     missing_data : str
         ``'include'`` (default) uses per-site valid data for frequency
         computation. ``'exclude'`` filters to sites with no missing data.
@@ -710,11 +764,25 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     is_hm = isinstance(r2_matrix_or_matrix, HaplotypeMatrix)
     estimator = _resolve_ld_estimator(estimator, is_hm)
 
-    # Map estimator to internal missing_data for backward compat with _zns_tiled
+    # Map sigma_d2 to the existing internal projection path.
     _md = 'project' if estimator == 'sigma_d2' else missing_data
 
-    # Streaming path for HaplotypeMatrix: O(B²) memory instead of O(m²)
     if is_hm:
+        if estimator == 'r2':
+            if missing_data == 'exclude':
+                return _zns_gram(r2_matrix_or_matrix, missing_data)
+
+            # The Gram identity requires a common sample set. With missing
+            # data, use exact pairwise-complete counts as requested by the
+            # public 'include' semantics.
+            from ._memutil import dac_and_n
+            hap = r2_matrix_or_matrix.haplotypes
+            if r2_matrix_or_matrix.device == 'CPU':
+                r2_matrix_or_matrix.transfer_to_gpu()
+                hap = r2_matrix_or_matrix.haplotypes
+            _, n_valid = dac_and_n(hap)
+            if not bool(cp.any(n_valid < hap.shape[0]).get()):
+                return _zns_gram(r2_matrix_or_matrix, missing_data)
         return _zns_tiled(r2_matrix_or_matrix, _md)
 
     if estimator == 'sigma_d2':
