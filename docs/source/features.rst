@@ -161,13 +161,13 @@ Linkage Disequilibrium
      -
    * - ``dd`` (LD)
      - D-squared (two-locus LD statistic)
-     -
+     - Ragsdale & Gravel (2019)
    * - ``dz``
      - Dz statistic (multi-population LD)
-     -
+     - Ragsdale & Gravel (2019)
    * - ``pi2``
      - Two-locus nucleotide diversity
-     -
+     - Ragsdale & Gravel (2019)
    * - ``zns``
      - Kelly's ZnS (mean pairwise r-squared)
      - Kelly (1997)
