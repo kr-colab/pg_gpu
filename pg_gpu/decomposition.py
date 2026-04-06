@@ -209,11 +209,24 @@ def pca(haplotype_matrix: HaplotypeMatrix,
         explained_variance_ratio = var[:n_components] / cp.sum(cp.maximum(var, 0))
         return coords.get(), explained_variance_ratio.get()
 
-    # Fast path: full SVD
     X = prepared
     n_samples, n_variants = X.shape
     n_components = min(n_components, min(n_samples, n_variants))
 
+    # When n_samples << n_variants (typical for popgen), eigendecompose
+    # the n x n Gram matrix X @ X.T instead of full SVD on n x m.
+    if n_samples < n_variants:
+        C = X @ X.T  # (n_samples, n_samples)
+        eigvals, eigvecs = cp.linalg.eigh(C)
+        idx = cp.argsort(eigvals)[::-1]
+        eigvals = eigvals[idx]
+        eigvecs = eigvecs[:, idx]
+        coords = eigvecs[:, :n_components] * cp.sqrt(cp.maximum(eigvals[:n_components], 0))
+        var = eigvals / n_samples
+        explained_variance_ratio = var[:n_components] / cp.sum(cp.maximum(var, 0))
+        return coords.get(), explained_variance_ratio.get()
+
+    # Fallback: full SVD when n_samples >= n_variants
     try:
         U, S, Vt = cp.linalg.svd(X, full_matrices=False)
     except Exception as e:
