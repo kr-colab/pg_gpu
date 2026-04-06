@@ -364,13 +364,27 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     n = X.shape[0]
 
     if metric in ('euclidean', 'sqeuclidean', 'cityblock'):
+        n_variants = X.shape[1]
+
+        # Fast path: Gram matrix trick for euclidean/sqeuclidean without missing data
+        if not has_missing and metric in ('euclidean', 'sqeuclidean'):
+            # d²(i,j) = ||x_i||² + ||x_j||² - 2*x_i·x_j
+            G = X @ X.T  # (n, n) gram matrix — O(n²*m)
+            norms_sq = cp.diag(G)  # ||x_i||²
+            D2 = norms_sq[:, None] + norms_sq[None, :] - 2.0 * G
+            # Clamp numerical noise
+            D2 = cp.maximum(D2, 0.0)
+            idx_i, idx_j = cp.triu_indices(n, k=1)
+            d = D2[idx_i, idx_j]
+            if metric == 'euclidean':
+                d = cp.sqrt(d)
+            return d.get()
+
+        # General batched path (missing data or cityblock)
         idx_i, idx_j = cp.triu_indices(n, k=1)
         n_pairs = len(idx_i)
 
-        # Estimate batch size from available GPU memory
-        n_variants = X.shape[1]
         free_mem = cp.cuda.Device().mem_info[0]
-        # Each pair needs ~3 float64 arrays of n_variants (diff, joint, result)
         bytes_per_pair = n_variants * 8 * 3
         batch_size = max(1, min(n_pairs, int(free_mem * 0.3 / bytes_per_pair)))
         dist_parts = []
@@ -381,7 +395,6 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
             bj = idx_j[start:end]
 
             if has_missing:
-                # only compare at jointly-valid sites
                 joint = valid_mask[bi] * valid_mask[bj]
                 n_joint = cp.sum(joint, axis=1)
             else:
@@ -392,7 +405,6 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
             else:
                 raw = cp.sum(((X[bi] - X[bj]) ** 2) * (joint if has_missing else 1.0), axis=1)
 
-            # normalize by jointly-valid sites
             if has_missing:
                 d = cp.where(n_joint > 0, raw * X.shape[1] / n_joint, 0.0)
             else:
