@@ -17,7 +17,7 @@ pg_gpu uses `pixi <https://pixi.sh>`_ for environment management.
 .. code-block:: bash
 
    # Clone repository
-   git clone https://github.com/andrewkern/pg_gpu.git
+   git clone https://github.com/kr-colab/pg_gpu.git
    cd pg_gpu
 
    # Install and activate the environment
@@ -26,6 +26,22 @@ pg_gpu uses `pixi <https://pixi.sh>`_ for environment management.
 
 The default environment includes CUDA/CuPy, development tools (pytest, ipython),
 and documentation tools (sphinx).
+
+Moments Integration
+~~~~~~~~~~~~~~~~~~~
+pg_gpu offers seamless integration with the `moments` demographic inference library,
+allowing users to leverage GPU acceleration for calculating
+LD statistics (a painpoint for demographic inference) while using moments for model fitting and inference.
+The `moments <https://moments.readthedocs.io/>`_ demographic inference library
+is available in a separate pixi environment to keep the default install
+lightweight:
+
+.. code-block:: bash
+
+   pixi install -e moments
+   pixi run -e moments python my_script.py
+
+See :doc:`moments_integration` for usage details.
 
 Verify Installation
 -------------------
