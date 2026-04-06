@@ -300,22 +300,90 @@ def _tile_sigma_d2(hi, vi, hj, vj):
     return sigma_d2, valid
 
 
-def _zns_tiled(mat, missing_data='include', tile_size=512):
-    """Compute ZnS without materializing the full r² matrix.
+def _zns_gram(mat, missing_data='include'):
+    """Compute ZnS via Gram matrix trick: O(n^2*m) instead of O(n*m^2).
 
-    Uses tile-based accumulation: computes r² for B×B blocks and
-    sums per tile, keeping memory at O(B²) instead of O(m²).
+    For m segregating sites and n haplotypes, the standard approach
+    computes all m*(m-1)/2 pairwise r^2 values.  Instead we use:
 
-    When missing_data='project', uses unbiased multinomial projection
-    estimators (Ragsdale & Gravel 2019) computing σ_D² = D²/π²
-    per pair instead of naive r².
+        sum_ij r^2(i,j) = ||S^T S||_F^2 = ||K||_F^2
+
+    where S is the (n x m) standardized haplotype matrix and K = S S^T
+    is only (n x n).  For typical popgen data (n ~ 200, m ~ 50000)
+    this is orders of magnitude faster.
+
+    Only valid when there is no missing data (all haplotypes observed
+    at all segregating sites).  Falls back to tiled when missing data
+    is present or when 'project' mode is requested.
     """
     hap_clean, valid_mask, m = _prepare_segregating(mat, missing_data)
     if m < 2:
         return 0.0
 
-    use_projection = (missing_data == 'project')
+    # Check for missing data or projection mode -> fallback
+    if missing_data == 'project':
+        return _zns_tiled_impl(hap_clean, valid_mask, m, missing_data)
 
+    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    n_hap = hap_clean.shape[0]
+
+    has_missing = bool((n_valid < n_hap).any().get())
+    if has_missing:
+        return _zns_tiled_impl(hap_clean, valid_mask, m, missing_data)
+
+    # Fast path: no missing data
+    # S_ij = (h_ij - p_j) / sqrt(p_j * (1 - p_j))  (standardized)
+    n = float(n_hap)
+    p = cp.sum(hap_clean, axis=0) / n
+    pq = p * (1.0 - p)
+    # Filter out monomorphic (shouldn't happen after _prepare_segregating, but safe)
+    good = pq > 0
+    if int(cp.sum(good).get()) < 2:
+        return 0.0
+
+    inv_sqrt_pq = cp.where(good, 1.0 / cp.sqrt(pq), 0.0)
+    S = (hap_clean - p) * inv_sqrt_pq  # (n_hap, m)
+
+    # K = S @ S.T  -- (n_hap, n_hap), much smaller than S.T @ S (m, m)
+    K = S @ S.T  # O(n^2 * m)
+
+    # sum_ij r^2 = ||K||_F^2 = sum of all K_ij^2
+    # But this includes diagonal (i==i) terms which are r^2(i,i) = 1
+    # so subtract m diagonal terms: trace(K^2) includes self-correlations
+    sum_r2_with_diag = float(cp.sum(K * K).get())
+    # Diagonal of S^T S has entries sum_k S_ki^2 = (sum (h-p)^2)/pq = n*pq/pq = n? No.
+    # Actually K_ij = sum_s S_is * S_js, so K_ii = sum_s S_is^2 = ||S_i||^2.
+    # ||K||_F^2 = trace(K^T K) = trace((S S^T)^2) = sum_ij (sum_s r(i,s)*r(j,s))^2...
+    # Wait, I need to be more careful. S^T S is the correlation matrix R.
+    # R_ij = (1/n) * sum_k S_ki * S_kj when S is centered but not scaled by 1/sqrt(n).
+    # Let me redo: r(i,j) = D(i,j) / sqrt(pq_i * pq_j)
+    # D(i,j) = (1/n) * h_i . h_j - p_i * p_j = (1/n) * sum_k (h_ki - p_i)(h_kj - p_j)
+    #         (since sum(h_k - p) = 0 for centered data... wait, h is 0/1 and p = mean)
+    # Actually h_ki are 0/1, so sum_k h_ki = n*p_i. So:
+    # sum_k (h_ki - p_i)(h_kj - p_j) = h_i . h_j - n*p_i*p_j = n*D(i,j)
+    # So r(i,j) = D(i,j)/sqrt(pq_i*pq_j) = (1/n) * sum_k S_ki * S_kj
+    # where S_ki = (h_ki - p_i)/sqrt(pq_i).
+    # So r(i,j) = (1/n) * (S^T S)_{ij}, i.e. R = (1/n) * S^T S.
+    # r^2(i,j) = (1/n^2) * ((S^T S)_{ij})^2
+    # sum_{i!=j} r^2 = (1/n^2) * (||S^T S||_F^2 - sum_i (S^T S)_{ii}^2)
+    # And ||S^T S||_F^2 = ||S S^T||_F^2 = ||K||_F^2 where K = S S^T.
+
+    # K = S S^T is (n_hap, n_hap).
+    # ||K||_F^2 = sum_ij K_ij^2
+    # diag of S^T S: (S^T S)_{ii} = ||S_col_i||^2 = sum_k ((h_ki - p_i)/sqrt(pq_i))^2
+    #    = (1/pq_i) * sum_k (h_ki - p_i)^2 = (1/pq_i) * n * pq_i = n
+    # So (S^T S)_{ii} = n for all i.
+    # sum_i (S^T S)_{ii}^2 = m * n^2
+    # sum_{i!=j} r^2 = (1/n^2) * (||K||_F^2 - m * n^2) = ||K||_F^2/n^2 - m
+
+    sum_r2 = sum_r2_with_diag / (n * n) - m
+
+    return sum_r2 / (m * (m - 1))
+
+
+def _zns_tiled_impl(hap_clean, valid_mask, m, missing_data, tile_size=512):
+    """Tiled ZnS computation (fallback for missing data / projection)."""
+    use_projection = (missing_data == 'project')
     B = tile_size
     total = 0.0
     n_pairs = 0
@@ -359,6 +427,15 @@ def _zns_tiled(mat, missing_data='include', tile_size=512):
     if use_projection:
         return total / n_pairs if n_pairs > 0 else 0.0
     return total / (m * (m - 1))
+
+
+def _zns_tiled(mat, missing_data='include', tile_size=512):
+    """Compute ZnS without materializing the full r² matrix.
+
+    Uses Gram matrix trick when no missing data is present (O(n^2*m)),
+    falls back to tile-based accumulation otherwise.
+    """
+    return _zns_gram(mat, missing_data)
 
 
 def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
