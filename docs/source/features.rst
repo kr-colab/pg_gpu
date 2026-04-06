@@ -142,9 +142,6 @@ Distance-Based Two-Population Statistics
    * - ``zx``
      - ZnS ratio (within-pop LD / total LD)
      - Schrider et al. (2018)
-   * - ``distance_based_stats``
-     - All distance-based statistics in one call
-     -
 
 Linkage Disequilibrium
 ----------------------
@@ -212,12 +209,6 @@ Selection Scans
    * - ``ehh_decay``
      - Extended Haplotype Homozygosity decay
      - Sabeti et al. (2002)
-   * - ``standardize``
-     - Standardize scores to zero mean, unit variance
-     -
-   * - ``standardize_by_allele_count``
-     - Standardize within allele frequency bins
-     -
 
 Site Frequency Spectrum
 -----------------------
