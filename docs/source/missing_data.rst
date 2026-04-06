@@ -44,8 +44,6 @@ parameter with three options (plus a fourth for LD statistics):
    linkage disequilibrium from unphased data." *Mol Biol Evol*
    37(3):923-932.
 
-The old ``'ignore'`` mode (which treated missing as reference allele)
-has been removed because it silently biases allele frequencies.
 
 Basic Usage
 -----------
@@ -181,6 +179,11 @@ Every public function accepts the ``missing_data`` parameter:
      - filter sites
      - maps to include
      - unbiased sigma_d^2
+   * - SFS estimators (FrequencySpectrum, diversity_stats_fast)
+     - group by n
+     - filter sites
+     - \-
+     - \-
 
 Haplotype Identity and Missing Data
 ------------------------------------
@@ -407,7 +410,4 @@ comparison at matched n).
    pi_proj = fs_proj.theta("pi")
 
 Simulation-based validation shows both approaches are unbiased under the
-standard neutral model at missing rates from 0--40%. The exclude strategy
-(``missing_data='exclude'``) is catastrophically biased above 1% missing
-in samples of 100 haplotypes. See ``debug/verify_missing_data_projection.py``
-for the full validation and figures.
+standard neutral model at missing rates from 0--40%. 
