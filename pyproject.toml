@@ -26,6 +26,9 @@ filterwarnings = [
     "ignore:No invariant site information:UserWarning",
     "ignore:__array__ implementation:DeprecationWarning",
     "ignore:.*FORMAT header not found:UserWarning",
+    "ignore::zarr.errors.UnstableSpecificationWarning",
+    "ignore::zarr.errors.ZarrDeprecationWarning",
+    "ignore:The `compressor` argument is deprecated:UserWarning:zarr",
 ]
 
 [tool.ruff]
