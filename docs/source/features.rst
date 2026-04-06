@@ -103,10 +103,10 @@ Divergence Statistics
      - Nei (1973)
    * - ``dxy``
      - Absolute divergence (mean pairwise differences between pops)
-     -
+     - Nei (1987)
    * - ``da``
      - Net divergence (Dxy minus mean within-pop pi)
-     -
+     - Nei & Li (1979)
    * - ``pbs``
      - Population Branch Statistic
      - Yi et al. (2010)
