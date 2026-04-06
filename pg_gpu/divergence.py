@@ -518,6 +518,8 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
             return 0.0 if not per_site else cp.zeros(total_sites)
         pop1_haps = pop1_haps[:, valid_sites]
         pop2_haps = pop2_haps[:, valid_sites]
+
+    n_filtered = pop1_haps.shape[1]
     n_sites = total_sites
 
     # Get allele frequencies from non-missing data per site
@@ -533,7 +535,7 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
 
     # Calculate Dxy only for sites with data
     valid_mask = (pop1_n > 0) & (pop2_n > 0)
-    dxy_per_site = cp.zeros(total_sites)
+    dxy_per_site = cp.zeros(n_filtered)
     dxy_per_site[valid_mask] = (pop1_freqs[valid_mask] + pop2_freqs[valid_mask] -
                                2 * pop1_freqs[valid_mask] * pop2_freqs[valid_mask])
 
@@ -655,6 +657,8 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
         if not cp.any(valid_sites):
             return 0.0
         pop_haplotypes = pop_haplotypes[:, valid_sites]
+
+    n_filtered = pop_haplotypes.shape[1]
     n_sites = total_sites
 
     # Calculate frequencies from non-missing data per site
@@ -665,7 +669,7 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
     pop_freq = cp.where(n > 0, pop_counts / n, 0.0)
 
     # Pi = 2 * p * (1 - p) * n / (n - 1) for sites with n > 1
-    pi_per_site = cp.zeros(total_sites)
+    pi_per_site = cp.zeros(n_filtered)
     valid_mask = n > 1
     pi_per_site[valid_mask] = (2.0 * pop_freq[valid_mask] * (1 - pop_freq[valid_mask]) *
                               n[valid_mask] / (n[valid_mask] - 1))
