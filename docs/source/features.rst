@@ -368,16 +368,16 @@ Distance Distribution Statistics
      -
    * - ``dist_var``
      - Variance of pairwise distance distribution
-     -
+     - Schrider et al. (2018)
    * - ``dist_skew``
      - Skewness of pairwise distance distribution
-     -
+     - Schrider et al. (2018)
    * - ``dist_kurt``
      - Excess kurtosis of pairwise distance distribution
-     -
+     - Schrider et al. (2018)
    * - ``dist_moments``
      - Variance, skewness, and kurtosis in one call
-     -
+     - Schrider et al. (2018)
 
 Fused Windowed Statistics
 -------------------------
