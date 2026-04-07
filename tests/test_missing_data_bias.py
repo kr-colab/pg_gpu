@@ -21,9 +21,6 @@ MISSING_RATES = [0.0, 0.10, 0.30, 0.60]
 BIAS_TOLERANCE = 0.05  # 5% relative bias
 
 
-# ── Fixtures ────────────────────────────────────────────────────────
-
-
 def _simulate(seed):
     """Simulate two populations under an isolation model."""
     demography = msprime.Demography()
@@ -32,21 +29,17 @@ def _simulate(seed):
     demography.add_population(name="anc", initial_size=10_000)
     demography.add_population_split(
         time=5000, derived=["pop1", "pop2"], ancestral="anc")
-
     ts = msprime.sim_ancestry(
         samples={"pop1": N_HAPS_PER_POP // 2,
                  "pop2": N_HAPS_PER_POP // 2},
         demography=demography,
         sequence_length=SEQ_LENGTH,
         recombination_rate=1e-8,
-        random_seed=seed,
-        ploidy=2,
-    )
+        random_seed=seed, ploidy=2)
     return msprime.sim_mutations(ts, rate=1e-8, random_seed=seed)
 
 
 def _ts_to_hm(ts):
-    """Convert tree sequence to HaplotypeMatrix with populations."""
     hm = HaplotypeMatrix.from_ts(ts)
     hm.sample_sets = {
         "pop1": list(range(0, N_HAPS_PER_POP)),
@@ -56,7 +49,6 @@ def _ts_to_hm(ts):
 
 
 def _add_missing(hm, rate, rng):
-    """Add MCAR missing data."""
     hap = hm.haplotypes
     if hasattr(hap, 'get'):
         hap = hap.get()
@@ -66,6 +58,29 @@ def _add_missing(hm, rate, rng):
         hap, hm.positions, hm.chrom_start, hm.chrom_end)
     hm_miss.sample_sets = hm.sample_sets
     return hm_miss
+
+
+def _check_bias(results, stat, miss_rate, near_zero=False,
+                rel_tol=BIAS_TOLERANCE, abs_tol=2.0):
+    """Assert that mean estimate at miss_rate matches truth."""
+    truth_vals = results[stat][0.0]
+    test_vals = results[stat][miss_rate]
+    assert len(truth_vals) >= 20, f"Too few truth replicates for {stat}"
+    assert len(test_vals) >= 20, f"Too few test replicates for {stat}"
+    truth_mean = np.mean(truth_vals)
+    test_mean = np.mean(test_vals)
+    if near_zero or abs(truth_mean) < 1e-10:
+        diff = abs(test_mean - truth_mean)
+        assert diff < abs_tol, (
+            f"{stat} at {miss_rate*100:.0f}% missing: "
+            f"diff={diff:.3f} (truth={truth_mean:.3f}, "
+            f"est={test_mean:.3f})")
+    else:
+        rel_bias = abs(test_mean / truth_mean - 1)
+        assert rel_bias < rel_tol, (
+            f"{stat} at {miss_rate*100:.0f}% missing: "
+            f"bias={rel_bias*100:.1f}% (truth={truth_mean:.6f}, "
+            f"est={test_mean:.6f})")
 
 
 @pytest.fixture(scope="module")
@@ -82,28 +97,20 @@ def simulation_results():
         return lambda hm: fn(hm, "pop1", "pop2", missing_data='include',
                              **kw)
 
-    def _achaz_theta(name):
-        return lambda hm: FrequencySpectrum(
-            hm, population="pop1").theta(name)
-
     stats = {
-        # ── Diversity (single-pop, span_normalize=False for raw sums) ──
-        "pi": (_pop1(diversity.pi, span_normalize=False), True),
-        "theta_w": (_pop1(diversity.theta_w, span_normalize=False), True),
-        "theta_h": (_pop1(diversity.theta_h, span_normalize=False), True),
-        "theta_l": (_pop1(diversity.theta_l, span_normalize=False), True),
-        "tajd": (_pop1(diversity.tajimas_d), True),
-        "fay_wus_h": (_pop1(diversity.fay_wus_h), True),
-        "zeng_e": (_pop1(diversity.zeng_e), True),
-        "seg_sites": (_pop1(diversity.segregating_sites), True),
-        # ── Divergence (two-pop) ──
-        "dxy": (_twopop(divergence.dxy), False),
-        "fst_hudson": (_twopop(divergence.fst_hudson), False),
-        "fst_wc": (_twopop(divergence.fst_weir_cockerham), False),
-        "da": (_twopop(divergence.da), False),
+        "pi": _pop1(diversity.pi, span_normalize=False),
+        "theta_w": _pop1(diversity.theta_w, span_normalize=False),
+        "theta_h": _pop1(diversity.theta_h, span_normalize=False),
+        "theta_l": _pop1(diversity.theta_l, span_normalize=False),
+        "tajd": _pop1(diversity.tajimas_d),
+        "fay_wus_h": _pop1(diversity.fay_wus_h),
+        "zeng_e": _pop1(diversity.zeng_e),
+        "dxy": _twopop(divergence.dxy),
+        "fst_hudson": _twopop(divergence.fst_hudson),
+        "fst_wc": _twopop(divergence.fst_weir_cockerham),
+        "da": _twopop(divergence.da),
     }
 
-    # Achaz stats computed from a single FrequencySpectrum per (rep, rate)
     achaz_stats = {
         "achaz_pi": lambda fs: fs.theta("pi"),
         "achaz_watterson": lambda fs: fs.theta("watterson"),
@@ -113,27 +120,23 @@ def simulation_results():
         "achaz_zeng_e": lambda fs: fs.zeng_e(),
     }
 
-    all_names = list(stats.keys()) + list(achaz_stats.keys())
+    all_names = list(stats) + list(achaz_stats)
     results = {name: {r: [] for r in MISSING_RATES} for name in all_names}
 
     for rep in range(N_REPS):
-        seed = rep + 1
-        rng = np.random.default_rng(seed + 10000)
-
-        ts = _simulate(seed)
+        rng = np.random.default_rng(rep + 10001)
+        ts = _simulate(rep + 1)
         hm_clean = _ts_to_hm(ts)
         if hm_clean.num_variants < 10:
             continue
         hm_clean.transfer_to_gpu()
 
         for rate in MISSING_RATES:
-            if rate == 0.0:
-                hm = hm_clean
-            else:
-                hm = _add_missing(hm_clean, rate, rng)
+            hm = hm_clean if rate == 0.0 else _add_missing(hm_clean, rate, rng)
+            if rate > 0:
                 hm.transfer_to_gpu()
 
-            for name, (fn, _) in stats.items():
+            for name, fn in stats.items():
                 try:
                     val = fn(hm)
                     if np.isfinite(val):
@@ -141,7 +144,6 @@ def simulation_results():
                 except Exception:
                     pass
 
-            # Compute FrequencySpectrum once, extract all achaz stats
             try:
                 fs = FrequencySpectrum(hm, population="pop1")
                 for name, fn in achaz_stats.items():
@@ -157,137 +159,49 @@ def simulation_results():
     return results
 
 
-# ── Tests ───────────────────────────────────────────────────────────
+# Statistics near zero under neutrality (differences of nearly-equal
+# theta estimators: H = pi - theta_H, E = theta_L - theta_W, etc.)
+NEAR_ZERO = {"tajd", "fay_wus_h", "zeng_e", "achaz_tajd", "achaz_zeng_e"}
 
-
-def _check_bias(results, stat_name, miss_rate, tolerance=BIAS_TOLERANCE):
-    """Check that mean estimate at miss_rate is within tolerance of truth."""
-    truth_vals = results[stat_name][0.0]
-    test_vals = results[stat_name][miss_rate]
-    assert len(truth_vals) >= 20, f"Too few truth replicates for {stat_name}"
-    assert len(test_vals) >= 20, f"Too few test replicates for {stat_name}"
-    truth_mean = np.mean(truth_vals)
-    test_mean = np.mean(test_vals)
-    if abs(truth_mean) < 1e-15:
-        return  # skip if truth is ~0 (e.g., Tajima's D near neutrality)
-    rel_bias = abs(test_mean / truth_mean - 1)
-    assert rel_bias < tolerance, (
-        f"{stat_name} at {miss_rate*100:.0f}% missing: "
-        f"bias={rel_bias*100:.1f}% (truth={truth_mean:.6f}, "
-        f"est={test_mean:.6f})")
-
-
-def _check_near_zero_bias(results, stat_name, miss_rate, abs_tol=0.3):
-    """For statistics near zero (neutrality tests), use absolute tolerance."""
-    truth = results[stat_name][0.0]
-    test = results[stat_name][miss_rate]
-    if len(truth) < 20 or len(test) < 20:
-        pytest.skip(f"Too few replicates for {stat_name}")
-    diff = abs(np.mean(test) - np.mean(truth))
-    assert diff < abs_tol, (
-        f"{stat_name} at {miss_rate*100:.0f}% missing: "
-        f"diff={diff:.3f} (truth={np.mean(truth):.3f}, "
-        f"est={np.mean(test):.3f})")
+# All stats that should be unbiased under MCAR
+ALL_UNBIASED = [
+    "pi", "theta_w", "theta_h", "theta_l",
+    "tajd", "fay_wus_h", "zeng_e",
+    "dxy", "fst_hudson", "fst_wc", "da",
+    "achaz_pi", "achaz_watterson", "achaz_theta_h", "achaz_theta_l",
+    "achaz_tajd", "achaz_zeng_e",
+]
 
 
 @pytest.mark.slow
-class TestIncludeModeUnbiased:
-    """Verify include mode is unbiased under MCAR."""
+class TestUnbiasedUnderMCAR:
+    """Verify all statistics are unbiased under MCAR missing data."""
 
     @pytest.mark.parametrize("miss_rate", [0.10, 0.30, 0.60])
-    @pytest.mark.parametrize("stat", [
-        "pi", "theta_w", "theta_h", "theta_l",
-    ])
-    def test_diversity(self, simulation_results, stat, miss_rate):
-        _check_bias(simulation_results, stat, miss_rate)
-
-    @pytest.mark.parametrize("miss_rate", [0.10, 0.30, 0.60])
-    @pytest.mark.parametrize("stat", ["tajd", "fay_wus_h", "zeng_e"])
-    def test_neutrality_near_zero(self, simulation_results, stat, miss_rate):
-        # These are near zero under neutrality; use absolute tolerance
-        # (H = pi - theta_H, E = theta_L - theta_W: differences of
-        # nearly-equal quantities have high variance relative to signal)
-        _check_near_zero_bias(simulation_results, stat, miss_rate,
-                              abs_tol=2.0)
-
-    @pytest.mark.parametrize("miss_rate", [0.10, 0.30, 0.60])
-    @pytest.mark.parametrize("stat", ["dxy", "fst_hudson", "da"])
-    def test_divergence(self, simulation_results, stat, miss_rate):
-        _check_bias(simulation_results, stat, miss_rate)
-
-
-@pytest.mark.slow
-class TestAchazUnbiased:
-    """Verify Achaz SFS framework is unbiased under MCAR."""
-
-    @pytest.mark.parametrize("miss_rate", [0.10, 0.30, 0.60])
-    @pytest.mark.parametrize("stat", [
-        "achaz_pi", "achaz_watterson", "achaz_theta_h", "achaz_theta_l",
-    ])
-    def test_achaz_theta(self, simulation_results, stat, miss_rate):
-        _check_bias(simulation_results, stat, miss_rate)
-
-    @pytest.mark.parametrize("miss_rate", [0.10, 0.30, 0.60])
-    @pytest.mark.parametrize("stat", ["achaz_tajd", "achaz_zeng_e"])
-    def test_achaz_neutrality(self, simulation_results, stat, miss_rate):
-        _check_near_zero_bias(simulation_results, stat, miss_rate)
-
-
-@pytest.mark.slow
-class TestKnownBiasedStats:
-    """Document statistics that ARE biased under MCAR missing data.
-
-    These tests verify the bias exists (not that it's fixed). They serve
-    as documentation and regression markers for future improvements.
-    """
-
-    @pytest.mark.parametrize("miss_rate", [0.30, 0.60])
-    def test_fst_wc_biased(self, simulation_results, miss_rate):
-        """Weir-Cockerham FST is biased upward with missing data."""
-        truth = np.mean(simulation_results["fst_wc"][0.0])
-        est = np.mean(simulation_results["fst_wc"][miss_rate])
-        # WC FST inflates with missing data — verify bias > 10%
-        assert est > truth * 1.1, (
-            f"Expected upward bias in WC FST at {miss_rate*100:.0f}% "
-            f"missing but got truth={truth:.4f}, est={est:.4f}")
-
-    @pytest.mark.parametrize("miss_rate", [0.30, 0.60])
-    def test_seg_sites_biased(self, simulation_results, miss_rate):
-        """Segregating sites decreases with missing data (some sites
-        appear monomorphic when alleles are masked)."""
-        truth = np.mean(simulation_results["seg_sites"][0.0])
-        est = np.mean(simulation_results["seg_sites"][miss_rate])
-        assert est < truth * 0.99, (
-            f"Expected seg_sites to decrease with missing data but got "
-            f"truth={truth:.0f}, est={est:.0f}")
+    @pytest.mark.parametrize("stat", ALL_UNBIASED)
+    def test_unbiased(self, simulation_results, stat, miss_rate):
+        _check_bias(simulation_results, stat, miss_rate,
+                     near_zero=(stat in NEAR_ZERO))
 
 
 @pytest.mark.slow
 class TestExcludeConsistency:
     """Verify exclude mode matches include on complete data."""
 
-    def test_pi_exclude_equals_include(self, simulation_results):
-        """On clean data, exclude and include should give same pi."""
-        # Run a single rep with no missing data both ways
+    def test_pi_exclude_equals_include(self):
         ts = _simulate(seed=999)
         hm = _ts_to_hm(ts)
         hm.transfer_to_gpu()
-
         pi_inc = diversity.pi(hm, population="pop1",
                               missing_data='include', span_normalize=False)
         pi_exc = diversity.pi(hm, population="pop1",
                               missing_data='exclude', span_normalize=False)
-        assert abs(pi_inc - pi_exc) < 1e-10, (
-            f"include={pi_inc}, exclude={pi_exc}")
+        assert abs(pi_inc - pi_exc) < 1e-10
 
-    def test_dxy_exclude_equals_include(self, simulation_results):
+    def test_dxy_exclude_equals_include(self):
         ts = _simulate(seed=999)
         hm = _ts_to_hm(ts)
         hm.transfer_to_gpu()
-
-        dxy_inc = divergence.dxy(hm, "pop1", "pop2",
-                                 missing_data='include')
-        dxy_exc = divergence.dxy(hm, "pop1", "pop2",
-                                 missing_data='exclude')
-        assert abs(dxy_inc - dxy_exc) < 1e-10, (
-            f"include={dxy_inc}, exclude={dxy_exc}")
+        dxy_inc = divergence.dxy(hm, "pop1", "pop2", missing_data='include')
+        dxy_exc = divergence.dxy(hm, "pop1", "pop2", missing_data='exclude')
+        assert abs(dxy_inc - dxy_exc) < 1e-10

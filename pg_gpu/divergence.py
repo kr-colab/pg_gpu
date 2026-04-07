@@ -226,32 +226,39 @@ def fst_weir_cockerham(haplotype_matrix,
         pop1_haps = pop1_haps[:, valid_sites]
         pop2_haps = pop2_haps[:, valid_sites]
 
-    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
-    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
-    pop1_counts = pop1_counts.astype(cp.float64)
-    pop2_counts = pop2_counts.astype(cp.float64)
-
-    # Compute per-site observed heterozygosity from paired haplotypes
-    def _pop_het(pop_haps):
-        ha = pop_haps[0::2, :]
-        hb = pop_haps[1::2, :]
-        valid = (ha >= 0) & (hb >= 0)
-        het = (ha != hb) & valid
-        n_called = cp.sum(valid, axis=0).astype(cp.float64)
+    # Compute per-site observed heterozygosity and allele counts from
+    # complete diploid pairs only. WC FST requires that frequencies and
+    # het are computed from the same set of individuals — using all valid
+    # haplotypes for counts but only complete pairs for n inflates
+    # frequencies by 1/(1-miss_rate) under MCAR.
+    def _pop_diploid_stats(pop_haps):
+        ha = pop_haps[0::2, :]  # first haplotype of each diploid
+        hb = pop_haps[1::2, :]  # second haplotype
+        both_valid = (ha >= 0) & (hb >= 0)
+        het = (ha != hb) & both_valid
+        n_called = cp.sum(both_valid, axis=0).astype(cp.float64)
         h_bar = cp.where(n_called > 0,
                          cp.sum(het, axis=0).astype(cp.float64) / n_called, 0.0)
-        return h_bar, n_called
+        # Derived allele count from complete pairs only
+        derived = cp.sum(
+            cp.where(both_valid, ha, 0) + cp.where(both_valid, hb, 0),
+            axis=0).astype(cp.float64)
+        return h_bar, n_called, derived
 
     if len(pop1_idx) >= 2 and len(pop2_idx) >= 2:
-        h_bar1, n1 = _pop_het(pop1_haps)
-        h_bar2, n2 = _pop_het(pop2_haps)
+        h_bar1, n1, pop1_counts = _pop_diploid_stats(pop1_haps)
+        h_bar2, n2, pop2_counts = _pop_diploid_stats(pop2_haps)
     else:
+        pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
+        pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
+        pop1_counts = pop1_counts.astype(cp.float64)
+        pop2_counts = pop2_counts.astype(cp.float64)
         n1 = pop1_n.astype(cp.float64)
         n2 = pop2_n.astype(cp.float64)
         h_bar1 = cp.zeros_like(n1)
         h_bar2 = cp.zeros_like(n2)
 
-    # Allele frequencies (using diploid sample sizes = n_individuals)
+    # Allele frequencies from complete diploid pairs
     pop1_freqs = cp.where(n1 > 0, pop1_counts / (2.0 * n1), 0.0)
     pop2_freqs = cp.where(n2 > 0, pop2_counts / (2.0 * n2), 0.0)
 
