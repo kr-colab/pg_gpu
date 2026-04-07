@@ -79,7 +79,7 @@ Every public function accepts the ``missing_data`` parameter:
      - filter sites
    * - Admixture (patterson_d, f2, f3)
      - per-site n
-     - NaN at missing
+     - filter sites
    * - Selection scans (ihs, nsl, xpehh)
      - wildcard in SSL
      - filter sites

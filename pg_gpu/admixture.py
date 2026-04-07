@@ -12,36 +12,24 @@ from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
 
 
-def _allele_freq(haplotype_matrix, missing_data='include'):
-    """Compute alternate allele frequency only (no heterozygosity)."""
+def _allele_freq(haplotype_matrix):
+    """Compute alternate allele frequency from per-site valid data."""
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
     hap = haplotype_matrix.haplotypes
-
-    if missing_data == 'exclude':
-        valid_mask = hap >= 0
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        n1 = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
-        freq = cp.where(n_valid > 0, n1 / n_valid, cp.nan)
-        # mark sites with any missing as NaN
-        has_missing = cp.any(hap < 0, axis=0)
-        freq[has_missing] = cp.nan
-        return freq
-    else:
-        valid_mask = hap >= 0
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        n1 = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
-        return cp.where(n_valid > 0, n1 / n_valid, 0.0)
+    valid_mask = hap >= 0
+    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    n1 = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
+    return cp.where(n_valid > 0, n1 / n_valid, 0.0)
 
 
-def _allele_freq_and_het(haplotype_matrix, missing_data='include'):
+def _allele_freq_and_het(haplotype_matrix):
     """Compute alternate allele frequency and unbiased heterozygosity.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
-    missing_data : str
 
     Returns
     -------
@@ -55,23 +43,48 @@ def _allele_freq_and_het(haplotype_matrix, missing_data='include'):
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
-    hap = haplotype_matrix.haplotypes  # (n_haplotypes, n_variants)
+    hap = haplotype_matrix.haplotypes
 
     valid_mask = hap >= 0
-    an = cp.sum(valid_mask, axis=0).astype(cp.float64)  # per-site n
+    an = cp.sum(valid_mask, axis=0).astype(cp.float64)
     n1 = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
     n0 = an - n1
 
     freq = cp.where(an > 0, n1 / an, 0.0)
     h = cp.where(an > 1, (n0 * n1) / (an * (an - 1)), 0.0)
 
-    if missing_data == 'exclude':
-        has_missing = cp.any(hap < 0, axis=0)
-        freq[has_missing] = cp.nan
-        h[has_missing] = cp.nan
-        an[has_missing] = 0
-
     return freq, h, an
+
+
+def _exclude_missing_sites(haplotype_matrix, *populations):
+    """Filter to sites with no missing data across all populations.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    *populations : str or list
+        Population names or sample index lists.
+
+    Returns
+    -------
+    HaplotypeMatrix or None
+        Filtered matrix, or None if no valid sites remain.
+    """
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
+    hap = haplotype_matrix.haplotypes
+    all_idx = []
+    for pop in populations:
+        if isinstance(pop, str):
+            all_idx.extend(haplotype_matrix.sample_sets[pop])
+        else:
+            all_idx.extend(list(pop))
+    has_missing = cp.any(hap[all_idx] < 0, axis=0)
+    valid = cp.where(~has_missing)[0]
+    if len(valid) == 0:
+        return None
+    return haplotype_matrix.get_subset(valid)
 
 
 def _moving_statistic(values, statistic, size, start=0, stop=None, step=None):
@@ -170,18 +183,24 @@ def patterson_f2(haplotype_matrix: HaplotypeMatrix,
         Population names or sample indices.
     missing_data : str
         'include' - per-site n_valid for frequencies
-        'exclude' - NaN at sites with any missing
+        'exclude' - filter to sites with no missing data
 
     Returns
     -------
     f2 : ndarray, float64, shape (n_variants,)
         Per-variant F2 estimates.
     """
+    if missing_data == 'exclude':
+        filtered = _exclude_missing_sites(haplotype_matrix, pop_a, pop_b)
+        if filtered is None:
+            return np.array([])
+        haplotype_matrix = filtered
+
     ma = _get_population_matrix(haplotype_matrix, pop_a)
     mb = _get_population_matrix(haplotype_matrix, pop_b)
 
-    a, ha, sa = _allele_freq_and_het(ma, missing_data)
-    b, hb, sb = _allele_freq_and_het(mb, missing_data)
+    a, ha, sa = _allele_freq_and_het(ma)
+    b, hb, sb = _allele_freq_and_het(mb)
 
     f2 = ((a - b) ** 2) - (ha / sa) - (hb / sb)
     return f2.get()
@@ -206,7 +225,7 @@ def patterson_f3(haplotype_matrix: HaplotypeMatrix,
         Source populations.
     missing_data : str
         'include' - per-site n_valid
-        'exclude' - NaN at sites with any missing
+        'exclude' - filter to sites with no missing data
 
     Returns
     -------
@@ -215,13 +234,20 @@ def patterson_f3(haplotype_matrix: HaplotypeMatrix,
     B : ndarray, float64, shape (n_variants,)
         Heterozygosity estimates (2 * h_hat) for population C.
     """
+    if missing_data == 'exclude':
+        filtered = _exclude_missing_sites(haplotype_matrix,
+                                          pop_c, pop_a, pop_b)
+        if filtered is None:
+            return np.array([]), np.array([])
+        haplotype_matrix = filtered
+
     mc = _get_population_matrix(haplotype_matrix, pop_c)
     ma = _get_population_matrix(haplotype_matrix, pop_a)
     mb = _get_population_matrix(haplotype_matrix, pop_b)
 
-    c, hc, sc = _allele_freq_and_het(mc, missing_data)
-    a, _, _ = _allele_freq_and_het(ma, missing_data)
-    b, _, _ = _allele_freq_and_het(mb, missing_data)
+    c, hc, sc = _allele_freq_and_het(mc)
+    a, _, _ = _allele_freq_and_het(ma)
+    b, _, _ = _allele_freq_and_het(mb)
 
     T = ((c - a) * (c - b)) - (hc / sc)
     B = 2 * hc
@@ -246,7 +272,7 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
         Population names or sample indices.
     missing_data : str
         'include' - per-site n_valid
-        'exclude' - NaN at sites with any missing
+        'exclude' - filter to sites with no missing data
 
     Returns
     -------
@@ -255,15 +281,22 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
     den : ndarray, float64, shape (n_variants,)
         Denominator.
     """
+    if missing_data == 'exclude':
+        filtered = _exclude_missing_sites(haplotype_matrix,
+                                          pop_a, pop_b, pop_c, pop_d)
+        if filtered is None:
+            return np.array([]), np.array([])
+        haplotype_matrix = filtered
+
     ma = _get_population_matrix(haplotype_matrix, pop_a)
     mb = _get_population_matrix(haplotype_matrix, pop_b)
     mc = _get_population_matrix(haplotype_matrix, pop_c)
     md = _get_population_matrix(haplotype_matrix, pop_d)
 
-    a = _allele_freq(ma, missing_data)
-    b = _allele_freq(mb, missing_data)
-    c = _allele_freq(mc, missing_data)
-    d = _allele_freq(md, missing_data)
+    a = _allele_freq(ma)
+    b = _allele_freq(mb)
+    c = _allele_freq(mc)
+    d = _allele_freq(md)
 
     num = (a - b) * (c - d)
     den = (a + b - 2 * a * b) * (c + d - 2 * c * d)
