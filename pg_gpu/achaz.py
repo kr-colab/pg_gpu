@@ -287,6 +287,7 @@ class FrequencySpectrum:
         else:
             matrix = haplotype_matrix
 
+        self._source_matrix = matrix
         n_hap = matrix.num_haplotypes
         if n_total_sites is None:
             n_total_sites = matrix.n_total_sites
@@ -333,10 +334,12 @@ class FrequencySpectrum:
         ----------
         weights : str or callable
             Name of a built-in weight function, or a callable w(n) -> array.
-        span_normalize : bool
-            If True, divide by genomic span.
+        span_normalize : bool or str
+            ``True``: auto-detect best denominator from source matrix.
+            ``False`` (default): return raw sum.
+            String values select an explicit denominator.
         span : float, optional
-            Genomic span for normalization. Required if span_normalize=True.
+            Explicit span for normalization. Overrides auto-detection.
 
         Returns
         -------
@@ -356,8 +359,14 @@ class FrequencySpectrum:
             w = weights_fn(n)
             total += np.sum(xi[:len(w)] * w[:len(xi)])
 
-        if span_normalize and span is not None and span > 0:
-            total /= span
+        if span_normalize is not False:
+            if span is not None and span > 0:
+                total /= span
+            elif self._source_matrix is not None:
+                mode = 'auto' if span_normalize is True else span_normalize
+                s = self._source_matrix.get_span(mode)
+                if s > 0:
+                    total /= s
 
         return total
 
