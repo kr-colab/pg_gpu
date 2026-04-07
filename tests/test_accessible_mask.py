@@ -589,7 +589,7 @@ class TestWindowedScatterAddWithMask:
 
 class TestWindowedAnalysisConvenience:
     def test_accessible_span_normalize(self):
-        """windowed_analysis with span_normalize='accessible' uses mask."""
+        """windowed_analysis with mask set auto-normalizes by accessible bases."""
         from pg_gpu.windowed_analysis import windowed_analysis
 
         hm = _make_windowed_matrix()
@@ -598,9 +598,9 @@ class TestWindowedAnalysisConvenience:
         mask[2000:3000] = False  # 1000 inaccessible in some windows
         hm.set_accessible_mask(mask)
 
+        # span_normalize=True (default) auto-detects accessible mask
         df = windowed_analysis(
-            hm, window_size=5000, statistics=['pi'],
-            span_normalize='accessible')
+            hm, window_size=5000, statistics=['pi'])
 
         assert len(df) > 0
         assert 'pi' in df.columns

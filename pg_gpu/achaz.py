@@ -334,12 +334,12 @@ class FrequencySpectrum:
         ----------
         weights : str or callable
             Name of a built-in weight function, or a callable w(n) -> array.
-        span_normalize : bool or str
+        span_normalize : bool
             ``True``: auto-detect best denominator from source matrix.
             ``False`` (default): return raw sum.
-            String values select an explicit denominator.
         span : float, optional
             Explicit span for normalization. Overrides auto-detection.
+            For internal use.
 
         Returns
         -------

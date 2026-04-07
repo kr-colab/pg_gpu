@@ -408,10 +408,9 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect best denominator.
         ``False``: return raw sum / sites-with-data average.
-        String values select an explicit denominator.
 
     Returns
     -------
@@ -484,7 +483,7 @@ def da(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect best denominator.
         ``False``: return raw sum / sites-with-data average.
 
@@ -526,7 +525,7 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
         Population name or list of indices
     missing_data : str
         'include' or 'exclude'
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect. ``False``: raw sum.
 
     Returns
@@ -560,7 +559,7 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect. ``False``: raw sum / per-site average.
 
     Returns

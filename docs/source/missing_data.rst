@@ -156,16 +156,13 @@ Rate estimators (pi, theta_w, dxy, etc.) accept a ``span_normalize``
 parameter that controls *how results are expressed*. This is orthogonal
 to missing data handling.
 
-``span_normalize`` accepts:
+``span_normalize`` accepts ``True`` or ``False``:
 
 * ``True`` (default): auto-detect the best denominator. If an accessible
   mask is set, divides by accessible bases. Otherwise divides by genomic
   span (chrom_end - chrom_start).
 * ``False``: return raw sum (used internally by composite statistics like
   Tajima's D, and by advanced users who need custom normalization).
-* ``'per_base'``: explicit genomic span.
-* ``'accessible'``: explicit accessible base count (error if no mask).
-* ``'per_variant'``: divide by number of variant sites.
 
 .. code-block:: python
 
@@ -178,9 +175,6 @@ to missing data handling.
 
    # Raw sum (no normalization)
    pi_raw = diversity.pi(h, span_normalize=False)
-
-   # Explicit mode
-   pi_var = diversity.pi(h, span_normalize='per_variant')
 
 Test statistics (Tajima's D, Fay-Wu's H, FST) do not accept
 ``span_normalize`` — they are dimensionless by definition.

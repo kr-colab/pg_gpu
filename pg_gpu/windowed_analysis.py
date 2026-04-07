@@ -508,10 +508,9 @@ class WindowedAnalyzer:
         missing_data : str
             'include' - Use all sites, calculate from available data per site
             'exclude' - Only use sites with no missing data
-        span_normalize : bool or str
+        span_normalize : bool
             ``True`` (default): auto-detect best denominator per window.
             ``False``: return raw sums.
-            String values select an explicit denominator.
         """
         self.window_params = WindowParams(
             window_type=window_type,
@@ -666,7 +665,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect best denominator per window.
         ``False``: return raw sums.
     accessible_bed : str, optional

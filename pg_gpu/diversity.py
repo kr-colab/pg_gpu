@@ -25,7 +25,7 @@ def _apply_span_normalize(value, matrix, span_normalize):
         Source matrix (for get_span).
     span_normalize : bool or str
         True: auto-detect best span. False: return raw value.
-        String: explicit mode passed to get_span().
+        String: explicit mode passed to get_span() (internal use).
     """
     if span_normalize is False:
         return float(value.get() if hasattr(value, 'get') else value)
@@ -125,12 +125,10 @@ def pi(haplotype_matrix: HaplotypeMatrix,
         The haplotype data
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect best denominator (accessible
         bases if mask set, else genomic span).
-        ``False``: return raw sum of per-site diversity.
-        String values (``'per_base'``, ``'accessible'``, ``'per_variant'``)
-        select an explicit denominator.
+        ``False``: return raw sum.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
@@ -196,10 +194,9 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
         The haplotype data
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect best denominator.
         ``False``: return raw sum.
-        String values select an explicit denominator.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
@@ -576,7 +573,7 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
         Population name or list of sample indices. If None, uses all samples
     statistics : list
         List of statistics to compute
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect best denominator.
         ``False``: return raw sums.
     missing_data : str
@@ -632,7 +629,7 @@ def diversity_stats_fast(haplotype_matrix: HaplotypeMatrix,
         The haplotype data.
     population : str or list, optional
         Population name or sample indices.
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect best denominator.
         ``False``: return raw sums.
         String values select an explicit denominator.
@@ -857,7 +854,7 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect best denominator.
         ``False``: return raw sum.
     missing_data : str
@@ -915,7 +912,7 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
-    span_normalize : bool or str
+    span_normalize : bool
         ``True`` (default): auto-detect best denominator.
         ``False``: return raw sum.
     missing_data : str
