@@ -928,7 +928,7 @@ class HaplotypeMatrix:
         from . import diversity
         return diversity.allele_frequency_spectrum(self)
 
-    def diversity(self, span_normalize: bool = True) -> float:
+    def diversity(self, span_normalize=True) -> float:
         """
         Calculate the nucleotide diversity (π) for the haplotype matrix.
 
@@ -943,7 +943,7 @@ class HaplotypeMatrix:
         from . import diversity
         return diversity.pi(self, span_normalize=span_normalize)
 
-    def watersons_theta(self, span_normalize: bool = True) -> float:
+    def watersons_theta(self, span_normalize=True) -> float:
         """
         Calculate Waterson's theta for the haplotype matrix.
 

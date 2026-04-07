@@ -298,10 +298,17 @@ difference and comparison counts are available via separate functions:
 .. code-block:: python
 
    from pg_gpu.diversity import pi_components
+   from pg_gpu.divergence import dxy_components
 
-   # Returns (total_diffs, total_comps, total_missing, n_sites)
+   # Within-population: (total_diffs, total_comps, total_missing, n_sites)
    diffs, comps, missing, n = pi_components(h.haplotypes)
    pi_manual = diffs / comps
+
+   # Between-population: (total_diffs, total_comps, n_sites)
+   pop1_haps = h.haplotypes[h.sample_sets['pop1']]
+   pop2_haps = h.haplotypes[h.sample_sets['pop2']]
+   diffs, comps, n = dxy_components(pop1_haps, pop2_haps)
+   dxy_manual = diffs / comps
 
 Best Practices
 --------------
@@ -331,9 +338,11 @@ Example Workflow
 .. code-block:: python
 
    from pg_gpu import HaplotypeMatrix, diversity, divergence
+   from pg_gpu.windowed_analysis import windowed_analysis
 
-   # Load data
-   h = HaplotypeMatrix.from_vcf("data.vcf.gz")
+   # Load data with accessible mask
+   h = HaplotypeMatrix.from_zarr("data.zarr", region="3L:1-10000000",
+                                  accessible_bed="accessibility.bed")
 
    # Inspect missing data
    summary = h.summarize_missing_data()
@@ -342,8 +351,14 @@ Example Workflow
    # Filter extreme missingness
    h = h.filter_variants_by_missing(max_missing_freq=0.5)
 
-   # Compute statistics (include mode is the default)
+   # Scalar statistics (auto-normalized by accessible bases)
    pi = diversity.pi(h, population="pop1")
    tajd = diversity.tajimas_d(h, population="pop1")
    dxy = divergence.dxy(h, 'pop1', 'pop2')
    fst = divergence.fst_hudson(h, 'pop1', 'pop2')
+
+   # Windowed analysis (accessible mask propagates per-window)
+   df = windowed_analysis(h, window_size=50_000,
+                          statistics=['pi', 'theta_w', 'tajimas_d',
+                                      'fst', 'dxy'],
+                          populations=['pop1', 'pop2'])
