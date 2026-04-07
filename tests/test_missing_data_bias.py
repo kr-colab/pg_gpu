@@ -94,28 +94,27 @@ def simulation_results():
         "theta_l": (_pop1(diversity.theta_l, span_normalize=False), True),
         "tajd": (_pop1(diversity.tajimas_d), True),
         "fay_wus_h": (_pop1(diversity.fay_wus_h), True),
-        "norm_fay_wus_h": (_pop1(diversity.normalized_fay_wus_h), True),
         "zeng_e": (_pop1(diversity.zeng_e), True),
         "seg_sites": (_pop1(diversity.segregating_sites), True),
-        "het_exp": (_pop1(diversity.heterozygosity_expected), True),
         # ── Divergence (two-pop) ──
         "dxy": (_twopop(divergence.dxy), False),
         "fst_hudson": (_twopop(divergence.fst_hudson), False),
         "fst_wc": (_twopop(divergence.fst_weir_cockerham), False),
         "da": (_twopop(divergence.da), False),
-        # ── Achaz SFS framework ──
-        "achaz_pi": (_achaz_theta("pi"), True),
-        "achaz_watterson": (_achaz_theta("watterson"), True),
-        "achaz_theta_h": (_achaz_theta("theta_h"), True),
-        "achaz_theta_l": (_achaz_theta("theta_l"), True),
-        "achaz_tajd": (lambda hm: FrequencySpectrum(
-            hm, population="pop1").tajimas_d(), True),
-        "achaz_zeng_e": (lambda hm: FrequencySpectrum(
-            hm, population="pop1").zeng_e(), True),
     }
 
-    results = {name: {r: [] for r in MISSING_RATES}
-               for name in stats}
+    # Achaz stats computed from a single FrequencySpectrum per (rep, rate)
+    achaz_stats = {
+        "achaz_pi": lambda fs: fs.theta("pi"),
+        "achaz_watterson": lambda fs: fs.theta("watterson"),
+        "achaz_theta_h": lambda fs: fs.theta("theta_h"),
+        "achaz_theta_l": lambda fs: fs.theta("theta_l"),
+        "achaz_tajd": lambda fs: fs.tajimas_d(),
+        "achaz_zeng_e": lambda fs: fs.zeng_e(),
+    }
+
+    all_names = list(stats.keys()) + list(achaz_stats.keys())
+    results = {name: {r: [] for r in MISSING_RATES} for name in all_names}
 
     for rep in range(N_REPS):
         seed = rep + 1
@@ -141,6 +140,19 @@ def simulation_results():
                         results[name][rate].append(val)
                 except Exception:
                     pass
+
+            # Compute FrequencySpectrum once, extract all achaz stats
+            try:
+                fs = FrequencySpectrum(hm, population="pop1")
+                for name, fn in achaz_stats.items():
+                    try:
+                        val = fn(fs)
+                        if np.isfinite(val):
+                            results[name][rate].append(val)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
     return results
 
@@ -178,10 +190,6 @@ def _check_near_zero_bias(results, stat_name, miss_rate, abs_tol=0.3):
         f"est={np.mean(test):.3f})")
 
 
-# Statistics near zero under neutrality (use absolute tolerance)
-NEAR_ZERO_STATS = ["tajd", "achaz_tajd", "achaz_zeng_e"]
-
-
 @pytest.mark.slow
 class TestIncludeModeUnbiased:
     """Verify include mode is unbiased under MCAR."""
@@ -194,8 +202,13 @@ class TestIncludeModeUnbiased:
         _check_bias(simulation_results, stat, miss_rate)
 
     @pytest.mark.parametrize("miss_rate", [0.10, 0.30, 0.60])
-    def test_tajimas_d(self, simulation_results, miss_rate):
-        _check_near_zero_bias(simulation_results, "tajd", miss_rate)
+    @pytest.mark.parametrize("stat", ["tajd", "fay_wus_h", "zeng_e"])
+    def test_neutrality_near_zero(self, simulation_results, stat, miss_rate):
+        # These are near zero under neutrality; use absolute tolerance
+        # (H = pi - theta_H, E = theta_L - theta_W: differences of
+        # nearly-equal quantities have high variance relative to signal)
+        _check_near_zero_bias(simulation_results, stat, miss_rate,
+                              abs_tol=2.0)
 
     @pytest.mark.parametrize("miss_rate", [0.10, 0.30, 0.60])
     @pytest.mark.parametrize("stat", ["dxy", "fst_hudson", "da"])

@@ -7,17 +7,11 @@ related statistics.
 """
 
 import warnings
-from collections import namedtuple
-
 import numpy as np
 import cupy as cp
 from typing import Union, Optional, Dict, Tuple
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix
-
-PairwiseResult = namedtuple(
-    'PairwiseResult',
-    ['value', 'total_diffs', 'total_comps', 'total_missing', 'n_sites'])
 
 
 def _dac_and_n(haplotypes):

@@ -1486,7 +1486,6 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                        or need_dist)
 
         # Precompute for fused ZnS path
-        use_proj = False  # projection now via estimator param, not missing_data
         if 'zns' in stat_arrays:
             hap = matrix.haplotypes
             hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
@@ -1500,7 +1499,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             if 'zns' in stat_arrays:
                 stat_arrays['zns'][wi] = ld_statistics._zns_from_precomputed(
                     hap_clean, valid_mask, s, e,
-                    use_projection=use_proj)
+                    use_projection=False)
 
             if need_winmat:
                 win_mat = HaplotypeMatrix(matrix.haplotypes[:, s:e],

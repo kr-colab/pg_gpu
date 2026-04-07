@@ -42,6 +42,11 @@ Data Loading and I/O
   multicore VCF-to-zarr conversion via bio2zarr. ``to_zarr()`` now writes VCZ
   format by default. ``GenotypeMatrix`` gains ``from_zarr()`` / ``to_zarr()``.
 
+* **Simplified missing data interface** -- reduced from four modes (include,
+  exclude, pairwise, project) to two (include, exclude). Simulation testing
+  confirms ``include`` mode is unbiased under MCAR. LD projection estimator
+  moved to ``estimator='sigma_d2'`` parameter on ``zns()`` / ``omega()``.
+
 * **Population file loading** -- ``load_pop_file('pops.txt')`` assigns populations
   from a tab-delimited file using stored sample names.
 

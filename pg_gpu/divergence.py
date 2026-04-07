@@ -6,15 +6,51 @@ including FST, Dxy, and related statistics using GPU acceleration.
 """
 
 import warnings
-from collections import namedtuple
 
 import numpy as np
 import cupy as cp
 from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
-from .diversity import PairwiseResult
 from ._memutil import chunked_dac_and_n as _pop_dac_and_n
 
+
+def dxy_components(pop1_haps, pop2_haps):
+    """Compute between-population pairwise differences and comparisons.
+
+    Returns raw counts for custom aggregation (e.g., windowed analysis).
+
+    Parameters
+    ----------
+    pop1_haps, pop2_haps : cupy.ndarray, shape (n_haplotypes, n_variants)
+        Haplotype data for each population, with -1 for missing.
+
+    Returns
+    -------
+    total_diffs : float
+        Sum of pairwise differences across usable sites.
+    total_comps : float
+        Sum of pairwise comparisons across usable sites.
+    n_sites : int
+        Number of sites with data in both populations.
+    """
+    pop1_derived, pop1_n = _pop_dac_and_n(pop1_haps)
+    pop2_derived, pop2_n = _pop_dac_and_n(pop2_haps)
+    pop1_n = pop1_n.astype(cp.float64)
+    pop2_n = pop2_n.astype(cp.float64)
+    pop1_derived = pop1_derived.astype(cp.float64)
+    pop2_derived = pop2_derived.astype(cp.float64)
+    pop1_ancestral = pop1_n - pop1_derived
+    pop2_ancestral = pop2_n - pop2_derived
+
+    site_diffs = pop1_derived * pop2_ancestral + pop1_ancestral * pop2_derived
+    site_comps = pop1_n * pop2_n
+
+    usable = (pop1_n > 0) & (pop2_n > 0)
+    total_diffs = float(cp.sum(site_diffs[usable]).get())
+    total_comps = float(cp.sum(site_comps[usable]).get())
+    n_sites = int(cp.sum(usable).get())
+
+    return total_diffs, total_comps, n_sites
 
 
 def fst(haplotype_matrix: HaplotypeMatrix,
