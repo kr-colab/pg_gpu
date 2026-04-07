@@ -25,7 +25,7 @@ class HaplotypeMatrix:
     sample_sets : dict, optional
         Maps population names to lists of haplotype indices.
     n_total_sites : int, optional
-        Total callable sites for pairwise-mode normalization.
+        Total callable sites for span normalization.
     samples : list, optional
         Diploid sample names (from VCF).
     accessible_mask : AccessibleMask, optional
@@ -203,7 +203,7 @@ class HaplotypeMatrix:
 
     @property
     def has_invariant_info(self):
-        """Whether invariant site information is available for pairwise mode."""
+        """Whether invariant site information is available for span normalization."""
         return self.n_total_sites is not None
 
     @property
@@ -469,7 +469,7 @@ class HaplotypeMatrix:
             ts: A tskit.TreeSequence object
             device: 'CPU' or 'GPU'
             include_invariant: If True, set n_total_sites from the sequence
-                length so that pairwise-mode calculations can account for
+                length so that calculations can account for
                 invariant sites analytically (no extra rows stored).
             accessible_bed: Path to a BED file defining accessible regions.
             chrom: Chromosome name for BED file filtering.
@@ -795,42 +795,57 @@ class HaplotypeMatrix:
         else:
             return np.sum(called, axis=axis)
 
-    def get_span(self, span_denominator='total'):
+    def get_span(self, mode='auto'):
         """
         Get the genomic span for normalization calculations.
 
         Parameters
         ----------
-        span_denominator : str
-            'total' - Use total genomic span (chrom_end - chrom_start)
-            'sites' - Use number of variant sites
+        mode : str
+            'auto' - Use best available: accessible mask > n_total_sites
+            > total genomic span > callable span
+            'accessible' - Use accessible base count from mask (error if
+            no mask set)
+            'per_base' - Use total genomic span (chrom_end - chrom_start)
+            'per_variant' - Use number of variant sites
             'callable' - Use span from first to last variant position
-            'accessible' - Use number of accessible sites from mask
+            'total' - Alias for 'per_base' (backward compatibility)
+            'sites' - Alias for 'per_variant' (backward compatibility)
 
         Returns
         -------
         span : int
             The span to use for normalization
         """
-        if span_denominator == 'accessible':
+        if mode == 'auto':
             if self.accessible_mask is not None:
                 start = self.chrom_start if self.chrom_start is not None else 0
                 end = self.chrom_end if self.chrom_end is not None else start
                 return self.accessible_mask.count_accessible(start, end)
-            # Fall back to total if no mask
-            span_denominator = 'total'
-
-        if span_denominator == 'total':
+            if self.n_total_sites is not None:
+                return self.n_total_sites
             if self.chrom_start is not None and self.chrom_end is not None:
                 return self.chrom_end - self.chrom_start
-            else:
-                # Fall back to callable span
-                span_denominator = 'callable'
+            mode = 'callable'
 
-        if span_denominator == 'sites':
+        if mode == 'accessible':
+            if self.accessible_mask is not None:
+                start = self.chrom_start if self.chrom_start is not None else 0
+                end = self.chrom_end if self.chrom_end is not None else start
+                return self.accessible_mask.count_accessible(start, end)
+            raise ValueError(
+                "mode='accessible' requires an accessible mask. "
+                "Use set_accessible_mask() first.")
+
+        if mode in ('per_base', 'total'):
+            if self.chrom_start is not None and self.chrom_end is not None:
+                return self.chrom_end - self.chrom_start
+            mode = 'callable'
+
+        if mode in ('per_variant', 'sites'):
             return self.num_variants
 
-        if span_denominator == 'callable':
+        if mode == 'callable':
             if self.device == 'GPU':
                 if len(self.positions) > 0:
                     return int((cp.max(self.positions) - cp.min(self.positions)).get()) + 1
@@ -842,7 +857,7 @@ class HaplotypeMatrix:
                 else:
                     return 0
 
-        raise ValueError(f"Invalid span_denominator: {span_denominator}")
+        raise ValueError(f"Invalid span mode: {mode}")
 
     def filter_variants_by_missing(self, max_missing_freq=0.1):
         """
@@ -913,7 +928,7 @@ class HaplotypeMatrix:
         from . import diversity
         return diversity.allele_frequency_spectrum(self)
 
-    def diversity(self, span_normalize: bool = True) -> float:
+    def diversity(self, span_normalize=True) -> float:
         """
         Calculate the nucleotide diversity (π) for the haplotype matrix.
 
@@ -928,7 +943,7 @@ class HaplotypeMatrix:
         from . import diversity
         return diversity.pi(self, span_normalize=span_normalize)
 
-    def watersons_theta(self, span_normalize: bool = True) -> float:
+    def watersons_theta(self, span_normalize=True) -> float:
         """
         Calculate Waterson's theta for the haplotype matrix.
 

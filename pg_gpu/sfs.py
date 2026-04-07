@@ -19,7 +19,7 @@ def _derived_allele_counts(haplotype_matrix, missing_data='include'):
     ----------
     haplotype_matrix : HaplotypeMatrix
     missing_data : str
-        'include' or 'pairwise' - return per-site n_valid
+        'include' - return per-site n_valid
         'exclude' - filter to complete sites
 
     Returns
@@ -34,7 +34,7 @@ def _derived_allele_counts(haplotype_matrix, missing_data='include'):
 
     hap = haplotype_matrix.haplotypes  # (n_haplotypes, n_variants)
 
-    if missing_data in ('include', 'pairwise'):
+    if missing_data == 'include':
         from ._memutil import chunked_dac_and_n
         dac, n_valid = chunked_dac_and_n(hap)
         return dac, n_valid
@@ -85,7 +85,7 @@ def sfs(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or sample indices.
     missing_data : str
-        'include' or 'pairwise' - per-site n_valid; bins by actual DAC
+        'include' - per-site n_valid; bins by actual DAC
         'exclude' - only sites with no missing data
 
     Returns
@@ -93,8 +93,6 @@ def sfs(haplotype_matrix: HaplotypeMatrix,
     ndarray, int64, shape (n_chromosomes + 1,)
         Element k = number of variants with k derived alleles.
     """
-    if missing_data == 'pairwise':
-        missing_data = 'include'
 
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
@@ -135,8 +133,6 @@ def sfs_folded(haplotype_matrix: HaplotypeMatrix,
     ndarray, int64, shape (n_chromosomes // 2 + 1,)
         Element k = number of variants with minor allele count k.
     """
-    if missing_data == 'pairwise':
-        missing_data = 'include'
 
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
@@ -235,15 +231,14 @@ def joint_sfs(haplotype_matrix: HaplotypeMatrix,
         Element [i, j] = number of variants with i derived alleles in pop1
         and j derived alleles in pop2.
     """
-    md = 'include' if missing_data == 'pairwise' else missing_data
 
     m1 = _get_population_matrix(haplotype_matrix, pop1)
     m2 = _get_population_matrix(haplotype_matrix, pop2)
 
-    dac1, n1 = _derived_allele_counts(m1, md)
-    dac2, n2 = _derived_allele_counts(m2, md)
+    dac1, n1 = _derived_allele_counts(m1, missing_data)
+    dac2, n2 = _derived_allele_counts(m2, missing_data)
 
-    if md == 'exclude':
+    if missing_data == 'exclude':
         valid = (dac1 >= 0) & (dac2 >= 0)
         dac1 = dac1[valid]
         dac2 = dac2[valid]
@@ -276,15 +271,14 @@ def joint_sfs_folded(haplotype_matrix: HaplotypeMatrix,
     -------
     ndarray, int64, shape (n1 // 2 + 1, n2 // 2 + 1)
     """
-    md = 'include' if missing_data == 'pairwise' else missing_data
 
     m1 = _get_population_matrix(haplotype_matrix, pop1)
     m2 = _get_population_matrix(haplotype_matrix, pop2)
 
-    ac1, n1 = _allele_counts(m1, md)
-    ac2, n2 = _allele_counts(m2, md)
+    ac1, n1 = _allele_counts(m1, missing_data)
+    ac2, n2 = _allele_counts(m2, missing_data)
 
-    if md == 'exclude':
+    if missing_data == 'exclude':
         valid = (ac1[:, 1] >= 0) & (ac2[:, 1] >= 0)
         ac1 = ac1[valid]
         ac2 = ac2[valid]
@@ -344,13 +338,12 @@ def joint_sfs_folded_scaled(haplotype_matrix: HaplotypeMatrix,
     -------
     ndarray, float64, shape (n1 // 2 + 1, n2 // 2 + 1)
     """
-    md = 'include' if missing_data == 'pairwise' else missing_data
 
     m1 = _get_population_matrix(haplotype_matrix, pop1)
     m2 = _get_population_matrix(haplotype_matrix, pop2)
 
-    _, n1 = _derived_allele_counts(m1, md)
-    _, n2 = _derived_allele_counts(m2, md)
+    _, n1 = _derived_allele_counts(m1, missing_data)
+    _, n2 = _derived_allele_counts(m2, missing_data)
 
     if isinstance(n1, cp.ndarray):
         n1 = int(cp.max(n1).get()) if n1.size > 0 else 0

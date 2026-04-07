@@ -181,7 +181,7 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population subset to use.
     missing_data : str
-        'include' or 'pairwise' - impute missing to per-site mean
+        'include' - impute missing to per-site mean
         'exclude' - filter sites with any missing
 
     Returns
@@ -332,7 +332,7 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population subset.
     missing_data : str
-        'include' or 'pairwise' - mask missing, normalize per pair
+        'include' - mask missing, normalize per pair
         'exclude' - filter sites with any missing
 
     Returns
@@ -340,8 +340,6 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     dist : ndarray, float64, shape (n_samples * (n_samples - 1) // 2,)
         Condensed distance matrix.
     """
-    if missing_data == 'pairwise':
-        missing_data = 'include'
 
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)

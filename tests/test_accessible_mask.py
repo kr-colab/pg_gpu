@@ -277,11 +277,42 @@ class TestHaplotypeMatrixAccessibleMask:
         assert hm.get_span('accessible') == 900
         assert hm.get_span('total') == 1000
 
-    def test_get_span_accessible_no_mask_fallback(self):
+    def test_get_span_auto_uses_accessible(self):
+        mask = np.ones(1000, dtype=bool)
+        mask[200:300] = False
         hm = _make_haplotype_matrix()
-        # Without mask, 'accessible' should fall back to 'total'
-        span = hm.get_span('accessible')
-        assert span == hm.get_span('total')
+        hm.set_accessible_mask(mask)
+        # auto mode should pick accessible when mask is set
+        assert hm.get_span('auto') == 900
+        assert hm.get_span('auto') == hm.get_span('accessible')
+
+    def test_get_span_auto_uses_total_without_mask(self):
+        hm = _make_haplotype_matrix()
+        # auto without mask should use total genomic span
+        assert hm.get_span('auto') == hm.get_span('total')
+
+    def test_span_normalize_auto_pi(self):
+        """pi(span_normalize=True) auto-detects accessible mask."""
+        from pg_gpu import diversity
+        mask = np.ones(1000, dtype=bool)
+        mask[200:300] = False
+        hm = _make_haplotype_matrix()
+
+        # Without mask: per total span
+        pi_total = diversity.pi(hm, span_normalize=True)
+
+        # With mask: per accessible bases (different denominator)
+        hm.set_accessible_mask(mask)
+        pi_accessible = diversity.pi(hm, span_normalize=True)
+
+        # Both should be finite, but may differ due to different denominators
+        assert np.isfinite(pi_total)
+        assert np.isfinite(pi_accessible)
+
+    def test_get_span_accessible_no_mask_raises(self):
+        hm = _make_haplotype_matrix()
+        with pytest.raises(ValueError, match="requires an accessible mask"):
+            hm.get_span('accessible')
 
     def test_get_subset_no_mask_propagation(self):
         """get_subset creates child from filtered view, no mask on child."""
@@ -392,9 +423,10 @@ class TestBackwardCompatibility:
         subset = hm.get_subset(np.array([0, 1]))
         assert not subset.has_accessible_mask
 
-    def test_accessible_fallback_to_total(self):
+    def test_accessible_raises_without_mask(self):
         hm = _make_haplotype_matrix()
-        assert hm.get_span('accessible') == hm.get_span('total')
+        with pytest.raises(ValueError, match="requires an accessible mask"):
+            hm.get_span('accessible')
 
     def test_apply_biallelic_filter_propagates_mask(self):
         """HaplotypeMatrix.apply_biallelic_filter preserves mask."""
@@ -556,8 +588,8 @@ class TestWindowedScatterAddWithMask:
 
 
 class TestWindowedAnalysisConvenience:
-    def test_accessible_span_denominator(self):
-        """windowed_analysis with span_denominator='accessible' uses mask."""
+    def test_accessible_span_normalize(self):
+        """windowed_analysis with span_normalize='accessible' uses mask."""
         from pg_gpu.windowed_analysis import windowed_analysis
 
         hm = _make_windowed_matrix()
@@ -568,7 +600,7 @@ class TestWindowedAnalysisConvenience:
 
         df = windowed_analysis(
             hm, window_size=5000, statistics=['pi'],
-            span_denominator='accessible')
+            span_normalize='accessible')
 
         assert len(df) > 0
         assert 'pi' in df.columns

@@ -171,7 +171,7 @@ class GenotypeMatrix:
 
     @property
     def has_invariant_info(self):
-        """Whether invariant site information is available for pairwise mode."""
+        """Whether invariant site information is available for span normalization."""
         return self.n_total_sites is not None
 
     @property

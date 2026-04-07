@@ -57,7 +57,7 @@ class TestDxyMin:
     def test_less_than_mean(self, two_pop_hm):
         dmin = divergence.dxy_min(two_pop_hm, 'pop1', 'pop2')
         dmean = divergence.dxy(two_pop_hm, 'pop1', 'pop2',
-                               span_denominator=False)
+                               span_normalize=False)
         # min should be <= mean (when comparing raw counts)
         # dmean is per-site; dmin is total. Adjust:
         assert dmin >= 0

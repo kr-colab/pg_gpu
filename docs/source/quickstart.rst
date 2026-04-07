@@ -375,7 +375,6 @@ Missing data is encoded as -1 and handled automatically:
 
 .. code-block:: python
 
-   # Different missing data strategies
+   # Missing data modes
    pi_include = diversity.pi(h, missing_data='include')   # default: per-site valid data
    pi_exclude = diversity.pi(h, missing_data='exclude')   # only fully genotyped sites
-   pi_pairwise = diversity.pi(h, missing_data='pairwise') # pixy-style comparison counting

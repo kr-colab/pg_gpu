@@ -6,33 +6,33 @@ including FST, Dxy, and related statistics using GPU acceleration.
 """
 
 import warnings
-from collections import namedtuple
 
 import numpy as np
 import cupy as cp
 from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
-from .diversity import PairwiseResult, _pairwise_pi_components
 from ._memutil import chunked_dac_and_n as _pop_dac_and_n
+from .diversity import _apply_span_normalize, pi as _diversity_pi
 
 
-def _pairwise_dxy_components(pop1_haps, pop2_haps, n_total_sites=None,
-                             n_pop1_full=None, n_pop2_full=None):
+def dxy_components(pop1_haps, pop2_haps):
     """Compute between-population pairwise differences and comparisons.
+
+    Returns raw counts for custom aggregation (e.g., windowed analysis).
 
     Parameters
     ----------
-    pop1_haps, pop2_haps : cp.ndarray, shape (n_haplotypes, n_variants)
-        Haplotype data for each population.
-    n_total_sites : int, optional
-        Total callable sites. Invariant sites contribute 0 diffs and
-        n_pop1_full * n_pop2_full comps each.
-    n_pop1_full, n_pop2_full : int, optional
-        Full sample sizes per population (for invariant site comps).
+    pop1_haps, pop2_haps : cupy.ndarray, shape (n_haplotypes, n_variants)
+        Haplotype data for each population, with -1 for missing.
 
     Returns
     -------
-    total_diffs, total_comps, total_missing, n_sites : float, float, float, int
+    total_diffs : float
+        Sum of pairwise differences across usable sites.
+    total_comps : float
+        Sum of pairwise comparisons across usable sites.
+    n_sites : int
+        Number of sites with data in both populations.
     """
     pop1_derived, pop1_n = _pop_dac_and_n(pop1_haps)
     pop2_derived, pop2_n = _pop_dac_and_n(pop2_haps)
@@ -43,9 +43,7 @@ def _pairwise_dxy_components(pop1_haps, pop2_haps, n_total_sites=None,
     pop1_ancestral = pop1_n - pop1_derived
     pop2_ancestral = pop2_n - pop2_derived
 
-    # Per-site diffs: pop1_derived * pop2_ancestral + pop1_ancestral * pop2_derived
     site_diffs = pop1_derived * pop2_ancestral + pop1_ancestral * pop2_derived
-    # Per-site comps: n_pop1 * n_pop2
     site_comps = pop1_n * pop2_n
 
     usable = (pop1_n > 0) & (pop2_n > 0)
@@ -53,22 +51,7 @@ def _pairwise_dxy_components(pop1_haps, pop2_haps, n_total_sites=None,
     total_comps = float(cp.sum(site_comps[usable]).get())
     n_sites = int(cp.sum(usable).get())
 
-    # Invariant site contribution
-    if n_total_sites is not None:
-        n1 = n_pop1_full or pop1_haps.shape[0]
-        n2 = n_pop2_full or pop2_haps.shape[0]
-        n_invariant = n_total_sites - n_sites
-        if n_invariant > 0:
-            total_comps += n_invariant * (n1 * n2)
-            n_sites += n_invariant
-
-    # Missing
-    n1 = n_pop1_full or pop1_haps.shape[0]
-    n2 = n_pop2_full or pop2_haps.shape[0]
-    total_possible = (n1 * n2) * n_sites
-    total_missing = total_possible - total_comps
-
-    return total_diffs, total_comps, total_missing, n_sites
+    return total_diffs, total_comps, n_sites
 
 
 def fst(haplotype_matrix: HaplotypeMatrix,
@@ -130,7 +113,6 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'pairwise' - Comparison-counting: FST = 1 - (pi_within / dxy)
 
     Returns
     -------
@@ -144,30 +126,6 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
-
-    # Pairwise mode: FST = 1 - (pi_within / dxy) using pairwise estimates
-    if missing_data == 'pairwise':
-        pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
-        pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
-        n_ts = haplotype_matrix.n_total_sites
-
-        # Pairwise pi for each population
-        d1, c1, _, _ = _pairwise_pi_components(
-            pop1_haps, n_total_sites=n_ts, n_haplotypes_full=len(pop1_idx))
-        d2, c2, _, _ = _pairwise_pi_components(
-            pop2_haps, n_total_sites=n_ts, n_haplotypes_full=len(pop2_idx))
-
-        # Pairwise dxy
-        d_between, c_between, _, _ = _pairwise_dxy_components(
-            pop1_haps, pop2_haps, n_total_sites=n_ts,
-            n_pop1_full=len(pop1_idx), n_pop2_full=len(pop2_idx))
-
-        pi_within = (d1 + d2) / (c1 + c2) if (c1 + c2) > 0 else float('nan')
-        dxy_val = d_between / c_between if c_between > 0 else float('nan')
-        if dxy_val == 0 or dxy_val != dxy_val:  # nan check
-            return 0.0
-        fst_val = 1.0 - (pi_within / dxy_val)
-        return fst_val
 
     # Get haplotype data
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
@@ -243,7 +201,7 @@ def fst_weir_cockerham(haplotype_matrix,
     pop2 : str or list
         Second population
     missing_data : str
-        'include' or 'pairwise' - per-site sample sizes, ratio-of-sums
+        'include' - per-site sample sizes, ratio-of-sums
         'exclude' - Only use sites with no missing data
 
     Returns
@@ -251,8 +209,6 @@ def fst_weir_cockerham(haplotype_matrix,
     float
         Weir & Cockerham's FST estimate
     """
-    if missing_data == 'pairwise':
-        missing_data = 'include'
 
     if hasattr(haplotype_matrix, 'device') and haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
@@ -271,32 +227,39 @@ def fst_weir_cockerham(haplotype_matrix,
         pop1_haps = pop1_haps[:, valid_sites]
         pop2_haps = pop2_haps[:, valid_sites]
 
-    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
-    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
-    pop1_counts = pop1_counts.astype(cp.float64)
-    pop2_counts = pop2_counts.astype(cp.float64)
-
-    # Compute per-site observed heterozygosity from paired haplotypes
-    def _pop_het(pop_haps):
-        ha = pop_haps[0::2, :]
-        hb = pop_haps[1::2, :]
-        valid = (ha >= 0) & (hb >= 0)
-        het = (ha != hb) & valid
-        n_called = cp.sum(valid, axis=0).astype(cp.float64)
+    # Compute per-site observed heterozygosity and allele counts from
+    # complete diploid pairs only. WC FST requires that frequencies and
+    # het are computed from the same set of individuals — using all valid
+    # haplotypes for counts but only complete pairs for n inflates
+    # frequencies by 1/(1-miss_rate) under MCAR.
+    def _pop_diploid_stats(pop_haps):
+        ha = pop_haps[0::2, :]  # first haplotype of each diploid
+        hb = pop_haps[1::2, :]  # second haplotype
+        both_valid = (ha >= 0) & (hb >= 0)
+        het = (ha != hb) & both_valid
+        n_called = cp.sum(both_valid, axis=0).astype(cp.float64)
         h_bar = cp.where(n_called > 0,
                          cp.sum(het, axis=0).astype(cp.float64) / n_called, 0.0)
-        return h_bar, n_called
+        # Derived allele count from complete pairs only
+        derived = cp.sum(
+            cp.where(both_valid, ha, 0) + cp.where(both_valid, hb, 0),
+            axis=0).astype(cp.float64)
+        return h_bar, n_called, derived
 
     if len(pop1_idx) >= 2 and len(pop2_idx) >= 2:
-        h_bar1, n1 = _pop_het(pop1_haps)
-        h_bar2, n2 = _pop_het(pop2_haps)
+        h_bar1, n1, pop1_counts = _pop_diploid_stats(pop1_haps)
+        h_bar2, n2, pop2_counts = _pop_diploid_stats(pop2_haps)
     else:
+        pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
+        pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
+        pop1_counts = pop1_counts.astype(cp.float64)
+        pop2_counts = pop2_counts.astype(cp.float64)
         n1 = pop1_n.astype(cp.float64)
         n2 = pop2_n.astype(cp.float64)
         h_bar1 = cp.zeros_like(n1)
         h_bar2 = cp.zeros_like(n2)
 
-    # Allele frequencies (using diploid sample sizes = n_individuals)
+    # Allele frequencies from complete diploid pairs
     pop1_freqs = cp.where(n1 > 0, pop1_counts / (2.0 * n1), 0.0)
     pop2_freqs = cp.where(n2 > 0, pop2_counts / (2.0 * n2), 0.0)
 
@@ -372,7 +335,6 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'pairwise' - Ratio-of-sums: sum(HT-HS) / sum(HT)
 
     Returns
     -------
@@ -390,11 +352,6 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     # Get haplotype data
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
-
-    # Pairwise mode: ratio-of-sums GST = sum(HT-HS) / sum(HT)
-    _is_pairwise = missing_data == 'pairwise'
-    if _is_pairwise:
-        missing_data = 'include'
 
     # Handle missing data
     if missing_data == 'exclude':
@@ -446,8 +403,8 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         pop2: Union[str, list],
         per_site: bool = False,
         missing_data: str = 'include',
-        span_denominator: bool = False,
-        return_components: bool = False) -> Union[float, cp.ndarray, 'PairwiseResult']:
+        span_normalize=True,
+        ) -> Union[float, cp.ndarray]:
     """
     Compute absolute divergence (Dxy) between two populations.
 
@@ -467,16 +424,15 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
-        ``'pairwise'`` uses comparison-counting normalization (pixy-style).
-    span_denominator : bool
-        If True, normalize by total sites; if False, normalize by sites with data
-    return_components : bool
-        If True, return PairwiseResult. Only meaningful for 'pairwise' mode.
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator.
+        ``False``: return raw sum / sites-with-data average.
+        String values select an explicit denominator.
 
     Returns
     -------
-    float, cp.ndarray, or PairwiseResult
-        Mean Dxy, per-site Dxy values, or components
+    float or cp.ndarray
+        Mean Dxy or per-site Dxy values
     """
     # Get population indices
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
@@ -490,25 +446,6 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
     total_sites = pop1_haps.shape[1]
-
-    # Pairwise mode: comparison-counting normalization
-    if missing_data == 'pairwise':
-        if not haplotype_matrix.has_invariant_info:
-            warnings.warn(
-                "No invariant site information available (n_total_sites not set). "
-                "Pairwise-mode dxy will be computed from variant sites only and "
-                "may overestimate divergence.",
-                stacklevel=2)
-        total_diffs, total_comps, total_missing, n_sites = _pairwise_dxy_components(
-            pop1_haps, pop2_haps,
-            n_total_sites=haplotype_matrix.n_total_sites,
-            n_pop1_full=len(pop1_idx),
-            n_pop2_full=len(pop2_idx))
-        dxy_value = total_diffs / total_comps if total_comps > 0 else float('nan')
-        if return_components:
-            return PairwiseResult(dxy_value, total_diffs, total_comps,
-                                 total_missing, n_sites)
-        return dxy_value
 
     # Handle missing data
     if missing_data == 'exclude':
@@ -539,10 +476,6 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     dxy_per_site[valid_mask] = (pop1_freqs[valid_mask] + pop2_freqs[valid_mask] -
                                2 * pop1_freqs[valid_mask] * pop2_freqs[valid_mask])
 
-    # Count sites with data for normalization
-    if not span_denominator:
-        n_sites = int(cp.sum(valid_mask).get())
-
     if per_site:
         if missing_data == 'exclude':
             result = cp.zeros(total_sites)
@@ -551,21 +484,18 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         else:
             return dxy_per_site.get()
     else:
-        if span_denominator:
-            # Normalize by total sites
-            return float(cp.sum(dxy_per_site).get() / total_sites)
-        elif n_sites > 0:
-            # Normalize by sites with data
-            return float(cp.sum(dxy_per_site).get() / n_sites)
-        else:
-            return 0.0
+        dxy_sum = cp.sum(dxy_per_site)
+        if span_normalize is False:
+            n_sites = int(cp.sum(valid_mask).get())
+            return float(dxy_sum.get() / n_sites) if n_sites > 0 else 0.0
+        return _apply_span_normalize(dxy_sum, haplotype_matrix, span_normalize)
 
 
 def da(haplotype_matrix: HaplotypeMatrix,
        pop1: Union[str, list],
        pop2: Union[str, list],
        missing_data: str = 'include',
-       span_denominator: bool = False) -> float:
+       span_normalize=True) -> float:
     """
     Compute net divergence (Da) between two populations.
 
@@ -583,8 +513,9 @@ def da(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-    span_denominator : bool
-        If True, normalize by total sites; if False, normalize by sites with data
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator.
+        ``False``: return raw sum / sites-with-data average.
 
     Returns
     -------
@@ -593,13 +524,13 @@ def da(haplotype_matrix: HaplotypeMatrix,
     """
     # Get Dxy
     dxy_value = dxy(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                   span_denominator=span_denominator)
+                   span_normalize=span_normalize)
 
     # Get within-population diversities
-    pi1 = pi_within_population(haplotype_matrix, pop1, missing_data=missing_data,
-                              span_denominator=span_denominator)
-    pi2 = pi_within_population(haplotype_matrix, pop2, missing_data=missing_data,
-                              span_denominator=span_denominator)
+    pi1 = _diversity_pi(haplotype_matrix, population=pop1, missing_data=missing_data,
+              span_normalize=span_normalize)
+    pi2 = _diversity_pi(haplotype_matrix, population=pop2, missing_data=missing_data,
+              span_normalize=span_normalize)
 
     # Calculate Da
     da_value = dxy_value - (pi1 + pi2) / 2.0
@@ -610,9 +541,11 @@ def da(haplotype_matrix: HaplotypeMatrix,
 def pi_within_population(haplotype_matrix: HaplotypeMatrix,
                         pop: Union[str, list],
                         missing_data: str = 'include',
-                        span_denominator: bool = False) -> float:
+                        span_normalize=True) -> float:
     """
     Compute nucleotide diversity (pi) within a population.
+
+    Delegates to ``diversity.pi()`` for consistent behavior.
 
     Parameters
     ----------
@@ -621,71 +554,17 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
     pop : str or list
         Population name or list of indices
     missing_data : str
-        'include' - Use all sites, calculate from available data per site
-        'exclude' - Only use sites with no missing data
-    span_denominator : bool
-        If True, normalize by total sites; if False, normalize by sites with data
+        'include' or 'exclude'
+    span_normalize : bool or str
+        ``True`` (default): auto-detect. ``False``: raw sum.
 
     Returns
     -------
     float
         Nucleotide diversity
     """
-    # Get population indices
-    pop_idx = _get_population_indices(haplotype_matrix, pop)
-
-    # Ensure data is on GPU if available
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
-
-    # Pairwise mode: comparison-counting pi
-    if missing_data == 'pairwise':
-        pop_haps = haplotype_matrix.haplotypes[pop_idx, :]
-        total_diffs, total_comps, _, _ = _pairwise_pi_components(
-            pop_haps, n_total_sites=haplotype_matrix.n_total_sites,
-            n_haplotypes_full=len(pop_idx))
-        return total_diffs / total_comps if total_comps > 0 else 0.0
-
-    # Extract population haplotypes
-    pop_haplotypes = haplotype_matrix.haplotypes[pop_idx, :]
-    total_sites = pop_haplotypes.shape[1]
-
-    # Handle missing data
-    if missing_data == 'exclude':
-        # Only use sites with no missing data
-        valid_sites = cp.all(pop_haplotypes >= 0, axis=0)
-        if not cp.any(valid_sites):
-            return 0.0
-        pop_haplotypes = pop_haplotypes[:, valid_sites]
-
-    n_filtered = pop_haplotypes.shape[1]
-    n_sites = total_sites
-
-    # Calculate frequencies from non-missing data per site
-    pop_counts, n = _pop_dac_and_n(pop_haplotypes)
-    pop_counts = pop_counts.astype(cp.float64)
-    n = n.astype(cp.float64)
-
-    pop_freq = cp.where(n > 0, pop_counts / n, 0.0)
-
-    # Pi = 2 * p * (1 - p) * n / (n - 1) for sites with n > 1
-    pi_per_site = cp.zeros(n_filtered)
-    valid_mask = n > 1
-    pi_per_site[valid_mask] = (2.0 * pop_freq[valid_mask] * (1 - pop_freq[valid_mask]) *
-                              n[valid_mask] / (n[valid_mask] - 1))
-
-    # Count sites with sufficient data for normalization
-    if not span_denominator:
-        n_sites = int(cp.sum(valid_mask).get())
-
-    if span_denominator:
-        # Normalize by total sites
-        return float(cp.sum(pi_per_site).get() / total_sites) if total_sites > 0 else 0.0
-    elif n_sites > 0:
-        # Normalize by sites with data
-        return float(cp.sum(pi_per_site).get() / n_sites)
-    else:
-        return 0.0
+    return _diversity_pi(haplotype_matrix, population=pop,
+               span_normalize=span_normalize, missing_data=missing_data)
 
 
 def divergence_stats(haplotype_matrix: HaplotypeMatrix,
@@ -693,7 +572,7 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
                     pop2: Union[str, list],
                     statistics: list = ['fst', 'dxy', 'da'],
                     missing_data: str = 'include',
-                    span_denominator: bool = False) -> Dict[str, float]:
+                    span_normalize=True) -> Dict[str, float]:
     """
     Compute multiple divergence statistics between two populations.
 
@@ -710,9 +589,8 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-    span_denominator : bool
-        If True, normalize by total sites; if False, normalize by sites with data
-        (only applies to dxy, da, pi1, pi2)
+    span_normalize : bool or str
+        ``True`` (default): auto-detect. ``False``: raw sum / per-site average.
 
     Returns
     -------
@@ -732,16 +610,16 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
             results['fst_nei'] = fst_nei(haplotype_matrix, pop1, pop2, missing_data=missing_data)
         elif stat == 'dxy':
             results['dxy'] = dxy(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                               span_denominator=span_denominator)
+                               span_normalize=span_normalize)
         elif stat == 'da':
             results['da'] = da(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                             span_denominator=span_denominator)
+                             span_normalize=span_normalize)
         elif stat == 'pi1':
             results['pi1'] = pi_within_population(haplotype_matrix, pop1, missing_data=missing_data,
-                                                span_denominator=span_denominator)
+                                                span_normalize=span_normalize)
         elif stat == 'pi2':
             results['pi2'] = pi_within_population(haplotype_matrix, pop2, missing_data=missing_data,
-                                                span_denominator=span_denominator)
+                                                span_normalize=span_normalize)
         else:
             raise ValueError(f"Unknown statistic: {stat}")
 
@@ -822,7 +700,7 @@ def _pop_allele_counts(haplotype_matrix, pop, missing_data='include'):
     """Compute per-variant allele counts for a population on GPU.
 
     Returns (ac_0, ac_1, n) as CuPy arrays. n is per-site (array)
-    for 'include'/'pairwise' modes, and also per-site after filtering
+    for 'include' mode, and also per-site after filtering
     for 'exclude' mode.
     """
     pop_idx = _get_population_indices(haplotype_matrix, pop)
@@ -915,7 +793,7 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
     normed : bool, optional
         If True (default), return normalized PBS (PBSn1).
     missing_data : str
-        'include' or 'pairwise' - per-site sample sizes
+        'include' - per-site sample sizes
         'exclude' - only use sites with no missing data
 
     Returns
