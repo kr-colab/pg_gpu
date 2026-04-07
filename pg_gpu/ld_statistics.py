@@ -301,143 +301,72 @@ def _tile_sigma_d2(hi, vi, hj, vj):
 
 
 def _zns_gram(mat, missing_data='include'):
-    """Compute ZnS via Gram matrix trick: O(n^2*m) instead of O(n*m^2).
+    """Compute ZnS via chunked Gram-matrix accumulation.
 
-    For m segregating sites and n haplotypes, the standard approach
-    computes all m*(m-1)/2 pairwise r^2 values.  Instead we form
+    Uses ``_prepare_segregating()`` for site filtering (handles
+    ``exclude`` / ``include`` / ``project`` uniformly) and standardizes
+    with the missing-aware factor ``1 / sqrt(n_i p_i q_i)`` so that
+    ``||B_i||^2 = 1`` for every site.  The diagonal of ``R = B^T B``
+    is then exactly ``1`` and ``ZnS`` is bounded in ``[0, 1]`` by
+    Cauchy-Schwarz, even under high or structured missingness.
 
-        K = S S^T    (n x n,  much smaller than the m x m R = S^T S)
+    For ``exclude`` mode (and any window with no missing data after
+    filtering), this reduces to the standard Pearson r^2 Gram trick
+    used by main's tiled path; values agree to floating-point
+    precision.  For ``include`` mode under missingness this computes
+    mean-imputation Pearson r^2 -- a standard estimator that is the
+    natural Gram-amenable generalization (no MCAR correction needed).
+    For ``project`` mode it falls back to ``_zns_tiled_impl``
+    (Ragsdale & Gravel sigma_D^2).
 
-    where S is the (n x m) standardized haplotype matrix with
-    S_ki = (h_ki - p_i) / sqrt(p_i * q_i) for valid entries and 0 for
-    missing entries (mean imputation).
-
-    With missing data and small m (n*m^2 < budget), falls back to the
-    exact tiled O(m^2) path.  For large m, uses mean imputation with
-    a MCAR correction factor.
-
-    Computation is chunked over columns (sites) so that only an
-    (n_hap x chunk_size) slice of S is ever in GPU memory at once,
-    making this safe for chromosome-scale data.
-
-    Falls back to tiled O(m^2) computation only for 'project' mode
-    (unbiased multinomial projection estimators).
+    Computation is chunked over columns (sites) so only an
+    (n_hap x chunk_size) slice of the standardized matrix is in GPU
+    memory at once, keeping it safe for chromosome-scale windows.
     """
-    from ._memutil import (chunked_dac_and_n, estimate_variant_chunk_size,
-                           free_gpu_pool)
+    from ._memutil import estimate_variant_chunk_size, free_gpu_pool
 
-    if hasattr(mat, 'device') and mat.device == 'CPU':
-        mat.transfer_to_gpu()
-
-    # --- exclude mode: drop sites with any missing data ----------------
-    if missing_data == 'exclude':
-        hap = mat.haplotypes
-        n_hap_ex, n_var_ex = hap.shape
-        csz = estimate_variant_chunk_size(n_hap_ex, 4, 1)
-        miss = cp.empty(n_var_ex, dtype=cp.int64)
-        for s in range(0, n_var_ex, csz):
-            e = min(s + csz, n_var_ex)
-            miss[s:e] = cp.sum((hap[:, s:e] < 0).astype(cp.int32), axis=0)
-        keep = cp.where(miss == 0)[0]
-        if len(keep) < n_var_ex:
-            mat = mat.get_subset(keep)
-
-    # --- filter to segregating sites (memory-safe, keeps int8) ---------
-    hap = mat.haplotypes  # int8 on GPU
-    dac, n_valid = chunked_dac_and_n(hap)
-    seg = (dac > 0) & (dac < n_valid)
-    seg_idx = cp.where(seg)[0]
-    m = len(seg_idx)
+    hap_clean, valid_mask, m = _prepare_segregating(mat, missing_data)
     if m < 2:
         return 0.0
-    if m < mat.num_variants:
-        mat = mat.get_subset(seg_idx)
-        hap = mat.haplotypes
-        dac, n_valid = chunked_dac_and_n(hap)
 
-    n_hap = hap.shape[0]
-
-    # --- project mode: fall back to tiled (different estimator) --------
     if missing_data == 'project':
-        valid_mask = (hap >= 0).astype(cp.float64)
-        hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
         return _zns_tiled_impl(hap_clean, valid_mask, m, missing_data)
 
-    # --- per-site frequency stats (1-D vectors, O(m) memory) ----------
-    p = dac.astype(cp.float64) / n_valid.astype(cp.float64)
+    n_hap = hap_clean.shape[0]
+    n_i = cp.sum(valid_mask, axis=0)             # per-site valid count
+    sum_h = cp.sum(hap_clean, axis=0)            # per-site allele count
+    p = sum_h / n_i
     pq = p * (1.0 - p)
-    good = pq > 0
-    if int(cp.sum(good).get()) < 2:
-        return 0.0
-    inv_sqrt_pq = cp.where(good, 1.0 / cp.sqrt(pq), 0.0)
+    # Sites guaranteed segregating by _prepare_segregating, so n_i >= 2
+    # and pq > 0 in exact arithmetic; guard floating-point edge cases.
+    norm = cp.sqrt(n_i * pq)
+    inv_norm = cp.where(norm > 0, 1.0 / norm, 0.0)
 
-    has_missing = bool((n_valid < n_hap).any().get())
-
-    # For missing data with manageable m, the tiled path gives exact
-    # per-pair r^2.  For large m the Gram path with MCAR correction
-    # is the only feasible option.  Crossover: tiled is O(n*m^2),
-    # Gram is O(n^2*m); use tiled when n*m^2 < budget (~10s on GPU).
-    if has_missing:
-        budget = 5e11  # ~50s of FLOPs
-        if float(n_hap) * float(m) * float(m) < budget:
-            valid_mask = (hap >= 0).astype(cp.float64)
-            hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
-            return _zns_tiled_exact(hap_clean, valid_mask, m)
-
-    # Diagonal correction: (S^T S)_{ii} = n_i, so sum_i (S^T S)_{ii}^2
-    n = float(n_hap)
-    diag_sum_sq = float(cp.sum(n_valid.astype(cp.float64) ** 2).get())
-
-    # --- chunked Gram matrix accumulation K = S S^T --------------------
     chunk_size = estimate_variant_chunk_size(
         n_hap, bytes_per_element=8, n_intermediates=3)
 
     K = cp.zeros((n_hap, n_hap), dtype=cp.float64)
     for col_start in range(0, m, chunk_size):
         col_end = min(col_start + chunk_size, m)
-        hap_chunk = hap[:, col_start:col_end]
+        h_c = hap_clean[:, col_start:col_end]
+        v_c = valid_mask[:, col_start:col_end]
         p_c = p[col_start:col_end]
-        isq_c = inv_sqrt_pq[col_start:col_end]
-
-        if has_missing:
-            valid_c = hap_chunk >= 0
-            h_f = cp.where(valid_c, hap_chunk, 0).astype(cp.float64)
-            S_chunk = (h_f - p_c * valid_c.astype(cp.float64)) * isq_c
-            del h_f, valid_c
-        else:
-            S_chunk = (hap_chunk.astype(cp.float64) - p_c) * isq_c
-
-        K += S_chunk @ S_chunk.T
-        del S_chunk
+        inv_c = inv_norm[col_start:col_end]
+        # B[k, i] = (h_ki - p_i) / sqrt(n_i p_i q_i)  for valid k
+        #        = 0                                    for missing k
+        # Equivalently (h_ki - v_ki * p_i) * inv_c[i]: missing entries
+        # have h_ki = 0 and v_ki = 0, so they contribute 0.
+        B_chunk = (h_c - v_c * p_c) * inv_c
+        K += B_chunk @ B_chunk.T
+        del B_chunk
 
     free_gpu_pool()
 
-    # --- compute ZnS from K -------------------------------------------
-    # r(i,j) = (1/n) * (S^T S)_{ij}
-    # sum_{i!=j} r^2 = (||K||_F^2 - diag_sum_sq) / n^2
+    # ||K||_F^2 = ||B^T B||_F^2 = sum_{i,j} r_imp^2(i, j)
+    #          = m + sum_{i!=j} r_imp^2(i, j)   (diagonal r^2 = 1)
     frob_sq = float(cp.sum(K * K).get())
-    sum_r2 = (frob_sq - diag_sum_sq) / (n * n)
-    zns = sum_r2 / (m * (m - 1))
-
-    if has_missing:
-        # Mean imputation divides by n instead of n_both(i,j) per pair,
-        # biasing each r^2 by ~(n_both/n)^2.  Under MCAR with per-site
-        # valid counts n_i, n_both(i,j) ~ n_i*n_j/n, giving a global
-        # correction of (n^2 * E[1/n_i^2])^2.
-        inv_nv_sq = (1.0 / n_valid.astype(cp.float64)) ** 2
-        c = n * n * float(cp.mean(inv_nv_sq).get())
-        correction = c * c
-        zns *= correction
-        if correction > 1.05:
-            import warnings
-            warnings.warn(
-                f"ZnS: Gram path applied MCAR correction of "
-                f"{correction:.2f}x (~{(correction-1)*100:.0f}% "
-                f"missing-data adjustment, {m:,} sites). "
-                f"Use missing_data='exclude' for exact results.",
-                stacklevel=3)
-
-    return zns
+    sum_r2 = frob_sq - m
+    return sum_r2 / (m * (m - 1))
 
 
 def _zns_tiled_exact(hap_clean, valid_mask, m, tile_size=512):
