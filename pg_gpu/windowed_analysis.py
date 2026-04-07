@@ -159,28 +159,27 @@ class StatisticsComputer:
                  custom_stat_kwargs: Optional[Dict] = None,
                  ld_bins: Optional[List[int]] = None,
                  missing_data: str = 'include',
-                 span_denominator: str = 'total'):
+                 span_normalize=True):
         self.statistics = statistics
         self.populations = populations or []
         self.custom_stat_kwargs = custom_stat_kwargs or {}
         self.ld_bins = ld_bins or [0, 1000, 5000, 10000, 50000]
         self.missing_data = missing_data
-        self.span_denominator = span_denominator
+        self.span_normalize = span_normalize
 
         # Categorize statistics
         self._categorize_statistics()
 
     def _categorize_statistics(self):
         """Categorize statistics by type for efficient computation."""
+        sn = self.span_normalize
         self.SINGLE_POP_STATS = {
             'pi': lambda w: diversity.pi(
-                w.matrix, span_normalize=True,
-                missing_data=self.missing_data,
-                span_denominator=self.span_denominator),
+                w.matrix, span_normalize=sn,
+                missing_data=self.missing_data),
             'theta_w': lambda w: diversity.theta_w(
-                w.matrix, span_normalize=True,
-                missing_data=self.missing_data,
-                span_denominator=self.span_denominator),
+                w.matrix, span_normalize=sn,
+                missing_data=self.missing_data),
             'tajimas_d': lambda w: diversity.tajimas_d(w.matrix, missing_data=self.missing_data),
             'n_variants': lambda w: w.n_variants,
             'n_singletons': lambda w: diversity.singleton_count(w.matrix, missing_data=self.missing_data),
@@ -191,13 +190,13 @@ class StatisticsComputer:
             'dxy': lambda w, p1, p2: divergence.dxy(
                 w.matrix, p1, p2,
                 missing_data=self.missing_data,
-                span_denominator=self.span_denominator == 'total'),
+                span_normalize=sn),
             'fst': lambda w, p1, p2: divergence.fst(w.matrix, p1, p2, missing_data=self.missing_data),
             'fst_hudson': lambda w, p1, p2: divergence.fst_hudson(w.matrix, p1, p2, missing_data=self.missing_data),
             'fst_wc': lambda w, p1, p2: divergence.fst_weir_cockerham(w.matrix, p1, p2, missing_data=self.missing_data),
             'da': lambda w, p1, p2: divergence.da(w.matrix, p1, p2,
                                                 missing_data=self.missing_data,
-                                                span_denominator=self.span_denominator == 'total'),
+                                                span_normalize=sn),
         }
 
         self.single_pop_stats = []
@@ -474,7 +473,7 @@ class WindowedAnalyzer:
                  progress_bar: bool = True,
                  custom_stat_kwargs: Optional[Dict] = None,
                  missing_data: str = 'include',
-                 span_denominator: str = 'total'):
+                 span_normalize=True):
         """
         Initialize windowed analyzer.
 
@@ -509,10 +508,10 @@ class WindowedAnalyzer:
         missing_data : str
             'include' - Use all sites, calculate from available data per site
             'exclude' - Only use sites with no missing data
-        span_denominator : str
-            'total' - Use total genomic span (chrom_end - chrom_start)
-            'sites' - Use number of sites analyzed
-            'callable' - Use span from first to last site included in analysis
+        span_normalize : bool or str
+            ``True`` (default): auto-detect best denominator per window.
+            ``False``: return raw sums.
+            String values select an explicit denominator.
         """
         self.window_params = WindowParams(
             window_type=window_type,
@@ -530,13 +529,13 @@ class WindowedAnalyzer:
         self.n_jobs = n_jobs
         self.progress_bar = progress_bar
         self.missing_data = missing_data
-        self.span_denominator = span_denominator
+        self.span_normalize = span_normalize
 
         # Initialize components
         self.memory_manager = MemoryManager(gpu_memory_limit)
         self.stats_computer = StatisticsComputer(
             statistics, populations, custom_stat_kwargs, ld_bins=self.ld_bins,
-            missing_data=missing_data, span_denominator=span_denominator
+            missing_data=missing_data, span_normalize=span_normalize
         )
 
     def compute(self, haplotype_matrix: HaplotypeMatrix) -> pd.DataFrame:
@@ -645,7 +644,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      statistics: List[str] = ['pi'],
                      populations: Optional[List[str]] = None,
                      missing_data: str = 'include',
-                     span_denominator: str = 'total',
+                     span_normalize=True,
                      accessible_bed: str = None,
                      chrom: str = None,
                      **kwargs) -> pd.DataFrame:
@@ -667,11 +666,9 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-    span_denominator : str
-        'total' - Use total genomic span (chrom_end - chrom_start)
-        'sites' - Use number of sites analyzed
-        'callable' - Use span from first to last site included in analysis
-        'accessible' - Use number of accessible sites from mask
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator per window.
+        ``False``: return raw sums.
     accessible_bed : str, optional
         Path to a BED file defining accessible/callable regions.
         If provided and the matrix has no mask, loads the mask.
@@ -748,7 +745,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             statistics=tuple(statistics),
             pop1=pop1,
             pop2=pop2,
-            per_base=(span_denominator in ('total', 'accessible')),
+            per_base=(span_normalize is not False),
             _win_starts=win_starts,
             _win_stops=win_stops,
             missing_data=missing_data,
@@ -763,7 +760,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         statistics=statistics,
         populations=populations,
         missing_data=missing_data,
-        span_denominator=span_denominator,
+        span_normalize=span_normalize,
         **kwargs
     )
     return analyzer.compute(haplotype_matrix)

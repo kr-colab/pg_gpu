@@ -150,7 +150,8 @@ class TestDxyCalculations:
             'pop2': list(range(20, 40))
         }
 
-        dxy_value = divergence.dxy(matrix, 'pop1', 'pop2')
+        dxy_value = divergence.dxy(matrix, 'pop1', 'pop2',
+                                    span_normalize=False)
 
         # Dxy should be at least 0.5 (25 fixed differences out of 50 sites)
         assert dxy_value >= 0.5

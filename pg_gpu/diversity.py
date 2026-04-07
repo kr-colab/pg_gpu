@@ -14,6 +14,28 @@ from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix
 
 
+def _apply_span_normalize(value, matrix, span_normalize):
+    """Apply span normalization to a raw statistic value.
+
+    Parameters
+    ----------
+    value : float or cupy scalar
+        Raw statistic sum.
+    matrix : HaplotypeMatrix
+        Source matrix (for get_span).
+    span_normalize : bool or str
+        True: auto-detect best span. False: return raw value.
+        String: explicit mode passed to get_span().
+    """
+    if span_normalize is False:
+        return float(value.get() if hasattr(value, 'get') else value)
+    mode = 'auto' if span_normalize is True else span_normalize
+    span = matrix.get_span(mode)
+    if span > 0:
+        return float(value / span)
+    return float('nan')
+
+
 def _dac_and_n(haplotypes):
     """Shared helper: derived allele counts and valid sample counts per site.
 
@@ -89,9 +111,8 @@ def pi_components(haplotypes, n_total_sites=None, n_haplotypes_full=None):
 
 def pi(haplotype_matrix: HaplotypeMatrix,
        population: Optional[Union[str, list]] = None,
-       span_normalize: bool = True,
-       missing_data: str = 'include',
-       span_denominator: str = 'total') -> float:
+       span_normalize=True,
+       missing_data: str = 'include') -> float:
     """
     Calculate nucleotide diversity (pi) for a population.
 
@@ -104,15 +125,15 @@ def pi(haplotype_matrix: HaplotypeMatrix,
         The haplotype data
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
-    span_normalize : bool
-        If True, normalize by genomic span; if False, return raw diversity
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator (accessible
+        bases if mask set, else genomic span).
+        ``False``: return raw sum of per-site diversity.
+        String values (``'per_base'``, ``'accessible'``, ``'per_variant'``)
+        select an explicit denominator.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
-    span_denominator : str
-        'total' - Use total genomic span (chrom_end - chrom_start)
-        'sites' - Use number of sites analyzed
-        'callable' - Use span from first to last site included in analysis
 
     Returns
     -------
@@ -163,22 +184,13 @@ def pi(haplotype_matrix: HaplotypeMatrix,
         # Sum across all valid sites
         pi_value = cp.sum(site_pi)
 
-    # Apply span normalization
-    if span_normalize:
-        span = matrix.get_span(span_denominator)
-        if span > 0:
-            return float(pi_value / span)
-        else:
-            return float('nan')
-
-    return float(pi_value.get() if hasattr(pi_value, 'get') else pi_value)
+    return _apply_span_normalize(pi_value, matrix, span_normalize)
 
 
 def theta_w(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
-            span_normalize: bool = True,
-            missing_data: str = 'include',
-            span_denominator: str = 'total') -> float:
+            span_normalize=True,
+            missing_data: str = 'include') -> float:
     """
     Calculate Watterson's theta for a population.
 
@@ -191,15 +203,13 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
         The haplotype data
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
-    span_normalize : bool
-        If True, normalize by genomic span; if False, return raw theta
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator.
+        ``False``: return raw sum.
+        String values select an explicit denominator.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
-    span_denominator : str
-        'total' - Use total genomic span (chrom_end - chrom_start)
-        'sites' - Use number of sites analyzed
-        'callable' - Use span from first to last site included in analysis
 
     Returns
     -------
@@ -273,15 +283,7 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
         a1 = cp.sum(1.0 / cp.arange(1, n_haplotypes, dtype=cp.float64))
         theta = seg_sites / a1
 
-    # Apply span normalization
-    if span_normalize:
-        span = matrix.get_span(span_denominator)
-        if span > 0:
-            return float(theta / span)
-        else:
-            return float('nan')
-
-    return float(theta.get() if hasattr(theta, 'get') else theta)
+    return _apply_span_normalize(theta, matrix, span_normalize)
 
 
 def tajimas_d(haplotype_matrix: HaplotypeMatrix,
@@ -602,9 +604,8 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
 def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                    population: Optional[Union[str, list]] = None,
                    statistics: list = ['pi', 'theta_w', 'tajimas_d'],
-                   span_normalize: bool = True,
-                   missing_data: str = 'include',
-                   span_denominator: str = 'total') -> Dict[str, float]:
+                   span_normalize=True,
+                   missing_data: str = 'include') -> Dict[str, float]:
     """
     Compute multiple diversity statistics at once.
 
@@ -616,15 +617,12 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
         Population name or list of sample indices. If None, uses all samples
     statistics : list
         List of statistics to compute
-    span_normalize : bool
-        Whether to normalize pi and theta_w by genomic span
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator.
+        ``False``: return raw sums.
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-    span_denominator : str
-        'total' - Use total genomic span (chrom_end - chrom_start)
-        'sites' - Use number of sites analyzed
-        'callable' - Use span from first to last site included in analysis
 
     Returns
     -------
@@ -635,9 +633,9 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
 
     for stat in statistics:
         if stat == 'pi':
-            results['pi'] = pi(haplotype_matrix, population, span_normalize, missing_data, span_denominator)
+            results['pi'] = pi(haplotype_matrix, population, span_normalize, missing_data)
         elif stat == 'theta_w':
-            results['theta_w'] = theta_w(haplotype_matrix, population, span_normalize, missing_data, span_denominator)
+            results['theta_w'] = theta_w(haplotype_matrix, population, span_normalize, missing_data)
         elif stat == 'tajimas_d':
             results['tajimas_d'] = tajimas_d(haplotype_matrix, population, missing_data)
         elif stat == 'segregating_sites':
@@ -660,9 +658,8 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
 
 def diversity_stats_fast(haplotype_matrix: HaplotypeMatrix,
                          population=None,
-                         span_normalize: bool = True,
+                         span_normalize=True,
                          missing_data: str = 'include',
-                         span_denominator: str = 'total',
                          projection_n: Optional[int] = None):
     """Compute all diversity and neutrality statistics from a single SFS.
 
@@ -676,16 +673,15 @@ def diversity_stats_fast(haplotype_matrix: HaplotypeMatrix,
         The haplotype data.
     population : str or list, optional
         Population name or sample indices.
-    span_normalize : bool
-        Whether to normalize theta estimators by genomic span.
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator.
+        ``False``: return raw sums.
+        String values select an explicit denominator.
     missing_data : str
         'include' - per-site sample sizes, group by n_valid
         'exclude' - only sites with no missing data
-    span_denominator : str
-        'total', 'sites', 'callable', or 'accessible'.
     projection_n : int, optional
         Project SFS to this sample size before computing statistics.
-        Useful for handling missing data or cross-population comparison.
 
     Returns
     -------
@@ -701,17 +697,18 @@ def diversity_stats_fast(haplotype_matrix: HaplotypeMatrix,
         fs = fs.project(projection_n)
 
     span = None
-    if span_normalize:
+    if span_normalize is not False:
         if population is not None:
             matrix = _get_population_matrix(haplotype_matrix, population)
         else:
             matrix = haplotype_matrix
-        span = matrix.get_span(span_denominator)
+        mode = 'auto' if span_normalize is True else span_normalize
+        span = matrix.get_span(mode)
 
     results = {}
     for name in ['pi', 'watterson', 'theta_h', 'theta_l',
                  'eta1', 'eta1_star', 'minus_eta1', 'minus_eta1_star']:
-        results[name] = fs.theta(name, span_normalize=span_normalize, span=span)
+        results[name] = fs.theta(name, span_normalize=bool(span_normalize), span=span)
 
     results['segregating_sites'] = fs.n_segregating
     results.update(fs.all_tests())
@@ -905,7 +902,7 @@ _get_population_matrix = get_population_matrix
 
 def theta_h(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
-            span_normalize: bool = True,
+            span_normalize=True,
             missing_data: str = 'include') -> float:
     """Compute theta_H (homozygosity-based diversity estimator).
 
@@ -916,8 +913,9 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
-    span_normalize : bool
-        If True, normalize by genomic span.
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator.
+        ``False``: return raw sum.
     missing_data : str
         'include' - per-site sample sizes
         'exclude' - only sites with no missing data
@@ -951,17 +949,12 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     usable = (n_valid > 1) & (dac > 0) & (dac < n_valid)
     th = cp.sum(2.0 * dac[usable] ** 2 / (n_valid[usable] * (n_valid[usable] - 1)))
 
-    if span_normalize:
-        span = matrix.get_span()
-        if span > 0:
-            th = th / span
-
-    return float(th.get())
+    return _apply_span_normalize(th, matrix, span_normalize)
 
 
 def theta_l(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
-            span_normalize: bool = True,
+            span_normalize=True,
             missing_data: str = 'include') -> float:
     """Compute theta_L diversity estimator.
 
@@ -980,8 +973,9 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
-    span_normalize : bool
-        If True, normalize by genomic span.
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator.
+        ``False``: return raw sum.
     missing_data : str
         'include' - per-site sample sizes
         'exclude' - only sites with no missing data
@@ -1015,12 +1009,7 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     usable = (n_valid > 1) & (dac > 0) & (dac < n_valid)
     tl = cp.sum(dac[usable] / (n_valid[usable] - 1))
 
-    if span_normalize:
-        span = matrix.get_span()
-        if span > 0:
-            tl = tl / span
-
-    return float(tl.get())
+    return _apply_span_normalize(tl, matrix, span_normalize)
 
 
 def _effective_n_and_S(matrix, missing_data):

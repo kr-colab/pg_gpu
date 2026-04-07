@@ -556,8 +556,8 @@ class TestWindowedScatterAddWithMask:
 
 
 class TestWindowedAnalysisConvenience:
-    def test_accessible_span_denominator(self):
-        """windowed_analysis with span_denominator='accessible' uses mask."""
+    def test_accessible_span_normalize(self):
+        """windowed_analysis with span_normalize='accessible' uses mask."""
         from pg_gpu.windowed_analysis import windowed_analysis
 
         hm = _make_windowed_matrix()
@@ -568,7 +568,7 @@ class TestWindowedAnalysisConvenience:
 
         df = windowed_analysis(
             hm, window_size=5000, statistics=['pi'],
-            span_denominator='accessible')
+            span_normalize='accessible')
 
         assert len(df) > 0
         assert 'pi' in df.columns

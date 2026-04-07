@@ -209,21 +209,17 @@ class TestDivergenceComparison:
         # pg_gpu
         matrix = HaplotypeMatrix(haplotypes, positions, start, end)
         matrix.sample_sets = {'pop1': pop1_indices, 'pop2': pop2_indices}
+        # pg_gpu: per-base by default (auto span normalization)
         dxy_pg = divergence.dxy(matrix, 'pop1', 'pop2', per_site=False)
 
-        # scikit-allel
+        # scikit-allel: also per-base
         h = allel.HaplotypeArray(haplotypes.T)
         ac1 = h.count_alleles(subpop=pop1_indices)
         ac2 = h.count_alleles(subpop=pop2_indices)
         dxy_allel = allel.sequence_divergence(positions, ac1, ac2, start=start, stop=end)
 
-        # scikit-allel normalizes by span, so we need to normalize our result
-        span = end - start + 1
-        n_sites = len(positions)
-        dxy_pg_normalized = dxy_pg * n_sites / span
-
         # Should match within numerical precision
-        assert abs(dxy_pg_normalized - dxy_allel) < 1e-8
+        assert abs(dxy_pg - dxy_allel) < 1e-8
 
     def test_within_population_diversity(self, population_data):
         """Test within-population diversity matches scikit-allel."""

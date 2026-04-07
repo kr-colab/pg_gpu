@@ -402,7 +402,7 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         pop2: Union[str, list],
         per_site: bool = False,
         missing_data: str = 'include',
-        span_denominator: bool = False,
+        span_normalize=True,
         ) -> Union[float, cp.ndarray]:
     """
     Compute absolute divergence (Dxy) between two populations.
@@ -423,8 +423,10 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
-    span_denominator : bool
-        If True, normalize by total sites; if False, normalize by sites with data
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator.
+        ``False``: return raw sum / sites-with-data average.
+        String values select an explicit denominator.
 
     Returns
     -------
@@ -473,10 +475,6 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     dxy_per_site[valid_mask] = (pop1_freqs[valid_mask] + pop2_freqs[valid_mask] -
                                2 * pop1_freqs[valid_mask] * pop2_freqs[valid_mask])
 
-    # Count sites with data for normalization
-    if not span_denominator:
-        n_sites = int(cp.sum(valid_mask).get())
-
     if per_site:
         if missing_data == 'exclude':
             result = cp.zeros(total_sites)
@@ -485,21 +483,19 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         else:
             return dxy_per_site.get()
     else:
-        if span_denominator:
-            # Normalize by total sites
-            return float(cp.sum(dxy_per_site).get() / total_sites)
-        elif n_sites > 0:
-            # Normalize by sites with data
-            return float(cp.sum(dxy_per_site).get() / n_sites)
-        else:
-            return 0.0
+        dxy_sum = cp.sum(dxy_per_site)
+        if span_normalize is False:
+            n_sites = int(cp.sum(valid_mask).get())
+            return float(dxy_sum.get() / n_sites) if n_sites > 0 else 0.0
+        from .diversity import _apply_span_normalize
+        return _apply_span_normalize(dxy_sum, haplotype_matrix, span_normalize)
 
 
 def da(haplotype_matrix: HaplotypeMatrix,
        pop1: Union[str, list],
        pop2: Union[str, list],
        missing_data: str = 'include',
-       span_denominator: bool = False) -> float:
+       span_normalize=True) -> float:
     """
     Compute net divergence (Da) between two populations.
 
@@ -517,8 +513,9 @@ def da(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-    span_denominator : bool
-        If True, normalize by total sites; if False, normalize by sites with data
+    span_normalize : bool or str
+        ``True`` (default): auto-detect best denominator.
+        ``False``: return raw sum / sites-with-data average.
 
     Returns
     -------
@@ -527,13 +524,14 @@ def da(haplotype_matrix: HaplotypeMatrix,
     """
     # Get Dxy
     dxy_value = dxy(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                   span_denominator=span_denominator)
+                   span_normalize=span_normalize)
 
     # Get within-population diversities
-    pi1 = pi_within_population(haplotype_matrix, pop1, missing_data=missing_data,
-                              span_denominator=span_denominator)
-    pi2 = pi_within_population(haplotype_matrix, pop2, missing_data=missing_data,
-                              span_denominator=span_denominator)
+    from .diversity import pi as _pi
+    pi1 = _pi(haplotype_matrix, population=pop1, missing_data=missing_data,
+              span_normalize=span_normalize)
+    pi2 = _pi(haplotype_matrix, population=pop2, missing_data=missing_data,
+              span_normalize=span_normalize)
 
     # Calculate Da
     da_value = dxy_value - (pi1 + pi2) / 2.0
@@ -544,9 +542,11 @@ def da(haplotype_matrix: HaplotypeMatrix,
 def pi_within_population(haplotype_matrix: HaplotypeMatrix,
                         pop: Union[str, list],
                         missing_data: str = 'include',
-                        span_denominator: bool = False) -> float:
+                        span_normalize=True) -> float:
     """
     Compute nucleotide diversity (pi) within a population.
+
+    Delegates to ``diversity.pi()`` for consistent behavior.
 
     Parameters
     ----------
@@ -555,63 +555,18 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
     pop : str or list
         Population name or list of indices
     missing_data : str
-        'include' - Use all sites, calculate from available data per site
-        'exclude' - Only use sites with no missing data
-    span_denominator : bool
-        If True, normalize by total sites; if False, normalize by sites with data
+        'include' or 'exclude'
+    span_normalize : bool or str
+        ``True`` (default): auto-detect. ``False``: raw sum.
 
     Returns
     -------
     float
         Nucleotide diversity
     """
-    # Get population indices
-    pop_idx = _get_population_indices(haplotype_matrix, pop)
-
-    # Ensure data is on GPU if available
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
-
-    # Extract population haplotypes
-    pop_haplotypes = haplotype_matrix.haplotypes[pop_idx, :]
-    total_sites = pop_haplotypes.shape[1]
-
-    # Handle missing data
-    if missing_data == 'exclude':
-        # Only use sites with no missing data
-        valid_sites = cp.all(pop_haplotypes >= 0, axis=0)
-        if not cp.any(valid_sites):
-            return 0.0
-        pop_haplotypes = pop_haplotypes[:, valid_sites]
-
-    n_filtered = pop_haplotypes.shape[1]
-    n_sites = total_sites
-
-    # Calculate frequencies from non-missing data per site
-    pop_counts, n = _pop_dac_and_n(pop_haplotypes)
-    pop_counts = pop_counts.astype(cp.float64)
-    n = n.astype(cp.float64)
-
-    pop_freq = cp.where(n > 0, pop_counts / n, 0.0)
-
-    # Pi = 2 * p * (1 - p) * n / (n - 1) for sites with n > 1
-    pi_per_site = cp.zeros(n_filtered)
-    valid_mask = n > 1
-    pi_per_site[valid_mask] = (2.0 * pop_freq[valid_mask] * (1 - pop_freq[valid_mask]) *
-                              n[valid_mask] / (n[valid_mask] - 1))
-
-    # Count sites with sufficient data for normalization
-    if not span_denominator:
-        n_sites = int(cp.sum(valid_mask).get())
-
-    if span_denominator:
-        # Normalize by total sites
-        return float(cp.sum(pi_per_site).get() / total_sites) if total_sites > 0 else 0.0
-    elif n_sites > 0:
-        # Normalize by sites with data
-        return float(cp.sum(pi_per_site).get() / n_sites)
-    else:
-        return 0.0
+    from .diversity import pi as _pi
+    return _pi(haplotype_matrix, population=pop,
+               span_normalize=span_normalize, missing_data=missing_data)
 
 
 def divergence_stats(haplotype_matrix: HaplotypeMatrix,
@@ -619,7 +574,7 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
                     pop2: Union[str, list],
                     statistics: list = ['fst', 'dxy', 'da'],
                     missing_data: str = 'include',
-                    span_denominator: bool = False) -> Dict[str, float]:
+                    span_normalize=True) -> Dict[str, float]:
     """
     Compute multiple divergence statistics between two populations.
 
@@ -636,9 +591,8 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-    span_denominator : bool
-        If True, normalize by total sites; if False, normalize by sites with data
-        (only applies to dxy, da, pi1, pi2)
+    span_normalize : bool or str
+        ``True`` (default): auto-detect. ``False``: raw sum / per-site average.
 
     Returns
     -------
@@ -658,16 +612,16 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
             results['fst_nei'] = fst_nei(haplotype_matrix, pop1, pop2, missing_data=missing_data)
         elif stat == 'dxy':
             results['dxy'] = dxy(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                               span_denominator=span_denominator)
+                               span_normalize=span_normalize)
         elif stat == 'da':
             results['da'] = da(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                             span_denominator=span_denominator)
+                             span_normalize=span_normalize)
         elif stat == 'pi1':
             results['pi1'] = pi_within_population(haplotype_matrix, pop1, missing_data=missing_data,
-                                                span_denominator=span_denominator)
+                                                span_normalize=span_normalize)
         elif stat == 'pi2':
             results['pi2'] = pi_within_population(haplotype_matrix, pop2, missing_data=missing_data,
-                                                span_denominator=span_denominator)
+                                                span_normalize=span_normalize)
         else:
             raise ValueError(f"Unknown statistic: {stat}")
 
