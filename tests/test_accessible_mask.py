@@ -277,11 +277,10 @@ class TestHaplotypeMatrixAccessibleMask:
         assert hm.get_span('accessible') == 900
         assert hm.get_span('total') == 1000
 
-    def test_get_span_accessible_no_mask_fallback(self):
+    def test_get_span_accessible_no_mask_raises(self):
         hm = _make_haplotype_matrix()
-        # Without mask, 'accessible' should fall back to 'total'
-        span = hm.get_span('accessible')
-        assert span == hm.get_span('total')
+        with pytest.raises(ValueError, match="requires an accessible mask"):
+            hm.get_span('accessible')
 
     def test_get_subset_no_mask_propagation(self):
         """get_subset creates child from filtered view, no mask on child."""
@@ -392,9 +391,10 @@ class TestBackwardCompatibility:
         subset = hm.get_subset(np.array([0, 1]))
         assert not subset.has_accessible_mask
 
-    def test_accessible_fallback_to_total(self):
+    def test_accessible_raises_without_mask(self):
         hm = _make_haplotype_matrix()
-        assert hm.get_span('accessible') == hm.get_span('total')
+        with pytest.raises(ValueError, match="requires an accessible mask"):
+            hm.get_span('accessible')
 
     def test_apply_biallelic_filter_propagates_mask(self):
         """HaplotypeMatrix.apply_biallelic_filter preserves mask."""
