@@ -19,6 +19,9 @@ Homepage = "https://github.com/andrewkern/pg_gpu"
 pythonpath = [
     "pg_gpu"
 ]
+markers = [
+    "slow: marks tests as slow (deselected by default, run with --slow)",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:cupyx",
     "ignore::DeprecationWarning:moments",

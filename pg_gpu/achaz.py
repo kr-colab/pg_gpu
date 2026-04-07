@@ -598,31 +598,11 @@ class FrequencySpectrum:
     def zeng_e(self):
         """Compute Zeng's E = (theta_L - theta_W) / sqrt(Var).
 
-        Uses Zeng et al. (2006) Eq. 14 variance formula.
+        Uses the Achaz (2009) general variance framework with Fu (1995)
+        covariance structure, which is equivalent to the Zeng et al.
+        (2006) Eq. 14 variance but avoids hand-coded coefficient errors.
         """
-        tl = self.theta('theta_l')
-        S = float(self.n_segregating)
-        if S < 2:
-            return float('nan')
-
-        n = max(self.sfs_by_n.keys(),
-                key=lambda ni: np.sum(self.sfs_by_n[ni]))
-        a1 = np.sum(1.0 / np.arange(1, n))
-        a2 = np.sum(1.0 / np.arange(1, n) ** 2)
-        tw = S / a1
-        theta_est = tw
-        theta_sq = S * (S - 1) / (a1 ** 2 + a2)
-
-        # Zeng et al. (2006) Eq. 14 variance terms
-        s1 = (n + 1) / (3 * (n - 1)) - 1 / a1
-        s2 = (a2 - (2 * (n - 1) * (n - 1) / ((n - 1) ** 2))
-              + (2 * (n + 1)) / ((n - 1) ** 2)
-              * (a1 - n / (n + 1)) - a2)
-        # Simplified: use Achaz framework for proper variance
-        var_e = s1 * theta_est + s2 * theta_sq
-        if var_e <= 0:
-            return float('nan')
-        return (tl - tw) / np.sqrt(abs(var_e))
+        return self.neutrality_test('theta_l', 'watterson')
 
     def all_tests(self):
         """Compute all standard neutrality tests at once.
