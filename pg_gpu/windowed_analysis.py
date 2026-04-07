@@ -172,21 +172,15 @@ class StatisticsComputer:
 
     def _categorize_statistics(self):
         """Categorize statistics by type for efficient computation."""
-        _is_pairwise = self.missing_data == 'pairwise'
-
-        # In pairwise mode, pi and dxy return components for proper aggregation.
-        # For other modes span_normalize controls the denominator.
         self.SINGLE_POP_STATS = {
             'pi': lambda w: diversity.pi(
-                w.matrix, span_normalize=not _is_pairwise,
+                w.matrix, span_normalize=True,
                 missing_data=self.missing_data,
-                span_denominator=self.span_denominator,
-                return_components=_is_pairwise),
+                span_denominator=self.span_denominator),
             'theta_w': lambda w: diversity.theta_w(
-                w.matrix, span_normalize=not _is_pairwise,
+                w.matrix, span_normalize=True,
                 missing_data=self.missing_data,
-                span_denominator=self.span_denominator,
-                return_components=_is_pairwise),
+                span_denominator=self.span_denominator),
             'tajimas_d': lambda w: diversity.tajimas_d(w.matrix, missing_data=self.missing_data),
             'n_variants': lambda w: w.n_variants,
             'n_singletons': lambda w: diversity.singleton_count(w.matrix, missing_data=self.missing_data),
@@ -197,8 +191,7 @@ class StatisticsComputer:
             'dxy': lambda w, p1, p2: divergence.dxy(
                 w.matrix, p1, p2,
                 missing_data=self.missing_data,
-                span_denominator=self.span_denominator == 'total',
-                return_components=_is_pairwise),
+                span_denominator=self.span_denominator == 'total'),
             'fst': lambda w, p1, p2: divergence.fst(w.matrix, p1, p2, missing_data=self.missing_data),
             'fst_hudson': lambda w, p1, p2: divergence.fst_hudson(w.matrix, p1, p2, missing_data=self.missing_data),
             'fst_wc': lambda w, p1, p2: divergence.fst_weir_cockerham(w.matrix, p1, p2, missing_data=self.missing_data),
@@ -290,16 +283,8 @@ class StatisticsComputer:
 
     @staticmethod
     def _store_result(results: Dict, key: str, val):
-        """Store a scalar or PairwiseResult into the results dict."""
-        from .diversity import PairwiseResult
-        if isinstance(val, PairwiseResult):
-            results[key] = val.value
-            results[f"{key}_diffs"] = val.total_diffs
-            results[f"{key}_comps"] = val.total_comps
-            results[f"{key}_missing"] = val.total_missing
-            results[f"{key}_n_sites"] = val.n_sites
-        else:
-            results[key] = val
+        """Store a scalar result into the results dict."""
+        results[key] = val
 
     def _get_population_matrix(self, matrix: HaplotypeMatrix,
                              pop: str) -> HaplotypeMatrix:
@@ -718,7 +703,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                  | fused_diploshic)
     requested = set(statistics)
 
-    can_fuse = (missing_data in ('include', 'project')
+    can_fuse = (missing_data == 'include'
                 and requested <= fused_all)
 
     if can_fuse:
@@ -1501,7 +1486,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                        or need_dist)
 
         # Precompute for fused ZnS path
-        use_proj = (missing_data == 'project')
+        use_proj = False  # projection now via estimator param, not missing_data
         if 'zns' in stat_arrays:
             hap = matrix.haplotypes
             hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)

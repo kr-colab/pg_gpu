@@ -115,7 +115,6 @@ def garud_h(matrix, population=None, missing_data='include'):
     missing_data : str
         'include' - treat missing as wildcard (compatible with any allele).
         'exclude' - filter to sites with no missing data.
-        'pairwise' - same as 'include' for haplotype pattern matching.
 
     Returns
     -------

@@ -169,7 +169,7 @@ def patterson_f2(haplotype_matrix: HaplotypeMatrix,
     pop_a, pop_b : str or list
         Population names or sample indices.
     missing_data : str
-        'include' or 'pairwise' - per-site n_valid for frequencies
+        'include' - per-site n_valid for frequencies
         'exclude' - NaN at sites with any missing
 
     Returns
@@ -205,7 +205,7 @@ def patterson_f3(haplotype_matrix: HaplotypeMatrix,
     pop_a, pop_b : str or list
         Source populations.
     missing_data : str
-        'include' or 'pairwise' - per-site n_valid
+        'include' - per-site n_valid
         'exclude' - NaN at sites with any missing
 
     Returns
@@ -245,7 +245,7 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
     pop_a, pop_b, pop_c, pop_d : str or list
         Population names or sample indices.
     missing_data : str
-        'include' or 'pairwise' - per-site n_valid
+        'include' - per-site n_valid
         'exclude' - NaN at sites with any missing
 
     Returns

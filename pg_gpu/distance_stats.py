@@ -89,16 +89,14 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     missing_data : str
-        'include' or 'pairwise' - normalize by jointly-valid sites per pair
+        'include' - normalize by jointly-valid sites per pair
         'exclude' - only use sites with no missing data
 
     Returns
     -------
     diffs : ndarray, float64, condensed form (n_pairs,)
-        For 'include'/'pairwise', values are per-site average differences.
+        Per-site average differences.
     """
-    if missing_data == 'pairwise':
-        missing_data = 'include'
 
     if population is not None:
         matrix = get_population_matrix(haplotype_matrix, population)
@@ -131,15 +129,13 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
     genotype_matrix : GenotypeMatrix
     population : str or list, optional
     missing_data : str
-        'include' or 'pairwise' - normalize by jointly-valid sites per pair
+        'include' - normalize by jointly-valid sites per pair
         'exclude' - only sites with no missing data
 
     Returns
     -------
     diffs : ndarray, float64, condensed form (n_pairs,)
     """
-    if missing_data == 'pairwise':
-        missing_data = 'include'
 
     if population is not None:
         pop_idx = genotype_matrix.sample_sets.get(population)

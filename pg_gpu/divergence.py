@@ -12,63 +12,9 @@ import numpy as np
 import cupy as cp
 from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
-from .diversity import PairwiseResult, _pairwise_pi_components
+from .diversity import PairwiseResult
 from ._memutil import chunked_dac_and_n as _pop_dac_and_n
 
-
-def _pairwise_dxy_components(pop1_haps, pop2_haps, n_total_sites=None,
-                             n_pop1_full=None, n_pop2_full=None):
-    """Compute between-population pairwise differences and comparisons.
-
-    Parameters
-    ----------
-    pop1_haps, pop2_haps : cp.ndarray, shape (n_haplotypes, n_variants)
-        Haplotype data for each population.
-    n_total_sites : int, optional
-        Total callable sites. Invariant sites contribute 0 diffs and
-        n_pop1_full * n_pop2_full comps each.
-    n_pop1_full, n_pop2_full : int, optional
-        Full sample sizes per population (for invariant site comps).
-
-    Returns
-    -------
-    total_diffs, total_comps, total_missing, n_sites : float, float, float, int
-    """
-    pop1_derived, pop1_n = _pop_dac_and_n(pop1_haps)
-    pop2_derived, pop2_n = _pop_dac_and_n(pop2_haps)
-    pop1_n = pop1_n.astype(cp.float64)
-    pop2_n = pop2_n.astype(cp.float64)
-    pop1_derived = pop1_derived.astype(cp.float64)
-    pop2_derived = pop2_derived.astype(cp.float64)
-    pop1_ancestral = pop1_n - pop1_derived
-    pop2_ancestral = pop2_n - pop2_derived
-
-    # Per-site diffs: pop1_derived * pop2_ancestral + pop1_ancestral * pop2_derived
-    site_diffs = pop1_derived * pop2_ancestral + pop1_ancestral * pop2_derived
-    # Per-site comps: n_pop1 * n_pop2
-    site_comps = pop1_n * pop2_n
-
-    usable = (pop1_n > 0) & (pop2_n > 0)
-    total_diffs = float(cp.sum(site_diffs[usable]).get())
-    total_comps = float(cp.sum(site_comps[usable]).get())
-    n_sites = int(cp.sum(usable).get())
-
-    # Invariant site contribution
-    if n_total_sites is not None:
-        n1 = n_pop1_full or pop1_haps.shape[0]
-        n2 = n_pop2_full or pop2_haps.shape[0]
-        n_invariant = n_total_sites - n_sites
-        if n_invariant > 0:
-            total_comps += n_invariant * (n1 * n2)
-            n_sites += n_invariant
-
-    # Missing
-    n1 = n_pop1_full or pop1_haps.shape[0]
-    n2 = n_pop2_full or pop2_haps.shape[0]
-    total_possible = (n1 * n2) * n_sites
-    total_missing = total_possible - total_comps
-
-    return total_diffs, total_comps, total_missing, n_sites
 
 
 def fst(haplotype_matrix: HaplotypeMatrix,
@@ -130,7 +76,6 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'pairwise' - Comparison-counting: FST = 1 - (pi_within / dxy)
 
     Returns
     -------
@@ -144,30 +89,6 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
-
-    # Pairwise mode: FST = 1 - (pi_within / dxy) using pairwise estimates
-    if missing_data == 'pairwise':
-        pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
-        pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
-        n_ts = haplotype_matrix.n_total_sites
-
-        # Pairwise pi for each population
-        d1, c1, _, _ = _pairwise_pi_components(
-            pop1_haps, n_total_sites=n_ts, n_haplotypes_full=len(pop1_idx))
-        d2, c2, _, _ = _pairwise_pi_components(
-            pop2_haps, n_total_sites=n_ts, n_haplotypes_full=len(pop2_idx))
-
-        # Pairwise dxy
-        d_between, c_between, _, _ = _pairwise_dxy_components(
-            pop1_haps, pop2_haps, n_total_sites=n_ts,
-            n_pop1_full=len(pop1_idx), n_pop2_full=len(pop2_idx))
-
-        pi_within = (d1 + d2) / (c1 + c2) if (c1 + c2) > 0 else float('nan')
-        dxy_val = d_between / c_between if c_between > 0 else float('nan')
-        if dxy_val == 0 or dxy_val != dxy_val:  # nan check
-            return 0.0
-        fst_val = 1.0 - (pi_within / dxy_val)
-        return fst_val
 
     # Get haplotype data
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
@@ -243,7 +164,7 @@ def fst_weir_cockerham(haplotype_matrix,
     pop2 : str or list
         Second population
     missing_data : str
-        'include' or 'pairwise' - per-site sample sizes, ratio-of-sums
+        'include' - per-site sample sizes, ratio-of-sums
         'exclude' - Only use sites with no missing data
 
     Returns
@@ -251,8 +172,6 @@ def fst_weir_cockerham(haplotype_matrix,
     float
         Weir & Cockerham's FST estimate
     """
-    if missing_data == 'pairwise':
-        missing_data = 'include'
 
     if hasattr(haplotype_matrix, 'device') and haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
@@ -372,7 +291,6 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
-        'pairwise' - Ratio-of-sums: sum(HT-HS) / sum(HT)
 
     Returns
     -------
@@ -390,11 +308,6 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     # Get haplotype data
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
-
-    # Pairwise mode: ratio-of-sums GST = sum(HT-HS) / sum(HT)
-    _is_pairwise = missing_data == 'pairwise'
-    if _is_pairwise:
-        missing_data = 'include'
 
     # Handle missing data
     if missing_data == 'exclude':
@@ -447,7 +360,7 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         per_site: bool = False,
         missing_data: str = 'include',
         span_denominator: bool = False,
-        return_components: bool = False) -> Union[float, cp.ndarray, 'PairwiseResult']:
+        ) -> Union[float, cp.ndarray]:
     """
     Compute absolute divergence (Dxy) between two populations.
 
@@ -467,16 +380,13 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
-        ``'pairwise'`` uses comparison-counting normalization (pixy-style).
     span_denominator : bool
         If True, normalize by total sites; if False, normalize by sites with data
-    return_components : bool
-        If True, return PairwiseResult. Only meaningful for 'pairwise' mode.
 
     Returns
     -------
-    float, cp.ndarray, or PairwiseResult
-        Mean Dxy, per-site Dxy values, or components
+    float or cp.ndarray
+        Mean Dxy or per-site Dxy values
     """
     # Get population indices
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
@@ -490,25 +400,6 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
     total_sites = pop1_haps.shape[1]
-
-    # Pairwise mode: comparison-counting normalization
-    if missing_data == 'pairwise':
-        if not haplotype_matrix.has_invariant_info:
-            warnings.warn(
-                "No invariant site information available (n_total_sites not set). "
-                "Pairwise-mode dxy will be computed from variant sites only and "
-                "may overestimate divergence.",
-                stacklevel=2)
-        total_diffs, total_comps, total_missing, n_sites = _pairwise_dxy_components(
-            pop1_haps, pop2_haps,
-            n_total_sites=haplotype_matrix.n_total_sites,
-            n_pop1_full=len(pop1_idx),
-            n_pop2_full=len(pop2_idx))
-        dxy_value = total_diffs / total_comps if total_comps > 0 else float('nan')
-        if return_components:
-            return PairwiseResult(dxy_value, total_diffs, total_comps,
-                                 total_missing, n_sites)
-        return dxy_value
 
     # Handle missing data
     if missing_data == 'exclude':
@@ -637,14 +528,6 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
-
-    # Pairwise mode: comparison-counting pi
-    if missing_data == 'pairwise':
-        pop_haps = haplotype_matrix.haplotypes[pop_idx, :]
-        total_diffs, total_comps, _, _ = _pairwise_pi_components(
-            pop_haps, n_total_sites=haplotype_matrix.n_total_sites,
-            n_haplotypes_full=len(pop_idx))
-        return total_diffs / total_comps if total_comps > 0 else 0.0
 
     # Extract population haplotypes
     pop_haplotypes = haplotype_matrix.haplotypes[pop_idx, :]
@@ -822,7 +705,7 @@ def _pop_allele_counts(haplotype_matrix, pop, missing_data='include'):
     """Compute per-variant allele counts for a population on GPU.
 
     Returns (ac_0, ac_1, n) as CuPy arrays. n is per-site (array)
-    for 'include'/'pairwise' modes, and also per-site after filtering
+    for 'include' mode, and also per-site after filtering
     for 'exclude' mode.
     """
     pop_idx = _get_population_indices(haplotype_matrix, pop)
@@ -915,7 +798,7 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
     normed : bool, optional
         If True (default), return normalized PBS (PBSn1).
     missing_data : str
-        'include' or 'pairwise' - per-site sample sizes
+        'include' - per-site sample sizes
         'exclude' - only use sites with no missing data
 
     Returns
