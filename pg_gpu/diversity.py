@@ -150,17 +150,10 @@ def pi(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    # Handle missing data strategies
     if missing_data == 'exclude':
-        # Filter to sites with no missing data
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_sites = cp.where(missing_per_variant == 0)[0]
-
-        if len(valid_sites) == 0:
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
             return 0.0
-
-        # Create subset with only valid sites
-        matrix = matrix.get_subset(valid_sites)
 
     # Per-site pi using only non-missing data
     derived_counts, n_valid_per_site = _dac_and_n(matrix.haplotypes)
@@ -227,18 +220,10 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        # Filter to sites with no missing data
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_sites = cp.where(missing_per_variant == 0)[0]
-
-        if len(valid_sites) == 0:
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
             return 0.0
-
-        # Create subset with only valid sites
-        matrix = matrix.get_subset(valid_sites)
         n_haplotypes = matrix.num_haplotypes
-
-        # Count segregating sites in the filtered data
         seg_sites = segregating_sites(matrix, missing_data='exclude')
 
     else:  # missing_data == 'include'
@@ -322,15 +307,9 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        # Filter to sites with no missing data
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_sites = cp.where(missing_per_variant == 0)[0]
-
-        if len(valid_sites) == 0:
-            return float("nan")  # No valid sites
-
-        # Create subset with only valid sites
-        matrix = matrix.get_subset(valid_sites)
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
+            return float("nan")
 
     # Get pi and theta with consistent missing data handling
     pi_value = pi(matrix, span_normalize=False, missing_data=missing_data)
@@ -426,20 +405,11 @@ def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        # Filter to sites with no missing data
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_sites = missing_per_variant == 0
-
-        if not cp.any(valid_sites):
-            # No valid sites, return empty AFS
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
             return np.zeros(matrix.num_haplotypes + 1, dtype=np.int64)
-
-        # Use only valid sites
-        valid_haplotypes = matrix.haplotypes[:, valid_sites]
         n_haplotypes = matrix.num_haplotypes
-
-        # Count derived alleles at each valid site
-        freqs = cp.sum(valid_haplotypes, axis=0)
+        freqs = cp.sum(matrix.haplotypes, axis=0)
 
     else:  # missing_data == 'include'
         max_n = matrix.num_haplotypes
@@ -515,16 +485,11 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        # Only count sites with no missing data
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_sites = missing_per_variant == 0
-
-        # Count alleles only at valid sites
-        valid_haplotypes = matrix.haplotypes[:, valid_sites]
-        allele_counts = cp.sum(valid_haplotypes, axis=0)
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
+            return 0
+        allele_counts = cp.sum(matrix.haplotypes, axis=0)
         n_haplotypes = matrix.num_haplotypes
-
-        # Site is segregating if not all 0s or all 1s
         segregating = (allele_counts > 0) & (allele_counts < n_haplotypes)
 
     else:  # missing_data == 'include'
@@ -576,16 +541,10 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        # Only count singletons at sites with no missing data
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_sites = missing_per_variant == 0
-
-        if not cp.any(valid_sites):
-            return 0  # No valid sites
-
-        # Count alleles only at valid sites
-        valid_haplotypes = matrix.haplotypes[:, valid_sites]
-        allele_counts = cp.sum(valid_haplotypes, axis=0)
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
+            return 0
+        allele_counts = cp.sum(matrix.haplotypes, axis=0)
 
     else:  # missing_data == 'include'
         derived_counts, n_valid_per_site = _dac_and_n(matrix.haplotypes)
@@ -742,15 +701,9 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        # Filter to sites with no missing data
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_sites = cp.where(missing_per_variant == 0)[0]
-
-        if len(valid_sites) == 0:
-            return float("nan")  # No valid sites
-
-        # Create subset with only valid sites
-        matrix = matrix.get_subset(valid_sites)
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
+            return float("nan")
 
     # so all components are on the same raw-sum scale.
     th_val = theta_h(matrix, span_normalize=False, missing_data=missing_data)
@@ -924,11 +877,9 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_sites = cp.where(missing_per_variant == 0)[0]
-        if len(valid_sites) == 0:
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
             return 0.0
-        matrix = matrix.get_subset(valid_sites)
 
     # 'include' mode (default)
     haplotypes = matrix.haplotypes
@@ -984,11 +935,9 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_sites = cp.where(missing_per_variant == 0)[0]
-        if len(valid_sites) == 0:
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
             return 0.0
-        matrix = matrix.get_subset(valid_sites)
 
     # 'include' mode (default)
     haplotypes = matrix.haplotypes
@@ -1013,11 +962,9 @@ def _effective_n_and_S(matrix, missing_data):
     Returns (n_eff, S, matrix) where matrix may be subset-filtered.
     """
     if missing_data == 'exclude':
-        missing_per_variant = matrix.count_missing(axis=0)
-        valid_idx = cp.where(missing_per_variant == 0)[0]
-        if len(valid_idx) == 0:
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
             return 0.0, 0.0, matrix
-        matrix = matrix.get_subset(valid_idx)
 
     dac_i, n_valid_i = _dac_and_n(matrix.haplotypes)
     n_valid = n_valid_i.astype(cp.float64)

@@ -119,28 +119,21 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     float
         Hudson's FST estimate
     """
-    # Get population indices
-    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
-    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
-
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
-    # Get haplotype data
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2])
+        if haplotype_matrix.num_variants == 0:
+            return 0.0
+
+    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
+    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    # Handle missing data
-    if missing_data == 'exclude':
-        # Only use sites with no missing data
-        valid_sites = cp.all(pop1_haps >= 0, axis=0) & cp.all(pop2_haps >= 0, axis=0)
-        if not cp.any(valid_sites):
-            return 0.0
-        pop1_haps = pop1_haps[:, valid_sites]
-        pop2_haps = pop2_haps[:, valid_sites]
-
-    # Get allele frequencies - calculate from non-missing data per site
     pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
     pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
     pop1_counts = pop1_counts.astype(cp.float64)
@@ -213,19 +206,16 @@ def fst_weir_cockerham(haplotype_matrix,
     if hasattr(haplotype_matrix, 'device') and haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2])
+        if haplotype_matrix.num_variants == 0:
+            return 0.0
+
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
-
-    hap = haplotype_matrix.haplotypes
-    pop1_haps = hap[pop1_idx, :]
-    pop2_haps = hap[pop2_idx, :]
-
-    if missing_data == 'exclude':
-        valid_sites = cp.all(pop1_haps >= 0, axis=0) & cp.all(pop2_haps >= 0, axis=0)
-        if not cp.any(valid_sites):
-            return 0.0
-        pop1_haps = pop1_haps[:, valid_sites]
-        pop2_haps = pop2_haps[:, valid_sites]
+    pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
+    pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
     # Compute per-site observed heterozygosity and allele counts from
     # complete diploid pairs only. WC FST requires that frequencies and
@@ -341,27 +331,21 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     float
         Nei's GST estimate
     """
-    # Get population indices
-    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
-    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
-
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
-    # Get haplotype data
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2])
+        if haplotype_matrix.num_variants == 0:
+            return 0.0
+
+    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
+    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    # Handle missing data
-    if missing_data == 'exclude':
-        valid_sites = cp.all(pop1_haps >= 0, axis=0) & cp.all(pop2_haps >= 0, axis=0)
-        if not cp.any(valid_sites):
-            return 0.0
-        pop1_haps = pop1_haps[:, valid_sites]
-        pop2_haps = pop2_haps[:, valid_sites]
-
-    # Get allele frequencies from non-missing data per site
     pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
     pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
     pop1_counts = pop1_counts.astype(cp.float64)
@@ -434,30 +418,22 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     float or cp.ndarray
         Mean Dxy or per-site Dxy values
     """
-    # Get population indices
-    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
-    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
-
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
-    # Get haplotype data
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2])
+        if haplotype_matrix.num_variants == 0:
+            return 0.0 if not per_site else np.array([])
+
+    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
+    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
-    total_sites = pop1_haps.shape[1]
-
-    # Handle missing data
-    if missing_data == 'exclude':
-        # Only use sites with no missing data
-        valid_sites = cp.all(pop1_haps >= 0, axis=0) & cp.all(pop2_haps >= 0, axis=0)
-        if not cp.any(valid_sites):
-            return 0.0 if not per_site else cp.zeros(total_sites)
-        pop1_haps = pop1_haps[:, valid_sites]
-        pop2_haps = pop2_haps[:, valid_sites]
 
     n_filtered = pop1_haps.shape[1]
-    n_sites = total_sites
 
     # Get allele frequencies from non-missing data per site
     pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
@@ -477,12 +453,7 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
                                2 * pop1_freqs[valid_mask] * pop2_freqs[valid_mask])
 
     if per_site:
-        if missing_data == 'exclude':
-            result = cp.zeros(total_sites)
-            result[valid_sites] = dxy_per_site
-            return result.get()
-        else:
-            return dxy_per_site.get()
+        return dxy_per_site.get()
     else:
         dxy_sum = cp.sum(dxy_per_site)
         if span_normalize is False:
@@ -703,14 +674,12 @@ def _pop_allele_counts(haplotype_matrix, pop, missing_data='include'):
     for 'include' mode, and also per-site after filtering
     for 'exclude' mode.
     """
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop])
+
     pop_idx = _get_population_indices(haplotype_matrix, pop)
     h = haplotype_matrix.haplotypes[pop_idx, :]
-
-    if missing_data == 'exclude':
-        valid_sites = cp.all(h >= 0, axis=0)
-        h = h[:, valid_sites]
-
-    # Use per-site non-missing counts
     ac_1, n = _pop_dac_and_n(h)
     n = n.astype(cp.float64)
     ac_1 = ac_1.astype(cp.float64)
@@ -930,22 +899,17 @@ def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     """
     from .distance_stats import _pairwise_diffs_matrix_gpu
 
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2])
+
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
     all_idx = pop1_idx + pop2_idx
     n1 = len(pop1_idx)
 
-    # Extract population subset on whatever device the data lives on.
-    # _pairwise_diffs_matrix_gpu accepts both numpy and cupy, chunking
-    # CPU data to GPU on-the-fly so the full matrix never needs to
-    # reside on GPU at once.
     hap = haplotype_matrix.haplotypes
     hap_sub = hap[all_idx, :]
-
-    if missing_data == 'exclude':
-        xp = cp if isinstance(hap_sub, cp.ndarray) else np
-        any_missing = xp.any(hap_sub < 0, axis=0)
-        hap_sub = hap_sub[:, ~any_missing]
 
     # Raw Hamming distances (not normalized) — appropriate for ratio/rank stats
     diffs = _pairwise_diffs_matrix_gpu(hap_sub, missing_data='include')

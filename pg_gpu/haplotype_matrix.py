@@ -859,6 +859,48 @@ class HaplotypeMatrix:
 
         raise ValueError(f"Invalid span mode: {mode}")
 
+    def exclude_missing_sites(self, populations=None):
+        """Return a new matrix with only sites that have no missing data.
+
+        Parameters
+        ----------
+        populations : list of (str or list), optional
+            If given, only require completeness within these populations.
+            Each element is a population name (looked up in sample_sets)
+            or a list of sample indices.
+
+        Returns
+        -------
+        HaplotypeMatrix
+            Filtered matrix. Returns self if no missing data.
+
+        Raises
+        ------
+        ValueError
+            If no sites remain after filtering.
+        """
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+
+        hap = self.haplotypes
+        if populations is not None:
+            idx = []
+            for pop in populations:
+                if isinstance(pop, str):
+                    idx.extend(self.sample_sets[pop])
+                else:
+                    idx.extend(list(pop))
+            has_missing = cp.any(hap[idx] < 0, axis=0)
+        else:
+            has_missing = cp.any(hap < 0, axis=0)
+
+        valid = cp.where(~has_missing)[0]
+        if len(valid) == hap.shape[1]:
+            return self
+        if len(valid) == 0:
+            return self.get_subset(valid)
+        return self.get_subset(valid)
+
     def filter_variants_by_missing(self, max_missing_freq=0.1):
         """
         Return a new HaplotypeMatrix with variants filtered by missing data frequency.

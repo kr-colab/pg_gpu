@@ -56,36 +56,6 @@ def _allele_freq_and_het(haplotype_matrix):
     return freq, h, an
 
 
-def _exclude_missing_sites(haplotype_matrix, *populations):
-    """Filter to sites with no missing data across all populations.
-
-    Parameters
-    ----------
-    haplotype_matrix : HaplotypeMatrix
-    *populations : str or list
-        Population names or sample index lists.
-
-    Returns
-    -------
-    HaplotypeMatrix or None
-        Filtered matrix, or None if no valid sites remain.
-    """
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
-
-    hap = haplotype_matrix.haplotypes
-    all_idx = []
-    for pop in populations:
-        if isinstance(pop, str):
-            all_idx.extend(haplotype_matrix.sample_sets[pop])
-        else:
-            all_idx.extend(list(pop))
-    has_missing = cp.any(hap[all_idx] < 0, axis=0)
-    valid = cp.where(~has_missing)[0]
-    if len(valid) == 0:
-        return None
-    return haplotype_matrix.get_subset(valid)
-
 
 def _moving_statistic(values, statistic, size, start=0, stop=None, step=None):
     """Apply a statistic to moving windows of an array.
@@ -191,10 +161,10 @@ def patterson_f2(haplotype_matrix: HaplotypeMatrix,
         Per-variant F2 estimates.
     """
     if missing_data == 'exclude':
-        filtered = _exclude_missing_sites(haplotype_matrix, pop_a, pop_b)
-        if filtered is None:
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop_a, pop_b])
+        if haplotype_matrix.num_variants == 0:
             return np.array([])
-        haplotype_matrix = filtered
 
     ma = _get_population_matrix(haplotype_matrix, pop_a)
     mb = _get_population_matrix(haplotype_matrix, pop_b)
@@ -235,11 +205,10 @@ def patterson_f3(haplotype_matrix: HaplotypeMatrix,
         Heterozygosity estimates (2 * h_hat) for population C.
     """
     if missing_data == 'exclude':
-        filtered = _exclude_missing_sites(haplotype_matrix,
-                                          pop_c, pop_a, pop_b)
-        if filtered is None:
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop_c, pop_a, pop_b])
+        if haplotype_matrix.num_variants == 0:
             return np.array([]), np.array([])
-        haplotype_matrix = filtered
 
     mc = _get_population_matrix(haplotype_matrix, pop_c)
     ma = _get_population_matrix(haplotype_matrix, pop_a)
@@ -282,11 +251,10 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
         Denominator.
     """
     if missing_data == 'exclude':
-        filtered = _exclude_missing_sites(haplotype_matrix,
-                                          pop_a, pop_b, pop_c, pop_d)
-        if filtered is None:
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop_a, pop_b, pop_c, pop_d])
+        if haplotype_matrix.num_variants == 0:
             return np.array([]), np.array([])
-        haplotype_matrix = filtered
 
     ma = _get_population_matrix(haplotype_matrix, pop_a)
     mb = _get_population_matrix(haplotype_matrix, pop_b)
