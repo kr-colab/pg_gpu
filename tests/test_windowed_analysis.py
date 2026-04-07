@@ -6,10 +6,26 @@ import pytest
 import numpy as np
 import pandas as pd
 from pg_gpu import HaplotypeMatrix
+from pg_gpu import ld_statistics
 from pg_gpu.windowed_analysis import (
     WindowedAnalyzer, windowed_analysis, WindowParams,
     WindowIterator, WindowData
 )
+
+
+def _zns_missing_matrix():
+    hap = np.array([
+        [0, 0, 0, 0, 0, 1],
+        [0, 1, 0, 1, 0, 1],
+        [0, 0, 1, -1, 0, 1],
+        [0, 1, 1, 1, 0, 0],
+        [1, 0, -1, 0, 0, 0],
+        [1, 1, -1, 1, 0, -1],
+        [1, 0, 1, 0, 0, -1],
+        [1, 1, 1, -1, 0, 0],
+    ], dtype=np.int8)
+    pos = np.arange(hap.shape[1]) * 100
+    return HaplotypeMatrix(hap, pos, 0, int(pos[-1]) + 100)
 
 
 class TestWindowIterator:
@@ -309,6 +325,21 @@ class TestWindowedAnalyzer:
         assert isinstance(results, pd.DataFrame)
         assert len(results) > 0
         assert matrix.device == 'GPU'  # Should stay on GPU
+
+    @pytest.mark.parametrize('missing_data', ['include', 'exclude', 'project'])
+    def test_windowed_zns_matches_direct(self, missing_data):
+        matrix = _zns_missing_matrix()
+        expected = ld_statistics.zns(matrix, missing_data=missing_data)
+        results = windowed_analysis(
+            matrix,
+            window_size=1000,
+            statistics=['zns'],
+            missing_data=missing_data,
+            progress_bar=False,
+        )
+        assert len(results) == 1
+        np.testing.assert_allclose(results.loc[0, 'zns'], expected,
+                                   rtol=1e-10, atol=1e-12)
 
 
 class TestCustomStatistics:

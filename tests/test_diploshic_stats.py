@@ -10,6 +10,34 @@ from pg_gpu import HaplotypeMatrix, GenotypeMatrix
 from pg_gpu import ld_statistics, diversity, selection, distance_stats
 
 
+def _missing_haplotype_matrix():
+    hap = np.array([
+        [0, 0, 0, 0, 0, 1],
+        [0, 1, 0, 1, 0, 1],
+        [0, 0, 1, -1, 0, 1],
+        [0, 1, 1, 1, 0, 0],
+        [1, 0, -1, 0, 0, 0],
+        [1, 1, -1, 1, 0, -1],
+        [1, 0, 1, 0, 0, -1],
+        [1, 1, 1, -1, 0, 0],
+    ], dtype=np.int8)
+    pos = np.arange(hap.shape[1]) * 100
+    return HaplotypeMatrix(hap, pos, 0, int(pos[-1]) + 100)
+
+
+def _multiallelic_haplotype_matrix():
+    hap = np.array([
+        [0, 0, 1, 2],
+        [0, 1, 1, 2],
+        [1, 0, 2, 3],
+        [1, 1, 2, 3],
+        [0, 0, 1, 2],
+        [1, 1, 2, 3],
+    ], dtype=np.int8)
+    pos = np.arange(hap.shape[1]) * 100
+    return HaplotypeMatrix(hap, pos, 0, int(pos[-1]) + 100)
+
+
 @pytest.fixture
 def hap_data():
     np.random.seed(42)
@@ -148,6 +176,43 @@ class TestZnSOmega:
     def test_omega_diploid(self, geno_data):
         o = ld_statistics.omega_diploid(geno_data)
         assert o >= 0
+
+    def test_zns_include_missing_matches_tiled_exact(self):
+        matrix = _missing_haplotype_matrix()
+        observed = ld_statistics.zns(matrix, missing_data='include')
+        hap_clean, valid_mask, m = ld_statistics._prepare_segregating(
+            matrix, missing_data='include')
+        expected = ld_statistics._zns_tiled_exact(hap_clean, valid_mask, m)
+        assert 0 <= observed <= 1
+        np.testing.assert_allclose(observed, expected, rtol=1e-10, atol=1e-12)
+
+    def test_zns_exclude_matches_tiled_exact(self):
+        matrix = _missing_haplotype_matrix()
+        observed = ld_statistics.zns(matrix, missing_data='exclude')
+        hap_clean, valid_mask, m = ld_statistics._prepare_segregating(
+            matrix, missing_data='exclude')
+        expected = ld_statistics._zns_tiled_exact(hap_clean, valid_mask, m)
+        assert 0 <= observed <= 1
+        np.testing.assert_allclose(observed, expected, rtol=1e-10, atol=1e-12)
+
+    def test_zns_include_heavy_missing_stays_bounded(self):
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, size=(64, 256), dtype=np.int8)
+        missing = rng.random(size=hap.shape) < 0.7
+        hap[missing] = -1
+        pos = np.arange(hap.shape[1]) * 10
+        matrix = HaplotypeMatrix(hap, pos, 0, int(pos[-1]) + 10)
+        observed = ld_statistics.zns(matrix, missing_data='include')
+        assert np.isfinite(observed)
+        assert 0 <= observed <= 1
+
+    def test_zns_exclude_multiallelic_matches_tiled_exact(self):
+        matrix = _multiallelic_haplotype_matrix()
+        observed = ld_statistics.zns(matrix, missing_data='exclude')
+        hap_clean, valid_mask, m = ld_statistics._prepare_segregating(
+            matrix, missing_data='exclude')
+        expected = ld_statistics._zns_tiled_exact(hap_clean, valid_mask, m)
+        np.testing.assert_allclose(observed, expected, rtol=1e-10, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------

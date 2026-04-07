@@ -220,21 +220,27 @@ def _prepare_segregating(mat, missing_data='include'):
         mat = mat.get_subset(valid)
 
     hap = mat.haplotypes
-    dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0)
-    n_valid_per_site = cp.sum((hap >= 0).astype(cp.int32), axis=0)
+    valid_mask = (hap >= 0).astype(cp.float64)
+    hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+    return _prepare_segregating_arrays(hap_clean, valid_mask, missing_data)
+
+
+def _prepare_segregating_arrays(hap_clean, valid_mask, missing_data='include'):
+    """Filter array-backed haplotypes to the ZnS-ready segregating sites."""
+    if missing_data == 'exclude':
+        complete = cp.all(valid_mask > 0, axis=0)
+        hap_clean = hap_clean[:, complete]
+        valid_mask = valid_mask[:, complete]
+
+    n_valid_per_site = cp.sum(valid_mask, axis=0)
+    dac = cp.sum(hap_clean, axis=0)
     seg = (dac > 0) & (dac < n_valid_per_site)
     seg_idx = cp.where(seg)[0]
-    if len(seg_idx) < mat.num_variants:
-        mat = mat.get_subset(seg_idx)
-
-    hap = mat.haplotypes
-    m = hap.shape[1]
+    m = len(seg_idx)
     if m < 2:
         return None, None, 0
 
-    valid_mask = (hap >= 0).astype(cp.float64)
-    hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
-    return hap_clean, valid_mask, m
+    return hap_clean[:, seg_idx], valid_mask[:, seg_idx], m
 
 
 def _tile_counts(hi, vi, hj, vj):
@@ -313,11 +319,11 @@ def _zns_gram(mat, missing_data='include'):
     For ``exclude`` mode (and any window with no missing data after
     filtering), this reduces to the standard Pearson r^2 Gram trick
     used by main's tiled path; values agree to floating-point
-    precision.  For ``include`` mode under missingness this computes
-    mean-imputation Pearson r^2 -- a standard estimator that is the
-    natural Gram-amenable generalization (no MCAR correction needed).
-    For ``project`` mode it falls back to ``_zns_tiled_impl``
-    (Ragsdale & Gravel sigma_D^2).
+    precision. For ``include`` mode it computes the bounded
+    mean-imputation Pearson r^2 estimator via the same chunked Gram
+    accumulation, avoiding the broken global MCAR correction while
+    still keeping large windows on the fast path. For ``project`` mode
+    it falls back to ``_zns_tiled_impl`` (Ragsdale & Gravel sigma_D^2).
 
     Computation is chunked over columns (sites) so only an
     (n_hap x chunk_size) slice of the standardized matrix is in GPU
@@ -326,11 +332,22 @@ def _zns_gram(mat, missing_data='include'):
     from ._memutil import estimate_variant_chunk_size, free_gpu_pool
 
     hap_clean, valid_mask, m = _prepare_segregating(mat, missing_data)
+    return _zns_prepared(hap_clean, valid_mask, m, missing_data)
+
+
+def _zns_prepared(hap_clean, valid_mask, m, missing_data='include'):
+    """Compute ZnS from pre-filtered arrays with shared mode dispatch."""
+    from ._memutil import estimate_variant_chunk_size, free_gpu_pool
+
     if m < 2:
         return 0.0
 
     if missing_data == 'project':
         return _zns_tiled_impl(hap_clean, valid_mask, m, missing_data)
+
+    has_missing = bool(cp.any(valid_mask == 0).get())
+    if missing_data == 'include' and has_missing:
+        return _zns_tiled_exact(hap_clean, valid_mask, m)
 
     n_hap = hap_clean.shape[0]
     n_i = cp.sum(valid_mask, axis=0)             # per-site valid count
@@ -346,6 +363,7 @@ def _zns_gram(mat, missing_data='include'):
         n_hap, bytes_per_element=8, n_intermediates=3)
 
     K = cp.zeros((n_hap, n_hap), dtype=cp.float64)
+    diag_sq_sum = 0.0
     for col_start in range(0, m, chunk_size):
         col_end = min(col_start + chunk_size, m)
         h_c = hap_clean[:, col_start:col_end]
@@ -356,17 +374,23 @@ def _zns_gram(mat, missing_data='include'):
         #        = 0                                    for missing k
         # Equivalently (h_ki - v_ki * p_i) * inv_c[i]: missing entries
         # have h_ki = 0 and v_ki = 0, so they contribute 0.
-        B_chunk = (h_c - v_c * p_c) * inv_c
+        centered = h_c - v_c * p_c
+        B_chunk = centered * inv_c
         K += B_chunk @ B_chunk.T
+        diag_chunk = cp.sum(centered * centered, axis=0) * (inv_c ** 2)
+        diag_sq_sum += float(cp.sum(diag_chunk * diag_chunk).get())
         del B_chunk
 
     free_gpu_pool()
 
-    # ||K||_F^2 = ||B^T B||_F^2 = sum_{i,j} r_imp^2(i, j)
-    #          = m + sum_{i!=j} r_imp^2(i, j)   (diagonal r^2 = 1)
+    # ||K||_F^2 = ||B^T B||_F^2 = sum_{i,j} r^2(i, j).
+    # Subtract the true diagonal contribution rather than assuming it is 1;
+    # this preserves parity with the tiled path even when the input carries
+    # non-biallelic allele codes.
     frob_sq = float(cp.sum(K * K).get())
-    sum_r2 = frob_sq - m
-    return sum_r2 / (m * (m - 1))
+    sum_r2 = max(frob_sq - diag_sq_sum, 0.0)
+    zns = sum_r2 / (m * (m - 1))
+    return min(max(zns, 0.0), 1.0)
 
 
 def _zns_tiled_exact(hap_clean, valid_mask, m, tile_size=512):
@@ -435,11 +459,12 @@ def _zns_tiled(mat, missing_data='include', tile_size=512):
 
 
 def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
-                          tile_size=512, use_projection=False):
+                          tile_size=512, missing_data='include'):
     """Compute ZnS for a column range using precomputed arrays.
 
-    This avoids creating a HaplotypeMatrix and recomputing valid_mask/hap_clean
-    for each window in the windowed_analysis loop.
+    This avoids creating a HaplotypeMatrix for each window while still
+    reusing the same preprocessing and mode-selection rules as
+    ``ld_statistics.zns()``.
 
     Parameters
     ----------
@@ -451,8 +476,8 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
         Column range [col_start, col_end) to compute ZnS over.
     tile_size : int
         Tile size for accumulation.
-    use_projection : bool
-        If True, use unbiased multinomial projection estimators.
+    missing_data : str
+        Missing-data mode for the sliced window.
 
     Returns
     -------
@@ -461,61 +486,8 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
     """
     hc = hap_clean[:, col_start:col_end]
     vm = valid_mask[:, col_start:col_end]
-
-    # Filter to segregating sites
-    n_valid = cp.sum(vm, axis=0).astype(cp.float64)
-    dac = cp.sum(hc, axis=0)
-    seg = (dac > 0) & (dac < n_valid)
-    seg_idx = cp.where(seg)[0]
-    m = len(seg_idx)
-    if m < 2:
-        return 0.0
-
-    hc = hc[:, seg_idx]
-    vm = vm[:, seg_idx]
-
-    if not use_projection:
-        n_valid = n_valid[seg_idx]
-        p = cp.where(n_valid > 0, cp.sum(hc, axis=0) / n_valid, 0.0)
-        pq = p * (1 - p)
-
-    B = tile_size
-    total = 0.0
-    n_pairs = 0
-
-    for i0 in range(0, m, B):
-        i1 = min(i0 + B, m)
-        hi = hc[:, i0:i1]
-        vi = vm[:, i0:i1]
-
-        for j0 in range(i0, m, B):
-            j1 = min(j0 + B, m)
-            hj = hc[:, j0:j1]
-            vj = vm[:, j0:j1]
-
-            if use_projection:
-                tile, valid = _tile_sigma_d2(hi, vi, hj, vj)
-                if i0 == j0:
-                    cp.fill_diagonal(tile, 0.0)
-                    cp.fill_diagonal(valid, False)
-                    total += float(cp.sum(tile).get())
-                    n_pairs += int(cp.sum(valid).get())
-                else:
-                    total += 2.0 * float(cp.sum(tile).get())
-                    n_pairs += 2 * int(cp.sum(valid).get())
-            else:
-                r2_tile = _tile_r2_naive(
-                    hi, vi, hj, vj,
-                    p[i0:i1], pq[i0:i1], p[j0:j1], pq[j0:j1])
-                if i0 == j0:
-                    cp.fill_diagonal(r2_tile, 0.0)
-                    total += float(cp.sum(r2_tile).get())
-                else:
-                    total += 2.0 * float(cp.sum(r2_tile).get())
-
-    if use_projection:
-        return total / n_pairs if n_pairs > 0 else 0.0
-    return total / (m * (m - 1))
+    hc, vm, m = _prepare_segregating_arrays(hc, vm, missing_data)
+    return _zns_prepared(hc, vm, m, missing_data)
 
 
 def zns(r2_matrix_or_matrix, missing_data='include'):
