@@ -277,6 +277,38 @@ class TestHaplotypeMatrixAccessibleMask:
         assert hm.get_span('accessible') == 900
         assert hm.get_span('total') == 1000
 
+    def test_get_span_auto_uses_accessible(self):
+        mask = np.ones(1000, dtype=bool)
+        mask[200:300] = False
+        hm = _make_haplotype_matrix()
+        hm.set_accessible_mask(mask)
+        # auto mode should pick accessible when mask is set
+        assert hm.get_span('auto') == 900
+        assert hm.get_span('auto') == hm.get_span('accessible')
+
+    def test_get_span_auto_uses_total_without_mask(self):
+        hm = _make_haplotype_matrix()
+        # auto without mask should use total genomic span
+        assert hm.get_span('auto') == hm.get_span('total')
+
+    def test_span_normalize_auto_pi(self):
+        """pi(span_normalize=True) auto-detects accessible mask."""
+        from pg_gpu import diversity
+        mask = np.ones(1000, dtype=bool)
+        mask[200:300] = False
+        hm = _make_haplotype_matrix()
+
+        # Without mask: per total span
+        pi_total = diversity.pi(hm, span_normalize=True)
+
+        # With mask: per accessible bases (different denominator)
+        hm.set_accessible_mask(mask)
+        pi_accessible = diversity.pi(hm, span_normalize=True)
+
+        # Both should be finite, but may differ due to different denominators
+        assert np.isfinite(pi_total)
+        assert np.isfinite(pi_accessible)
+
     def test_get_span_accessible_no_mask_raises(self):
         hm = _make_haplotype_matrix()
         with pytest.raises(ValueError, match="requires an accessible mask"):

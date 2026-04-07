@@ -12,6 +12,7 @@ import cupy as cp
 from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
 from ._memutil import chunked_dac_and_n as _pop_dac_and_n
+from .diversity import _apply_span_normalize, pi as _diversity_pi
 
 
 def dxy_components(pop1_haps, pop2_haps):
@@ -487,7 +488,6 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         if span_normalize is False:
             n_sites = int(cp.sum(valid_mask).get())
             return float(dxy_sum.get() / n_sites) if n_sites > 0 else 0.0
-        from .diversity import _apply_span_normalize
         return _apply_span_normalize(dxy_sum, haplotype_matrix, span_normalize)
 
 
@@ -527,10 +527,9 @@ def da(haplotype_matrix: HaplotypeMatrix,
                    span_normalize=span_normalize)
 
     # Get within-population diversities
-    from .diversity import pi as _pi
-    pi1 = _pi(haplotype_matrix, population=pop1, missing_data=missing_data,
+    pi1 = _diversity_pi(haplotype_matrix, population=pop1, missing_data=missing_data,
               span_normalize=span_normalize)
-    pi2 = _pi(haplotype_matrix, population=pop2, missing_data=missing_data,
+    pi2 = _diversity_pi(haplotype_matrix, population=pop2, missing_data=missing_data,
               span_normalize=span_normalize)
 
     # Calculate Da
@@ -564,8 +563,7 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
     float
         Nucleotide diversity
     """
-    from .diversity import pi as _pi
-    return _pi(haplotype_matrix, population=pop,
+    return _diversity_pi(haplotype_matrix, population=pop,
                span_normalize=span_normalize, missing_data=missing_data)
 
 

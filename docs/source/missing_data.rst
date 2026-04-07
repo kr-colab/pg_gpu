@@ -152,26 +152,38 @@ HaplotypeMatrix Utilities
 Span Normalization
 ------------------
 
-Span normalization (``span_normalize=True``, the default for pi and
-theta_w) controls *how results are expressed* and is orthogonal to
-missing data handling. Use ``span_denominator`` to choose the divisor:
+Rate estimators (pi, theta_w, dxy, etc.) accept a ``span_normalize``
+parameter that controls *how results are expressed*. This is orthogonal
+to missing data handling.
 
-* ``'total'`` (default): genomic span (chrom_end - chrom_start)
-* ``'sites'``: number of variant sites analyzed
-* ``'callable'``: span from first to last variant
-* ``'accessible'``: accessible base count from mask
+``span_normalize`` accepts:
+
+* ``True`` (default): auto-detect the best denominator. If an accessible
+  mask is set, divides by accessible bases. Otherwise divides by genomic
+  span (chrom_end - chrom_start).
+* ``False``: return raw sum (used internally by composite statistics like
+  Tajima's D, and by advanced users who need custom normalization).
+* ``'per_base'``: explicit genomic span.
+* ``'accessible'``: explicit accessible base count (error if no mask).
+* ``'per_variant'``: divide by number of variant sites.
 
 .. code-block:: python
 
-   # Pi per base pair (default)
+   # Per base pair (default -- auto-detects best denominator)
    pi = diversity.pi(h)
 
-   # Raw sum of per-site heterozygosities (no normalization)
+   # With accessible mask: auto uses accessible bases
+   h.set_accessible_mask("mask.bed", chrom="3L")
+   pi = diversity.pi(h)  # per accessible base, automatically
+
+   # Raw sum (no normalization)
    pi_raw = diversity.pi(h, span_normalize=False)
 
-   # Pi per accessible base (with mask)
-   h.set_accessible_mask("mask.bed", chrom="3L")
-   pi_acc = diversity.pi(h, span_denominator='accessible')
+   # Explicit mode
+   pi_var = diversity.pi(h, span_normalize='per_variant')
+
+Test statistics (Tajima's D, Fay-Wu's H, FST) do not accept
+``span_normalize`` — they are dimensionless by definition.
 
 Accessible Site Masks
 ---------------------

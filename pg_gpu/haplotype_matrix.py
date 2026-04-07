@@ -25,7 +25,7 @@ class HaplotypeMatrix:
     sample_sets : dict, optional
         Maps population names to lists of haplotype indices.
     n_total_sites : int, optional
-        Total callable sites for pairwise-mode normalization.
+        Total callable sites for span normalization.
     samples : list, optional
         Diploid sample names (from VCF).
     accessible_mask : AccessibleMask, optional
@@ -203,7 +203,7 @@ class HaplotypeMatrix:
 
     @property
     def has_invariant_info(self):
-        """Whether invariant site information is available for pairwise mode."""
+        """Whether invariant site information is available for span normalization."""
         return self.n_total_sites is not None
 
     @property
@@ -469,7 +469,7 @@ class HaplotypeMatrix:
             ts: A tskit.TreeSequence object
             device: 'CPU' or 'GPU'
             include_invariant: If True, set n_total_sites from the sequence
-                length so that pairwise-mode calculations can account for
+                length so that calculations can account for
                 invariant sites analytically (no extra rows stored).
             accessible_bed: Path to a BED file defining accessible regions.
             chrom: Chromosome name for BED file filtering.
@@ -819,13 +819,14 @@ class HaplotypeMatrix:
         """
         if mode == 'auto':
             if self.accessible_mask is not None:
-                mode = 'accessible'
-            elif self.n_total_sites is not None:
+                start = self.chrom_start if self.chrom_start is not None else 0
+                end = self.chrom_end if self.chrom_end is not None else start
+                return self.accessible_mask.count_accessible(start, end)
+            if self.n_total_sites is not None:
                 return self.n_total_sites
-            elif self.chrom_start is not None and self.chrom_end is not None:
-                mode = 'per_base'
-            else:
-                mode = 'callable'
+            if self.chrom_start is not None and self.chrom_end is not None:
+                return self.chrom_end - self.chrom_start
+            mode = 'callable'
 
         if mode == 'accessible':
             if self.accessible_mask is not None:

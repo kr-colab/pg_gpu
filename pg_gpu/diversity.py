@@ -696,19 +696,10 @@ def diversity_stats_fast(haplotype_matrix: HaplotypeMatrix,
     if projection_n is not None:
         fs = fs.project(projection_n)
 
-    span = None
-    if span_normalize is not False:
-        if population is not None:
-            matrix = _get_population_matrix(haplotype_matrix, population)
-        else:
-            matrix = haplotype_matrix
-        mode = 'auto' if span_normalize is True else span_normalize
-        span = matrix.get_span(mode)
-
     results = {}
     for name in ['pi', 'watterson', 'theta_h', 'theta_l',
                  'eta1', 'eta1_star', 'minus_eta1', 'minus_eta1_star']:
-        results[name] = fs.theta(name, span_normalize=bool(span_normalize), span=span)
+        results[name] = fs.theta(name, span_normalize=span_normalize)
 
     results['segregating_sites'] = fs.n_segregating
     results.update(fs.all_tests())
