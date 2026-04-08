@@ -7,10 +7,9 @@ related statistics. Includes the FrequencySpectrum class for SFS-based analysis,
 custom weight functions, and SFS projection.
 """
 
-import warnings
 import numpy as np
 import cupy as cp
-from typing import Union, Optional, Dict, Tuple, Callable
+from typing import Union, Optional, Dict, Callable
 from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix
@@ -1028,7 +1027,14 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     # Map stat names to estimator names for batched computation
     theta_stats = {'pi': 'pi', 'theta_w': 'watterson', 'theta_h': 'theta_h',
                    'theta_l': 'theta_l'}
-    needs_thetas = {s for s in statistics if s in theta_stats or s == 'tajimas_d'}
+    # Neutrality tests: (w1, w2) weight pairs
+    test_specs = {
+        'tajimas_d': ('pi', 'watterson'),
+        'fay_wus_h': ('pi', 'theta_h'),
+        'normalized_fay_wus_h': ('pi', 'theta_h'),
+        'zeng_e': ('theta_l', 'watterson'),
+    }
+    needs_thetas = {s for s in statistics if s in theta_stats or s in test_specs}
 
     results = {}
 
@@ -1043,32 +1049,31 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
             for s in needs_thetas:
                 if s in theta_stats:
                     estimators.add(theta_stats[s])
-                elif s == 'tajimas_d':
-                    estimators.update(('pi', 'watterson'))
+                elif s in test_specs:
+                    estimators.update(test_specs[s])
             ct = _compute_thetas(matrix, tuple(estimators))
 
             for s in needs_thetas:
                 if s in theta_stats:
                     results[s] = _apply_span_normalize(
                         ct['thetas'][theta_stats[s]], matrix, span_normalize)
-                elif s == 'tajimas_d':
+                elif s in test_specs:
+                    w1, w2 = test_specs[s]
                     S = ct['S']
                     n = ct['n_harmonic_mean']
-                    if S == 0 or n < 2:
-                        results['tajimas_d'] = float('nan')
+                    if S < 3 or n < 3:
+                        results[s] = float('nan')
+                    elif s == 'fay_wus_h':
+                        results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
                     else:
-                        a1 = sum(1.0 / i for i in range(1, n))
-                        a2 = sum(1.0 / (i ** 2) for i in range(1, n))
-                        b1 = (n + 1) / (3 * (n - 1))
-                        b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
-                        c1 = b1 - (1 / a1)
-                        c2 = b2 - ((n + 2) / (a1 * n)) + (a2 / (a1 ** 2))
-                        e1 = c1 / a1
-                        e2 = c2 / (a1 ** 2 + a2)
-                        V = np.sqrt(e1 * S + e2 * S * (S - 1))
-                        pi_val = ct['thetas']['pi']
-                        tw_val = ct['thetas']['watterson']
-                        results['tajimas_d'] = float((pi_val - tw_val) / V) if V > 0 else float('nan')
+                        alpha_n, beta_n = _achaz_variance_coefficients(w1, w2, n)
+                        a1 = np.sum(1.0 / np.arange(1, n))
+                        a2 = np.sum(1.0 / np.arange(1, n) ** 2)
+                        theta_est = S / a1
+                        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
+                        var = alpha_n * theta_est + beta_n * theta_sq_est
+                        num = ct['thetas'][w1] - ct['thetas'][w2]
+                        results[s] = float(num / np.sqrt(var)) if var > 0 else float('nan')
 
     # Non-theta stats
     for stat in statistics:
