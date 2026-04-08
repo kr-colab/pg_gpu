@@ -89,11 +89,11 @@ def _achaz_alpha_beta(v1, v2, n):
     per-u_hat weights where u_hat_i = i * xi_i. The conversion is
     v_i/sum(v_j) = w[i]/i, giving V_i = w1[i]/i - w2[i]/i.
     """
-    k = np.arange(1, n, dtype=np.float64)
-    V = (v1[1:n] - v2[1:n]) / k
-    alpha_n = float(np.sum(k * V ** 2))
-    sigma = compute_sigma_ij(n)
-    beta_n = float(np.sum(
+    k = cp.arange(1, n, dtype=cp.float64)
+    V = cp.asarray((v1[1:n] - v2[1:n])) / k
+    alpha_n = float(cp.sum(k * V ** 2))
+    sigma = _compute_sigma_ij_gpu(n)
+    beta_n = float(cp.sum(
         k[:, None] * k[None, :] * V[:, None] * V[None, :] * sigma))
     return alpha_n, beta_n
 
@@ -290,25 +290,12 @@ def _harmonic_sums(n):
 
 
 @lru_cache(maxsize=64)
-def compute_sigma_ij(n):
-    """Compute the Fu (1995) covariance matrix sigma_ij for sample size n.
-
-    sigma_ij = Cov[xi_i, xi_j] / theta^2 for the unfolded SFS under the
-    standard neutral model. GPU-accelerated via CuPy for the O(n^2) broadcast.
-
-    Parameters
-    ----------
-    n : int
-        Sample size (number of haplotypes).
-
-    Returns
-    -------
-    sigma : ndarray, float64, shape (n-1, n-1)
-    """
+def _compute_sigma_ij_gpu(n):
+    """Compute Fu (1995) sigma_ij on GPU, return CuPy array (cached)."""
     H = _harmonic_sums(n)
     an = H[n - 1]
 
-    # beta(i, n) for i = 1..n-1 (CPU, 1D — tiny)
+    # beta(i, n) for i = 1..n-1 (CPU, 1D)
     idx_b = np.arange(1, n, dtype=np.float64)
     a_b = H[idx_b.astype(int) - 1]
     beta_arr = (2.0 * n / ((n - idx_b + 1) * (n - idx_b))
@@ -317,7 +304,7 @@ def compute_sigma_ij(n):
     beta_full = np.zeros(n + 1)
     beta_full[1:n] = beta_arr
 
-    # Move lookup arrays to GPU for the O(n^2) broadcast
+    # O(n^2) broadcast on GPU
     beta_gpu = cp.asarray(beta_full)
     H_gpu = cp.asarray(H)
 
@@ -353,7 +340,25 @@ def compute_sigma_ij(n):
     d_idx = cp.arange(n - 1)
     sigma[d_idx, d_idx] = diag_vals
 
-    return sigma.get()
+    return sigma
+
+
+def compute_sigma_ij(n):
+    """Compute the Fu (1995) covariance matrix sigma_ij for sample size n.
+
+    sigma_ij = Cov[xi_i, xi_j] / theta^2 for the unfolded SFS under the
+    standard neutral model.
+
+    Parameters
+    ----------
+    n : int
+        Sample size (number of haplotypes).
+
+    Returns
+    -------
+    sigma : ndarray, float64, shape (n-1, n-1)
+    """
+    return _compute_sigma_ij_gpu(n).get()
 
 
 @lru_cache(maxsize=128)
