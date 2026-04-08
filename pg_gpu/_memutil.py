@@ -105,7 +105,9 @@ def chunked_dac_and_n(hap):
     if needed < free * 0.4:
         valid_mask = hap >= 0
         n_valid = cp.sum(valid_mask.astype(cp.int32), axis=0).astype(cp.int64)
-        dac = cp.sum((hap * valid_mask).astype(cp.int32), axis=0).astype(cp.int64)
+        # Count non-reference alleles (hap > 0), not sum of allele indices.
+        # This handles multiallelic sites correctly (allele 2,3 count as 1 derived).
+        dac = cp.sum(((hap > 0) & valid_mask).astype(cp.int32), axis=0).astype(cp.int64)
         return dac, n_valid
 
     # Chunked path for large matrices
@@ -119,7 +121,7 @@ def chunked_dac_and_n(hap):
         chunk = hap[:, start:end]
         valid = (chunk >= 0).astype(cp.int32)
         n_valid[start:end] = cp.sum(valid, axis=0)
-        dac[start:end] = cp.sum((chunk * valid).astype(cp.int32), axis=0)
+        dac[start:end] = cp.sum(((chunk > 0) & (chunk >= 0)).astype(cp.int32), axis=0)
 
     return dac, n_valid
 
