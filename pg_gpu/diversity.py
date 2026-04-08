@@ -109,6 +109,18 @@ def _achaz_variance_coefficients(w1_name, w2_name, n):
     return _achaz_alpha_beta(v1, v2, n)
 
 
+def _achaz_variance(w1_name, w2_name, n, S):
+    """Compute the Achaz (2009) null variance for a neutrality test.
+
+    Var(T) = alpha_n * theta_est + beta_n * theta_sq_est
+    where theta_est = S/a1 and theta_sq_est = S(S-1)/(a1^2+a2).
+    """
+    alpha_n, beta_n = _achaz_variance_coefficients(w1_name, w2_name, n)
+    a1 = np.sum(1.0 / np.arange(1, n))
+    a2 = np.sum(1.0 / np.arange(1, n) ** 2)
+    return alpha_n * S / a1 + beta_n * S * (S - 1) / (a1 ** 2 + a2)
+
+
 def _site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=None):
     """Compute per-site contribution for a theta estimator on GPU.
 
@@ -245,12 +257,7 @@ def _compute_neutrality_test(matrix, w1_name, w2_name):
     n = result['n_harmonic_mean']
     if S < 3 or n < 3:
         return float('nan')
-    alpha_n, beta_n = _achaz_variance_coefficients(w1_name, w2_name, n)
-    a1 = np.sum(1.0 / np.arange(1, n))
-    a2 = np.sum(1.0 / np.arange(1, n) ** 2)
-    theta_est = S / a1
-    theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
-    var = alpha_n * theta_est + beta_n * theta_sq_est
+    var = _achaz_variance(w1_name, w2_name, n, S)
     if var <= 0:
         return float('nan')
     num = result['thetas'][w1_name] - result['thetas'][w2_name]
@@ -547,18 +554,15 @@ class FrequencySpectrum:
         w2_name = w2 if isinstance(w2, str) else None
 
         if w1_name and w2_name:
-            alpha_n, beta_n = _achaz_variance_coefficients(w1_name, w2_name, n_eff)
+            variance = _achaz_variance(w1_name, w2_name, n_eff, S)
         else:
             w1_fn = WEIGHT_REGISTRY[w1] if isinstance(w1, str) else w1
             w2_fn = WEIGHT_REGISTRY[w2] if isinstance(w2, str) else w2
             alpha_n, beta_n = _achaz_alpha_beta(w1_fn(n_eff), w2_fn(n_eff), n_eff)
+            a1 = np.sum(1.0 / np.arange(1, n_eff))
+            a2 = np.sum(1.0 / np.arange(1, n_eff) ** 2)
+            variance = alpha_n * S / a1 + beta_n * S * (S - 1) / (a1 ** 2 + a2)
 
-        a1 = np.sum(1.0 / np.arange(1, n_eff))
-        a2 = np.sum(1.0 / np.arange(1, n_eff) ** 2)
-        theta_est = S / a1
-        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
-
-        variance = alpha_n * theta_est + beta_n * theta_sq_est
         if variance <= 0:
             return float('nan')
         return numerator / np.sqrt(variance)
@@ -1066,12 +1070,7 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                     elif s == 'fay_wus_h':
                         results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
                     else:
-                        alpha_n, beta_n = _achaz_variance_coefficients(w1, w2, n)
-                        a1 = np.sum(1.0 / np.arange(1, n))
-                        a2 = np.sum(1.0 / np.arange(1, n) ** 2)
-                        theta_est = S / a1
-                        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
-                        var = alpha_n * theta_est + beta_n * theta_sq_est
+                        var = _achaz_variance(w1, w2, n, S)
                         num = ct['thetas'][w1] - ct['thetas'][w2]
                         results[s] = float(num / np.sqrt(var)) if var > 0 else float('nan')
 
