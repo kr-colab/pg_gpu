@@ -772,33 +772,20 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             results['tajimas_d'] = tajd
 
     if 'normalized_fay_wu_h' in stats_set:
+        from .diversity import _fay_wu_h_variance_coeffs
         H = raw['pi'].get() - raw['theta_h'].get()
-        n_f = float(n_hap)
-        a_n = sum(1.0 / i for i in range(1, n_hap))
-        b_n = sum(1.0 / (i * i) for i in range(1, n_hap))
-        n2 = n_f * n_f
-        e1_h = (n_f - 2) / (6 * (n_f - 1))
-        e2_num = (18 * n2 * (3 * n_f + 2) * b_n
-                  - (88 * n2 * n_f + 9 * n2 - 13 * n_f + 6))
-        e2_den = 9 * n_f * (n2 - n_f) * a_n + 9 * n_f * (n2 - n_f) * b_n
-        e2_h = e2_num / e2_den if e2_den != 0 else 0.0
+        e1_h, e2_h = _fay_wu_h_variance_coeffs(n_hap)
         var_H = e1_h * S + e2_h * S * (S - 1)
         with np.errstate(invalid='ignore', divide='ignore'):
             results['normalized_fay_wu_h'] = np.where(
                 var_H > 0, H / np.sqrt(var_H), 0.0)
 
     if 'zeng_e' in stats_set:
+        from .diversity import _zeng_e_variance_coeffs
         E = raw['theta_l'].get() - raw['watterson'].get()
         a_n = sum(1.0 / i for i in range(1, n_hap))
-        b_n = sum(1.0 / (i * i) for i in range(1, n_hap))
         theta_s = S / a_n
-        n_f = float(n_hap)
-        e1_e = (n_f / (2 * (n_f - 1)) - 1.0 / a_n)
-        e2_num = (b_n / (a_n * a_n)
-                  + 2 * (n_f / (n_f - 1)) ** 2 * b_n
-                  - 2 * (n_f * b_n - n_f + 1) / ((n_f - 1) * a_n)
-                  - (3 * n_f + 1) / (n_f - 1))
-        e2_e = e2_num / (a_n * a_n + b_n)
+        e1_e, e2_e = _zeng_e_variance_coeffs(n_hap)
         var_E = e1_e * theta_s + e2_e * theta_s * theta_s
         with np.errstate(invalid='ignore', divide='ignore'):
             results['zeng_e'] = np.where(var_E > 0, E / np.sqrt(var_E), 0.0)

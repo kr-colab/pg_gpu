@@ -38,21 +38,52 @@ def _apply_span_normalize(value, matrix, span_normalize):
     return float('nan')
 
 
-_a1_inv_cache = {}
+_gpu_lookup_cache = {}
 
 
 def _get_a1_inv(n_max):
     """Get cached 1/a1(n) lookup array on GPU."""
-    if n_max in _a1_inv_cache:
-        return _a1_inv_cache[n_max]
+    key = ('a1_inv', n_max)
+    if key in _gpu_lookup_cache:
+        return _gpu_lookup_cache[key]
     a1 = np.zeros(n_max + 1, dtype=np.float64)
     for n in range(2, n_max + 1):
         a1[n] = 1.0 / np.sum(1.0 / np.arange(1, n, dtype=np.float64))
     result = cp.asarray(a1)
-    _a1_inv_cache[n_max] = result
+    _gpu_lookup_cache[key] = result
     return result
 
 
+def _get_minus_eta1_norm(n_max):
+    """Get cached 1/(a1-1) normalizer for minus_eta1 estimator on GPU."""
+    key = ('minus_eta1', n_max)
+    if key in _gpu_lookup_cache:
+        return _gpu_lookup_cache[key]
+    arr = np.zeros(n_max + 1, dtype=np.float64)
+    for ni in range(3, n_max + 1):
+        a1 = np.sum(1.0 / np.arange(1, ni, dtype=np.float64))
+        arr[ni] = 1.0 / (a1 - 1.0) if a1 > 1.0 else 0.0
+    result = cp.asarray(arr)
+    _gpu_lookup_cache[key] = result
+    return result
+
+
+def _get_minus_eta1_star_norm(n_max):
+    """Get cached normalizer for minus_eta1_star estimator on GPU."""
+    key = ('minus_eta1_star', n_max)
+    if key in _gpu_lookup_cache:
+        return _gpu_lookup_cache[key]
+    arr = np.zeros(n_max + 1, dtype=np.float64)
+    for ni in range(4, n_max + 1):
+        a1 = np.sum(1.0 / np.arange(1, ni, dtype=np.float64))
+        denom = a1 - 1.0 - 1.0 / (ni - 1)
+        arr[ni] = 1.0 / denom if denom > 0 else 0.0
+    result = cp.asarray(arr)
+    _gpu_lookup_cache[key] = result
+    return result
+
+
+@lru_cache(maxsize=128)
 def _tajimas_d_variance_coeffs(n):
     """Compute Tajima (1989) variance coefficients e1, e2 for sample size n."""
     a1 = sum(1.0 / i for i in range(1, n))
@@ -63,6 +94,36 @@ def _tajimas_d_variance_coeffs(n):
     c2 = b2 - ((n + 2) / (a1 * n)) + (a2 / (a1 ** 2))
     e1 = c1 / a1
     e2 = c2 / (a1 ** 2 + a2)
+    return e1, e2
+
+
+@lru_cache(maxsize=128)
+def _fay_wu_h_variance_coeffs(n):
+    """Compute Fay & Wu's H variance coefficients (Zeng et al. 2006)."""
+    a_n = sum(1.0 / i for i in range(1, n))
+    b_n = sum(1.0 / (i * i) for i in range(1, n))
+    n_f = float(n)
+    n2, n3 = n_f * n_f, n_f * n_f * n_f
+    e1 = (n_f - 2) / (6 * (n_f - 1))
+    e2_num = (18 * n2 * (3 * n_f + 2) * b_n
+              - (88 * n3 + 9 * n2 - 13 * n_f + 6))
+    e2_den = 9 * n_f * (n2 - n_f) * a_n + 9 * n_f * (n2 - n_f) * b_n
+    e2 = e2_num / e2_den if e2_den != 0 else 0.0
+    return e1, e2
+
+
+@lru_cache(maxsize=128)
+def _zeng_e_variance_coeffs(n):
+    """Compute Zeng's E variance coefficients (Zeng et al. 2006)."""
+    a_n = sum(1.0 / i for i in range(1, n))
+    b_n = sum(1.0 / (i * i) for i in range(1, n))
+    n_f = float(n)
+    e1 = (n_f / (2 * (n_f - 1)) - 1.0 / a_n)
+    e2_num = (b_n / (a_n * a_n)
+              + 2 * (n_f / (n_f - 1)) ** 2 * b_n
+              - 2 * (n_f * b_n - n_f + 1) / ((n_f - 1) * a_n)
+              - (3 * n_f + 1) / (n_f - 1))
+    e2 = e2_num / (a_n * a_n + b_n)
     return e1, e2
 
 
@@ -116,25 +177,12 @@ def _site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=None):
         is_edge = (dac == 1) | (dac == n_valid - 1)
         return cp.where(seg & is_edge, a1_inv[n_valid], 0.0)
     elif name == 'minus_eta1':
-        # All segregating except singletons
         not_sing = dac >= 2
-        # Normalizer: 1/(a1 - 1)
-        import numpy as _np
-        a1_minus1 = _np.zeros(n_hap + 1, dtype=_np.float64)
-        for ni in range(3, n_hap + 1):
-            a1 = _np.sum(1.0 / _np.arange(1, ni, dtype=_np.float64))
-            a1_minus1[ni] = 1.0 / (a1 - 1.0) if a1 > 1.0 else 0.0
-        a1m1_gpu = cp.asarray(a1_minus1)
+        a1m1_gpu = _get_minus_eta1_norm(n_hap)
         return cp.where(seg & not_sing, a1m1_gpu[n_valid], 0.0)
     elif name == 'minus_eta1_star':
-        # All segregating except singletons and (n-1)-tons
         interior = (dac >= 2) & (dac <= n_valid - 2)
-        import numpy as _np
-        norm = _np.zeros(n_hap + 1, dtype=_np.float64)
-        for ni in range(4, n_hap + 1):
-            a1 = _np.sum(1.0 / _np.arange(1, ni, dtype=_np.float64))
-            norm[ni] = 1.0 / (a1 - 1.0 - 1.0 / (ni - 1)) if (a1 - 1.0 - 1.0 / (ni - 1)) > 0 else 0.0
-        norm_gpu = cp.asarray(norm)
+        norm_gpu = _get_minus_eta1_star_norm(n_hap)
         return cp.where(seg & interior, norm_gpu[n_valid], 0.0)
     else:
         raise ValueError(f"Unknown estimator: {name}. Use FrequencySpectrum "
@@ -1339,18 +1387,7 @@ def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
 
     H = result['thetas']['pi'] - result['thetas']['theta_h']
 
-    # Variance of H under neutrality (Zeng et al. 2006, below eq 11)
-    a_n = sum(1.0 / i for i in range(1, n))
-    b_n = sum(1.0 / (i * i) for i in range(1, n))
-    n_f = float(n)
-    n2, n3 = n_f * n_f, n_f * n_f * n_f
-
-    e1 = (n_f - 2) / (6 * (n_f - 1))
-    e2_num = (18 * n2 * (3 * n_f + 2) * b_n
-              - (88 * n3 + 9 * n2 - 13 * n_f + 6))
-    e2_den = 9 * n_f * (n2 - n_f) * a_n + 9 * n_f * (n2 - n_f) * b_n
-    e2 = e2_num / e2_den if e2_den != 0 else 0.0
-
+    e1, e2 = _fay_wu_h_variance_coeffs(n)
     var_H = e1 * S + e2 * S * (S - 1)
     if var_H <= 0:
         return 0.0
@@ -1392,19 +1429,9 @@ def zeng_e(haplotype_matrix: HaplotypeMatrix,
     tw = result['thetas']['watterson']
     E = tl - tw
 
-    # Variance of E under neutrality (Zeng et al. 2006, eq 14)
     a_n = sum(1.0 / i for i in range(1, n))
-    b_n = sum(1.0 / (i * i) for i in range(1, n))
     theta = S / a_n
-    n_f = float(n)
-
-    e1 = (n_f / (2 * (n_f - 1)) - 1.0 / a_n)
-    e2_num = (b_n / (a_n * a_n)
-              + 2 * (n_f / (n_f - 1)) ** 2 * b_n
-              - 2 * (n_f * b_n - n_f + 1) / ((n_f - 1) * a_n)
-              - (3 * n_f + 1) / (n_f - 1))
-    e2 = e2_num / (a_n * a_n + b_n)
-
+    e1, e2 = _zeng_e_variance_coeffs(n)
     var_E = e1 * theta + e2 * theta * theta
     if var_E <= 0:
         return 0.0
