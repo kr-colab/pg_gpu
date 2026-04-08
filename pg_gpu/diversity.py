@@ -51,19 +51,120 @@ def _get_a1_inv(n_max):
     return result
 
 
+def _tajimas_d_variance_coeffs(n):
+    """Compute Tajima (1989) variance coefficients e1, e2 for sample size n."""
+    a1 = sum(1.0 / i for i in range(1, n))
+    a2 = sum(1.0 / (i ** 2) for i in range(1, n))
+    b1 = (n + 1) / (3 * (n - 1))
+    b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
+    c1 = b1 - (1 / a1)
+    c2 = b2 - ((n + 2) / (a1 * n)) + (a2 / (a1 ** 2))
+    e1 = c1 / a1
+    e2 = c2 / (a1 ** 2 + a2)
+    return e1, e2
+
+
+def _site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=None):
+    """Compute per-site contribution for a theta estimator on GPU.
+
+    This is the single source of truth for what each estimator computes.
+    Both scalar (_compute_thetas) and windowed (_windowed_thetas_scatter)
+    paths call this function.
+
+    Parameters
+    ----------
+    name : str
+        Estimator name.
+    d, n_safe : cupy.ndarray, float64
+        Derived allele count (float) and safe sample size per site.
+    seg : cupy.ndarray, bool
+        Segregating site mask.
+    n_valid : cupy.ndarray, int64
+        Per-site valid sample count (for watterson lookup).
+    n_hap : int
+        Total haplotype count (for harmonic number lookup).
+    dac : cupy.ndarray, int64, optional
+        Integer derived allele count (for exact comparisons like == 1).
+        If None, uses d cast to int64.
+
+    Returns
+    -------
+    cupy.ndarray, float64, shape (n_variants,)
+        Per-site contribution (zero for non-segregating sites).
+    """
+    if dac is None:
+        dac = d.astype(cp.int64)
+
+    if name in ('pi', 'theta_pi'):
+        return cp.where(seg, 2 * d * (n_safe - d) / (n_safe * (n_safe - 1)), 0.0)
+    elif name in ('watterson', 'theta_s'):
+        a1_inv = _get_a1_inv(n_hap)
+        return cp.where(seg, a1_inv[n_valid], 0.0)
+    elif name == 'theta_h':
+        return cp.where(seg, 2 * d * d / (n_safe * (n_safe - 1)), 0.0)
+    elif name == 'theta_l':
+        return cp.where(seg, d / (n_safe - 1), 0.0)
+    elif name == 'eta1':
+        # Singletons only: dac == 1
+        a1_inv = _get_a1_inv(n_hap)
+        return cp.where(seg & (dac == 1), a1_inv[n_valid], 0.0)
+    elif name == 'eta1_star':
+        # Singletons + (n-1)-tons
+        a1_inv = _get_a1_inv(n_hap)
+        is_edge = (dac == 1) | (dac == n_valid - 1)
+        return cp.where(seg & is_edge, a1_inv[n_valid], 0.0)
+    elif name == 'minus_eta1':
+        # All segregating except singletons
+        not_sing = dac >= 2
+        # Normalizer: 1/(a1 - 1)
+        import numpy as _np
+        a1_minus1 = _np.zeros(n_hap + 1, dtype=_np.float64)
+        for ni in range(3, n_hap + 1):
+            a1 = _np.sum(1.0 / _np.arange(1, ni, dtype=_np.float64))
+            a1_minus1[ni] = 1.0 / (a1 - 1.0) if a1 > 1.0 else 0.0
+        a1m1_gpu = cp.asarray(a1_minus1)
+        return cp.where(seg & not_sing, a1m1_gpu[n_valid], 0.0)
+    elif name == 'minus_eta1_star':
+        # All segregating except singletons and (n-1)-tons
+        interior = (dac >= 2) & (dac <= n_valid - 2)
+        import numpy as _np
+        norm = _np.zeros(n_hap + 1, dtype=_np.float64)
+        for ni in range(4, n_hap + 1):
+            a1 = _np.sum(1.0 / _np.arange(1, ni, dtype=_np.float64))
+            norm[ni] = 1.0 / (a1 - 1.0 - 1.0 / (ni - 1)) if (a1 - 1.0 - 1.0 / (ni - 1)) > 0 else 0.0
+        norm_gpu = cp.asarray(norm)
+        return cp.where(seg & interior, norm_gpu[n_valid], 0.0)
+    else:
+        raise ValueError(f"Unknown estimator: {name}. Use FrequencySpectrum "
+                         f"for custom weight functions.")
+
+
+def _prepare_dac(matrix):
+    """Compute dac, n_valid, and derived quantities on GPU.
+
+    Returns (dac, n_valid, d, n_safe, seg, n_hap) — the shared
+    intermediate arrays used by all theta estimator paths.
+    """
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    from ._memutil import dac_and_n
+    dac, n_valid = dac_and_n(matrix.haplotypes)
+    n = n_valid.astype(cp.float64)
+    d = dac.astype(cp.float64)
+    seg = (dac > 0) & (dac < n_valid) & (n_valid >= 2)
+    n_safe = cp.maximum(n, 2.0)
+    return dac, n_valid, d, n_safe, seg, matrix.num_haplotypes
+
+
 def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')):
     """Compute multiple theta estimators via direct vectorized GPU arithmetic.
-
-    Single-pass computation: reads dac and n_valid once, evaluates
-    all weight functions as closed-form expressions on GPU arrays.
-    O(m) per estimator, O(n) memory for harmonic number lookup.
 
     Parameters
     ----------
     matrix : HaplotypeMatrix
         Population-subsetted, on GPU.
     estimators : tuple of str
-        Estimator names: 'pi', 'watterson', 'theta_h', 'theta_l'.
+        Estimator names.
 
     Returns
     -------
@@ -72,31 +173,11 @@ def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')
         'S': int, number of segregating sites
         'n_harmonic_mean': int, harmonic mean of per-site sample sizes
     """
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    from ._memutil import dac_and_n
-    dac, n_valid = dac_and_n(matrix.haplotypes)
-
-    n = n_valid.astype(cp.float64)
-    d = dac.astype(cp.float64)
-    seg = (dac > 0) & (dac < n_valid) & (n_valid >= 2)
-    n_safe = cp.maximum(n, 2.0)  # avoid division by zero
+    dac, n_valid, d, n_safe, seg, n_hap = _prepare_dac(matrix)
 
     thetas = {}
     for name in estimators:
-        if name in ('pi', 'theta_pi'):
-            val = cp.sum(cp.where(seg, 2 * d * (n - d) / (n_safe * (n_safe - 1)), 0.0))
-        elif name in ('watterson', 'theta_s'):
-            a1_inv = _get_a1_inv(matrix.num_haplotypes)
-            val = cp.sum(cp.where(seg, a1_inv[n_valid], 0.0))
-        elif name == 'theta_h':
-            val = cp.sum(cp.where(seg, 2 * d * d / (n_safe * (n_safe - 1)), 0.0))
-        elif name == 'theta_l':
-            val = cp.sum(cp.where(seg, d / (n_safe - 1), 0.0))
-        else:
-            raise ValueError(f"Unknown estimator: {name}. Use FrequencySpectrum "
-                             f"for custom weight functions.")
+        val = cp.sum(_site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=dac))
         thetas[name] = float(val.get())
 
     S = int(cp.sum(seg).get())
@@ -301,15 +382,7 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
     if S == 0 or n < 2:
         return float("nan")
 
-    # Tajima (1989) variance
-    a1 = sum(1.0 / i for i in range(1, n))
-    a2 = sum(1.0 / (i ** 2) for i in range(1, n))
-    b1 = (n + 1) / (3 * (n - 1))
-    b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
-    c1 = b1 - (1 / a1)
-    c2 = b2 - ((n + 2) / (a1 * n)) + (a2 / (a1 ** 2))
-    e1 = c1 / a1
-    e2 = c2 / (a1 ** 2 + a2)
+    e1, e2 = _tajimas_d_variance_coeffs(n)
     V = np.sqrt(e1 * S + e2 * S * (S - 1))
 
     if V == 0:
