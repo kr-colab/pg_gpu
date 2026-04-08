@@ -96,6 +96,34 @@ Every public function accepts the ``missing_data`` parameter:
      - group by n
      - filter sites
 
+Multiallelic Sites
+------------------
+
+pg_gpu encodes haplotype alleles as integers: ``0`` = reference,
+``1`` = first alternate, ``2`` = second alternate, etc. Missing data
+is ``-1``.
+
+For derived allele counting (used by all SFS-based statistics),
+any non-reference allele is treated as derived: allele values
+1, 2, 3, etc. all contribute 1 to the derived allele count. This
+is the standard "reference vs any alternate" folding used by most
+population genetics tools.
+
+This means multiallelic VCF sites are handled correctly without
+filtering — a site with REF=A, ALT=T,C where some samples carry
+the C allele will count all non-reference haplotypes as derived.
+
+If you need strictly biallelic data (e.g., for LD statistics or
+compatibility with other tools), use ``apply_biallelic_filter()``:
+
+.. code-block:: python
+
+   h = h.apply_biallelic_filter()  # keeps only 0/1 sites
+
+This is available on both ``HaplotypeMatrix`` and ``GenotypeMatrix``.
+Note that ``GenotypeMatrix.from_vcf()`` applies this filter
+automatically during loading.
+
 LD Estimator Choice
 -------------------
 
