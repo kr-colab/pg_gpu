@@ -83,29 +83,31 @@ def _get_minus_eta1_star_norm(n_max):
     return result
 
 
-@lru_cache(maxsize=128)
-def _achaz_variance_coefficients(w1_name, w2_name, n):
-    """Compute Achaz (2009) Eq. 9 variance coefficients (alpha_n, beta_n).
+def _achaz_alpha_beta(v1, v2, n):
+    """Compute Achaz (2009) Eq. 9 alpha_n, beta_n from two per-xi weight vectors.
 
-    Given two weight vector names, computes the coefficients for the
-    neutrality test variance: Var(T) = alpha_n * theta + beta_n * theta^2.
-    Uses the Fu (1995) covariance matrix sigma_ij.
-
-    This is the single source of truth for all neutrality test variances.
+    Our weight functions return per-xi weights w[i]. Achaz's v-vectors are
+    per-u_hat weights where u_hat_i = i * xi_i. The conversion is
+    v_i/sum(v_j) = w[i]/i, giving V_i = w1[i]/i - w2[i]/i.
     """
-    w1_fn = WEIGHT_REGISTRY[w1_name]
-    w2_fn = WEIGHT_REGISTRY[w2_name]
-    v1, v2 = w1_fn(n), w2_fn(n)
-    # Achaz Eq. 9: V_i = v1_i/sum(v1) - v2_i/sum(v2) where v are per-u_hat
-    # weights. Our weight functions return per-xi weights w[i], related by
-    # w[i] = v_i * i / sum(v_j). So v_i/sum(v_j) = w[i]/i.
-    V = np.array([(v1[i] / i - v2[i] / i) for i in range(1, n)])
     k = np.arange(1, n, dtype=np.float64)
+    V = (v1[1:n] - v2[1:n]) / k
     alpha_n = float(np.sum(k * V ** 2))
     sigma = compute_sigma_ij(n)
     beta_n = float(np.sum(
         k[:, None] * k[None, :] * V[:, None] * V[None, :] * sigma))
     return alpha_n, beta_n
+
+
+@lru_cache(maxsize=128)
+def _achaz_variance_coefficients(w1_name, w2_name, n):
+    """Cached Achaz (2009) Eq. 9 variance coefficients for named weight pairs.
+
+    This is the single source of truth for all neutrality test variances.
+    """
+    v1 = WEIGHT_REGISTRY[w1_name](n)
+    v2 = WEIGHT_REGISTRY[w2_name](n)
+    return _achaz_alpha_beta(v1, v2, n)
 
 
 def _site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=None):
@@ -548,16 +550,9 @@ class FrequencySpectrum:
         if w1_name and w2_name:
             alpha_n, beta_n = _achaz_variance_coefficients(w1_name, w2_name, n_eff)
         else:
-            # Custom weight functions: compute V-vector directly
             w1_fn = WEIGHT_REGISTRY[w1] if isinstance(w1, str) else w1
             w2_fn = WEIGHT_REGISTRY[w2] if isinstance(w2, str) else w2
-            v1, v2 = w1_fn(n_eff), w2_fn(n_eff)
-            V = np.array([(v1[i] / i - v2[i] / i) for i in range(1, n_eff)])
-            k = np.arange(1, n_eff, dtype=np.float64)
-            alpha_n = float(np.sum(k * V ** 2))
-            sigma = compute_sigma_ij(n_eff)
-            beta_n = float(np.sum(
-                k[:, None] * k[None, :] * V[:, None] * V[None, :] * sigma))
+            alpha_n, beta_n = _achaz_alpha_beta(w1_fn(n_eff), w2_fn(n_eff), n_eff)
 
         a1 = np.sum(1.0 / np.arange(1, n_eff))
         a2 = np.sum(1.0 / np.arange(1, n_eff) ** 2)
