@@ -294,7 +294,7 @@ def compute_sigma_ij(n):
     """Compute the Fu (1995) covariance matrix sigma_ij for sample size n.
 
     sigma_ij = Cov[xi_i, xi_j] / theta^2 for the unfolded SFS under the
-    standard neutral model.
+    standard neutral model. GPU-accelerated via CuPy for the O(n^2) broadcast.
 
     Parameters
     ----------
@@ -306,45 +306,54 @@ def compute_sigma_ij(n):
     sigma : ndarray, float64, shape (n-1, n-1)
     """
     H = _harmonic_sums(n)
-    sigma = np.zeros((n - 1, n - 1))
+    an = H[n - 1]
 
-    def beta(i, nn):
-        ai = H[i - 1]
-        an = H[nn - 1]
-        return 2.0 * nn / ((nn - i + 1) * (nn - i)) * (an + 1.0 / nn - ai) - 2.0 / (nn - i)
+    # beta(i, n) for i = 1..n-1 (CPU, 1D — tiny)
+    idx_b = np.arange(1, n, dtype=np.float64)
+    a_b = H[idx_b.astype(int) - 1]
+    beta_arr = (2.0 * n / ((n - idx_b + 1) * (n - idx_b))
+                * (an + 1.0 / n - a_b)
+                - 2.0 / (n - idx_b))
+    beta_full = np.zeros(n + 1)
+    beta_full[1:n] = beta_arr
 
-    def sigma_ii(i, nn):
-        if 2 * i < nn:
-            return beta(i + 1, nn)
-        elif 2 * i == nn:
-            ai = H[i - 1]
-            an = H[nn - 1]
-            return 2.0 * (an - ai) / (nn - i) - 1.0 / (i * i)
-        else:
-            return beta(i, nn) - 1.0 / (i * i)
+    # Move lookup arrays to GPU for the O(n^2) broadcast
+    beta_gpu = cp.asarray(beta_full)
+    H_gpu = cp.asarray(H)
 
-    def sigma_ij_val(i, j, nn):
-        if i == j:
-            return sigma_ii(i, nn)
-        if i < j:
-            i, j = j, i
-        if i + j < nn:
-            return (beta(i + 1, nn) - beta(i, nn)) / 2.0
-        elif i + j == nn:
-            ai = H[i - 1]
-            aj = H[j - 1]
-            an = H[nn - 1]
-            return ((an - ai) / (nn - i) + (an - aj) / (nn - j)
-                    - (beta(i, nn) + beta(j + 1, nn)) / 2.0
-                    - 1.0 / (i * j))
-        else:
-            return (beta(j, nn) - beta(j + 1, nn)) / 2.0 - 1.0 / (i * j)
+    idx = cp.arange(1, n, dtype=cp.float64)
+    ii = idx[:, None]
+    jj = idx[None, :]
+    i_hi = cp.maximum(ii, jj)
+    j_lo = cp.minimum(ii, jj)
+    s = i_hi + j_lo
 
-    for i in range(1, n):
-        for j in range(1, n):
-            sigma[i - 1, j - 1] = sigma_ij_val(i, j, n)
+    i_hi_int = i_hi.astype(cp.int64)
+    j_lo_int = j_lo.astype(cp.int64)
 
-    return sigma
+    case_lt = (beta_gpu[i_hi_int + 1] - beta_gpu[i_hi_int]) / 2.0
+    ai_hi = H_gpu[i_hi_int - 1]
+    aj_lo = H_gpu[j_lo_int - 1]
+    case_eq = ((an - ai_hi) / (n - i_hi) + (an - aj_lo) / (n - j_lo)
+               - (beta_gpu[i_hi_int] + beta_gpu[j_lo_int + 1]) / 2.0
+               - 1.0 / (i_hi * j_lo))
+    case_gt = ((beta_gpu[j_lo_int] - beta_gpu[j_lo_int + 1]) / 2.0
+               - 1.0 / (i_hi * j_lo))
+
+    sigma = cp.where(s < n, case_lt, cp.where(s == n, case_eq, case_gt))
+
+    # Diagonal
+    i_d = idx
+    i_d_int = i_d.astype(cp.int64)
+    diag_vals = cp.where(
+        2 * i_d < n, beta_gpu[i_d_int + 1],
+        cp.where(2 * i_d == n,
+                 2.0 * (an - H_gpu[i_d_int - 1]) / (n - i_d) - 1.0 / (i_d * i_d),
+                 beta_gpu[i_d_int] - 1.0 / (i_d * i_d)))
+    d_idx = cp.arange(n - 1)
+    sigma[d_idx, d_idx] = diag_vals
+
+    return sigma.get()
 
 
 @lru_cache(maxsize=128)
