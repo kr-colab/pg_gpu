@@ -84,47 +84,28 @@ def _get_minus_eta1_star_norm(n_max):
 
 
 @lru_cache(maxsize=128)
-def _tajimas_d_variance_coeffs(n):
-    """Compute Tajima (1989) variance coefficients e1, e2 for sample size n."""
-    a1 = sum(1.0 / i for i in range(1, n))
-    a2 = sum(1.0 / (i ** 2) for i in range(1, n))
-    b1 = (n + 1) / (3 * (n - 1))
-    b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
-    c1 = b1 - (1 / a1)
-    c2 = b2 - ((n + 2) / (a1 * n)) + (a2 / (a1 ** 2))
-    e1 = c1 / a1
-    e2 = c2 / (a1 ** 2 + a2)
-    return e1, e2
+def _achaz_variance_coefficients(w1_name, w2_name, n):
+    """Compute Achaz (2009) Eq. 9 variance coefficients (alpha_n, beta_n).
 
+    Given two weight vector names, computes the coefficients for the
+    neutrality test variance: Var(T) = alpha_n * theta + beta_n * theta^2.
+    Uses the Fu (1995) covariance matrix sigma_ij.
 
-@lru_cache(maxsize=128)
-def _fay_wu_h_variance_coeffs(n):
-    """Compute Fay & Wu's H variance coefficients (Zeng et al. 2006)."""
-    a_n = sum(1.0 / i for i in range(1, n))
-    b_n = sum(1.0 / (i * i) for i in range(1, n))
-    n_f = float(n)
-    n2, n3 = n_f * n_f, n_f * n_f * n_f
-    e1 = (n_f - 2) / (6 * (n_f - 1))
-    e2_num = (18 * n2 * (3 * n_f + 2) * b_n
-              - (88 * n3 + 9 * n2 - 13 * n_f + 6))
-    e2_den = 9 * n_f * (n2 - n_f) * a_n + 9 * n_f * (n2 - n_f) * b_n
-    e2 = e2_num / e2_den if e2_den != 0 else 0.0
-    return e1, e2
-
-
-@lru_cache(maxsize=128)
-def _zeng_e_variance_coeffs(n):
-    """Compute Zeng's E variance coefficients (Zeng et al. 2006)."""
-    a_n = sum(1.0 / i for i in range(1, n))
-    b_n = sum(1.0 / (i * i) for i in range(1, n))
-    n_f = float(n)
-    e1 = (n_f / (2 * (n_f - 1)) - 1.0 / a_n)
-    e2_num = (b_n / (a_n * a_n)
-              + 2 * (n_f / (n_f - 1)) ** 2 * b_n
-              - 2 * (n_f * b_n - n_f + 1) / ((n_f - 1) * a_n)
-              - (3 * n_f + 1) / (n_f - 1))
-    e2 = e2_num / (a_n * a_n + b_n)
-    return e1, e2
+    This is the single source of truth for all neutrality test variances.
+    """
+    w1_fn = WEIGHT_REGISTRY[w1_name]
+    w2_fn = WEIGHT_REGISTRY[w2_name]
+    v1, v2 = w1_fn(n), w2_fn(n)
+    # Achaz Eq. 9: V_i = v1_i/sum(v1) - v2_i/sum(v2) where v are per-u_hat
+    # weights. Our weight functions return per-xi weights w[i], related by
+    # w[i] = v_i * i / sum(v_j). So v_i/sum(v_j) = w[i]/i.
+    V = np.array([(v1[i] / i - v2[i] / i) for i in range(1, n)])
+    k = np.arange(1, n, dtype=np.float64)
+    alpha_n = float(np.sum(k * V ** 2))
+    sigma = compute_sigma_ij(n)
+    beta_n = float(np.sum(
+        k[:, None] * k[None, :] * V[:, None] * V[None, :] * sigma))
+    return alpha_n, beta_n
 
 
 def _site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=None):
@@ -240,6 +221,39 @@ def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')
         n_harm = 0
 
     return {'thetas': thetas, 'S': S, 'n_harmonic_mean': n_harm}
+
+
+def _compute_neutrality_test(matrix, w1_name, w2_name):
+    """Compute a neutrality test statistic using the Achaz (2009) framework.
+
+    T = (theta_w1 - theta_w2) / sqrt(alpha_n * theta_est + beta_n * theta_sq_est)
+
+    Parameters
+    ----------
+    matrix : HaplotypeMatrix
+        Population-subsetted, on GPU.
+    w1_name, w2_name : str
+        Weight vector names from WEIGHT_REGISTRY.
+
+    Returns
+    -------
+    float
+    """
+    result = _compute_thetas(matrix, (w1_name, w2_name))
+    S = result['S']
+    n = result['n_harmonic_mean']
+    if S < 3 or n < 3:
+        return float('nan')
+    alpha_n, beta_n = _achaz_variance_coefficients(w1_name, w2_name, n)
+    a1 = np.sum(1.0 / np.arange(1, n))
+    a2 = np.sum(1.0 / np.arange(1, n) ** 2)
+    theta_est = S / a1
+    theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
+    var = alpha_n * theta_est + beta_n * theta_sq_est
+    if var <= 0:
+        return float('nan')
+    num = result['thetas'][w1_name] - result['thetas'][w2_name]
+    return float(num / np.sqrt(var))
 
 
 def _prepare_matrix(haplotype_matrix, population=None, missing_data='include'):
@@ -521,26 +535,30 @@ class FrequencySpectrum:
         theta2 = self.theta(w2)
         numerator = theta1 - theta2
 
+        S = self.n_segregating
+        if S < 3:
+            return float('nan')
+
         n_eff = max(self.sfs_by_n.keys(),
                     key=lambda n: np.sum(self.sfs_by_n[n]))
 
-        w1_fn = WEIGHT_REGISTRY[w1] if isinstance(w1, str) else w1
-        w2_fn = WEIGHT_REGISTRY[w2] if isinstance(w2, str) else w2
-        v1, v2 = w1_fn(n_eff), w2_fn(n_eff)
+        w1_name = w1 if isinstance(w1, str) else None
+        w2_name = w2 if isinstance(w2, str) else None
 
-        s1, s2 = np.sum(v1[1:n_eff]), np.sum(v2[1:n_eff])
-        if s1 == 0 or s2 == 0:
-            return float('nan')
+        if w1_name and w2_name:
+            alpha_n, beta_n = _achaz_variance_coefficients(w1_name, w2_name, n_eff)
+        else:
+            # Custom weight functions: compute V-vector directly
+            w1_fn = WEIGHT_REGISTRY[w1] if isinstance(w1, str) else w1
+            w2_fn = WEIGHT_REGISTRY[w2] if isinstance(w2, str) else w2
+            v1, v2 = w1_fn(n_eff), w2_fn(n_eff)
+            V = np.array([(v1[i] / i - v2[i] / i) for i in range(1, n_eff)])
+            k = np.arange(1, n_eff, dtype=np.float64)
+            alpha_n = float(np.sum(k * V ** 2))
+            sigma = compute_sigma_ij(n_eff)
+            beta_n = float(np.sum(
+                k[:, None] * k[None, :] * V[:, None] * V[None, :] * sigma))
 
-        Omega = np.array([v1[i]/s1 - v2[i]/s2 for i in range(1, n_eff)])
-        k = np.arange(1, n_eff, dtype=np.float64)
-        alpha_n = np.sum(k * Omega ** 2)
-
-        sigma = compute_sigma_ij(n_eff)
-        beta_n = float(np.sum(
-            k[:, None] * k[None, :] * Omega[:, None] * Omega[None, :] * sigma))
-
-        S = self.n_segregating
         a1 = np.sum(1.0 / np.arange(1, n_eff))
         a2 = np.sum(1.0 / np.arange(1, n_eff) ** 2)
         theta_est = S / a1
@@ -596,43 +614,18 @@ class FrequencySpectrum:
                              'eta1', 'eta1_star', 'minus_eta1', 'minus_eta1_star']}
 
     def tajimas_d(self):
-        """Tajima's D using classical (1989) variance."""
-        pi = self.theta('pi')
-        S = float(self.n_segregating)
-        if S < 3:
-            return float('nan')
-        n = max(self.sfs_by_n.keys(),
-                key=lambda ni: np.sum(self.sfs_by_n[ni]))
-        e1, e2 = _tajimas_d_variance_coeffs(n)
-        a1 = np.sum(1.0 / np.arange(1, n))
-        tw = S / a1
-        d_var = e1 * S + e2 * S * (S - 1)
-        if d_var <= 0:
-            return float('nan')
-        return (pi - tw) / np.sqrt(d_var)
+        """Tajima's D via Achaz (2009) general variance framework."""
+        return self.neutrality_test('pi', 'watterson')
 
     def fay_wu_h(self, normalized=False):
-        """Fay & Wu's H = pi - theta_H. Optionally normalized."""
+        """Fay & Wu's H = pi - theta_H. Optionally normalized (H*)."""
         h = self.theta('pi') - self.theta('theta_h')
         if not normalized:
             return h
-        n = max(self.sfs_by_n.keys(),
-                key=lambda ni: np.sum(self.sfs_by_n[ni]))
-        S = float(self.n_segregating)
-        a1 = np.sum(1.0 / np.arange(1, n))
-        a2 = np.sum(1.0 / np.arange(1, n) ** 2)
-        theta_est = S / a1
-        theta_sq = S * (S - 1) / (a1 ** 2 + a2)
-        tn = theta_est * (n - 2) / (6 * (n - 1))
-        tn2 = theta_sq * (18 * n**2 * (3*n+2) * a2
-                          - (88*n**3 + 9*n**2 - 13*n + 6)) / (9*n*(n-1)**2)
-        var_h = tn + tn2
-        if var_h <= 0:
-            return float('nan')
-        return h / np.sqrt(var_h)
+        return self.neutrality_test('pi', 'theta_h')
 
     def zeng_e(self):
-        """Zeng's E via Achaz general variance framework."""
+        """Zeng's E via Achaz (2009) general variance framework."""
         return self.neutrality_test('theta_l', 'watterson')
 
     def all_tests(self):
@@ -816,22 +809,7 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
     if matrix.num_variants == 0:
         return float("nan")
-
-    result = _compute_thetas(matrix, ('pi', 'watterson'))
-    pi_val = result['thetas']['pi']
-    tw_val = result['thetas']['watterson']
-    S = result['S']
-    n = result['n_harmonic_mean']
-
-    if S == 0 or n < 2:
-        return float("nan")
-
-    e1, e2 = _tajimas_d_variance_coeffs(n)
-    V = np.sqrt(e1 * S + e2 * S * (S - 1))
-
-    if V == 0:
-        return float("nan")
-    return float((pi_val - tw_val) / V)
+    return _compute_neutrality_test(matrix, 'pi', 'watterson')
 
 
 def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
@@ -1377,21 +1355,7 @@ def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
     if matrix.num_variants == 0:
         return float("nan")
-
-    result = _compute_thetas(matrix, ('pi', 'theta_h'))
-    S = result['S']
-    n = result['n_harmonic_mean']
-
-    if S < 2 or n < 2:
-        return 0.0
-
-    H = result['thetas']['pi'] - result['thetas']['theta_h']
-
-    e1, e2 = _fay_wu_h_variance_coeffs(n)
-    var_H = e1 * S + e2 * S * (S - 1)
-    if var_H <= 0:
-        return 0.0
-    return float(H / (var_H ** 0.5))
+    return _compute_neutrality_test(matrix, 'pi', 'theta_h')
 
 
 def zeng_e(haplotype_matrix: HaplotypeMatrix,
@@ -1416,26 +1380,8 @@ def zeng_e(haplotype_matrix: HaplotypeMatrix,
     """
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
     if matrix.num_variants == 0:
-        return 0.0
-
-    result = _compute_thetas(matrix, ('theta_l', 'watterson'))
-    S = result['S']
-    n = result['n_harmonic_mean']
-
-    if S < 2 or n < 2:
-        return 0.0
-
-    tl = result['thetas']['theta_l']
-    tw = result['thetas']['watterson']
-    E = tl - tw
-
-    a_n = sum(1.0 / i for i in range(1, n))
-    theta = S / a_n
-    e1, e2 = _zeng_e_variance_coeffs(n)
-    var_E = e1 * theta + e2 * theta * theta
-    if var_E <= 0:
-        return 0.0
-    return float(E / (var_E ** 0.5))
+        return float('nan')
+    return _compute_neutrality_test(matrix, 'theta_l', 'watterson')
 
 
 def zeng_dh(haplotype_matrix: HaplotypeMatrix,

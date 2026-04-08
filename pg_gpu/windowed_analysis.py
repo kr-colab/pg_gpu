@@ -755,40 +755,37 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     if 'fay_wu_h' in stats_set:
         results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get() / spans
 
-    # Neutrality tests
+    # Neutrality tests — unified Achaz (2009) variance framework
     need_variance = stats_set & {'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}
     if need_variance:
-        from .diversity import _tajimas_d_variance_coeffs
+        from .diversity import _achaz_variance_coefficients
         S = seg_count.get()
+        a1 = sum(1.0 / i for i in range(1, n_hap))
+        a2 = sum(1.0 / (i ** 2) for i in range(1, n_hap))
+        theta_est = S / a1
+        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
+
+        def windowed_test(w1, w2, numerator_arr):
+            alpha, beta = _achaz_variance_coefficients(w1, w2, n_hap)
+            var = alpha * theta_est + beta * theta_sq_est
+            with np.errstate(invalid='ignore', divide='ignore'):
+                return np.where((var > 0) & (S >= 3),
+                                numerator_arr / np.sqrt(var), np.nan)
 
     if stats_set & {'tajimas_d', 'zeng_dh'}:
-        pi_np = raw['pi'].get()
-        tw_np = raw['watterson'].get()
-        e1, e2 = _tajimas_d_variance_coeffs(n_hap)
-        V = np.sqrt(np.maximum(e1*S + e2*S*(S-1), 0))
-        with np.errstate(invalid='ignore', divide='ignore'):
-            tajd = np.where((V > 0) & (S >= 3), (pi_np - tw_np) / V, np.nan)
+        tajd = windowed_test('pi', 'watterson',
+                             raw['pi'].get() - raw['watterson'].get())
         if 'tajimas_d' in stats_set:
             results['tajimas_d'] = tajd
 
     if 'normalized_fay_wu_h' in stats_set:
-        from .diversity import _fay_wu_h_variance_coeffs
-        H = raw['pi'].get() - raw['theta_h'].get()
-        e1_h, e2_h = _fay_wu_h_variance_coeffs(n_hap)
-        var_H = e1_h * S + e2_h * S * (S - 1)
-        with np.errstate(invalid='ignore', divide='ignore'):
-            results['normalized_fay_wu_h'] = np.where(
-                var_H > 0, H / np.sqrt(var_H), 0.0)
+        results['normalized_fay_wu_h'] = windowed_test(
+            'pi', 'theta_h', raw['pi'].get() - raw['theta_h'].get())
 
     if 'zeng_e' in stats_set:
-        from .diversity import _zeng_e_variance_coeffs
-        E = raw['theta_l'].get() - raw['watterson'].get()
-        a_n = sum(1.0 / i for i in range(1, n_hap))
-        theta_s = S / a_n
-        e1_e, e2_e = _zeng_e_variance_coeffs(n_hap)
-        var_E = e1_e * theta_s + e2_e * theta_s * theta_s
-        with np.errstate(invalid='ignore', divide='ignore'):
-            results['zeng_e'] = np.where(var_E > 0, E / np.sqrt(var_E), 0.0)
+        results['zeng_e'] = windowed_test(
+            'theta_l', 'watterson',
+            raw['theta_l'].get() - raw['watterson'].get())
 
     if 'zeng_dh' in stats_set:
         H = (raw['pi'] - raw['theta_h']).get() / spans
