@@ -11,7 +11,7 @@ import numpy as np
 import cupy as cp
 from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
-from ._memutil import chunked_dac_and_n as _pop_dac_and_n
+from ._memutil import dac_and_n as _pop_dac_and_n
 from .diversity import _apply_span_normalize, pi as _diversity_pi
 
 

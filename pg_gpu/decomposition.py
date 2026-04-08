@@ -18,7 +18,7 @@ def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'
     Uses chunked processing for large matrices to avoid OOM.
     Returns the prepared matrix X on GPU.
     """
-    from ._memutil import chunked_dac_and_n, estimate_variant_chunk_size
+    from ._memutil import dac_and_n, estimate_variant_chunk_size
 
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
@@ -32,14 +32,14 @@ def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'
     n_samples, n_var = hap.shape
 
     if missing_data == 'exclude':
-        dac, nv = chunked_dac_and_n(hap)
+        dac, nv = dac_and_n(hap)
         complete = nv == n_samples
         if not cp.all(complete):
             hap = hap[:, complete]
             n_var = hap.shape[1]
 
     # Compute per-site mean and scale from allele counts (memory-safe)
-    dac, nv = chunked_dac_and_n(hap)
+    dac, nv = dac_and_n(hap)
     site_mean = cp.where(nv > 0, dac.astype(cp.float64) / nv.astype(cp.float64), 0.0)
 
     if scaler == 'patterson':
