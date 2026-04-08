@@ -12,7 +12,6 @@ GPU-accelerated population genetics statistics for Python.
    quickstart
    api
    missing_data
-   achaz_framework
    examples
    moments_integration
    changelog
@@ -33,7 +32,7 @@ Key Features
 * **Fused windowed analysis**: compute all statistics across all genomic windows in a single GPU pass -- up to 60x faster than scikit-allel
 * **Automatic missing data handling** across all modules
 * **Multi-population analyses** with flexible population specification
-* **Achaz (2009) generalized framework**: compute all theta estimators and neutrality tests from a single SFS, with custom weight vectors and SFS projection for missing data
+* **8 theta estimators and 4 neutrality tests** (pi, theta_w, theta_h, theta_l, eta1, eta1_star, minus_eta1, minus_eta1_star, Tajima's D, Fay-Wu's H, Zeng's E, DH)
 * **Validated against scikit-allel** -- 29 statistics verified at machine precision using real Ag1000G data
 
 Installation

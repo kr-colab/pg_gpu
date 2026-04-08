@@ -78,10 +78,6 @@ Diversity Statistics
    * - ``diversity_stats``
      - All core diversity statistics in one call
      -
-   * - ``diversity_stats_fast``
-     - All diversity and neutrality statistics from a single SFS
-     - Achaz (2009)
-
 Divergence Statistics
 ---------------------
 
@@ -283,8 +279,12 @@ Admixture and F-Statistics
      - D with block-jackknife standard error
      - Patterson et al. (2012)
 
-Achaz Framework (Generalized Theta Estimation)
------------------------------------------------
+FrequencySpectrum (Power-User SFS Interface)
+---------------------------------------------
+
+The ``FrequencySpectrum`` class provides direct access to SFS-based estimation
+for custom weight functions, SFS projection, and the general Achaz (2009)
+variance framework.
 
 .. list-table::
    :header-rows: 1
@@ -302,14 +302,8 @@ Achaz Framework (Generalized Theta Estimation)
    * - ``FrequencySpectrum.project``
      - SFS projection via hypergeometric sampling
      - Gutenkunst et al. (2009)
-   * - ``FrequencySpectrum.all_thetas``
-     - All 8 standard theta estimators at once
-     - Achaz (2009)
-   * - ``FrequencySpectrum.all_tests``
-     - All 4 standard neutrality tests at once
-     - Achaz (2009)
 
-Built-in weight vectors: ``pi``, ``watterson``, ``theta_h``, ``theta_l``,
+Built-in estimators: ``pi``, ``watterson``, ``theta_h``, ``theta_l``,
 ``eta1``, ``eta1_star``, ``minus_eta1``, ``minus_eta1_star``. Custom weight
 functions are also supported.
 

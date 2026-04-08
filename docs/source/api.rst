@@ -313,8 +313,8 @@ Haplotype Structure
 .. autofunction:: pg_gpu.plotting.plot_haplotype_frequencies
 .. autofunction:: pg_gpu.plotting.plot_variant_locator
 
-Achaz Framework (FrequencySpectrum)
------------------------------------
+FrequencySpectrum (SFS-Based Estimation)
+----------------------------------------
 
 .. autoclass:: pg_gpu.diversity.FrequencySpectrum
    :members:

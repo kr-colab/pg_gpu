@@ -18,7 +18,7 @@ Usage:
 import numpy as np
 import msprime
 from pg_gpu import HaplotypeMatrix
-from pg_gpu.achaz import FrequencySpectrum
+from pg_gpu.diversity import FrequencySpectrum
 
 
 # ── Simulation parameters ───────────────────────────────────────────────
