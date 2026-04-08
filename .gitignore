@@ -23,4 +23,5 @@ simulations/
 commit_message.txt
 *.png
 *.csv
-CLAUDE.mdTODO_performance.md
+CLAUDE.md
+TODO_*.md
