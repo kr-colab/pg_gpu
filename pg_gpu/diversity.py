@@ -124,6 +124,55 @@ def _prepare_matrix(haplotype_matrix, population=None, missing_data='include'):
     return matrix
 
 
+def pi_components(haplotypes, n_total_sites=None, n_haplotypes_full=None):
+    """Compute pairwise differences and comparisons across all sites.
+
+    For advanced use cases (custom windowed aggregation, etc.).
+
+    Parameters
+    ----------
+    haplotypes : cp.ndarray, shape (n_haplotypes, n_variants)
+        Haplotype data with -1 for missing.
+    n_total_sites : int, optional
+        Total callable sites (variant + invariant). If provided, invariant
+        sites contribute 0 diffs and C(n_haplotypes_full, 2) comps each.
+    n_haplotypes_full : int, optional
+        Full sample size (used for invariant site comps).
+
+    Returns
+    -------
+    total_diffs : float
+    total_comps : float
+    total_missing : float
+    n_sites : int
+    """
+    dac, n_valid_i = _dac_and_n(haplotypes)
+    n_valid = n_valid_i.astype(cp.float64)
+    derived = dac.astype(cp.float64)
+    ancestral = n_valid - derived
+
+    site_diffs = derived * ancestral
+    site_comps = n_valid * (n_valid - 1) / 2.0
+
+    usable = n_valid >= 2
+    total_diffs = float(cp.sum(site_diffs[usable]).get())
+    total_comps = float(cp.sum(site_comps[usable]).get())
+    n_sites = int(cp.sum(usable).get())
+
+    if n_total_sites is not None:
+        n_full = n_haplotypes_full or haplotypes.shape[0]
+        n_invariant = n_total_sites - n_sites
+        if n_invariant > 0:
+            total_comps += n_invariant * (n_full * (n_full - 1) / 2.0)
+            n_sites += n_invariant
+
+    n_full = n_haplotypes_full or haplotypes.shape[0]
+    total_possible = (n_full * (n_full - 1) / 2.0) * n_sites
+    total_missing = total_possible - total_comps
+
+    return total_diffs, total_comps, total_missing, n_sites
+
+
 def _dac_and_n(haplotypes):
     """Shared helper: derived allele counts and valid sample counts per site.
 
@@ -141,60 +190,6 @@ def _dac_and_n(haplotypes):
     from ._memutil import dac_and_n
     return dac_and_n(haplotypes)
 
-
-def pi_components(haplotypes, n_total_sites=None, n_haplotypes_full=None):
-    """Compute pairwise differences and comparisons across all sites.
-
-    Parameters
-    ----------
-    haplotypes : cp.ndarray, shape (n_haplotypes, n_variants)
-        Haplotype data with -1 for missing.
-    n_total_sites : int, optional
-        Total callable sites (variant + invariant). If provided, invariant
-        sites contribute 0 diffs and C(n_haplotypes_full, 2) comps each.
-    n_haplotypes_full : int, optional
-        Full sample size (used for invariant site comps). Required when
-        n_total_sites is set. Defaults to haplotypes.shape[0].
-
-    Returns
-    -------
-    total_diffs : float
-    total_comps : float
-    total_missing : float
-    n_sites : int
-    """
-    dac, n_valid_i = _dac_and_n(haplotypes)
-    n_valid = n_valid_i.astype(cp.float64)
-    derived = dac.astype(cp.float64)
-    ancestral = n_valid - derived
-
-    # Per-site: diffs = derived * ancestral (number of mismatched pairs)
-    site_diffs = derived * ancestral
-    # Per-site: comps = C(n_valid, 2)
-    site_comps = n_valid * (n_valid - 1) / 2.0
-
-    # Only count sites with >= 2 valid samples
-    usable = n_valid >= 2
-    total_diffs = float(cp.sum(site_diffs[usable]).get())
-    total_comps = float(cp.sum(site_comps[usable]).get())
-    n_sites = int(cp.sum(usable).get())
-
-    # Invariant site contribution
-    if n_total_sites is not None:
-        n_full = n_haplotypes_full or haplotypes.shape[0]
-        n_invariant = n_total_sites - n_sites
-        if n_invariant > 0:
-            invariant_comps = n_invariant * (n_full * (n_full - 1) / 2.0)
-            total_comps += invariant_comps
-            n_sites += n_invariant
-
-    # Total possible comparisons (for missing count)
-    n_full = n_haplotypes_full or haplotypes.shape[0]
-    possible_per_site = n_full * (n_full - 1) / 2.0
-    total_possible = possible_per_site * n_sites
-    total_missing = total_possible - total_comps
-
-    return total_diffs, total_comps, total_missing, n_sites
 
 
 def pi(haplotype_matrix: HaplotypeMatrix,
@@ -604,56 +599,6 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     return results
 
 
-def diversity_stats_fast(haplotype_matrix: HaplotypeMatrix,
-                         population=None,
-                         span_normalize=True,
-                         missing_data: str = 'include',
-                         projection_n: Optional[int] = None):
-    """Compute all diversity and neutrality statistics from a single SFS.
-
-    Uses the Achaz (2009) framework: one GPU pass for allele counting,
-    then all estimators as weight vector dot products. 2-24x faster than
-    calling individual functions when computing multiple statistics.
-
-    Parameters
-    ----------
-    haplotype_matrix : HaplotypeMatrix
-        The haplotype data.
-    population : str or list, optional
-        Population name or sample indices.
-    span_normalize : bool
-        ``True`` (default): auto-detect best denominator.
-        ``False``: return raw sums.
-        String values select an explicit denominator.
-    missing_data : str
-        'include' - per-site sample sizes, group by n_valid
-        'exclude' - only sites with no missing data
-    projection_n : int, optional
-        Project SFS to this sample size before computing statistics.
-
-    Returns
-    -------
-    dict
-        All theta estimators and neutrality tests.
-    """
-    from .achaz import FrequencySpectrum
-
-    fs = FrequencySpectrum(haplotype_matrix, population=population,
-                           missing_data=missing_data)
-
-    if projection_n is not None:
-        fs = fs.project(projection_n)
-
-    results = {}
-    for name in ['pi', 'watterson', 'theta_h', 'theta_l',
-                 'eta1', 'eta1_star', 'minus_eta1', 'minus_eta1_star']:
-        results[name] = fs.theta(name, span_normalize=span_normalize)
-
-    results['segregating_sites'] = fs.n_segregating
-    results.update(fs.all_tests())
-
-    return results
-
 
 def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
               population: Optional[Union[str, list]] = None,
@@ -882,36 +827,6 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     return _apply_span_normalize(result['thetas']['theta_l'], matrix, span_normalize)
 
 
-def _effective_n_and_S(matrix, missing_data):
-    """Compute effective sample size and segregating site count.
-
-    For 'include': uses harmonic mean of per-site n_valid
-    as effective n, and counts segregating sites among valid data.
-    For 'exclude': uses the fixed sample size.
-
-    Returns (n_eff, S, matrix) where matrix may be subset-filtered.
-    """
-    if missing_data == 'exclude':
-        matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return 0.0, 0.0, matrix
-
-    dac_i, n_valid_i = _dac_and_n(matrix.haplotypes)
-    n_valid = n_valid_i.astype(cp.float64)
-    dac = dac_i.astype(cp.float64)
-    usable = n_valid >= 2
-    if not cp.any(usable):
-        return 0.0, 0.0, matrix
-
-    seg_mask = usable & (dac > 0) & (dac < n_valid)
-    S = float(cp.sum(seg_mask).get())
-
-    # harmonic mean of per-site sample sizes (across usable sites)
-    # round to avoid off-by-one from float truncation in downstream int()
-    n_usable = n_valid[usable]
-    n_eff = round(float(len(n_usable)) / float(cp.sum(1.0 / n_usable).get()))
-
-    return n_eff, S, matrix
 
 
 def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
