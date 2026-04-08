@@ -7,6 +7,7 @@ related statistics. Includes the FrequencySpectrum class for SFS-based analysis,
 custom weight functions, and SFS projection.
 """
 
+import math
 import numpy as np
 import cupy as cp
 from typing import Union, Optional, Dict, Callable
@@ -116,8 +117,7 @@ def _achaz_variance(w1_name, w2_name, n, S):
     where theta_est = S/a1 and theta_sq_est = S(S-1)/(a1^2+a2).
     """
     alpha_n, beta_n = _achaz_variance_coefficients(w1_name, w2_name, n)
-    a1 = np.sum(1.0 / np.arange(1, n))
-    a2 = np.sum(1.0 / np.arange(1, n) ** 2)
+    a1, a2 = _harmonic_a1_a2(n)
     return alpha_n * S / a1 + beta_n * S * (S - 1) / (a1 ** 2 + a2)
 
 
@@ -261,7 +261,7 @@ def _compute_neutrality_test(matrix, w1_name, w2_name):
     if var <= 0:
         return float('nan')
     num = result['thetas'][w1_name] - result['thetas'][w2_name]
-    return float(num / np.sqrt(var))
+    return float(num / math.sqrt(var))
 
 
 def _prepare_matrix(haplotype_matrix, population=None, missing_data='include'):
@@ -287,6 +287,16 @@ def _harmonic_sums(n):
     H = np.zeros(n + 1)
     H[1:] = np.cumsum(1.0 / np.arange(1, n + 1))
     return H
+
+
+@lru_cache(maxsize=128)
+def _harmonic_a1_a2(n):
+    """Return (a1, a2) harmonic number sums for sample size n.
+
+    a1 = sum(1/i for i=1..n-1), a2 = sum(1/i^2 for i=1..n-1).
+    """
+    k = np.arange(1, n, dtype=np.float64)
+    return float(np.sum(1.0 / k)), float(np.sum(1.0 / (k * k)))
 
 
 @lru_cache(maxsize=64)
@@ -573,13 +583,12 @@ class FrequencySpectrum:
             w1_fn = WEIGHT_REGISTRY[w1] if isinstance(w1, str) else w1
             w2_fn = WEIGHT_REGISTRY[w2] if isinstance(w2, str) else w2
             alpha_n, beta_n = _achaz_alpha_beta(w1_fn(n_eff), w2_fn(n_eff), n_eff)
-            a1 = np.sum(1.0 / np.arange(1, n_eff))
-            a2 = np.sum(1.0 / np.arange(1, n_eff) ** 2)
+            a1, a2 = _harmonic_a1_a2(n_eff)
             variance = alpha_n * S / a1 + beta_n * S * (S - 1) / (a1 ** 2 + a2)
 
         if variance <= 0:
             return float('nan')
-        return numerator / np.sqrt(variance)
+        return numerator / math.sqrt(variance)
 
     def suggest_projection_n(self, retain_fraction=0.95):
         """Suggest a projection target retaining most sites."""
@@ -1086,7 +1095,7 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                     else:
                         var = _achaz_variance(w1, w2, n, S)
                         num = ct['thetas'][w1] - ct['thetas'][w2]
-                        results[s] = float(num / np.sqrt(var)) if var > 0 else float('nan')
+                        results[s] = float(num / math.sqrt(var)) if var > 0 else float('nan')
 
     # Non-theta stats
     for stat in statistics:
@@ -1827,16 +1836,13 @@ def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
     ndarray, float64, shape (n_variants,)
         Inbreeding coefficient per variant. NaN where He = 0.
     """
-    ho = heterozygosity_observed(haplotype_matrix, population, ploidy,
-                                 missing_data=missing_data)
-    he = heterozygosity_expected(haplotype_matrix, population,
-                                 missing_data=missing_data)
+    ho = cp.asarray(heterozygosity_observed(haplotype_matrix, population,
+                                             ploidy, missing_data=missing_data))
+    he = cp.asarray(heterozygosity_expected(haplotype_matrix, population,
+                                             missing_data=missing_data))
 
-    # F = 1 - Ho/He; undefined where He = 0
-    with np.errstate(divide='ignore', invalid='ignore'):
-        f = np.where(he > 0, 1.0 - ho / he, np.nan)
-
-    return f
+    f = cp.where(he > 0, 1.0 - ho / he, cp.nan)
+    return f.get()
 
 
 def mu_var(haplotype_matrix: HaplotypeMatrix,
