@@ -3,13 +3,15 @@ GPU-accelerated diversity and polymorphism statistics.
 
 This module provides efficient computation of within-population genetic diversity
 metrics including nucleotide diversity (π), Watterson's theta, Tajima's D, and
-related statistics.
+related statistics. Includes the FrequencySpectrum class for SFS-based analysis,
+custom weight functions, and SFS projection.
 """
 
-import warnings
+import math
 import numpy as np
 import cupy as cp
-from typing import Union, Optional, Dict, Tuple
+from typing import Union, Optional, Dict, Callable
+from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix
 
@@ -36,6 +38,680 @@ def _apply_span_normalize(value, matrix, span_normalize):
     return float('nan')
 
 
+_gpu_lookup_cache = {}
+
+
+def _get_a1_inv(n_max):
+    """Get cached 1/a1(n) lookup array on GPU."""
+    key = ('a1_inv', n_max)
+    if key in _gpu_lookup_cache:
+        return _gpu_lookup_cache[key]
+    a1 = np.zeros(n_max + 1, dtype=np.float64)
+    for n in range(2, n_max + 1):
+        a1[n] = 1.0 / np.sum(1.0 / np.arange(1, n, dtype=np.float64))
+    result = cp.asarray(a1)
+    _gpu_lookup_cache[key] = result
+    return result
+
+
+def _get_minus_eta1_norm(n_max):
+    """Get cached 1/(a1-1) normalizer for minus_eta1 estimator on GPU."""
+    key = ('minus_eta1', n_max)
+    if key in _gpu_lookup_cache:
+        return _gpu_lookup_cache[key]
+    arr = np.zeros(n_max + 1, dtype=np.float64)
+    for ni in range(3, n_max + 1):
+        a1 = np.sum(1.0 / np.arange(1, ni, dtype=np.float64))
+        arr[ni] = 1.0 / (a1 - 1.0) if a1 > 1.0 else 0.0
+    result = cp.asarray(arr)
+    _gpu_lookup_cache[key] = result
+    return result
+
+
+def _get_minus_eta1_star_norm(n_max):
+    """Get cached normalizer for minus_eta1_star estimator on GPU."""
+    key = ('minus_eta1_star', n_max)
+    if key in _gpu_lookup_cache:
+        return _gpu_lookup_cache[key]
+    arr = np.zeros(n_max + 1, dtype=np.float64)
+    for ni in range(4, n_max + 1):
+        a1 = np.sum(1.0 / np.arange(1, ni, dtype=np.float64))
+        denom = a1 - 1.0 - 1.0 / (ni - 1)
+        arr[ni] = 1.0 / denom if denom > 0 else 0.0
+    result = cp.asarray(arr)
+    _gpu_lookup_cache[key] = result
+    return result
+
+
+def _achaz_alpha_beta(v1, v2, n):
+    """Compute Achaz (2009) Eq. 9 alpha_n, beta_n from two per-xi weight vectors.
+
+    Our weight functions return per-xi weights w[i]. Achaz's v-vectors are
+    per-u_hat weights where u_hat_i = i * xi_i. The conversion is
+    v_i/sum(v_j) = w[i]/i, giving V_i = w1[i]/i - w2[i]/i.
+    """
+    k = cp.arange(1, n, dtype=cp.float64)
+    V = cp.asarray((v1[1:n] - v2[1:n])) / k
+    alpha_n = float(cp.sum(k * V ** 2))
+    sigma = _compute_sigma_ij_gpu(n)
+    beta_n = float(cp.sum(
+        k[:, None] * k[None, :] * V[:, None] * V[None, :] * sigma))
+    return alpha_n, beta_n
+
+
+@lru_cache(maxsize=128)
+def _achaz_variance_coefficients(w1_name, w2_name, n):
+    """Cached Achaz (2009) Eq. 9 variance coefficients for named weight pairs.
+
+    This is the single source of truth for all neutrality test variances.
+    """
+    v1 = WEIGHT_REGISTRY[w1_name](n)
+    v2 = WEIGHT_REGISTRY[w2_name](n)
+    return _achaz_alpha_beta(v1, v2, n)
+
+
+def _achaz_variance(w1_name, w2_name, n, S):
+    """Compute the Achaz (2009) null variance for a neutrality test.
+
+    Var(T) = alpha_n * theta_est + beta_n * theta_sq_est
+    where theta_est = S/a1 and theta_sq_est = S(S-1)/(a1^2+a2).
+    """
+    alpha_n, beta_n = _achaz_variance_coefficients(w1_name, w2_name, n)
+    a1, a2 = _harmonic_a1_a2(n)
+    return alpha_n * S / a1 + beta_n * S * (S - 1) / (a1 ** 2 + a2)
+
+
+def _site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=None):
+    """Compute per-site contribution for a theta estimator on GPU.
+
+    This is the single source of truth for what each estimator computes.
+    Both scalar (_compute_thetas) and windowed (_windowed_thetas_scatter)
+    paths call this function.
+
+    Parameters
+    ----------
+    name : str
+        Estimator name.
+    d, n_safe : cupy.ndarray, float64
+        Derived allele count (float) and safe sample size per site.
+    seg : cupy.ndarray, bool
+        Segregating site mask.
+    n_valid : cupy.ndarray, int64
+        Per-site valid sample count (for watterson lookup).
+    n_hap : int
+        Total haplotype count (for harmonic number lookup).
+    dac : cupy.ndarray, int64, optional
+        Integer derived allele count (for exact comparisons like == 1).
+        If None, uses d cast to int64.
+
+    Returns
+    -------
+    cupy.ndarray, float64, shape (n_variants,)
+        Per-site contribution (zero for non-segregating sites).
+    """
+    if dac is None:
+        dac = d.astype(cp.int64)
+
+    if name in ('pi', 'theta_pi'):
+        return cp.where(seg, 2 * d * (n_safe - d) / (n_safe * (n_safe - 1)), 0.0)
+    elif name in ('watterson', 'theta_s'):
+        a1_inv = _get_a1_inv(n_hap)
+        return cp.where(seg, a1_inv[n_valid], 0.0)
+    elif name == 'theta_h':
+        return cp.where(seg, 2 * d * d / (n_safe * (n_safe - 1)), 0.0)
+    elif name == 'theta_l':
+        return cp.where(seg, d / (n_safe - 1), 0.0)
+    elif name == 'eta1':
+        # Singletons only: dac == 1
+        a1_inv = _get_a1_inv(n_hap)
+        return cp.where(seg & (dac == 1), a1_inv[n_valid], 0.0)
+    elif name == 'eta1_star':
+        # Singletons + (n-1)-tons
+        a1_inv = _get_a1_inv(n_hap)
+        is_edge = (dac == 1) | (dac == n_valid - 1)
+        return cp.where(seg & is_edge, a1_inv[n_valid], 0.0)
+    elif name == 'minus_eta1':
+        not_sing = dac >= 2
+        a1m1_gpu = _get_minus_eta1_norm(n_hap)
+        return cp.where(seg & not_sing, a1m1_gpu[n_valid], 0.0)
+    elif name == 'minus_eta1_star':
+        interior = (dac >= 2) & (dac <= n_valid - 2)
+        norm_gpu = _get_minus_eta1_star_norm(n_hap)
+        return cp.where(seg & interior, norm_gpu[n_valid], 0.0)
+    else:
+        raise ValueError(f"Unknown estimator: {name}. Use FrequencySpectrum "
+                         f"for custom weight functions.")
+
+
+def _prepare_dac(matrix):
+    """Compute dac, n_valid, and derived quantities on GPU.
+
+    Returns (dac, n_valid, d, n_safe, seg, n_hap) — the shared
+    intermediate arrays used by all theta estimator paths.
+    """
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    from ._memutil import dac_and_n
+    dac, n_valid = dac_and_n(matrix.haplotypes)
+    n = n_valid.astype(cp.float64)
+    d = dac.astype(cp.float64)
+    seg = (dac > 0) & (dac < n_valid) & (n_valid >= 2)
+    n_safe = cp.maximum(n, 2.0)
+    return dac, n_valid, d, n_safe, seg, matrix.num_haplotypes
+
+
+def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')):
+    """Compute multiple theta estimators via direct vectorized GPU arithmetic.
+
+    Parameters
+    ----------
+    matrix : HaplotypeMatrix
+        Population-subsetted, on GPU.
+    estimators : tuple of str
+        Estimator names.
+
+    Returns
+    -------
+    dict with keys:
+        'thetas': dict of estimator name -> float (raw sum)
+        'S': int, number of segregating sites
+        'n_harmonic_mean': int, harmonic mean of per-site sample sizes
+    """
+    dac, n_valid, d, n_safe, seg, n_hap = _prepare_dac(matrix)
+
+    thetas = {}
+    for name in estimators:
+        val = cp.sum(_site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=dac))
+        thetas[name] = float(val.get())
+
+    S = int(cp.sum(seg).get())
+
+    has_data = n_valid >= 2
+    if cp.any(has_data):
+        valid_n = n_valid[has_data].astype(cp.float64)
+        n_harm = round(float(len(valid_n) / cp.sum(1.0 / valid_n).get()))
+    else:
+        n_harm = 0
+
+    return {'thetas': thetas, 'S': S, 'n_harmonic_mean': n_harm}
+
+
+def _compute_neutrality_test(matrix, w1_name, w2_name):
+    """Compute a neutrality test statistic using the Achaz (2009) framework.
+
+    T = (theta_w1 - theta_w2) / sqrt(alpha_n * theta_est + beta_n * theta_sq_est)
+
+    Parameters
+    ----------
+    matrix : HaplotypeMatrix
+        Population-subsetted, on GPU.
+    w1_name, w2_name : str
+        Weight vector names from WEIGHT_REGISTRY.
+
+    Returns
+    -------
+    float
+    """
+    result = _compute_thetas(matrix, (w1_name, w2_name))
+    S = result['S']
+    n = result['n_harmonic_mean']
+    if S < 3 or n < 3:
+        return float('nan')
+    var = _achaz_variance(w1_name, w2_name, n, S)
+    if var <= 0:
+        return float('nan')
+    num = result['thetas'][w1_name] - result['thetas'][w2_name]
+    return float(num / math.sqrt(var))
+
+
+def _prepare_matrix(haplotype_matrix, population=None, missing_data='include'):
+    """Extract population subset and apply exclude filtering."""
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    if missing_data == 'exclude':
+        matrix = matrix.exclude_missing_sites()
+    return matrix
+
+
+# ---------------------------------------------------------------------------
+# SFS projection and covariance (Gutenkunst et al. 2009, Fu 1995)
+# ---------------------------------------------------------------------------
+
+@lru_cache(maxsize=64)
+def _harmonic_sums(n):
+    """Precompute harmonic sums H[i] = sum(1/j for j=1..i) for i=0..n."""
+    H = np.zeros(n + 1)
+    H[1:] = np.cumsum(1.0 / np.arange(1, n + 1))
+    return H
+
+
+@lru_cache(maxsize=128)
+def _harmonic_a1_a2(n):
+    """Return (a1, a2) harmonic number sums for sample size n.
+
+    a1 = sum(1/i for i=1..n-1), a2 = sum(1/i^2 for i=1..n-1).
+    """
+    k = np.arange(1, n, dtype=np.float64)
+    return float(np.sum(1.0 / k)), float(np.sum(1.0 / (k * k)))
+
+
+@lru_cache(maxsize=64)
+def _compute_sigma_ij_gpu(n):
+    """Compute Fu (1995) sigma_ij on GPU, return CuPy array (cached)."""
+    H = _harmonic_sums(n)
+    an = H[n - 1]
+
+    # beta(i, n) for i = 1..n-1 (CPU, 1D)
+    idx_b = np.arange(1, n, dtype=np.float64)
+    a_b = H[idx_b.astype(int) - 1]
+    beta_arr = (2.0 * n / ((n - idx_b + 1) * (n - idx_b))
+                * (an + 1.0 / n - a_b)
+                - 2.0 / (n - idx_b))
+    beta_full = np.zeros(n + 1)
+    beta_full[1:n] = beta_arr
+
+    # O(n^2) broadcast on GPU
+    beta_gpu = cp.asarray(beta_full)
+    H_gpu = cp.asarray(H)
+
+    idx = cp.arange(1, n, dtype=cp.float64)
+    ii = idx[:, None]
+    jj = idx[None, :]
+    i_hi = cp.maximum(ii, jj)
+    j_lo = cp.minimum(ii, jj)
+    s = i_hi + j_lo
+
+    i_hi_int = i_hi.astype(cp.int64)
+    j_lo_int = j_lo.astype(cp.int64)
+
+    case_lt = (beta_gpu[i_hi_int + 1] - beta_gpu[i_hi_int]) / 2.0
+    ai_hi = H_gpu[i_hi_int - 1]
+    aj_lo = H_gpu[j_lo_int - 1]
+    case_eq = ((an - ai_hi) / (n - i_hi) + (an - aj_lo) / (n - j_lo)
+               - (beta_gpu[i_hi_int] + beta_gpu[j_lo_int + 1]) / 2.0
+               - 1.0 / (i_hi * j_lo))
+    case_gt = ((beta_gpu[j_lo_int] - beta_gpu[j_lo_int + 1]) / 2.0
+               - 1.0 / (i_hi * j_lo))
+
+    sigma = cp.where(s < n, case_lt, cp.where(s == n, case_eq, case_gt))
+
+    # Diagonal
+    i_d = idx
+    i_d_int = i_d.astype(cp.int64)
+    diag_vals = cp.where(
+        2 * i_d < n, beta_gpu[i_d_int + 1],
+        cp.where(2 * i_d == n,
+                 2.0 * (an - H_gpu[i_d_int - 1]) / (n - i_d) - 1.0 / (i_d * i_d),
+                 beta_gpu[i_d_int] - 1.0 / (i_d * i_d)))
+    d_idx = cp.arange(n - 1)
+    sigma[d_idx, d_idx] = diag_vals
+
+    return sigma
+
+
+def compute_sigma_ij(n):
+    """Compute the Fu (1995) covariance matrix sigma_ij for sample size n.
+
+    sigma_ij = Cov[xi_i, xi_j] / theta^2 for the unfolded SFS under the
+    standard neutral model.
+
+    Parameters
+    ----------
+    n : int
+        Sample size (number of haplotypes).
+
+    Returns
+    -------
+    sigma : ndarray, float64, shape (n-1, n-1)
+    """
+    return _compute_sigma_ij_gpu(n).get()
+
+
+@lru_cache(maxsize=128)
+def _projection_matrix(n_from, n_to):
+    """Hypergeometric projection matrix from n_from to n_to."""
+    from scipy.special import comb
+    P = np.zeros((n_to + 1, n_from + 1))
+    for k_from in range(n_from + 1):
+        for k_to in range(max(0, k_from - (n_from - n_to)),
+                          min(k_from, n_to) + 1):
+            P[k_to, k_from] = (comb(k_from, k_to, exact=True)
+                               * comb(n_from - k_from, n_to - k_to, exact=True)
+                               / comb(n_from, n_to, exact=True))
+    return P
+
+
+def project_sfs(sfs, n_from, n_to):
+    """Project an SFS from sample size n_from down to n_to.
+
+    Uses hypergeometric sampling (Gutenkunst et al. 2009).
+    """
+    if n_to > n_from:
+        raise ValueError(f"Cannot project up: n_to={n_to} > n_from={n_from}")
+    if n_to == n_from:
+        return sfs.copy()
+    return _projection_matrix(n_from, n_to) @ sfs
+
+
+# ---------------------------------------------------------------------------
+# FrequencySpectrum: power-user class for SFS analysis
+# ---------------------------------------------------------------------------
+
+# Weight functions for SFS dot-product path (used by FrequencySpectrum.theta
+# for custom callables; built-in names use _site_contribution instead).
+def _weights_watterson(n):
+    w = np.zeros(n + 1)
+    a1 = np.sum(1.0 / np.arange(1, n))
+    w[1:n] = 1.0 / a1
+    return w
+
+def _weights_pi(n):
+    k = np.arange(n + 1, dtype=np.float64)
+    w = 2.0 * k * (n - k) / (n * (n - 1))
+    w[0] = w[n] = 0.0
+    return w
+
+def _weights_theta_h(n):
+    k = np.arange(n + 1, dtype=np.float64)
+    w = 2.0 * k ** 2 / (n * (n - 1))
+    w[0] = w[n] = 0.0
+    return w
+
+def _weights_theta_l(n):
+    k = np.arange(n + 1, dtype=np.float64)
+    w = k / (n - 1)
+    w[0] = w[n] = 0.0
+    return w
+
+def _weights_eta1(n):
+    w = np.zeros(n + 1)
+    a1 = np.sum(1.0 / np.arange(1, n))
+    w[1] = 1.0 / a1
+    return w
+
+def _weights_eta1_star(n):
+    w = np.zeros(n + 1)
+    a1 = np.sum(1.0 / np.arange(1, n))
+    w[1] = w[n - 1] = 1.0 / a1
+    return w
+
+def _weights_minus_eta1(n):
+    w = np.zeros(n + 1)
+    a1 = np.sum(1.0 / np.arange(1, n))
+    w[2:n] = 1.0 / (a1 - 1.0)
+    return w
+
+def _weights_minus_eta1_star(n):
+    w = np.zeros(n + 1)
+    a1 = np.sum(1.0 / np.arange(1, n))
+    w[2:n - 1] = 1.0 / (a1 - 1.0 - 1.0 / (n - 1))
+    return w
+
+
+WEIGHT_REGISTRY: Dict[str, Callable] = {
+    'watterson': _weights_watterson, 'theta_s': _weights_watterson,
+    'pi': _weights_pi, 'theta_pi': _weights_pi,
+    'theta_h': _weights_theta_h,
+    'theta_l': _weights_theta_l,
+    'eta1': _weights_eta1,
+    'eta1_star': _weights_eta1_star,
+    'minus_eta1': _weights_minus_eta1,
+    'minus_eta1_star': _weights_minus_eta1_star,
+}
+
+
+class FrequencySpectrum:
+    """Site frequency spectrum with support for variable sample sizes.
+
+    Computes derived allele counts on GPU, groups by per-site sample
+    size, and provides theta estimation via weight vector dot products.
+    For built-in estimators, use the scalar functions (``pi()``, etc.)
+    which are faster. This class is for custom weight functions,
+    SFS inspection, projection, and the general Achaz variance framework.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    population : str or list, optional
+    missing_data : str
+        'include' (default) or 'exclude'
+    n_total_sites : int, optional
+        Total callable sites for invariant site correction.
+    """
+
+    def __init__(self, haplotype_matrix, population=None,
+                 missing_data='include', n_total_sites=None):
+        if population is not None:
+            matrix = get_population_matrix(haplotype_matrix, population)
+        else:
+            matrix = haplotype_matrix
+
+        if matrix.device == 'CPU':
+            matrix.transfer_to_gpu()
+        self._source_matrix = matrix
+        n_hap = matrix.num_haplotypes
+        if n_total_sites is None:
+            n_total_sites = matrix.n_total_sites
+
+        from ._memutil import dac_and_n as _dac_n
+        dac, n_valid = _dac_n(matrix.haplotypes)
+
+        if missing_data == 'exclude':
+            complete = n_valid == n_hap
+            dac = dac[complete]
+            n_valid = n_valid[complete]
+
+        self.sfs_by_n = {}
+        if len(dac) == 0:
+            self.n_max = 0
+            self.n_segregating = 0
+        else:
+            unique_n = cp.unique(n_valid)
+            self.n_max = int(unique_n[-1].get())
+            for ni_gpu in unique_n:
+                ni = int(ni_gpu.get())
+                if ni < 2:
+                    continue
+                mask = n_valid == ni
+                xi = cp.bincount(dac[mask], minlength=ni + 1)[:ni + 1]
+                self.sfs_by_n[ni] = xi.astype(cp.float64).get()
+            self.n_segregating = sum(
+                int(np.sum(xi[1:n])) for n, xi in self.sfs_by_n.items())
+
+        self.n_total_sites = n_total_sites
+        if n_total_sites is not None and self.n_max > 0:
+            n_invariant = n_total_sites - self.n_segregating
+            if n_invariant > 0 and self.n_max in self.sfs_by_n:
+                self.sfs_by_n[self.n_max][0] += n_invariant
+
+    def theta(self, weights='pi', span_normalize=False, span=None):
+        """Compute a theta estimator from the SFS.
+
+        Parameters
+        ----------
+        weights : str or callable
+            Name of a built-in weight function, or a callable w(n) -> array.
+        span_normalize : bool
+        span : float, optional
+        """
+        if isinstance(weights, str):
+            if weights not in WEIGHT_REGISTRY:
+                raise ValueError(f"Unknown weight: {weights}")
+            weights_fn = WEIGHT_REGISTRY[weights]
+        else:
+            weights_fn = weights
+
+        total = 0.0
+        for n, xi in self.sfs_by_n.items():
+            w = weights_fn(n)
+            total += np.sum(xi[:len(w)] * w[:len(xi)])
+
+        if span_normalize is not False:
+            if span is not None and span > 0:
+                total /= span
+            elif self._source_matrix is not None:
+                mode = 'auto' if span_normalize is True else span_normalize
+                s = self._source_matrix.get_span(mode)
+                if s > 0:
+                    total /= s
+
+        return total
+
+    def neutrality_test(self, w1='pi', w2='watterson'):
+        """Compute T = (theta1 - theta2) / sqrt(var) using Achaz (2009) Eq. 9."""
+        theta1 = self.theta(w1)
+        theta2 = self.theta(w2)
+        numerator = theta1 - theta2
+
+        S = self.n_segregating
+        if S < 3:
+            return float('nan')
+
+        n_eff = max(self.sfs_by_n.keys(),
+                    key=lambda n: np.sum(self.sfs_by_n[n]))
+
+        w1_name = w1 if isinstance(w1, str) else None
+        w2_name = w2 if isinstance(w2, str) else None
+
+        if w1_name and w2_name:
+            variance = _achaz_variance(w1_name, w2_name, n_eff, S)
+        else:
+            w1_fn = WEIGHT_REGISTRY[w1] if isinstance(w1, str) else w1
+            w2_fn = WEIGHT_REGISTRY[w2] if isinstance(w2, str) else w2
+            alpha_n, beta_n = _achaz_alpha_beta(w1_fn(n_eff), w2_fn(n_eff), n_eff)
+            a1, a2 = _harmonic_a1_a2(n_eff)
+            variance = alpha_n * S / a1 + beta_n * S * (S - 1) / (a1 ** 2 + a2)
+
+        if variance <= 0:
+            return float('nan')
+        return numerator / math.sqrt(variance)
+
+    def suggest_projection_n(self, retain_fraction=0.95):
+        """Suggest a projection target retaining most sites."""
+        if len(self.sfs_by_n) <= 1:
+            return self.n_max
+        sorted_ns = sorted(self.sfs_by_n.keys(), reverse=True)
+        total_seg = self.n_segregating
+        if total_seg == 0:
+            return self.n_max
+        cumulative = 0
+        for ni in sorted_ns:
+            cumulative += int(np.sum(self.sfs_by_n[ni][1:ni]))
+            if cumulative / total_seg >= retain_fraction:
+                return ni
+        return sorted_ns[-1]
+
+    def project(self, target_n):
+        """Project all SFS groups to a common sample size."""
+        projected = np.zeros(target_n + 1)
+        for n, xi in self.sfs_by_n.items():
+            if n < target_n:
+                continue
+            projected += project_sfs(xi, n, target_n)
+        result = object.__new__(FrequencySpectrum)
+        result.sfs_by_n = {target_n: projected}
+        result.n_max = target_n
+        result.n_segregating = int(np.sum(projected[1:target_n]))
+        result.n_total_sites = self.n_total_sites
+        result._source_matrix = self._source_matrix
+        return result
+
+    def sfs(self, n=None):
+        """Return the SFS, optionally projected."""
+        if n is not None:
+            return self.project(n).sfs_by_n[n]
+        if len(self.sfs_by_n) == 1:
+            return list(self.sfs_by_n.values())[0]
+        return self.sfs_by_n.get(self.n_max, np.array([]))
+
+    def all_thetas(self, span_normalize=False, span=None):
+        """Compute all 8 standard theta estimators."""
+        return {name: self.theta(name, span_normalize=span_normalize, span=span)
+                for name in ['pi', 'watterson', 'theta_h', 'theta_l',
+                             'eta1', 'eta1_star', 'minus_eta1', 'minus_eta1_star']}
+
+    def tajimas_d(self):
+        """Tajima's D via Achaz (2009) general variance framework."""
+        return self.neutrality_test('pi', 'watterson')
+
+    def fay_wu_h(self, normalized=False):
+        """Fay & Wu's H = pi - theta_H. Optionally normalized (H*)."""
+        h = self.theta('pi') - self.theta('theta_h')
+        if not normalized:
+            return h
+        return self.neutrality_test('pi', 'theta_h')
+
+    def zeng_e(self):
+        """Zeng's E via Achaz (2009) general variance framework."""
+        return self.neutrality_test('theta_l', 'watterson')
+
+    def all_tests(self):
+        """All standard neutrality tests."""
+        return {
+            'tajimas_d': self.tajimas_d(),
+            'fay_wu_h': self.fay_wu_h(),
+            'normalized_fay_wu_h': self.fay_wu_h(normalized=True),
+            'zeng_e': self.zeng_e(),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Pairwise components (power-user API)
+# ---------------------------------------------------------------------------
+
+def pi_components(haplotypes, n_total_sites=None, n_haplotypes_full=None):
+    """Compute pairwise differences and comparisons across all sites.
+
+    For advanced use cases (custom windowed aggregation, etc.).
+
+    Parameters
+    ----------
+    haplotypes : cp.ndarray, shape (n_haplotypes, n_variants)
+        Haplotype data with -1 for missing.
+    n_total_sites : int, optional
+        Total callable sites (variant + invariant). If provided, invariant
+        sites contribute 0 diffs and C(n_haplotypes_full, 2) comps each.
+    n_haplotypes_full : int, optional
+        Full sample size (used for invariant site comps).
+
+    Returns
+    -------
+    total_diffs : float
+    total_comps : float
+    total_missing : float
+    n_sites : int
+    """
+    dac, n_valid_i = _dac_and_n(haplotypes)
+    n_valid = n_valid_i.astype(cp.float64)
+    derived = dac.astype(cp.float64)
+    ancestral = n_valid - derived
+
+    site_diffs = derived * ancestral
+    site_comps = n_valid * (n_valid - 1) / 2.0
+
+    usable = n_valid >= 2
+    total_diffs = float(cp.sum(site_diffs[usable]).get())
+    total_comps = float(cp.sum(site_comps[usable]).get())
+    n_sites = int(cp.sum(usable).get())
+
+    if n_total_sites is not None:
+        n_full = n_haplotypes_full or haplotypes.shape[0]
+        n_invariant = n_total_sites - n_sites
+        if n_invariant > 0:
+            total_comps += n_invariant * (n_full * (n_full - 1) / 2.0)
+            n_sites += n_invariant
+
+    n_full = n_haplotypes_full or haplotypes.shape[0]
+    total_possible = (n_full * (n_full - 1) / 2.0) * n_sites
+    total_missing = total_possible - total_comps
+
+    return total_diffs, total_comps, total_missing, n_sites
+
+
 def _dac_and_n(haplotypes):
     """Shared helper: derived allele counts and valid sample counts per site.
 
@@ -50,63 +726,9 @@ def _dac_and_n(haplotypes):
     dac : cupy.ndarray, int64, shape (n_var,)
     n_valid : cupy.ndarray, int64, shape (n_var,)
     """
-    from ._memutil import chunked_dac_and_n
-    return chunked_dac_and_n(haplotypes)
+    from ._memutil import dac_and_n
+    return dac_and_n(haplotypes)
 
-
-def pi_components(haplotypes, n_total_sites=None, n_haplotypes_full=None):
-    """Compute pairwise differences and comparisons across all sites.
-
-    Parameters
-    ----------
-    haplotypes : cp.ndarray, shape (n_haplotypes, n_variants)
-        Haplotype data with -1 for missing.
-    n_total_sites : int, optional
-        Total callable sites (variant + invariant). If provided, invariant
-        sites contribute 0 diffs and C(n_haplotypes_full, 2) comps each.
-    n_haplotypes_full : int, optional
-        Full sample size (used for invariant site comps). Required when
-        n_total_sites is set. Defaults to haplotypes.shape[0].
-
-    Returns
-    -------
-    total_diffs : float
-    total_comps : float
-    total_missing : float
-    n_sites : int
-    """
-    dac, n_valid_i = _dac_and_n(haplotypes)
-    n_valid = n_valid_i.astype(cp.float64)
-    derived = dac.astype(cp.float64)
-    ancestral = n_valid - derived
-
-    # Per-site: diffs = derived * ancestral (number of mismatched pairs)
-    site_diffs = derived * ancestral
-    # Per-site: comps = C(n_valid, 2)
-    site_comps = n_valid * (n_valid - 1) / 2.0
-
-    # Only count sites with >= 2 valid samples
-    usable = n_valid >= 2
-    total_diffs = float(cp.sum(site_diffs[usable]).get())
-    total_comps = float(cp.sum(site_comps[usable]).get())
-    n_sites = int(cp.sum(usable).get())
-
-    # Invariant site contribution
-    if n_total_sites is not None:
-        n_full = n_haplotypes_full or haplotypes.shape[0]
-        n_invariant = n_total_sites - n_sites
-        if n_invariant > 0:
-            invariant_comps = n_invariant * (n_full * (n_full - 1) / 2.0)
-            total_comps += invariant_comps
-            n_sites += n_invariant
-
-    # Total possible comparisons (for missing count)
-    n_full = n_haplotypes_full or haplotypes.shape[0]
-    possible_per_site = n_full * (n_full - 1) / 2.0
-    total_possible = possible_per_site * n_sites
-    total_missing = total_possible - total_comps
-
-    return total_diffs, total_comps, total_missing, n_sites
 
 
 def pi(haplotype_matrix: HaplotypeMatrix,
@@ -138,44 +760,11 @@ def pi(haplotype_matrix: HaplotypeMatrix,
     float
         Nucleotide diversity value
     """
-    # Get population subset if specified
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    # Ensure on GPU
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    if missing_data == 'exclude':
-        matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return 0.0
-
-    # Per-site pi using only non-missing data
-    derived_counts, n_valid_per_site = _dac_and_n(matrix.haplotypes)
-
-    sites_with_data = n_valid_per_site >= 2
-
-    if not cp.any(sites_with_data):
-        pi_value = cp.float64(0.0)
-    else:
-        valid_sites = cp.where(sites_with_data)[0]
-        n_valid = n_valid_per_site[valid_sites].astype(cp.float64)
-        derived = derived_counts[valid_sites].astype(cp.float64)
-
-        # Calculate frequencies
-        freq_derived = derived / n_valid
-        freq_ancestral = (n_valid - derived) / n_valid
-
-        # Calculate pi per site with Nei's correction
-        site_pi = 2 * freq_ancestral * freq_derived * n_valid / (n_valid - 1)
-
-        # Sum across all valid sites
-        pi_value = cp.sum(site_pi)
-
-    return _apply_span_normalize(pi_value, matrix, span_normalize)
+    matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if matrix.num_variants == 0:
+        return 0.0
+    result = _compute_thetas(matrix, ('pi',))
+    return _apply_span_normalize(result['thetas']['pi'], matrix, span_normalize)
 
 
 def theta_w(haplotype_matrix: HaplotypeMatrix,
@@ -206,66 +795,11 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
     float
         Watterson's theta value
     """
-    # Get population subset if specified
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    # Ensure on GPU
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    if missing_data == 'exclude':
-        matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return 0.0
-        n_haplotypes = matrix.num_haplotypes
-        seg_sites = segregating_sites(matrix, missing_data='exclude')
-
-    else:  # missing_data == 'include'
-        derived_counts, n_valid_per_site = _dac_and_n(matrix.haplotypes)
-        sites_with_data = n_valid_per_site >= 2
-
-        if not cp.any(sites_with_data):
-            theta = cp.float64(0.0)
-        else:
-
-            # A site is segregating if 0 < derived_count < n_valid
-            valid_sites = cp.where(sites_with_data)[0]
-            n_valid_sites = n_valid_per_site[valid_sites]
-            derived_sites = derived_counts[valid_sites]
-
-            # Check which sites are segregating (not monomorphic)
-            segregating_mask = (derived_sites > 0) & (derived_sites < n_valid_sites)
-
-            if not cp.any(segregating_mask):
-                theta = cp.float64(0.0)
-            else:
-                # For each segregating site, compute 1/a1 where a1 is harmonic number
-                seg_n_valid = n_valid_sites[segregating_mask]
-
-                # Compute harmonic numbers for each sample size
-                # This is the most complex part to vectorize efficiently
-                unique_n = cp.unique(seg_n_valid)
-                theta_sum = cp.float64(0.0)
-
-                for n in unique_n:
-                    # Count how many sites have this sample size
-                    count_with_n = cp.sum(seg_n_valid == n)
-                    # Compute harmonic number for this sample size
-                    a1 = cp.sum(1.0 / cp.arange(1, int(n), dtype=cp.float64))
-                    # Add contribution
-                    theta_sum += count_with_n / a1
-
-                theta = theta_sum
-
-    # For exclude mode, compute theta the standard way
-    if missing_data == 'exclude':
-        a1 = cp.sum(1.0 / cp.arange(1, n_haplotypes, dtype=cp.float64))
-        theta = seg_sites / a1
-
-    return _apply_span_normalize(theta, matrix, span_normalize)
+    matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if matrix.num_variants == 0:
+        return 0.0
+    result = _compute_thetas(matrix, ('watterson',))
+    return _apply_span_normalize(result['thetas']['watterson'], matrix, span_normalize)
 
 
 def tajimas_d(haplotype_matrix: HaplotypeMatrix,
@@ -293,78 +827,10 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
     float
         Tajima's D value
     """
-    # Get population subset if specified
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    # Ensure on GPU
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    if missing_data == 'exclude':
-        matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return float("nan")
-
-    # Get pi and theta with consistent missing data handling
-    pi_value = pi(matrix, span_normalize=False, missing_data=missing_data)
-
-    if missing_data == 'include':
-        # For Tajima's D with missing data, we need to use an average sample size
-        # Calculate the harmonic mean of sample sizes across sites
-        n_valid_per_site = matrix.count_called(axis=0)
-
-        # Filter to sites with at least 2 samples
-        valid_site_mask = n_valid_per_site >= 2
-        if not cp.any(valid_site_mask):
-            return float("nan")
-
-        # Harmonic mean of sample sizes (round to avoid off-by-one from
-        # float truncation, e.g. 199.9999 -> int 199 instead of 200)
-        n_haplotypes = round(float(len(n_valid_per_site[valid_site_mask]) /
-                           cp.sum(1.0 / n_valid_per_site[valid_site_mask]).get()))
-
-        derived_counts, n_valid_per_site = _dac_and_n(matrix.haplotypes)
-        sites_with_data = n_valid_per_site >= 2
-
-        if not cp.any(sites_with_data):
-            S = 0
-        else:
-            valid_sites = cp.where(sites_with_data)[0]
-            segregating_mask = (derived_counts[valid_sites] > 0) & (derived_counts[valid_sites] < n_valid_per_site[valid_sites])
-            S = int(cp.sum(segregating_mask).get())
-    else:
-        # For 'exclude' mode
-        n_haplotypes = matrix.num_haplotypes
-        S = segregating_sites(matrix, missing_data=missing_data)
-
-    # If no segregating sites, return NaN
-    if S == 0:
+    matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if matrix.num_variants == 0:
         return float("nan")
-
-    # Calculate theta directly (to avoid span normalization)
-    a1 = cp.sum(1.0 / cp.arange(1, n_haplotypes, dtype=cp.float64)) if isinstance(n_haplotypes, int) else sum(1.0 / i for i in range(1, int(n_haplotypes)))
-    theta = S / a1
-
-    # Variance term for Tajima's D
-    n = n_haplotypes
-    a2 = cp.sum(1.0 / (cp.arange(1, n, dtype=cp.float64) ** 2)) if isinstance(n, int) else sum(1.0 / (i ** 2) for i in range(1, int(n)))
-    b1 = (n + 1) / (3 * (n - 1))
-    b2 = 2 * (n**2 + n + 3) / (9 * n * (n - 1))
-    c1 = b1 - (1 / a1)
-    c2 = b2 - ((n + 2) / (a1 * n)) + (a2 / (a1 ** 2))
-    e1 = c1 / a1
-    e2 = c2 / ((a1 ** 2) + a2)
-    V = cp.sqrt((e1 * S) + (e2 * S * (S - 1))) if isinstance(S, cp.ndarray) else np.sqrt((e1 * S) + (e2 * S * (S - 1)))
-
-    # Calculate D
-    if V != 0:
-        D = (pi_value - float(theta)) / float(V.get() if hasattr(V, 'get') else V)
-        return D
-    else:
-        return float("nan")
+    return _compute_neutrality_test(matrix, 'pi', 'watterson')
 
 
 def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
@@ -585,82 +1051,70 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     dict
         Dictionary mapping statistic names to values
     """
+    # Map stat names to estimator names for batched computation
+    theta_stats = {'pi': 'pi', 'theta_w': 'watterson', 'theta_h': 'theta_h',
+                   'theta_l': 'theta_l'}
+    # Neutrality tests: (w1, w2) weight pairs
+    test_specs = {
+        'tajimas_d': ('pi', 'watterson'),
+        'fay_wus_h': ('pi', 'theta_h'),
+        'normalized_fay_wus_h': ('pi', 'theta_h'),
+        'zeng_e': ('theta_l', 'watterson'),
+    }
+    needs_thetas = {s for s in statistics if s in theta_stats or s in test_specs}
+
     results = {}
 
+    if needs_thetas:
+        matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+        if matrix.num_variants == 0:
+            for s in needs_thetas:
+                results[s] = 0.0 if s in theta_stats else float('nan')
+        else:
+            # Collect all needed estimators for a single _compute_thetas call
+            estimators = set()
+            for s in needs_thetas:
+                if s in theta_stats:
+                    estimators.add(theta_stats[s])
+                elif s in test_specs:
+                    estimators.update(test_specs[s])
+            ct = _compute_thetas(matrix, tuple(estimators))
+
+            for s in needs_thetas:
+                if s in theta_stats:
+                    results[s] = _apply_span_normalize(
+                        ct['thetas'][theta_stats[s]], matrix, span_normalize)
+                elif s in test_specs:
+                    w1, w2 = test_specs[s]
+                    S = ct['S']
+                    n = ct['n_harmonic_mean']
+                    if S < 3 or n < 3:
+                        results[s] = float('nan')
+                    elif s == 'fay_wus_h':
+                        results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
+                    else:
+                        var = _achaz_variance(w1, w2, n, S)
+                        num = ct['thetas'][w1] - ct['thetas'][w2]
+                        results[s] = float(num / math.sqrt(var)) if var > 0 else float('nan')
+
+    # Non-theta stats
     for stat in statistics:
-        if stat == 'pi':
-            results['pi'] = pi(haplotype_matrix, population, span_normalize, missing_data)
-        elif stat == 'theta_w':
-            results['theta_w'] = theta_w(haplotype_matrix, population, span_normalize, missing_data)
-        elif stat == 'tajimas_d':
-            results['tajimas_d'] = tajimas_d(haplotype_matrix, population, missing_data)
-        elif stat == 'segregating_sites':
+        if stat in results:
+            continue
+        if stat == 'segregating_sites':
             results['segregating_sites'] = segregating_sites(haplotype_matrix, population, missing_data)
         elif stat == 'singletons':
             results['singletons'] = singleton_count(haplotype_matrix, population, missing_data)
         elif stat == 'n_variants':
-            if population is not None:
-                matrix = _get_population_matrix(haplotype_matrix, population)
-                results['n_variants'] = matrix.num_variants
-            else:
-                results['n_variants'] = haplotype_matrix.num_variants
+            m = _prepare_matrix(haplotype_matrix, population, missing_data)
+            results['n_variants'] = m.num_variants
         elif stat == 'haplotype_diversity':
             results['haplotype_diversity'] = haplotype_diversity(haplotype_matrix, population, missing_data)
-        else:
+        elif stat not in ('pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'):
             raise ValueError(f"Unknown statistic: {stat}")
 
     return results
 
-
-def diversity_stats_fast(haplotype_matrix: HaplotypeMatrix,
-                         population=None,
-                         span_normalize=True,
-                         missing_data: str = 'include',
-                         projection_n: Optional[int] = None):
-    """Compute all diversity and neutrality statistics from a single SFS.
-
-    Uses the Achaz (2009) framework: one GPU pass for allele counting,
-    then all estimators as weight vector dot products. 2-24x faster than
-    calling individual functions when computing multiple statistics.
-
-    Parameters
-    ----------
-    haplotype_matrix : HaplotypeMatrix
-        The haplotype data.
-    population : str or list, optional
-        Population name or sample indices.
-    span_normalize : bool
-        ``True`` (default): auto-detect best denominator.
-        ``False``: return raw sums.
-        String values select an explicit denominator.
-    missing_data : str
-        'include' - per-site sample sizes, group by n_valid
-        'exclude' - only sites with no missing data
-    projection_n : int, optional
-        Project SFS to this sample size before computing statistics.
-
-    Returns
-    -------
-    dict
-        All theta estimators and neutrality tests.
-    """
-    from .achaz import FrequencySpectrum
-
-    fs = FrequencySpectrum(haplotype_matrix, population=population,
-                           missing_data=missing_data)
-
-    if projection_n is not None:
-        fs = fs.project(projection_n)
-
-    results = {}
-    for name in ['pi', 'watterson', 'theta_h', 'theta_l',
-                 'eta1', 'eta1_star', 'minus_eta1', 'minus_eta1_star']:
-        results[name] = fs.theta(name, span_normalize=span_normalize)
-
-    results['segregating_sites'] = fs.n_segregating
-    results.update(fs.all_tests())
-
-    return results
 
 
 def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
@@ -687,27 +1141,11 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
     float
         Fay and Wu's H value
     """
-    # Get population subset if specified
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    # Ensure on GPU
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    if missing_data == 'exclude':
-        matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return float("nan")
-
-    # so all components are on the same raw-sum scale.
-    th_val = theta_h(matrix, span_normalize=False, missing_data=missing_data)
-    pi_value = pi(matrix, span_normalize=False, missing_data=missing_data)
-
-    # H = pi - theta_H
-    return pi_value - th_val
+    matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if matrix.num_variants == 0:
+        return float("nan")
+    result = _compute_thetas(matrix, ('pi', 'theta_h'))
+    return result['thetas']['pi'] - result['thetas']['theta_h']
 
 
 def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
@@ -865,30 +1303,11 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     -------
     float
     """
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    if missing_data == 'exclude':
-        matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return 0.0
-
-    # 'include' mode (default)
-    haplotypes = matrix.haplotypes
-    dac_i, n_valid_i = _dac_and_n(haplotypes)
-    n_valid = n_valid_i.astype(cp.float64)
-    dac = dac_i.astype(cp.float64)
-
-    # Only segregating sites: 0 < dac < n_valid
-    usable = (n_valid > 1) & (dac > 0) & (dac < n_valid)
-    th = cp.sum(2.0 * dac[usable] ** 2 / (n_valid[usable] * (n_valid[usable] - 1)))
-
-    return _apply_span_normalize(th, matrix, span_normalize)
+    matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if matrix.num_variants == 0:
+        return 0.0
+    result = _compute_thetas(matrix, ('theta_h',))
+    return _apply_span_normalize(result['thetas']['theta_h'], matrix, span_normalize)
 
 
 def theta_l(haplotype_matrix: HaplotypeMatrix,
@@ -901,12 +1320,7 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     sites with derived allele count i. Weights variants linearly by
     derived allele frequency, bridging theta_pi and theta_H.
 
-    With missing data ('include'), each site contributes
-    d_i / (n_i - 1) using its own sample size.
-
-    Reference: Zeng et al. (2006), "Statistical Tests for Detecting
-    Positive Selection by Utilizing High-Frequency Variants",
-    Genetics 174: 1431-1439, Equation (8).
+    Reference: Zeng et al. (2006), Genetics 174: 1431-1439, Equation (8).
 
     Parameters
     ----------
@@ -923,62 +1337,13 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     -------
     float
     """
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    if missing_data == 'exclude':
-        matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return 0.0
-
-    # 'include' mode (default)
-    haplotypes = matrix.haplotypes
-    dac_i, n_valid_i = _dac_and_n(haplotypes)
-    n_valid = n_valid_i.astype(cp.float64)
-    dac = dac_i.astype(cp.float64)
-
-    # Only segregating sites: 0 < dac < n_valid
-    usable = (n_valid > 1) & (dac > 0) & (dac < n_valid)
-    tl = cp.sum(dac[usable] / (n_valid[usable] - 1))
-
-    return _apply_span_normalize(tl, matrix, span_normalize)
+    matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if matrix.num_variants == 0:
+        return 0.0
+    result = _compute_thetas(matrix, ('theta_l',))
+    return _apply_span_normalize(result['thetas']['theta_l'], matrix, span_normalize)
 
 
-def _effective_n_and_S(matrix, missing_data):
-    """Compute effective sample size and segregating site count.
-
-    For 'include': uses harmonic mean of per-site n_valid
-    as effective n, and counts segregating sites among valid data.
-    For 'exclude': uses the fixed sample size.
-
-    Returns (n_eff, S, matrix) where matrix may be subset-filtered.
-    """
-    if missing_data == 'exclude':
-        matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return 0.0, 0.0, matrix
-
-    dac_i, n_valid_i = _dac_and_n(matrix.haplotypes)
-    n_valid = n_valid_i.astype(cp.float64)
-    dac = dac_i.astype(cp.float64)
-    usable = n_valid >= 2
-    if not cp.any(usable):
-        return 0.0, 0.0, matrix
-
-    seg_mask = usable & (dac > 0) & (dac < n_valid)
-    S = float(cp.sum(seg_mask).get())
-
-    # harmonic mean of per-site sample sizes (across usable sites)
-    # round to avoid off-by-one from float truncation in downstream int()
-    n_usable = n_valid[usable]
-    n_eff = round(float(len(n_usable)) / float(cp.sum(1.0 / n_usable).get()))
-
-    return n_eff, S, matrix
 
 
 def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
@@ -1009,46 +1374,10 @@ def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
         Normalized H*. Negative values indicate excess high-frequency
         derived alleles (directional selection signal).
     """
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    n_eff, S, matrix = _effective_n_and_S(matrix, missing_data)
-
-    if S < 2:
-        return 0.0
-
-    # H = pi - theta_H (both raw, not span-normalized)
-    pi_val = pi(matrix, span_normalize=False, missing_data=missing_data)
-    th_val = theta_h(matrix, span_normalize=False, missing_data=missing_data)
-    H = pi_val - th_val
-
-    # variance of H under neutrality (Zeng et al. 2006, below eq 11)
-    n_f = n_eff
-    n = int(round(n_f))
-    a_n = sum(1.0 / i for i in range(1, n))
-    b_n = sum(1.0 / (i * i) for i in range(1, n))
-
-    n2 = n_f * n_f
-    n3 = n2 * n_f
-
-    e1 = (n_f - 2) / (6 * (n_f - 1))
-
-    e2_num = (18 * n2 * (3 * n_f + 2) * b_n
-              - (88 * n3 + 9 * n2 - 13 * n_f + 6))
-    e2_den = 9 * n_f * (n2 - n_f) * a_n + 9 * n_f * (n2 - n_f) * b_n
-    e2 = e2_num / e2_den if e2_den != 0 else 0.0
-
-    var_H = e1 * S + e2 * S * (S - 1)
-
-    if var_H <= 0:
-        return 0.0
-
-    return float(H / (var_H ** 0.5))
+    matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if matrix.num_variants == 0:
+        return float("nan")
+    return _compute_neutrality_test(matrix, 'pi', 'theta_h')
 
 
 def zeng_e(haplotype_matrix: HaplotypeMatrix,
@@ -1057,68 +1386,24 @@ def zeng_e(haplotype_matrix: HaplotypeMatrix,
     """Compute Zeng's E test statistic.
 
     E = theta_L - theta_W, normalized by its standard deviation.
-    Contrasts high-frequency variants (theta_L) against rare variants
-    (theta_W). Negative values indicate excess high-frequency derived
-    alleles relative to rare variants.
 
-    Reference: Zeng et al. (2006), "Statistical Tests for Detecting
-    Positive Selection by Utilizing High-Frequency Variants",
-    Genetics 174: 1431-1439, Equation (13).
+    Reference: Zeng et al. (2006), Genetics 174: 1431-1439, Equation (13).
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     missing_data : str
-        ``'include'`` (default) uses per-site sample
-        sizes with harmonic mean n for variance terms.
-        ``'exclude'`` filters to sites with no missing data.
+        ``'include'`` (default) or ``'exclude'``.
 
     Returns
     -------
     float
-        Normalized E statistic.
     """
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    n_eff, S, matrix = _effective_n_and_S(matrix, missing_data)
-
-    if S < 2:
-        return 0.0
-
-    # theta_L and theta_W (raw, not span-normalized)
-    tl = theta_l(matrix, span_normalize=False, missing_data=missing_data)
-    tw = theta_w(matrix, span_normalize=False, missing_data=missing_data)
-
-    E = tl - tw
-
-    # variance of E under neutrality (Zeng et al. 2006, eq 14)
-    n_f = n_eff
-    n = int(round(n_f))
-    a_n = sum(1.0 / i for i in range(1, n))
-    b_n = sum(1.0 / (i * i) for i in range(1, n))
-
-    theta = S / a_n
-
-    e1 = (n_f / (2 * (n_f - 1)) - 1.0 / a_n)
-    e2_num = (b_n / (a_n * a_n)
-              + 2 * (n_f / (n_f - 1)) ** 2 * b_n
-              - 2 * (n_f * b_n - n_f + 1) / ((n_f - 1) * a_n)
-              - (3 * n_f + 1) / (n_f - 1))
-    e2 = e2_num / (a_n * a_n + b_n)
-
-    var_E = e1 * theta + e2 * theta * theta
-
-    if var_E <= 0:
-        return 0.0
-
-    return float(E / (var_E ** 0.5))
+    matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if matrix.num_variants == 0:
+        return float('nan')
+    return _compute_neutrality_test(matrix, 'theta_l', 'watterson')
 
 
 def zeng_dh(haplotype_matrix: HaplotypeMatrix,
@@ -1551,16 +1836,13 @@ def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
     ndarray, float64, shape (n_variants,)
         Inbreeding coefficient per variant. NaN where He = 0.
     """
-    ho = heterozygosity_observed(haplotype_matrix, population, ploidy,
-                                 missing_data=missing_data)
-    he = heterozygosity_expected(haplotype_matrix, population,
-                                 missing_data=missing_data)
+    ho = cp.asarray(heterozygosity_observed(haplotype_matrix, population,
+                                             ploidy, missing_data=missing_data))
+    he = cp.asarray(heterozygosity_expected(haplotype_matrix, population,
+                                             missing_data=missing_data))
 
-    # F = 1 - Ho/He; undefined where He = 0
-    with np.errstate(divide='ignore', invalid='ignore'):
-        f = np.where(he > 0, 1.0 - ho / he, np.nan)
-
-    return f
+    f = cp.where(he > 0, 1.0 - ho / he, cp.nan)
+    return f.get()
 
 
 def mu_var(haplotype_matrix: HaplotypeMatrix,

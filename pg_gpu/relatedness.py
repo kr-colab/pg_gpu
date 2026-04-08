@@ -41,7 +41,7 @@ def grm(genotype_matrix_or_haplotype_matrix,
         Symmetric GRM. Diagonal entries are individual inbreeding
         coefficients + 1. Off-diagonal entries are pairwise relatedness.
     """
-    from ._memutil import estimate_variant_chunk_size, chunked_dac_and_n
+    from ._memutil import estimate_variant_chunk_size, dac_and_n
 
     hap, n_ind = _get_haplotype_data(genotype_matrix_or_haplotype_matrix,
                                        population)
@@ -50,7 +50,7 @@ def grm(genotype_matrix_or_haplotype_matrix,
     # Allele frequency: p = sum(alleles) / n_haplotypes = sum(genotypes) / (2*n_ind)
     # DAC sums all haplotype alleles; n_valid counts valid haplotypes.
     # For diploid p: divide by n_valid (not 2*n_valid).
-    dac, n_valid = chunked_dac_and_n(hap)
+    dac, n_valid = dac_and_n(hap)
     p = cp.where(n_valid > 0, dac.astype(cp.float64) / n_valid.astype(cp.float64), 0.0)
 
     # Filter monomorphic and exclude-missing sites

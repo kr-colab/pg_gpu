@@ -24,7 +24,7 @@ parameter with two options:
 Simulation testing under the standard neutral model confirms that
 ``include`` mode is unbiased under MCAR (missing completely at random)
 at missingness rates from 0--60% for pi, theta_w, theta_h, theta_l,
-Tajima's D, dxy, Hudson FST, da, and all Achaz SFS estimators.
+Tajima's D, dxy, Hudson FST, da, and all SFS-based estimators.
 
 Basic Usage
 -----------
@@ -92,9 +92,37 @@ Every public function accepts the ``missing_data`` parameter:
    * - LD (zns, omega)
      - per-site n
      - filter sites
-   * - SFS estimators (FrequencySpectrum, diversity_stats_fast)
+   * - SFS estimators (FrequencySpectrum)
      - group by n
      - filter sites
+
+Multiallelic Sites
+------------------
+
+pg_gpu encodes haplotype alleles as integers: ``0`` = reference,
+``1`` = first alternate, ``2`` = second alternate, etc. Missing data
+is ``-1``.
+
+For derived allele counting (used by all SFS-based statistics),
+any non-reference allele is treated as derived: allele values
+1, 2, 3, etc. all contribute 1 to the derived allele count. This
+is the standard "reference vs any alternate" folding used by most
+population genetics tools.
+
+This means multiallelic VCF sites are handled correctly without
+filtering — a site with REF=A, ALT=T,C where some samples carry
+the C allele will count all non-reference haplotypes as derived.
+
+If you need strictly biallelic data (e.g., for LD statistics or
+compatibility with other tools), use ``apply_biallelic_filter()``:
+
+.. code-block:: python
+
+   h = h.apply_biallelic_filter()  # keeps only 0/1 sites
+
+This is available on both ``HaplotypeMatrix`` and ``GenotypeMatrix``.
+Note that ``GenotypeMatrix.from_vcf()`` applies this filter
+automatically during loading.
 
 LD Estimator Choice
 -------------------
@@ -247,41 +275,20 @@ active simultaneously:
                                  accessible_bed="mask.bed")
    pi = diversity.pi(h)  # uses accessible mask + per-site valid counts
 
-Achaz Framework and SFS Projection
------------------------------------
+SFS Projection
+--------------
 
-The :doc:`achaz_framework` provides an additional approach to missing data
-through SFS projection. When computing theta estimators from the site
-frequency spectrum, sites with different sample sizes can be handled in
-two ways:
-
-**Group by sample size (recommended default):** The ``FrequencySpectrum``
-class groups variants by their per-site sample size and applies
-sample-size-specific weight vectors to each group. This uses all available
-data without discarding any sites.
-
-**Hypergeometric projection:** Project all SFS contributions to a common
-sample size using the hypergeometric distribution (Gutenkunst et al. 2009).
-This is useful when a clean SFS at a single sample size is needed (e.g.,
-for demographic inference with moments or dadi, or for cross-population
-comparison at matched n).
+For cross-population comparison at matched sample sizes, or for
+demographic inference, ``FrequencySpectrum`` supports hypergeometric
+SFS projection (Gutenkunst et al. 2009):
 
 .. code-block:: python
 
-   from pg_gpu import FrequencySpectrum
+   from pg_gpu.diversity import FrequencySpectrum
 
    fs = FrequencySpectrum(h, population="pop1")
-
-   # Group-by-n: uses all data (default)
-   pi_include = fs.theta("pi")
-
-   # Projection: suggest a target retaining 95% of sites
-   target_n = fs.suggest_projection_n(retain_fraction=0.95)
-   fs_proj = fs.project(target_n)
+   fs_proj = fs.project(target_n=50)
    pi_proj = fs_proj.theta("pi")
-
-Simulation-based validation shows both approaches are unbiased under the
-standard neutral model at missing rates from 0--60%.
 
 Component-Level Access
 ----------------------
@@ -314,9 +321,9 @@ Best Practices
    at exactly the same sites (e.g., for certain LD analyses or when
    missingness is non-random).
 
-3. **Use the Achaz framework** (``FrequencySpectrum``) for theta
-   estimators and neutrality tests when you want proper handling of
-   variable sample sizes via group-by-n or SFS projection.
+3. **Use FrequencySpectrum** for theta estimators and neutrality tests
+   when you want proper handling of variable sample sizes via group-by-n
+   or SFS projection.
 
 4. **Use estimator='sigma_d2'** for LD statistics (ZnS, Omega) when
    sample sizes are small or variable. The unbiased estimators correct

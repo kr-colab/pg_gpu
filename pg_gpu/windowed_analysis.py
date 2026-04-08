@@ -636,6 +636,165 @@ class WindowedAnalyzer:
                 yield pd.DataFrame(batch_results)
 
 
+def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
+                              statistics, populations, missing_data,
+                              span_normalize):
+    """Compute windowed theta estimators via scatter-add on GPU.
+
+    Uses dac_and_n fused kernel + direct vectorized arithmetic + scatter_add
+    for per-window accumulation. Handles variable sample sizes per site.
+    """
+    from ._utils import get_population_matrix
+    from cupyx import scatter_add
+
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
+    pop = populations[0] if populations else None
+    if pop is not None:
+        matrix = get_population_matrix(haplotype_matrix, pop)
+    else:
+        matrix = haplotype_matrix
+
+    if missing_data == 'exclude':
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
+            return pd.DataFrame()
+
+    from .diversity import _prepare_dac, _site_contribution
+    dac, n_valid, d, n_safe, seg, n_hap = _prepare_dac(matrix)
+
+    pos = matrix.positions
+    if isinstance(pos, cp.ndarray):
+        pos_cpu = pos.get()
+    else:
+        pos_cpu = np.asarray(pos)
+
+    # Window boundaries
+    chrom_start = matrix.chrom_start or int(pos_cpu[0])
+    chrom_end = matrix.chrom_end or int(pos_cpu[-1])
+    win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
+                           dtype=np.float64)
+    win_stops = win_starts + window_size
+    n_windows = len(win_starts)
+
+    # Map variants to windows
+    win_idx = np.searchsorted(win_starts, pos_cpu, side='right') - 1
+    win_idx = np.clip(win_idx, 0, n_windows - 1)
+    in_window = pos_cpu < win_stops[win_idx]
+    win_idx_gpu = cp.asarray(win_idx)
+    mask = cp.asarray(in_window)
+
+    def scatter_sum(values):
+        out = cp.zeros(n_windows, dtype=cp.float64)
+        scatter_add(out, win_idx_gpu, values * mask)
+        return out
+
+    # Compute requested per-variant contributions and scatter
+    results = {}
+    results['start'] = win_starts.astype(int)
+    results['stop'] = np.minimum(win_stops, chrom_end).astype(int)
+
+    # Span for normalization
+    if span_normalize is not False:
+        if haplotype_matrix.has_accessible_mask:
+            am = haplotype_matrix.accessible_mask
+            spans = am.count_accessible_windows(
+                results['start'], results['stop'])
+        elif matrix.n_total_sites is not None:
+            # Proportional from n_total_sites
+            total_span = chrom_end - chrom_start
+            spans = (win_stops - win_starts) * matrix.n_total_sites / total_span
+        else:
+            spans = np.minimum(win_stops, chrom_end) - win_starts
+        spans = np.maximum(spans, 1.0)
+    else:
+        spans = np.ones(n_windows)
+
+    stats_set = set(statistics)
+
+    # Determine which theta estimators are needed as intermediates
+    needs = {
+        'pi': stats_set & {'pi', 'tajimas_d', 'fay_wu_h', 'normalized_fay_wu_h', 'zeng_dh'},
+        'theta_h': stats_set & {'theta_h', 'fay_wu_h', 'normalized_fay_wu_h', 'zeng_dh'},
+        'theta_l': stats_set & {'theta_l', 'zeng_e'},
+        'watterson': stats_set & {'theta_w', 'tajimas_d', 'zeng_e', 'zeng_dh'},
+    }
+
+    # Compute per-variant contributions via _site_contribution (single source of truth)
+    raw = {}
+    for est_name, dependents in needs.items():
+        if dependents:
+            raw[est_name] = scatter_sum(
+                _site_contribution(est_name, d, n_safe, seg, n_valid, n_hap, dac=dac))
+
+    if stats_set & {'segregating_sites', 'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}:
+        seg_count = scatter_sum(seg.astype(cp.float64))
+    if 'singletons' in stats_set:
+        is_sing = seg & ((dac == 1) | (dac == n_valid - 1))
+        sing_count = scatter_sum(is_sing.astype(cp.float64))
+    if 'max_daf' in stats_set:
+        dafs = cp.where(seg & mask, d / n_safe, 0.0).get()
+        max_daf_arr = np.zeros(n_windows)
+        np.maximum.at(max_daf_arr, win_idx, dafs)
+
+    # Build output — theta estimators as per-base rates
+    for est_name, out_name in [('pi', 'pi'), ('watterson', 'theta_w'),
+                                ('theta_h', 'theta_h'), ('theta_l', 'theta_l')]:
+        if out_name in stats_set and est_name in raw:
+            results[out_name] = raw[est_name].get() / spans
+
+    if 'segregating_sites' in stats_set:
+        results['segregating_sites'] = seg_count.get()
+    if 'singletons' in stats_set:
+        results['singletons'] = sing_count.get()
+    if 'max_daf' in stats_set:
+        results['max_daf'] = max_daf_arr
+
+    # Composite stats from raw theta sums
+    if 'fay_wu_h' in stats_set:
+        results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get() / spans
+
+    # Neutrality tests — unified Achaz (2009) variance framework
+    need_variance = stats_set & {'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}
+    if need_variance:
+        from .diversity import _achaz_variance_coefficients
+        S = seg_count.get()
+        a1 = sum(1.0 / i for i in range(1, n_hap))
+        a2 = sum(1.0 / (i ** 2) for i in range(1, n_hap))
+        theta_est = S / a1
+        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
+
+        def windowed_test(w1, w2, numerator_arr):
+            alpha, beta = _achaz_variance_coefficients(w1, w2, n_hap)
+            var = alpha * theta_est + beta * theta_sq_est
+            with np.errstate(invalid='ignore', divide='ignore'):
+                return np.where((var > 0) & (S >= 3),
+                                numerator_arr / np.sqrt(var), np.nan)
+
+    if stats_set & {'tajimas_d', 'zeng_dh'}:
+        tajd = windowed_test('pi', 'watterson',
+                             raw['pi'].get() - raw['watterson'].get())
+        if 'tajimas_d' in stats_set:
+            results['tajimas_d'] = tajd
+
+    if 'normalized_fay_wu_h' in stats_set:
+        results['normalized_fay_wu_h'] = windowed_test(
+            'pi', 'theta_h', raw['pi'].get() - raw['theta_h'].get())
+
+    if 'zeng_e' in stats_set:
+        results['zeng_e'] = windowed_test(
+            'theta_l', 'watterson',
+            raw['theta_l'].get() - raw['watterson'].get())
+
+    if 'zeng_dh' in stats_set:
+        H = (raw['pi'] - raw['theta_h']).get() / spans
+        results['zeng_dh'] = np.where(
+            (tajd < 0) & (H < 0), tajd * H, 0.0)
+
+    return pd.DataFrame(results)
+
+
 # Convenience function for simple usage
 def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      window_size: int = 50000,
@@ -684,7 +843,20 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     if step_size is None:
         step_size = window_size
 
-    # Fast path: use fused CUDA kernels when possible.
+    # Scatter-add path: single-pop theta estimators via dac_and_n + scatter
+    scatter_stats = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
+                     'theta_h', 'theta_l', 'fay_wu_h', 'singletons',
+                     'normalized_fay_wu_h', 'zeng_e', 'zeng_dh', 'max_daf'}
+    if (missing_data in ('include', 'exclude')
+            and set(statistics) <= scatter_stats
+            and len(populations or []) <= 1):
+        result = _windowed_thetas_scatter(
+            haplotype_matrix, window_size, step_size,
+            statistics, populations, missing_data, span_normalize)
+        if result is not None:
+            return result
+
+    # Fused CUDA kernel path for more complex stat combinations.
     fused_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
                     'singletons', 'theta_h', 'fay_wu_h', 'max_daf'}
     fused_two = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}

@@ -52,7 +52,7 @@ Data Loading and I/O
   with a single ``span_normalize`` parameter. ``True`` (default) auto-detects
   the best denominator (accessible bases if mask set, else genomic span).
   Consistent across pi, theta_w, dxy, da, and all theta estimators.
-  Achaz ``FrequencySpectrum.theta()`` now auto-detects span from source matrix.
+  ``FrequencySpectrum.theta()`` now auto-detects span from source matrix.
 
 * **Population file loading** -- ``load_pop_file('pops.txt')`` assigns populations
   from a tab-delimited file using stored sample names.

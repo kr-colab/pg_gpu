@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 import msprime
 from pg_gpu import HaplotypeMatrix, diversity
-from pg_gpu.achaz import (
+from pg_gpu.diversity import (
     FrequencySpectrum, project_sfs, compute_sigma_ij,
     WEIGHT_REGISTRY,
 )

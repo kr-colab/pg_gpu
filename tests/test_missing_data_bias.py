@@ -12,7 +12,7 @@ import pytest
 import msprime
 
 from pg_gpu import HaplotypeMatrix, diversity, divergence
-from pg_gpu.achaz import FrequencySpectrum
+from pg_gpu.diversity import FrequencySpectrum
 
 N_REPS = 50
 N_HAPS_PER_POP = 100

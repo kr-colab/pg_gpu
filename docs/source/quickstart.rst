@@ -319,54 +319,39 @@ auto-dispatch based on input type:
    # Distance distribution moments
    var, skew, kurt = distance_stats.dist_moments(gm)
 
-Achaz Framework
-~~~~~~~~~~~~~~~~
+Theta Estimators and Neutrality Tests
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The Achaz (2009) framework treats all frequency-spectrum-based theta estimators
-as linear combinations of the site frequency spectrum (SFS). Compute the SFS
-once on GPU, then derive all estimators as trivial dot products. This is
-faster when computing multiple statistics and enables custom estimators.
+All theta estimators and neutrality tests are available as individual
+functions or batched:
 
 .. code-block:: python
 
-   from pg_gpu import FrequencySpectrum
-
-   # Build SFS from haplotype data (one GPU pass)
-   fs = FrequencySpectrum(h, population="pop1")
-
-   # Standard theta estimators
-   fs.theta("pi")          # nucleotide diversity (Tajima 1983)
-   fs.theta("watterson")   # Watterson's theta (Watterson 1975)
-   fs.theta("theta_h")     # Fay & Wu's theta_H (Fay & Wu 2000)
-   fs.theta("theta_l")     # theta_L (Zeng et al. 2006)
-   fs.theta("eta1")        # singleton-based theta (Fu & Li 1993)
-
-   # Neutrality tests (with proper variance)
-   fs.tajimas_d()                    # Tajima's D
-   fs.fay_wu_h()                     # Fay & Wu's H (unnormalized)
-   fs.fay_wu_h(normalized=True)      # Fay & Wu's H* (Zeng et al. 2006)
-   fs.zeng_e()                       # Zeng's E
-
-   # All at once
-   fs.all_thetas()   # dict of 8 theta estimators
-   fs.all_tests()    # dict of 4 neutrality tests
-
-   # Custom weight vector: any function w(n) -> array
-   def rare_variant_weights(n):
-       import numpy as np
-       w = np.zeros(n + 1)
-       w[1:4] = 1.0  # weight only singletons, doubletons, tripletons
-       return w / np.sum(w[1:n])
-   fs.theta(rare_variant_weights)
-
-   # SFS projection for missing data (Gutenkunst et al. 2009)
-   fs_projected = fs.project(target_n=50)
-   fs_projected.theta("pi")
-
-   # Batch computation via diversity module
    from pg_gpu import diversity
-   stats = diversity.diversity_stats_fast(h, population="pop1")
-   # Returns all 12 statistics in one call
+
+   # Individual statistics
+   diversity.pi(h, population="pop1")
+   diversity.theta_w(h, population="pop1")
+   diversity.tajimas_d(h, population="pop1")
+   diversity.fay_wus_h(h, population="pop1")
+
+   # Batched (single GPU pass for all)
+   stats = diversity.diversity_stats(h, population="pop1",
+       statistics=['pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'])
+
+Available estimators: pi, theta_w, theta_h, theta_l, eta1, eta1_star,
+minus_eta1, minus_eta1_star. Available tests: tajimas_d, fay_wus_h,
+normalized_fay_wus_h, zeng_e, zeng_dh.
+
+For custom weight functions or SFS projection, use ``FrequencySpectrum``:
+
+.. code-block:: python
+
+   from pg_gpu.diversity import FrequencySpectrum
+
+   fs = FrequencySpectrum(h, population="pop1")
+   fs.theta(my_custom_weight_fn)
+   fs.project(target_n=50).theta("pi")
 
 Missing Data
 ~~~~~~~~~~~~

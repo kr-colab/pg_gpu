@@ -35,12 +35,12 @@ def _derived_allele_counts(haplotype_matrix, missing_data='include'):
     hap = haplotype_matrix.haplotypes  # (n_haplotypes, n_variants)
 
     if missing_data == 'include':
-        from ._memutil import chunked_dac_and_n
-        dac, n_valid = chunked_dac_and_n(hap)
+        from ._memutil import dac_and_n
+        dac, n_valid = dac_and_n(hap)
         return dac, n_valid
     elif missing_data == 'exclude':
-        from ._memutil import chunked_dac_and_n
-        dac, n_valid = chunked_dac_and_n(hap)
+        from ._memutil import dac_and_n
+        dac, n_valid = dac_and_n(hap)
         incomplete = n_valid < hap.shape[0]
         dac[incomplete] = -1
         n = hap.shape[0]

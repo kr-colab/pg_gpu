@@ -82,11 +82,31 @@ def chunked_sum_int32(hap, axis=0):
     return result
 
 
-def chunked_dac_and_n(hap):
-    """Compute derived allele counts and valid counts, memory-safe.
+_dac_and_n_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void dac_and_n(const signed char* hap, int n_hap, int n_var,
+               long long stride0, long long stride1,
+               long long* out_dac, long long* out_n) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= n_var) return;
+    int d = 0, nv = 0;
+    for (int i = 0; i < n_hap; i++) {
+        signed char v = hap[i * stride0 + j * stride1];
+        if (v >= 0) nv++;
+        if (v > 0) d++;
+    }
+    out_dac[j] = d;
+    out_n[j] = nv;
+}
+''', 'dac_and_n')
 
-    Uses the fast inline path when the matrix fits in memory, falling
-    back to chunked processing for large matrices.
+
+def dac_and_n(hap):
+    """Compute derived allele counts and valid counts via fused CUDA kernel.
+
+    Single-pass kernel: reads each element once, no intermediate arrays.
+    Counts non-reference alleles (hap > 0) as derived, handling
+    multiallelic sites correctly.
 
     Parameters
     ----------
@@ -95,33 +115,23 @@ def chunked_dac_and_n(hap):
     Returns
     -------
     dac : cupy.ndarray, int64, shape (n_var,)
+        Derived (non-reference) allele count per site.
     n_valid : cupy.ndarray, int64, shape (n_var,)
+        Number of non-missing haplotypes per site.
     """
     n_hap, n_var = hap.shape
+    out_dac = cp.empty(n_var, dtype=cp.int64)
+    out_n = cp.empty(n_var, dtype=cp.int64)
+    s0, s1 = hap.strides
+    threads = 256
+    blocks = (n_var + threads - 1) // threads
+    _dac_and_n_kernel((blocks,), (threads,),
+                      (hap, n_hap, n_var, s0, s1, out_dac, out_n))
+    return out_dac, out_n
 
-    # Fast path: if int32 intermediates fit in ~40% of free memory, no chunking
-    free = cp.cuda.Device().mem_info[0]
-    needed = n_hap * n_var * 4 * 2  # two int32 intermediates
-    if needed < free * 0.4:
-        valid_mask = hap >= 0
-        n_valid = cp.sum(valid_mask.astype(cp.int32), axis=0).astype(cp.int64)
-        dac = cp.sum((hap * valid_mask).astype(cp.int32), axis=0).astype(cp.int64)
-        return dac, n_valid
 
-    # Chunked path for large matrices
-    chunk_size = estimate_variant_chunk_size(n_hap, bytes_per_element=4,
-                                             n_intermediates=2)
-    dac = cp.empty(n_var, dtype=cp.int64)
-    n_valid = cp.empty(n_var, dtype=cp.int64)
-
-    for start in range(0, n_var, chunk_size):
-        end = min(start + chunk_size, n_var)
-        chunk = hap[:, start:end]
-        valid = (chunk >= 0).astype(cp.int32)
-        n_valid[start:end] = cp.sum(valid, axis=0)
-        dac[start:end] = cp.sum((chunk * valid).astype(cp.int32), axis=0)
-
-    return dac, n_valid
+# Backward-compatible alias
+chunked_dac_and_n = dac_and_n
 
 
 def chunked_matmul_accumulate(X, chunk_size=None):
