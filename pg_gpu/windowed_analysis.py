@@ -920,24 +920,21 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         pi1_sum = scatter_sum(mpd1)
         pi2_sum = scatter_sum(mpd2)
 
-    # Build output
-    between_np = between_sum.get() if between_sum is not None else None
+    # Build output — stay on GPU, single .get() per result
+    spans_gpu = cp.asarray(spans)
 
     if stats_set & {'fst', 'fst_hudson'}:
-        fst_num_np = fst_num.get()
-        with np.errstate(invalid='ignore', divide='ignore'):
-            fst_vals = np.where(between_np > 0, fst_num_np / between_np, np.nan)
+        fst_vals = cp.where(between_sum > 0, fst_num / between_sum, cp.nan).get()
         if 'fst' in stats_set:
             results['fst'] = fst_vals
         if 'fst_hudson' in stats_set:
             results['fst_hudson'] = fst_vals
 
     if 'dxy' in stats_set:
-        results['dxy'] = between_np / spans
+        results['dxy'] = (between_sum / spans_gpu).get()
 
     if 'da' in stats_set:
-        da_vals = (between_np - (pi1_sum.get() + pi2_sum.get()) / 2.0) / spans
-        results['da'] = da_vals
+        results['da'] = ((between_sum - (pi1_sum + pi2_sum) / 2.0) / spans_gpu).get()
 
     return pd.DataFrame(results)
 
