@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'moments'))
 
 import numpy as np
 import pytest
-import moments.LD
+pytest.importorskip("moments.LD")
 from pg_gpu.haplotype_matrix import HaplotypeMatrix
 import tempfile
 import msprime

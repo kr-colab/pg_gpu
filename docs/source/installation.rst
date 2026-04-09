@@ -61,5 +61,13 @@ Running Tests
 
 .. code-block:: bash
 
-   pixi run test              # all tests
+   pixi run test              # all tests (moments-dependent tests auto-skip)
    pixi run test-parallel     # parallel execution
+
+Tests that validate against the `moments` library will be automatically
+skipped if moments is not installed. To run the full test suite including
+moments validation tests:
+
+.. code-block:: bash
+
+   pixi run -e moments test   # includes moments LD validation tests

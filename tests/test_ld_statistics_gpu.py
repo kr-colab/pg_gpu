@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'moments'))
 import numpy as np
 import pytest
 from pg_gpu.haplotype_matrix import HaplotypeMatrix
+pytest.importorskip("moments.LD")
 import moments.LD.Parsing as mParsing
 import tempfile
 import allel
