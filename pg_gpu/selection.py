@@ -741,10 +741,12 @@ def _distinct_haplotype_frequencies_missing(hap):
 _nsl01_kernel = cp.RawKernel(r'''
 extern "C" __global__
 void nsl01_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
+                       long long stride_var, long long stride_hap,
                        const int* pair_j, const int* pair_k, int n_pairs,
                        double* ssl_sum_00, double* ssl_sum_11,
                        int* count_00, int* count_11) {
-    // Each thread handles one haplotype pair across all variants
+    // Each thread handles one haplotype pair across all variants.
+    // Stride-aware: reads transposed/reversed views without copying.
     int pid = blockDim.x * blockIdx.x + threadIdx.x;
     if (pid >= n_pairs) return;
 
@@ -753,8 +755,8 @@ void nsl01_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
     int ssl = 0;
 
     for (int i = 0; i < n_variants; i++) {
-        signed char a1 = h[(long long)i * n_haplotypes + j];
-        signed char a2 = h[(long long)i * n_haplotypes + k];
+        signed char a1 = h[i * stride_var + j * stride_hap];
+        signed char a2 = h[i * stride_var + k * stride_hap];
 
         if (a1 < 0 || a2 < 0) {
             ssl += 1;
@@ -778,6 +780,7 @@ void nsl01_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
 _nsl_kernel = cp.RawKernel(r'''
 extern "C" __global__
 void nsl_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
+                     long long stride_var, long long stride_hap,
                      const int* pair_j, const int* pair_k, int n_pairs,
                      double* ssl_sum) {
     int pid = blockDim.x * blockIdx.x + threadIdx.x;
@@ -788,8 +791,8 @@ void nsl_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
     int ssl = 0;
 
     for (int i = 0; i < n_variants; i++) {
-        signed char a1 = h[(long long)i * n_haplotypes + j];
-        signed char a2 = h[(long long)i * n_haplotypes + k];
+        signed char a1 = h[i * stride_var + j * stride_hap];
+        signed char a2 = h[i * stride_var + k * stride_hap];
 
         if ((a1 != a2) && (a1 >= 0) && (a2 >= 0)) {
             ssl = 0;
@@ -822,11 +825,13 @@ def _get_pair_indices(n_haplotypes):
 def _nsl01_scan_gpu(h):
     """Forward scan computing mean SSL for ref (0) and alt (1) allele classes.
 
-    Uses a CUDA kernel with one thread per haplotype pair.
+    Uses a stride-aware CUDA kernel with one thread per haplotype pair.
+    Reads transposed/reversed views directly without copying.
 
     Parameters
     ----------
     h : cupy.ndarray, shape (n_variants, n_haplotypes)
+        Can be a non-contiguous view (e.g., from .T or [::-1]).
 
     Returns
     -------
@@ -843,13 +848,16 @@ def _nsl01_scan_gpu(h):
     count_00 = cp.zeros(n_variants, dtype=cp.int32)
     count_11 = cp.zeros(n_variants, dtype=cp.int32)
 
-    h_contig = cp.ascontiguousarray(h.astype(cp.int8))
+    # Ensure int8 dtype; keep as view (no contiguous copy needed)
+    h_view = h if h.dtype == cp.int8 else h.astype(cp.int8, copy=False)
+    s0, s1 = h_view.strides  # bytes per element (int8 = 1 byte)
 
     block = 256
     grid = (n_pairs + block - 1) // block
 
     _nsl01_kernel((grid,), (block,),
-                  (h_contig, np.int32(n_variants), np.int32(n_haplotypes),
+                  (h_view, np.int32(n_variants), np.int32(n_haplotypes),
+                   np.int64(s0), np.int64(s1),
                    pair_j, pair_k, np.int32(n_pairs),
                    ssl_sum_00, ssl_sum_11, count_00, count_11))
 
@@ -877,13 +885,15 @@ def _nsl_scan_gpu(h):
 
     ssl_sum = cp.zeros(n_variants, dtype=cp.float64)
 
-    h_contig = cp.ascontiguousarray(h.astype(cp.int8))
+    h_view = h if h.dtype == cp.int8 else h.astype(cp.int8, copy=False)
+    s0, s1 = h_view.strides
 
     block = 256
     grid = (n_pairs + block - 1) // block
 
     _nsl_kernel((grid,), (block,),
-                (h_contig, np.int32(n_variants), np.int32(n_haplotypes),
+                (h_view, np.int32(n_variants), np.int32(n_haplotypes),
+                 np.int64(s0), np.int64(s1),
                  pair_j, pair_k, np.int32(n_pairs), ssl_sum))
 
     vnsl = ssl_sum / n_pairs

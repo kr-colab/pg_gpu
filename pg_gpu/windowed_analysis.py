@@ -1074,6 +1074,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
 
         pop1 = populations[0] if populations and len(populations) >= 1 else None
         pop2 = populations[1] if populations and len(populations) >= 2 else None
+        population = pop1  # single-pop stats use the first population
 
         # Choose chunked or single-shot fused based on memory
         n_hap = haplotype_matrix.num_haplotypes
@@ -1088,6 +1089,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             haplotype_matrix,
             bp_bins=bp_bins,
             statistics=tuple(statistics),
+            population=population,
             pop1=pop1,
             pop2=pop2,
             per_base=(span_normalize is not False),
@@ -1752,7 +1754,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     if 'mean_nsl' in statistics:
         from . import selection as sel
-        nsl_gpu = cp.asarray(sel.nsl(matrix, population=population))
+        # matrix is already population-subsetted (line 1533); don't re-subset
+        nsl_gpu = cp.asarray(sel.nsl(matrix))
         valid = cp.isfinite(nsl_gpu) & in_range
         results['mean_nsl'] = _windowed_mean(nsl_gpu, bin_idx, valid, n_windows)
 
