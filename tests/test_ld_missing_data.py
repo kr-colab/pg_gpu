@@ -10,6 +10,7 @@ import numpy as np
 import tempfile
 import os
 import allel
+pytest.importorskip("moments.LD")
 import moments.LD.Parsing as mParsing
 from pg_gpu.haplotype_matrix import HaplotypeMatrix
 from collections import OrderedDict

@@ -7,12 +7,14 @@ implementations, checking that they agree within numerical tolerance.
 """
 
 import os
+import tempfile
+
 import numpy as np
 import pytest
-from pg_gpu.haplotype_matrix import HaplotypeMatrix
-import moments.LD.stats_from_haplotype_counts as moments_shc
-import tempfile
 import allel
+from pg_gpu.haplotype_matrix import HaplotypeMatrix
+
+moments_shc = pytest.importorskip("moments.LD.stats_from_haplotype_counts")
 
 
 class TestLDStatisticsComparison:
