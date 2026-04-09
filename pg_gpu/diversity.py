@@ -95,30 +95,30 @@ def _achaz_alpha_beta(v1, v2, n):
     v_i/sum(v_j) = w[i]/i, giving V_i = w1[i]/i - w2[i]/i.
     """
     H = cp.asarray(_harmonic_sums(n))
-    an = float(H[n - 1])
+    an = H[n - 1]  # CuPy scalar — stays on GPU
 
     k = cp.arange(1, n, dtype=cp.float64)
+    k_int = k.astype(cp.int64)
     V = cp.asarray((v1[1:n] - v2[1:n])) / k
     w = k * V
 
-    alpha_n = float(cp.sum(k * V ** 2))
+    alpha_n = cp.sum(k * V ** 2)
 
-    # Precompute beta(i) for i=1..n-1
-    idx_b = cp.arange(1, n, dtype=cp.float64)
-    a_b = H[idx_b.astype(cp.int64) - 1]
+    # Precompute beta(i) for i=1..n-1 (reuse k instead of separate idx_b)
+    a_b = H[k_int - 1]
     beta_vals = cp.zeros(n + 1, dtype=cp.float64)
-    beta_vals[1:n] = (2.0 * n / ((n - idx_b + 1) * (n - idx_b))
-                      * (an + 1.0 / n - a_b) - 2.0 / (n - idx_b))
+    beta_vals[1:n] = (2.0 * n / ((n - k + 1) * (n - k))
+                      * (an + 1.0 / n - a_b) - 2.0 / (n - k))
 
     # --- Diagonal: sum w_i^2 * sigma_{ii} ---
-    i_d = k
-    i_int = i_d.astype(cp.int64)
+    # Clip indices protect against out-of-bounds; valid masks ensure
+    # only correct contributions are summed.
     diag_sigma = cp.where(
-        2 * i_d < n, beta_vals[i_int + 1],
-        cp.where(2 * i_d == n,
-                 2.0 * (an - H[i_int - 1]) / (n - i_d) - 1.0 / (i_d * i_d),
-                 beta_vals[i_int] - 1.0 / (i_d * i_d)))
-    diag_sum = float(cp.sum(w ** 2 * diag_sigma))
+        2 * k < n, beta_vals[k_int + 1],
+        cp.where(2 * k == n,
+                 2.0 * (an - H[k_int - 1]) / (n - k) - 1.0 / (k * k),
+                 beta_vals[k_int] - 1.0 / (k * k)))
+    diag_sum = cp.sum(w ** 2 * diag_sigma)
 
     # --- Prefix/suffix sums for off-diagonal ---
     W_prefix = cp.cumsum(w)
@@ -132,7 +132,7 @@ def _achaz_alpha_beta(v1, v2, n):
     valid_a = upper >= 1
     psum = cp.where(valid_a,
                     W_prefix[cp.clip(upper - 1, 0, n - 2).astype(cp.int64)], 0.0)
-    case_a = float(cp.sum(dbeta * w[j_idx - 1] * psum * valid_a))
+    case_a = cp.sum(dbeta * w[j_idx - 1] * psum * valid_a)
 
     # Case C: i < j, i+j > n => sigma = (beta(i)-beta(i+1))/2 - 1/(i*j)
     i_idx = cp.arange(1, n - 1, dtype=cp.int64)
@@ -141,10 +141,10 @@ def _achaz_alpha_beta(v1, v2, n):
     valid_c = j_start <= n - 1
     ws = cp.where(valid_c,
                   W_suffix[cp.clip(j_start - 1, 0, n - 2).astype(cp.int64)], 0.0)
-    case_c1 = float(cp.sum(dbeta_i * w[i_idx - 1] * ws * valid_c))
+    case_c1 = cp.sum(dbeta_i * w[i_idx - 1] * ws * valid_c)
     vs = cp.where(valid_c,
                   V_suffix[cp.clip(j_start - 1, 0, n - 2).astype(cp.int64)], 0.0)
-    case_c2 = float(cp.sum(V[i_idx - 1] * vs * valid_c))
+    case_c2 = cp.sum(V[i_idx - 1] * vs * valid_c)
 
     # Case B: i+j == n (anti-diagonal, O(n) terms)
     i_b = cp.arange(1, n, dtype=cp.int64)
@@ -157,11 +157,12 @@ def _achaz_alpha_beta(v1, v2, n):
     s_b = ((an - aj) / (n - j_f) + (an - ai) / (n - i_f)
            - (beta_vals[j_b] + beta_vals[cp.clip(i_b + 1, 0, n)]) / 2.0
            - 1.0 / (j_f * i_f))
-    case_b = float(cp.sum(
-        2.0 * w[i_b - 1] * w[cp.clip(j_b - 1, 0, n - 2)] * s_b * valid_b))
+    case_b = cp.sum(
+        2.0 * w[i_b - 1] * w[cp.clip(j_b - 1, 0, n - 2)] * s_b * valid_b)
 
+    # Single GPU->CPU transfer at the end
     beta_n = diag_sum + case_a + case_c1 - 2.0 * case_c2 + case_b
-    return alpha_n, beta_n
+    return float(alpha_n), float(beta_n)
 
 
 @lru_cache(maxsize=128)
