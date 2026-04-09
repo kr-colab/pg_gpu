@@ -1433,7 +1433,7 @@ def _ihh01_scan_hist_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
     n_pairs = (n_haplotypes * (n_haplotypes - 1)) // 2
 
     if max_ssl_cap is None:
-        max_ssl_cap = min(n_variants, 2_000)
+        max_ssl_cap = min(n_variants, 10_000)
     hist_size = min(max_ssl_cap + 1, n_variants + 1)
 
     pair_j, pair_k = _get_pair_indices(n_haplotypes)
@@ -1519,7 +1519,7 @@ def _ihh_scan_gpu(h, gaps, min_ehh=0.05, include_edges=False,
 
     # Histogram-based approach for all haplotype counts
     if max_ssl_cap is None:
-        max_ssl_cap = min(n_variants, 2_000)
+        max_ssl_cap = min(n_variants, 10_000)
     hist_size = min(max_ssl_cap + 1, n_variants + 1)
 
     pair_j, pair_k = _get_pair_indices(n_haplotypes)
