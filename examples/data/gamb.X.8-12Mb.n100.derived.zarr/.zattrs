@@ -1,0 +1,38 @@
+{
+  "vcf_zarr_version": "0.4",
+  "source": "bio2zarr-0.1.8",
+  "vcf_meta_information": [
+    [
+      "fileformat",
+      "VCFv4.2"
+    ],
+    [
+      "fileDate",
+      "20/07/2021 - 13:55:02"
+    ],
+    [
+      "source",
+      "shapeit4.1.3"
+    ],
+    [
+      "bcftools_concatVersion",
+      "1.11+htslib-1.11"
+    ],
+    [
+      "bcftools_concatCommand",
+      "concat --file-list phased_vcf_list.txt --ligate --output ag3_gamb_colu_X_phased.vcf.gz --output-type z; Date=Wed Jul 21 09:25:10 2021"
+    ],
+    [
+      "bcftools_viewVersion",
+      "1.22+htslib-1.22.1"
+    ],
+    [
+      "bcftools_viewCommand",
+      "view -S /tmp/first100_samples.txt -Oz -o /home/adkern/pg_gpu/examples/data/gamb.X.phased.n100.derived.vcf.gz /sietch_colab/data_share/Ag1000G/Ag3.0/vcf/phased_vcf/gamb/gamb.X.phased.n1470.derived.vcf.gz; Date=Tue Mar 31 20:39:07 2026"
+    ],
+    [
+      "bcftools_viewCommand",
+      "view -r X:8000000-12000000 -Oz -o /home/adkern/pg_gpu/examples/data/gamb.X.8-12Mb.n100.derived.vcf.gz /home/adkern/pg_gpu/examples/data/gamb.X.phased.n100.derived.vcf.gz; Date=Tue Mar 31 21:09:48 2026"
+    ]
+  ]
+}
