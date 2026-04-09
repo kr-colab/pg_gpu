@@ -746,31 +746,45 @@ void nsl01_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
                        double* ssl_sum_00, double* ssl_sum_11,
                        int* count_00, int* count_11) {
     // Each thread handles one haplotype pair across all variants.
-    // Stride-aware: reads transposed/reversed views without copying.
+    // Warp-level reduction reduces atomic contention by 32x.
     int pid = blockDim.x * blockIdx.x + threadIdx.x;
     if (pid >= n_pairs) return;
 
     int j = pair_j[pid];
     int k = pair_k[pid];
     int ssl = 0;
+    unsigned mask = 0xFFFFFFFF;
+    int lane = threadIdx.x & 31;
 
     for (int i = 0; i < n_variants; i++) {
         signed char a1 = h[i * stride_var + j * stride_hap];
         signed char a2 = h[i * stride_var + k * stride_hap];
 
+        double sv00 = 0.0, sv11 = 0.0;
+        int c00 = 0, c11 = 0;
+
         if (a1 < 0 || a2 < 0) {
             ssl += 1;
         } else if (a1 == a2) {
             ssl += 1;
-            if (a1 == 0) {
-                atomicAdd(&ssl_sum_00[i], (double)ssl);
-                atomicAdd(&count_00[i], 1);
-            } else {
-                atomicAdd(&ssl_sum_11[i], (double)ssl);
-                atomicAdd(&count_11[i], 1);
-            }
+            if (a1 == 0) { sv00 = (double)ssl; c00 = 1; }
+            else          { sv11 = (double)ssl; c11 = 1; }
         } else {
             ssl = 0;
+        }
+
+        for (int off = 16; off > 0; off >>= 1) {
+            sv00 += __shfl_down_sync(mask, sv00, off);
+            sv11 += __shfl_down_sync(mask, sv11, off);
+            c00  += __shfl_down_sync(mask, c00, off);
+            c11  += __shfl_down_sync(mask, c11, off);
+        }
+
+        if (lane == 0) {
+            if (sv00 != 0.0) atomicAdd(&ssl_sum_00[i], sv00);
+            if (sv11 != 0.0) atomicAdd(&ssl_sum_11[i], sv11);
+            if (c00 != 0)    atomicAdd(&count_00[i], c00);
+            if (c11 != 0)    atomicAdd(&count_11[i], c11);
         }
     }
 }
@@ -789,6 +803,8 @@ void nsl_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
     int j = pair_j[pid];
     int k = pair_k[pid];
     int ssl = 0;
+    unsigned mask = 0xFFFFFFFF;
+    int lane = threadIdx.x & 31;
 
     for (int i = 0; i < n_variants; i++) {
         signed char a1 = h[i * stride_var + j * stride_hap];
@@ -799,7 +815,12 @@ void nsl_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
         } else {
             ssl += 1;
         }
-        atomicAdd(&ssl_sum[i], (double)ssl);
+
+        double val = (double)ssl;
+        for (int off = 16; off > 0; off >>= 1)
+            val += __shfl_down_sync(mask, val, off);
+        if (lane == 0)
+            atomicAdd(&ssl_sum[i], val);
     }
 }
 ''', 'nsl_scan_kernel')
