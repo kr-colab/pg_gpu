@@ -849,7 +849,7 @@ def _nsl01_scan_gpu(h):
     count_11 = cp.zeros(n_variants, dtype=cp.int32)
 
     # Ensure int8 dtype; keep as view (no contiguous copy needed)
-    h_view = h.astype(cp.int8) if h.dtype != cp.int8 else h
+    h_view = h if h.dtype == cp.int8 else h.astype(cp.int8, copy=False)
     s0, s1 = h_view.strides  # bytes per element (int8 = 1 byte)
 
     block = 256
@@ -885,7 +885,7 @@ def _nsl_scan_gpu(h):
 
     ssl_sum = cp.zeros(n_variants, dtype=cp.float64)
 
-    h_view = h.astype(cp.int8) if h.dtype != cp.int8 else h
+    h_view = h if h.dtype == cp.int8 else h.astype(cp.int8, copy=False)
     s0, s1 = h_view.strides
 
     block = 256
