@@ -160,6 +160,22 @@ class _DeferredPCATranspose:
         return result
 
 
+def _pca_from_gram(C, n_samples, n_components):
+    """Extract PCA coordinates from a Gram matrix (X @ X.T).
+
+    Eigendecomposes the n x n Gram matrix instead of running SVD on the
+    full n x m data matrix. Equivalent when n_samples <= n_variants.
+    """
+    eigvals, eigvecs = cp.linalg.eigh(C)
+    idx = cp.argsort(eigvals)[::-1]
+    eigvals = eigvals[idx]
+    eigvecs = eigvecs[:, idx]
+    coords = eigvecs[:, :n_components] * cp.sqrt(cp.maximum(eigvals[:n_components], 0))
+    var = eigvals / n_samples
+    explained_variance_ratio = var[:n_components] / cp.sum(cp.maximum(var, 0))
+    return coords.get(), explained_variance_ratio.get()
+
+
 def pca(haplotype_matrix: HaplotypeMatrix,
         n_components: int = 10,
         scaler: Optional[str] = 'patterson',
@@ -194,39 +210,22 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     prepared = _prepare_matrix(haplotype_matrix, scaler, population, missing_data)
 
     if isinstance(prepared, _DeferredPCA):
-        # Memory-constrained: use covariance trick (eigendecompose X @ X.T)
-        n_samples, n_variants = prepared.shape
+        n_samples = prepared.shape[0]
         n_components = min(n_components, n_samples)
-        C = prepared.chunked_gram()  # (n_samples, n_samples)
-        eigvals, eigvecs = cp.linalg.eigh(C)
-        # eigh returns ascending order; reverse for descending
-        idx = cp.argsort(eigvals)[::-1]
-        eigvals = eigvals[idx]
-        eigvecs = eigvecs[:, idx]
-        # Eigenvalues of C = singular values^2 of X
-        coords = eigvecs[:, :n_components] * cp.sqrt(cp.maximum(eigvals[:n_components], 0))
-        var = eigvals / n_samples
-        explained_variance_ratio = var[:n_components] / cp.sum(cp.maximum(var, 0))
-        return coords.get(), explained_variance_ratio.get()
+        C = prepared.chunked_gram()
+        return _pca_from_gram(C, n_samples, n_components)
 
     X = prepared
     n_samples, n_variants = X.shape
     n_components = min(n_components, min(n_samples, n_variants))
 
-    # When n_samples << n_variants (typical for popgen), eigendecompose
+    # When n_samples <= n_variants (typical for popgen), eigendecompose
     # the n x n Gram matrix X @ X.T instead of full SVD on n x m.
-    if n_samples < n_variants:
-        C = X @ X.T  # (n_samples, n_samples)
-        eigvals, eigvecs = cp.linalg.eigh(C)
-        idx = cp.argsort(eigvals)[::-1]
-        eigvals = eigvals[idx]
-        eigvecs = eigvecs[:, idx]
-        coords = eigvecs[:, :n_components] * cp.sqrt(cp.maximum(eigvals[:n_components], 0))
-        var = eigvals / n_samples
-        explained_variance_ratio = var[:n_components] / cp.sum(cp.maximum(var, 0))
-        return coords.get(), explained_variance_ratio.get()
+    if n_samples <= n_variants:
+        C = X @ X.T
+        return _pca_from_gram(C, n_samples, n_components)
 
-    # Fallback: full SVD when n_samples >= n_variants
+    # Fallback: full SVD when n_samples > n_variants
     try:
         U, S, Vt = cp.linalg.svd(X, full_matrices=False)
     except Exception as e:
