@@ -908,34 +908,35 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
 
     stats_set = set(statistics)
 
+    # Scatter-add per-site components into windows (deduplicated)
+    need_between = stats_set & {'fst', 'fst_hudson', 'dxy', 'da'}
+    between_sum = scatter_sum(between) if need_between else None
+
     if stats_set & {'fst', 'fst_hudson', 'da'}:
         within = (mpd1 + mpd2) / 2.0
         fst_num = scatter_sum(between - within)
-        fst_den = scatter_sum(between)
-
-    if stats_set & {'dxy', 'da'}:
-        dxy_sum = scatter_sum(between)
 
     if 'da' in stats_set:
         pi1_sum = scatter_sum(mpd1)
         pi2_sum = scatter_sum(mpd2)
 
     # Build output
+    between_np = between_sum.get() if between_sum is not None else None
+
     if stats_set & {'fst', 'fst_hudson'}:
         fst_num_np = fst_num.get()
-        fst_den_np = fst_den.get()
         with np.errstate(invalid='ignore', divide='ignore'):
-            fst_vals = np.where(fst_den_np > 0, fst_num_np / fst_den_np, np.nan)
+            fst_vals = np.where(between_np > 0, fst_num_np / between_np, np.nan)
         if 'fst' in stats_set:
             results['fst'] = fst_vals
         if 'fst_hudson' in stats_set:
             results['fst_hudson'] = fst_vals
 
     if 'dxy' in stats_set:
-        results['dxy'] = dxy_sum.get() / spans
+        results['dxy'] = between_np / spans
 
     if 'da' in stats_set:
-        da_vals = (dxy_sum.get() - (pi1_sum.get() + pi2_sum.get()) / 2.0) / spans
+        da_vals = (between_np - (pi1_sum.get() + pi2_sum.get()) / 2.0) / spans
         results['da'] = da_vals
 
     return pd.DataFrame(results)
@@ -2454,47 +2455,15 @@ def _per_variant_fst_hudson_components(hap1, hap2, n1, n2):
     Returns (num, den) as CuPy arrays. Handles missing data (-1) by
     using per-site valid counts.
     """
-    valid1 = (hap1 >= 0).astype(cp.float64)
-    valid2 = (hap2 >= 0).astype(cp.float64)
-    ac1_1 = cp.sum(cp.where(hap1 >= 0, hap1, 0), axis=0).astype(cp.float64)
-    n1_v = cp.sum(valid1, axis=0).astype(cp.float64)
-    ac1_0 = n1_v - ac1_1
-    ac2_1 = cp.sum(cp.where(hap2 >= 0, hap2, 0), axis=0).astype(cp.float64)
-    n2_v = cp.sum(valid2, axis=0).astype(cp.float64)
-    ac2_0 = n2_v - ac2_1
-
-    n1_pairs = n1_v * (n1_v - 1) / 2
-    n1_same = (ac1_0 * (ac1_0 - 1) + ac1_1 * (ac1_1 - 1)) / 2
-    mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
-
-    n2_pairs = n2_v * (n2_v - 1) / 2
-    n2_same = (ac2_0 * (ac2_0 - 1) + ac2_1 * (ac2_1 - 1)) / 2
-    mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
-
+    mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
     within = (mpd1 + mpd2) / 2.0
-
-    n_between = n1_v * n2_v
-    n_between_same = ac1_0 * ac2_0 + ac1_1 * ac2_1
-    between = cp.where(n_between > 0,
-                       (n_between - n_between_same) / n_between, 0.0)
-
     return between - within, between
 
 
 def _per_variant_dxy(hap1, hap2, n1, n2):
     """Per-variant mean pairwise difference between populations (GPU)."""
-    valid1 = (hap1 >= 0).astype(cp.float64)
-    valid2 = (hap2 >= 0).astype(cp.float64)
-    ac1_1 = cp.sum(cp.where(hap1 >= 0, hap1, 0), axis=0).astype(cp.float64)
-    n1_v = cp.sum(valid1, axis=0).astype(cp.float64)
-    ac1_0 = n1_v - ac1_1
-    ac2_1 = cp.sum(cp.where(hap2 >= 0, hap2, 0), axis=0).astype(cp.float64)
-    n2_v = cp.sum(valid2, axis=0).astype(cp.float64)
-    ac2_0 = n2_v - ac2_1
-
-    n_pairs = n1_v * n2_v
-    n_same = ac1_0 * ac2_0 + ac1_1 * ac2_1
-    return cp.where(n_pairs > 0, (n_pairs - n_same) / n_pairs, 0.0)
+    _, _, between = _twopop_site_components(hap1, hap2)
+    return between
 
 
 def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
