@@ -86,17 +86,83 @@ def _get_minus_eta1_star_norm(n_max):
 def _achaz_alpha_beta(v1, v2, n):
     """Compute Achaz (2009) Eq. 9 alpha_n, beta_n from two per-xi weight vectors.
 
+    O(n) time and memory — computes the bilinear form w^T @ sigma @ w
+    directly using the structure of Fu (1995) sigma_ij, without
+    materializing the full (n-1)x(n-1) covariance matrix.
+
     Our weight functions return per-xi weights w[i]. Achaz's v-vectors are
     per-u_hat weights where u_hat_i = i * xi_i. The conversion is
     v_i/sum(v_j) = w[i]/i, giving V_i = w1[i]/i - w2[i]/i.
     """
+    H = cp.asarray(_harmonic_sums(n))
+    an = H[n - 1]  # CuPy scalar — stays on GPU
+
     k = cp.arange(1, n, dtype=cp.float64)
+    k_int = k.astype(cp.int64)
     V = cp.asarray((v1[1:n] - v2[1:n])) / k
-    alpha_n = float(cp.sum(k * V ** 2))
-    sigma = _compute_sigma_ij_gpu(n)
-    beta_n = float(cp.sum(
-        k[:, None] * k[None, :] * V[:, None] * V[None, :] * sigma))
-    return alpha_n, beta_n
+    w = k * V
+
+    alpha_n = cp.sum(k * V ** 2)
+
+    # Precompute beta(i) for i=1..n-1 (reuse k instead of separate idx_b)
+    a_b = H[k_int - 1]
+    beta_vals = cp.zeros(n + 1, dtype=cp.float64)
+    beta_vals[1:n] = (2.0 * n / ((n - k + 1) * (n - k))
+                      * (an + 1.0 / n - a_b) - 2.0 / (n - k))
+
+    # --- Diagonal: sum w_i^2 * sigma_{ii} ---
+    # Clip indices protect against out-of-bounds; valid masks ensure
+    # only correct contributions are summed.
+    diag_sigma = cp.where(
+        2 * k < n, beta_vals[k_int + 1],
+        cp.where(2 * k == n,
+                 2.0 * (an - H[k_int - 1]) / (n - k) - 1.0 / (k * k),
+                 beta_vals[k_int] - 1.0 / (k * k)))
+    diag_sum = cp.sum(w ** 2 * diag_sigma)
+
+    # --- Prefix/suffix sums for off-diagonal ---
+    W_prefix = cp.cumsum(w)
+    W_suffix = cp.flip(cp.cumsum(cp.flip(w)))
+    V_suffix = cp.flip(cp.cumsum(cp.flip(V)))
+
+    # Case A: i < j, i+j < n => sigma = (beta(j+1) - beta(j)) / 2
+    j_idx = cp.arange(2, n, dtype=cp.int64)
+    dbeta = beta_vals[j_idx + 1] - beta_vals[j_idx]
+    upper = cp.minimum(j_idx - 1, n - j_idx - 1)
+    valid_a = upper >= 1
+    psum = cp.where(valid_a,
+                    W_prefix[cp.clip(upper - 1, 0, n - 2).astype(cp.int64)], 0.0)
+    case_a = cp.sum(dbeta * w[j_idx - 1] * psum * valid_a)
+
+    # Case C: i < j, i+j > n => sigma = (beta(i)-beta(i+1))/2 - 1/(i*j)
+    i_idx = cp.arange(1, n - 1, dtype=cp.int64)
+    dbeta_i = beta_vals[i_idx] - beta_vals[i_idx + 1]
+    j_start = cp.maximum(i_idx + 1, n - i_idx + 1)
+    valid_c = j_start <= n - 1
+    ws = cp.where(valid_c,
+                  W_suffix[cp.clip(j_start - 1, 0, n - 2).astype(cp.int64)], 0.0)
+    case_c1 = cp.sum(dbeta_i * w[i_idx - 1] * ws * valid_c)
+    vs = cp.where(valid_c,
+                  V_suffix[cp.clip(j_start - 1, 0, n - 2).astype(cp.int64)], 0.0)
+    case_c2 = cp.sum(V[i_idx - 1] * vs * valid_c)
+
+    # Case B: i+j == n (anti-diagonal, O(n) terms)
+    i_b = cp.arange(1, n, dtype=cp.int64)
+    j_b = n - i_b
+    valid_b = (j_b > 0) & (j_b < n) & (j_b > i_b)
+    ai = H[cp.clip(i_b - 1, 0, n).astype(cp.int64)]
+    aj = H[cp.clip(j_b - 1, 0, n).astype(cp.int64)]
+    j_f = j_b.astype(cp.float64)
+    i_f = i_b.astype(cp.float64)
+    s_b = ((an - aj) / (n - j_f) + (an - ai) / (n - i_f)
+           - (beta_vals[j_b] + beta_vals[cp.clip(i_b + 1, 0, n)]) / 2.0
+           - 1.0 / (j_f * i_f))
+    case_b = cp.sum(
+        2.0 * w[i_b - 1] * w[cp.clip(j_b - 1, 0, n - 2)] * s_b * valid_b)
+
+    # Single GPU->CPU transfer at the end
+    beta_n = diag_sum + case_a + case_c1 - 2.0 * case_c2 + case_b
+    return float(alpha_n), float(beta_n)
 
 
 @lru_cache(maxsize=128)
