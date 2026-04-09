@@ -795,6 +795,152 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     return pd.DataFrame(results)
 
 
+def _twopop_site_components(hap1, hap2):
+    """Compute per-site two-population components on GPU.
+
+    Returns (mpd1, mpd2, between) where:
+      mpd1 = within-pop1 mean pairwise difference per site
+      mpd2 = within-pop2 mean pairwise difference per site
+      between = between-pop mean pairwise difference per site
+
+    All quantities use per-site valid counts (missing-data aware).
+    """
+    valid1 = (hap1 >= 0).astype(cp.float64)
+    valid2 = (hap2 >= 0).astype(cp.float64)
+    ac1 = cp.sum(cp.where(hap1 >= 0, hap1, 0), axis=0).astype(cp.float64)
+    n1 = cp.sum(valid1, axis=0).astype(cp.float64)
+    ac2 = cp.sum(cp.where(hap2 >= 0, hap2, 0), axis=0).astype(cp.float64)
+    n2 = cp.sum(valid2, axis=0).astype(cp.float64)
+
+    # Within-pop mean pairwise differences
+    n1_pairs = n1 * (n1 - 1) / 2
+    n1_same = ((n1 - ac1) * (n1 - ac1 - 1) + ac1 * (ac1 - 1)) / 2
+    mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
+
+    n2_pairs = n2 * (n2 - 1) / 2
+    n2_same = ((n2 - ac2) * (n2 - ac2 - 1) + ac2 * (ac2 - 1)) / 2
+    mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
+
+    # Between-pop mean pairwise differences
+    n_between = n1 * n2
+    n_between_same = (n1 - ac1) * (n2 - ac2) + ac1 * ac2
+    between = cp.where(n_between > 0,
+                       (n_between - n_between_same) / n_between, 0.0)
+
+    return mpd1, mpd2, between
+
+
+def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
+                              statistics, populations, missing_data,
+                              span_normalize):
+    """Compute windowed two-population stats via scatter-add on GPU.
+
+    Same pattern as _windowed_thetas_scatter but for fst, dxy, da.
+    Uses per-site valid counts for correct missing data handling.
+    """
+    from ._utils import get_population_matrix
+    from cupyx import scatter_add
+
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
+    pop1_name, pop2_name = populations[0], populations[1]
+    mat1 = get_population_matrix(haplotype_matrix, pop1_name)
+    mat2 = get_population_matrix(haplotype_matrix, pop2_name)
+
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1_name, pop2_name])
+        if haplotype_matrix.num_variants == 0:
+            return pd.DataFrame()
+        mat1 = get_population_matrix(haplotype_matrix, pop1_name)
+        mat2 = get_population_matrix(haplotype_matrix, pop2_name)
+
+    hap1 = mat1.haplotypes
+    hap2 = mat2.haplotypes
+
+    pos = haplotype_matrix.positions
+    if isinstance(pos, cp.ndarray):
+        pos_cpu = pos.get()
+    else:
+        pos_cpu = np.asarray(pos)
+
+    # Window boundaries (same pattern as _windowed_thetas_scatter)
+    chrom_start = haplotype_matrix.chrom_start or int(pos_cpu[0])
+    chrom_end = haplotype_matrix.chrom_end or int(pos_cpu[-1])
+    win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
+                           dtype=np.float64)
+    win_stops = win_starts + window_size
+    n_windows = len(win_starts)
+
+    win_idx = np.searchsorted(win_starts, pos_cpu, side='right') - 1
+    win_idx = np.clip(win_idx, 0, n_windows - 1)
+    in_window = pos_cpu < win_stops[win_idx]
+    win_idx_gpu = cp.asarray(win_idx)
+    mask = cp.asarray(in_window)
+
+    def scatter_sum(values):
+        out = cp.zeros(n_windows, dtype=cp.float64)
+        scatter_add(out, win_idx_gpu, values * mask)
+        return out
+
+    results = {}
+    results['start'] = win_starts.astype(int)
+    results['stop'] = np.minimum(win_stops, chrom_end).astype(int)
+
+    # Span normalization
+    if span_normalize is not False:
+        if haplotype_matrix.has_accessible_mask:
+            am = haplotype_matrix.accessible_mask
+            spans = am.count_accessible_windows(
+                results['start'], results['stop'])
+        elif haplotype_matrix.n_total_sites is not None:
+            total_span = chrom_end - chrom_start
+            spans = (win_stops - win_starts) * haplotype_matrix.n_total_sites / total_span
+        else:
+            spans = np.minimum(win_stops, chrom_end) - win_starts
+        spans = np.maximum(spans, 1.0)
+    else:
+        spans = np.ones(n_windows)
+
+    # Compute per-site components (single pass over the data)
+    mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
+
+    stats_set = set(statistics)
+
+    if stats_set & {'fst', 'fst_hudson', 'da'}:
+        within = (mpd1 + mpd2) / 2.0
+        fst_num = scatter_sum(between - within)
+        fst_den = scatter_sum(between)
+
+    if stats_set & {'dxy', 'da'}:
+        dxy_sum = scatter_sum(between)
+
+    if 'da' in stats_set:
+        pi1_sum = scatter_sum(mpd1)
+        pi2_sum = scatter_sum(mpd2)
+
+    # Build output
+    if stats_set & {'fst', 'fst_hudson'}:
+        fst_num_np = fst_num.get()
+        fst_den_np = fst_den.get()
+        with np.errstate(invalid='ignore', divide='ignore'):
+            fst_vals = np.where(fst_den_np > 0, fst_num_np / fst_den_np, np.nan)
+        if 'fst' in stats_set:
+            results['fst'] = fst_vals
+        if 'fst_hudson' in stats_set:
+            results['fst_hudson'] = fst_vals
+
+    if 'dxy' in stats_set:
+        results['dxy'] = dxy_sum.get() / spans
+
+    if 'da' in stats_set:
+        da_vals = (dxy_sum.get() - (pi1_sum.get() + pi2_sum.get()) / 2.0) / spans
+        results['da'] = da_vals
+
+    return pd.DataFrame(results)
+
+
 # Convenience function for simple usage
 def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      window_size: int = 50000,
@@ -844,17 +990,47 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         step_size = window_size
 
     # Scatter-add path: single-pop theta estimators via dac_and_n + scatter
-    scatter_stats = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
-                     'theta_h', 'theta_l', 'fay_wu_h', 'singletons',
-                     'normalized_fay_wu_h', 'zeng_e', 'zeng_dh', 'max_daf'}
-    if (missing_data in ('include', 'exclude')
-            and set(statistics) <= scatter_stats
-            and len(populations or []) <= 1):
-        result = _windowed_thetas_scatter(
-            haplotype_matrix, window_size, step_size,
-            statistics, populations, missing_data, span_normalize)
-        if result is not None:
-            return result
+    scatter_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
+                      'theta_h', 'theta_l', 'fay_wu_h', 'singletons',
+                      'normalized_fay_wu_h', 'zeng_e', 'zeng_dh', 'max_daf'}
+    scatter_twopop = {'fst', 'fst_hudson', 'dxy', 'da'}
+    requested = set(statistics)
+
+    if missing_data in ('include', 'exclude'):
+        # Pure single-pop request
+        if requested <= scatter_single and len(populations or []) <= 1:
+            result = _windowed_thetas_scatter(
+                haplotype_matrix, window_size, step_size,
+                statistics, populations, missing_data, span_normalize)
+            if result is not None:
+                return result
+
+        # Pure two-pop request
+        if requested <= scatter_twopop and len(populations or []) == 2:
+            result = _windowed_twopop_scatter(
+                haplotype_matrix, window_size, step_size,
+                statistics, populations, missing_data, span_normalize)
+            if result is not None:
+                return result
+
+        # Mixed single + two-pop request
+        single_stats = sorted(requested & scatter_single)
+        twopop_stats = sorted(requested & scatter_twopop)
+        if (single_stats and twopop_stats
+                and requested <= (scatter_single | scatter_twopop)
+                and len(populations or []) == 2):
+            df1 = _windowed_thetas_scatter(
+                haplotype_matrix, window_size, step_size,
+                single_stats, [populations[0]], missing_data, span_normalize)
+            df2 = _windowed_twopop_scatter(
+                haplotype_matrix, window_size, step_size,
+                twopop_stats, populations, missing_data, span_normalize)
+            if df1 is not None and df2 is not None:
+                # Merge on window boundaries
+                for col in df2.columns:
+                    if col not in ('start', 'stop'):
+                        df1[col] = df2[col].values
+                return df1
 
     # Fused CUDA kernel path for more complex stat combinations.
     fused_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
