@@ -689,7 +689,7 @@ def _pop_allele_counts(haplotype_matrix, pop, missing_data='include'):
 def _hudson_fst_from_counts(ac1_0, ac1_1, n1, ac2_0, ac2_1, n2):
     """Compute per-variant Hudson FST num/den from precomputed allele counts.
 
-    Returns (num, den) as numpy arrays.
+    Returns (num, den) as CuPy arrays on GPU.
     """
     n1_pairs = n1 * (n1 - 1) / 2
     n1_same = (ac1_0 * (ac1_0 - 1) + ac1_1 * (ac1_1 - 1)) / 2
@@ -706,27 +706,28 @@ def _hudson_fst_from_counts(ac1_0, ac1_1, n1, ac2_0, ac2_1, n2):
     between = cp.where(n_between > 0,
                        (n_between - n_between_same) / n_between, 0.0)
 
-    return (between - within).get(), between.get()
+    return between - within, between
 
 
 def _windowed_fst(num, den, size, start=0, stop=None, step=None):
-    """Compute windowed FST from per-variant numerator/denominator."""
+    """Compute windowed FST from per-variant numerator/denominator on GPU.
+
+    Uses cumulative sums for O(n) windowed reduction.
+    """
     n = len(num)
     if stop is None:
         stop = n
     if step is None:
         step = size
 
-    fst_vals = []
-    for w_start in range(start, stop - size + 1, step):
-        w_end = w_start + size
-        den_sum = np.nansum(den[w_start:w_end])
-        if den_sum != 0:
-            fst_vals.append(np.nansum(num[w_start:w_end]) / den_sum)
-        else:
-            fst_vals.append(np.nan)
-
-    return np.array(fst_vals)
+    num_clean = cp.where(cp.isfinite(num), num, 0.0)
+    den_clean = cp.where(cp.isfinite(den), den, 0.0)
+    cs_num = cp.concatenate([cp.zeros(1, dtype=cp.float64), cp.cumsum(num_clean)])
+    cs_den = cp.concatenate([cp.zeros(1, dtype=cp.float64), cp.cumsum(den_clean)])
+    w_starts = cp.arange(start, stop - size + 1, step)
+    num_sum = cs_num[w_starts + size] - cs_num[w_starts]
+    den_sum = cs_den[w_starts + size] - cs_den[w_starts]
+    return cp.where(den_sum != 0, num_sum / den_sum, cp.nan)
 
 
 def pbs(haplotype_matrix: HaplotypeMatrix,
@@ -789,13 +790,13 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
     fst23 = _windowed_fst(num23, den23, window_size, window_start,
                           window_stop, window_step)
 
-    np.clip(fst12, 0, 0.99999, out=fst12)
-    np.clip(fst13, 0, 0.99999, out=fst13)
-    np.clip(fst23, 0, 0.99999, out=fst23)
+    cp.clip(fst12, 0, 0.99999, out=fst12)
+    cp.clip(fst13, 0, 0.99999, out=fst13)
+    cp.clip(fst23, 0, 0.99999, out=fst23)
 
-    t12 = -np.log(1 - fst12)
-    t13 = -np.log(1 - fst13)
-    t23 = -np.log(1 - fst23)
+    t12 = -cp.log(1 - fst12)
+    t13 = -cp.log(1 - fst13)
+    t23 = -cp.log(1 - fst23)
 
     ret = (t12 + t13 - t23) / 2
 
@@ -803,7 +804,7 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
         norm = 1 + (t12 + t13 + t23) / 2
         ret = ret / norm
 
-    return ret
+    return ret.get()
 
 
 # ---------------------------------------------------------------------------

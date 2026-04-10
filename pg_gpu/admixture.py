@@ -57,19 +57,17 @@ def _allele_freq_and_het(haplotype_matrix):
 
 
 
-def _moving_statistic(values, statistic, size, start=0, stop=None, step=None):
-    """Apply a statistic to moving windows of an array.
+def _moving_nansum(values, size, start=0, stop=None, step=None):
+    """Windowed nansum on GPU via cumulative sums.
 
     Parameters
     ----------
-    values : ndarray, shape (n,)
-    statistic : callable
-    size : int
-    start, stop, step : int, optional
+    values : cupy.ndarray, shape (n,)
+    size, start, stop, step : int
 
     Returns
     -------
-    ndarray, shape (n_windows,)
+    cupy.ndarray, shape (n_windows,)
     """
     n = len(values)
     if stop is None:
@@ -77,12 +75,39 @@ def _moving_statistic(values, statistic, size, start=0, stop=None, step=None):
     if step is None:
         step = size
 
-    results = []
-    for w_start in range(start, stop - size + 1, step):
-        w_end = w_start + size
-        results.append(statistic(values[w_start:w_end]))
+    v = cp.where(cp.isfinite(values), values, 0.0)
+    cs = cp.concatenate([cp.zeros(1, dtype=cp.float64), cp.cumsum(v)])
+    w_starts = cp.arange(start, stop - size + 1, step)
+    return cs[w_starts + size] - cs[w_starts]
 
-    return np.array(results)
+
+def _moving_nanmean(values, size, start=0, stop=None, step=None):
+    """Windowed nanmean on GPU via cumulative sums.
+
+    Parameters
+    ----------
+    values : cupy.ndarray, shape (n,)
+    size, start, stop, step : int
+
+    Returns
+    -------
+    cupy.ndarray, shape (n_windows,)
+    """
+    n = len(values)
+    if stop is None:
+        stop = n
+    if step is None:
+        step = size
+
+    finite = cp.isfinite(values)
+    v = cp.where(finite, values, 0.0)
+    cs = cp.concatenate([cp.zeros(1, dtype=cp.float64), cp.cumsum(v)])
+    cn = cp.concatenate([cp.zeros(1, dtype=cp.float64),
+                         cp.cumsum(finite.astype(cp.float64))])
+    w_starts = cp.arange(start, stop - size + 1, step)
+    sums = cs[w_starts + size] - cs[w_starts]
+    counts = cn[w_starts + size] - cn[w_starts]
+    return cp.where(counts > 0, sums / counts, cp.nan)
 
 
 def _jackknife(values, statistic):
@@ -224,6 +249,28 @@ def patterson_f3(haplotype_matrix: HaplotypeMatrix,
     return T.get(), B.get()
 
 
+def _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
+                      missing_data='include'):
+    """Like patterson_f3 but returns CuPy arrays (no D2H transfer)."""
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop_c, pop_a, pop_b])
+        if haplotype_matrix.num_variants == 0:
+            return cp.array([]), cp.array([])
+
+    mc = _get_population_matrix(haplotype_matrix, pop_c)
+    ma = _get_population_matrix(haplotype_matrix, pop_a)
+    mb = _get_population_matrix(haplotype_matrix, pop_b)
+
+    c, hc, sc = _allele_freq_and_het(mc)
+    a, _, _ = _allele_freq_and_het(ma)
+    b, _, _ = _allele_freq_and_het(mb)
+
+    T = ((c - a) * (c - b)) - (hc / sc)
+    B = 2 * hc
+    return T, B
+
+
 def patterson_d(haplotype_matrix: HaplotypeMatrix,
                 pop_a: Union[str, list],
                 pop_b: Union[str, list],
@@ -272,6 +319,30 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
     return num.get(), den.get()
 
 
+def _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
+                     missing_data='include'):
+    """Like patterson_d but returns CuPy arrays (no D2H transfer)."""
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop_a, pop_b, pop_c, pop_d])
+        if haplotype_matrix.num_variants == 0:
+            return cp.array([]), cp.array([])
+
+    ma = _get_population_matrix(haplotype_matrix, pop_a)
+    mb = _get_population_matrix(haplotype_matrix, pop_b)
+    mc = _get_population_matrix(haplotype_matrix, pop_c)
+    md = _get_population_matrix(haplotype_matrix, pop_d)
+
+    a = _allele_freq(ma)
+    b = _allele_freq(mb)
+    c = _allele_freq(mc)
+    d = _allele_freq(md)
+
+    num = (a - b) * (c - d)
+    den = (a + b - 2 * a * b) * (c + d - 2 * c * d)
+    return num, den
+
+
 # ---------------------------------------------------------------------------
 # Public API: Moving window variants
 # ---------------------------------------------------------------------------
@@ -303,17 +374,17 @@ def moving_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     -------
     f3 : ndarray, float64, shape (n_windows,)
     """
-    T, B = patterson_f3(haplotype_matrix, pop_c, pop_a, pop_b,
-                         missing_data=missing_data)
+    T, B = _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
+                              missing_data=missing_data)
 
     if normed:
-        T_bsum = _moving_statistic(T, np.nansum, size, start, stop, step)
-        B_bsum = _moving_statistic(B, np.nansum, size, start, stop, step)
-        f3 = T_bsum / B_bsum
+        T_bsum = _moving_nansum(T, size, start, stop, step)
+        B_bsum = _moving_nansum(B, size, start, stop, step)
+        f3 = cp.where(B_bsum != 0, T_bsum / B_bsum, cp.nan)
     else:
-        f3 = _moving_statistic(T, np.nanmean, size, start, stop, step)
+        f3 = _moving_nanmean(T, size, start, stop, step)
 
-    return f3
+    return f3.get()
 
 
 def moving_patterson_d(haplotype_matrix: HaplotypeMatrix,
@@ -340,11 +411,11 @@ def moving_patterson_d(haplotype_matrix: HaplotypeMatrix,
     -------
     d : ndarray, float64, shape (n_windows,)
     """
-    num, den = patterson_d(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
-                            missing_data=missing_data)
-    num_sum = _moving_statistic(num, np.nansum, size, start, stop, step)
-    den_sum = _moving_statistic(den, np.nansum, size, start, stop, step)
-    return num_sum / den_sum
+    num, den = _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
+                                missing_data=missing_data)
+    num_sum = _moving_nansum(num, size, start, stop, step)
+    den_sum = _moving_nansum(den, size, start, stop, step)
+    return cp.where(den_sum != 0, num_sum / den_sum, cp.nan).get()
 
 
 # ---------------------------------------------------------------------------
@@ -383,21 +454,24 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     vj : ndarray
         Jackknife resampled values.
     """
-    T, B = patterson_f3(haplotype_matrix, pop_c, pop_a, pop_b,
-                         missing_data=missing_data)
+    T, B = _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
+                              missing_data=missing_data)
 
     if normed:
-        f3 = np.nansum(T) / np.nansum(B)
-        T_bsum = _moving_statistic(T, np.nansum, blen)
-        B_bsum = _moving_statistic(B, np.nansum, blen)
+        T_finite = cp.where(cp.isfinite(T), T, 0.0)
+        B_finite = cp.where(cp.isfinite(B), B, 0.0)
+        f3 = float((cp.sum(T_finite) / cp.sum(B_finite)).get())
+        T_bsum = _moving_nansum(T, blen).get()
+        B_bsum = _moving_nansum(B, blen).get()
         vb = T_bsum / B_bsum
         _, se, vj = _jackknife(
             (T_bsum, B_bsum),
             statistic=lambda t, b: np.sum(t) / np.sum(b)
         )
     else:
-        f3 = np.nanmean(T)
-        vb = _moving_statistic(T, np.nanmean, blen)
+        finite = cp.isfinite(T)
+        f3 = float((cp.sum(cp.where(finite, T, 0.0)) / cp.sum(finite)).get())
+        vb = _moving_nanmean(T, blen).get()
         _, se, vj = _jackknife(vb, statistic=np.mean)
 
     z = f3 / se
@@ -434,13 +508,15 @@ def average_patterson_d(haplotype_matrix: HaplotypeMatrix,
     vj : ndarray
         Jackknife resampled values.
     """
-    num, den = patterson_d(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
-                            missing_data=missing_data)
+    num, den = _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
+                                missing_data=missing_data)
 
-    d_avg = np.nansum(num) / np.nansum(den)
+    num_f = cp.where(cp.isfinite(num), num, 0.0)
+    den_f = cp.where(cp.isfinite(den), den, 0.0)
+    d_avg = float((cp.sum(num_f) / cp.sum(den_f)).get())
 
-    num_bsum = _moving_statistic(num, np.nansum, blen)
-    den_bsum = _moving_statistic(den, np.nansum, blen)
+    num_bsum = _moving_nansum(num, blen).get()
+    den_bsum = _moving_nansum(den, blen).get()
     vb = num_bsum / den_bsum
 
     _, se, vj = _jackknife(
