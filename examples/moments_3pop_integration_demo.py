@@ -13,7 +13,6 @@ Requires the 'moments' pixi environment (pixi install -e moments).
 
 import os
 import gzip
-import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 import msprime
@@ -45,7 +44,6 @@ SAMPLE_SIZE = 10  # diploids per population
 SAMPLE_POPS = ["deme0", "deme1", "deme2"]
 DATA_DIR = "examples/data/moments_3pop_integration_demo"
 R_BINS = np.array([0, 1e-7, 5e-7, 1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4])
-OVERWRITE = False  # don't use the cache and overwrite intermediate output
 
 
 # ── Model definition and simulation ────────────────────────────
@@ -214,33 +212,25 @@ if __name__ == "__main__":
     plt.close(fig)
 
 
-    logger.info("Simulating data and calculating statistics")
-    cache_path = os.path.join(DATA_DIR, "ld_stats_cache_pg_gpu.pkl")
     vcf_path = os.path.join(DATA_DIR, "data")
-    if not os.path.exists(cache_path) or OVERWRITE:
+    logger.info("Simulating chunks of sequence")
+    vcf_paths, map_path, samples_path = simulate_data(demes.load(true_yaml_path), vcf_path)
 
-        logger.info("Simulating chunks of sequence")
-        vcf_paths, map_path, samples_path = simulate_data(demes.load(true_yaml_path), vcf_path)
-
-        # ── pg_gpu drop-in replacement !!! ─────────────────────────────
-        #
-        # This is the *key* integration point: pg_gpu.moments_ld.compute_ld_statistics
-        # is a GPU-accelerated drop-in replacement for
-        # moments.LD.Parsing.compute_ld_statistics. Same arguments, same output
-        # format — just swap the import and everything downstream (bootstrapping,
-        # optimization, uncertainty estimation) works unchanged.
-        #
-        logger.info("Calculating statistics across chunks with pg_gpu")
-        ld_stats = {
-            vcf: pg_gpu.moments_ld.compute_ld_statistics(
-                vcf, rec_map_file=map_path, pop_file=samples_path,
-                pops=SAMPLE_POPS, r_bins=R_BINS, report=False,
-            ) for vcf in vcf_paths
-        }
-        with open(cache_path, "wb") as handle:
-            pickle.dump(ld_stats, handle)
-    with open(cache_path, "rb") as handle:
-        ld_stats = pickle.load(handle)
+    # ── pg_gpu drop-in replacement !!! ─────────────────────────────
+    #
+    # This is the *key* integration point: pg_gpu.moments_ld.compute_ld_statistics
+    # is a GPU-accelerated drop-in replacement for
+    # moments.LD.Parsing.compute_ld_statistics. Same arguments, same output
+    # format — just swap the import and everything downstream (bootstrapping,
+    # optimization, uncertainty estimation) works unchanged.
+    #
+    logger.info("Calculating statistics across chunks with pg_gpu")
+    ld_stats = {
+        vcf: pg_gpu.moments_ld.compute_ld_statistics(
+            vcf, rec_map_file=map_path, pop_file=samples_path,
+            pops=SAMPLE_POPS, r_bins=R_BINS, report=False,
+        ) for vcf in vcf_paths
+    }
 
 
     logger.info("Bootstrapping and averaging chunks")
@@ -257,46 +247,43 @@ if __name__ == "__main__":
     logger.info("Optimizing model")
     fitted_yaml_path = os.path.join(DATA_DIR, "fitted_model.yaml")
     optim_options_path = os.path.join(DATA_DIR, "options.yaml")
-    if not os.path.exists(fitted_yaml_path) or OVERWRITE:
 
-        logger.info(f"Writing optimization options to {optim_options_path}")
-        with open(optim_options_path, "w") as handle:
-            handle.write(moments_optimization_options)
+    logger.info(f"Writing optimization options to {optim_options_path}")
+    with open(optim_options_path, "w") as handle:
+        handle.write(moments_optimization_options)
 
-        logger.info(f"Fitting and writing the optimized model to {fitted_yaml_path}")
-        fitted_parameters = moments.Demes.Inference.optimize_LD(
-            true_yaml_path,
-            optim_options_path,
-            bootstrap_means,
-            bootstrap_varcovs,
-            pop_ids=SAMPLE_POPS,
-            perturb=0,
-            rs=R_BINS,
-            normalization=SAMPLE_POPS[0],
-            method="powell",
-            output=fitted_yaml_path,
-            # DEBUG:
-            verbose=True,
-        )
+    logger.info(f"Fitting and writing the optimized model to {fitted_yaml_path}")
+    fitted_parameters = moments.Demes.Inference.optimize_LD(
+        true_yaml_path,
+        optim_options_path,
+        bootstrap_means,
+        bootstrap_varcovs,
+        pop_ids=SAMPLE_POPS,
+        perturb=0,
+        rs=R_BINS,
+        normalization=SAMPLE_POPS[0],
+        method="powell",
+        output=fitted_yaml_path,
+        verbose=True,
+    )
 
 
     logger.info("Calculating standard errors via Godambe information matrix")
     summary_path = os.path.join(DATA_DIR, "fitted_parameters.txt")
-    if not os.path.exists(summary_path) or OVERWRITE:
-        bootstraps = moments.LD.Parsing.get_bootstrap_sets(ld_stats)
-        std_errors = moments.Demes.Inference.uncerts_LD(
-            fitted_yaml_path,
-            optim_options_path,
-            bootstrap_means,
-            bootstrap_varcovs,
-            bootstraps=bootstraps,
-            statistics=bootstrap_stats,
-            pop_ids=SAMPLE_POPS,
-            rs=R_BINS,
-            normalization=SAMPLE_POPS[0],
-            method="GIM",
-            output=summary_path,
-        )
+    bootstraps = moments.LD.Parsing.get_bootstrap_sets(ld_stats)
+    std_errors = moments.Demes.Inference.uncerts_LD(
+        fitted_yaml_path,
+        optim_options_path,
+        bootstrap_means,
+        bootstrap_varcovs,
+        bootstraps=bootstraps,
+        statistics=bootstrap_stats,
+        pop_ids=SAMPLE_POPS,
+        rs=R_BINS,
+        normalization=SAMPLE_POPS[0],
+        method="GIM",
+        output=summary_path,
+    )
     with open(summary_path) as handle:
         logger.info(f"Wrote estimates to {summary_path}:\n{handle.read().strip()}")
 
