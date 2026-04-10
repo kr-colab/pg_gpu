@@ -8,19 +8,16 @@ lazily to avoid upfront memory explosion. Streams results as they
 complete.
 
 Usage:
-    pixi run python debug/stress_test_ag1000g.py
+    pixi run python debug/stress_test_ag1000g.py             # full comparison
+    pixi run python debug/stress_test_ag1000g.py --no-allel  # pg_gpu only
 """
 
+import argparse
 import sys
 import time
 import traceback
 import numpy as np
 import cupy as cp
-import allel
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 from pg_gpu import (
     HaplotypeMatrix,
@@ -88,7 +85,7 @@ def _get_allel(gt, positions, key):
     return _allel_cache[key]
 
 
-def load_data():
+def load_data(skip_allel=False):
     """Load region from Ag1000G zarr."""
     import zarr
 
@@ -134,7 +131,9 @@ def load_data():
 
     print(f"  {hm.num_haplotypes} haplotypes x {hm.num_variants:,} variants ({time.time()-t0:.0f}s)",
           flush=True)
-    return hm, gt, positions
+    if skip_allel:
+        del gt  # free ~32 GB
+    return hm, (None if skip_allel else gt), positions
 
 
 def bench(fn, n_iter=N_ITER, sync_gpu=True):
@@ -155,7 +154,20 @@ def bench(fn, n_iter=N_ITER, sync_gpu=True):
 
 
 def main():
-    hm, gt, positions = load_data()
+    parser = argparse.ArgumentParser(description="pg_gpu stress test on Ag1000G")
+    parser.add_argument("--no-allel", action="store_true",
+                        help="Run pg_gpu benchmarks only, skip allel comparison")
+    args = parser.parse_args()
+    skip_allel = args.no_allel
+
+    if not skip_allel:
+        import allel  # noqa: F811
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt  # noqa: F811
+        import seaborn as sns  # noqa: F811
+
+    hm, gt, positions = load_data(skip_allel=skip_allel)
     gm = GenotypeMatrix.from_haplotype_matrix(hm)
     pos = positions
 
@@ -375,85 +387,97 @@ def main():
 
     # ── Run ───────────────────────────────────────────────────────────────
     print(f"\nRunning {len(benchmarks)} benchmarks...\n", flush=True)
-    print(f"{'Statistic':<42s} {'pg_gpu':>9s} {'allel':>9s} {'speedup':>9s}", flush=True)
-    print("-" * 72, flush=True)
+    if skip_allel:
+        print(f"{'Statistic':<42s} {'pg_gpu':>9s}", flush=True)
+        print("-" * 52, flush=True)
+    else:
+        print(f"{'Statistic':<42s} {'pg_gpu':>9s} {'allel':>9s} {'speedup':>9s}", flush=True)
+        print("-" * 72, flush=True)
 
     results = []
     for name, pg_fn, allel_fn_wrapped in benchmarks:
         cp.get_default_memory_pool().free_all_blocks()
         t_pg = bench(pg_fn, sync_gpu=True)
-        t_al = bench(allel_fn_wrapped, sync_gpu=False) if allel_fn_wrapped else None
+
+        if skip_allel:
+            t_al = None
+        else:
+            t_al = bench(allel_fn_wrapped, sync_gpu=False) if allel_fn_wrapped else None
 
         pg_str = f"{t_pg:.3f}s" if t_pg is not None else "FAIL"
-        al_str = f"{t_al:.3f}s" if t_al is not None else "---"
 
-        if t_pg is not None and t_al is not None and t_pg > 0:
-            speedup = t_al / t_pg
-            sp_str = f"{speedup:.1f}x"
+        if skip_allel:
+            print(f"{name:<42s} {pg_str:>9s}", flush=True)
         else:
-            speedup = None
-            sp_str = "---"
+            al_str = f"{t_al:.3f}s" if t_al is not None else "---"
+            if t_pg is not None and t_al is not None and t_pg > 0:
+                speedup = t_al / t_pg
+                sp_str = f"{speedup:.1f}x"
+            else:
+                speedup = None
+                sp_str = "---"
+            print(f"{name:<42s} {pg_str:>9s} {al_str:>9s} {sp_str:>9s}", flush=True)
 
-        print(f"{name:<42s} {pg_str:>9s} {al_str:>9s} {sp_str:>9s}", flush=True)
-        results.append({"name": name, "pg_gpu": t_pg, "allel": t_al, "speedup": speedup})
+        results.append({"name": name, "pg_gpu": t_pg, "allel": t_al,
+                        "speedup": (t_al / t_pg if t_pg and t_al and t_pg > 0 else None)})
 
     # ── Summary ──────────────────────────────────────────────────────────
     print(flush=True)
     n_pass = sum(1 for r in results if r["pg_gpu"] is not None)
     n_fail = len(results) - n_pass
-    speedups = [r["speedup"] for r in results if r["speedup"] is not None]
     print(f"pg_gpu: {n_pass}/{len(results)} passed", flush=True)
+
+    speedups = [r["speedup"] for r in results if r["speedup"] is not None]
     if speedups:
         print(f"Speedups ({len(speedups)} compared): "
               f"median {np.median(speedups):.1f}x, "
               f"range {min(speedups):.1f}x - {max(speedups):.1f}x", flush=True)
 
-    # ── Figure ───────────────────────────────────────────────────────────
-    compared = [r for r in results if r["speedup"] is not None]
-    if not compared:
-        return
+    # ── Figure (only when allel comparisons were run) ────────────────────
+    if not skip_allel:
+        compared = [r for r in results if r["speedup"] is not None]
+        if compared:
+            sns.set_theme(style="whitegrid", context="talk", palette="Set2")
+            fig, axes = plt.subplots(2, 1, figsize=(14, 12),
+                                     gridspec_kw={"height_ratios": [2, 1]})
 
-    sns.set_theme(style="whitegrid", context="talk", palette="Set2")
-    fig, axes = plt.subplots(2, 1, figsize=(14, 12),
-                             gridspec_kw={"height_ratios": [2, 1]})
+            names = [r["name"] for r in compared]
+            speedups_arr = np.array([r["speedup"] for r in compared])
+            colors = ["#2ecc71" if s >= 1 else "#e74c3c" for s in speedups_arr]
 
-    names = [r["name"] for r in compared]
-    speedups_arr = np.array([r["speedup"] for r in compared])
-    colors = ["#2ecc71" if s >= 1 else "#e74c3c" for s in speedups_arr]
+            ax = axes[0]
+            bars = ax.barh(range(len(names)), speedups_arr, color=colors,
+                           edgecolor="0.3", linewidth=0.5)
+            ax.set_yticks(range(len(names)))
+            ax.set_yticklabels(names, fontsize=10)
+            ax.set_xscale("log")
+            ax.axvline(1, color="0.4", linestyle="--", linewidth=1)
+            ax.set_xlabel("Speedup (pg_gpu vs scikit-allel)")
+            ax.set_title(f"pg_gpu speedups on Ag1000G {CHROM} "
+                         f"({hm.num_haplotypes} haplotypes x {hm.num_variants:,} variants)")
+            ax.invert_yaxis()
+            for bar, sp in zip(bars, speedups_arr):
+                ax.text(bar.get_width() * 1.1, bar.get_y() + bar.get_height() / 2,
+                        f"{sp:.1f}x", va="center", fontsize=9)
 
-    ax = axes[0]
-    bars = ax.barh(range(len(names)), speedups_arr, color=colors,
-                   edgecolor="0.3", linewidth=0.5)
-    ax.set_yticks(range(len(names)))
-    ax.set_yticklabels(names, fontsize=10)
-    ax.set_xscale("log")
-    ax.axvline(1, color="0.4", linestyle="--", linewidth=1)
-    ax.set_xlabel("Speedup (pg_gpu vs scikit-allel)")
-    ax.set_title(f"pg_gpu speedups on Ag1000G {CHROM} "
-                 f"({hm.num_haplotypes} haplotypes x {hm.num_variants:,} variants)")
-    ax.invert_yaxis()
-    for bar, sp in zip(bars, speedups_arr):
-        ax.text(bar.get_width() * 1.1, bar.get_y() + bar.get_height() / 2,
-                f"{sp:.1f}x", va="center", fontsize=9)
+            ax2 = axes[1]
+            x = np.arange(len(names))
+            width = 0.35
+            ax2.bar(x - width/2, [r["pg_gpu"] for r in compared], width,
+                    label="pg_gpu", color="#2ecc71", edgecolor="0.3", linewidth=0.5)
+            ax2.bar(x + width/2, [r["allel"] for r in compared], width,
+                    label="scikit-allel", color="#e74c3c", edgecolor="0.3", linewidth=0.5)
+            ax2.set_yscale("log")
+            ax2.set_ylabel("Time (seconds)")
+            ax2.set_xticks(x)
+            ax2.set_xticklabels(names, rotation=45, ha="right", fontsize=9)
+            ax2.legend()
+            ax2.set_title("Absolute wall-clock time")
 
-    ax2 = axes[1]
-    x = np.arange(len(names))
-    width = 0.35
-    ax2.bar(x - width/2, [r["pg_gpu"] for r in compared], width,
-            label="pg_gpu", color="#2ecc71", edgecolor="0.3", linewidth=0.5)
-    ax2.bar(x + width/2, [r["allel"] for r in compared], width,
-            label="scikit-allel", color="#e74c3c", edgecolor="0.3", linewidth=0.5)
-    ax2.set_yscale("log")
-    ax2.set_ylabel("Time (seconds)")
-    ax2.set_xticks(x)
-    ax2.set_xticklabels(names, rotation=45, ha="right", fontsize=9)
-    ax2.legend()
-    ax2.set_title("Absolute wall-clock time")
-
-    plt.tight_layout()
-    outpath = "debug/stress_test_ag1000g.png"
-    fig.savefig(outpath, dpi=150, bbox_inches="tight")
-    print(f"\nFigure saved to {outpath}", flush=True)
+            plt.tight_layout()
+            outpath = "debug/stress_test_ag1000g.png"
+            fig.savefig(outpath, dpi=150, bbox_inches="tight")
+            print(f"\nFigure saved to {outpath}", flush=True)
 
     if n_fail:
         sys.exit(1)
