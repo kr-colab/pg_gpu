@@ -15,7 +15,7 @@ The demographic model:
   - Symmetric migration rate: 1e-4
 
 Usage:
-    pixi run -e moments python examples/moments_2pop_integration_demo.py
+    pixi run -e moments python examples/moments_integration_demo.py
 
 Requires the 'moments' pixi environment (pixi install -e moments).
 """
