@@ -1701,41 +1701,38 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
              out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
              out_wc_a, out_wc_ab))
 
-        fst_num = out_fst_num.get()
-        fst_den = out_fst_den.get()
-        dxy_sum = out_dxy.get()
-        pi1_sum = out_pi1.get()
-        pi2_sum = out_pi2.get()
-        wc_a = out_wc_a.get()
-        wc_ab = out_wc_ab.get()
-
         if 'n_variants' not in results:
             results['n_variants'] = (win_stop - win_start).get().astype(int)
 
+        # Post-process on GPU, single .get() per result
         if 'fst' in statistics or 'fst_hudson' in statistics:
-            hudson_fst = np.where(fst_den > 0, fst_num / fst_den, np.nan)
+            hudson_fst = cp.where(out_fst_den > 0,
+                                  out_fst_num / out_fst_den, cp.nan).get()
             if 'fst' in statistics:
                 results['fst'] = hudson_fst
             if 'fst_hudson' in statistics:
                 results['fst_hudson'] = hudson_fst
 
         if 'fst_wc' in statistics:
-            results['fst_wc'] = np.where(wc_ab > 0, wc_a / wc_ab, np.nan)
+            results['fst_wc'] = cp.where(out_wc_ab > 0,
+                                          out_wc_a / out_wc_ab, cp.nan).get()
 
         if 'dxy' in statistics:
             if per_base:
-                results['dxy'] = np.where(window_bases > 0,
-                                          dxy_sum / window_bases, np.nan)
+                wb = cp.asarray(window_bases)
+                results['dxy'] = cp.where(wb > 0,
+                                          out_dxy / wb, cp.nan).get()
             else:
-                results['dxy'] = dxy_sum
+                results['dxy'] = out_dxy.get()
 
         if 'da' in statistics:
+            da_sum = out_dxy - (out_pi1 + out_pi2) / 2.0
             if per_base:
-                da_sum = dxy_sum - (pi1_sum + pi2_sum) / 2.0
-                results['da'] = np.where(window_bases > 0,
-                                         da_sum / window_bases, np.nan)
+                wb = cp.asarray(window_bases)
+                results['da'] = cp.where(wb > 0,
+                                         da_sum / wb, cp.nan).get()
             else:
-                results['da'] = dxy_sum - (pi1_sum + pi2_sum) / 2.0
+                results['da'] = da_sum.get()
 
     # Garud's H via fused kernel (SNP windows using prefix-sum hashing)
     garud_stats = {'garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
@@ -2136,38 +2133,35 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         if 'n_variants' not in results:
             results['n_variants'] = (win_stop - win_start).get().astype(int)
 
-        fst_num = acc_fst_num.get()
-        fst_den = acc_fst_den.get()
-        dxy_sum = acc_dxy.get()
-        pi1_sum = acc_pi1.get()
-        pi2_sum = acc_pi2.get()
-        wc_a = acc_wc_a.get()
-        wc_ab = acc_wc_ab.get()
-
+        # Post-process on GPU, single .get() per result
         if 'fst' in statistics or 'fst_hudson' in statistics:
-            hudson_fst = np.where(fst_den > 0, fst_num / fst_den, np.nan)
+            hudson_fst = cp.where(acc_fst_den > 0,
+                                  acc_fst_num / acc_fst_den, cp.nan).get()
             if 'fst' in statistics:
                 results['fst'] = hudson_fst
             if 'fst_hudson' in statistics:
                 results['fst_hudson'] = hudson_fst
 
         if 'fst_wc' in statistics:
-            results['fst_wc'] = np.where(wc_ab > 0, wc_a / wc_ab, np.nan)
+            results['fst_wc'] = cp.where(acc_wc_ab > 0,
+                                          acc_wc_a / acc_wc_ab, cp.nan).get()
 
         if 'dxy' in statistics:
             if per_base:
-                results['dxy'] = np.where(window_bases > 0,
-                                          dxy_sum / window_bases, np.nan)
+                wb = cp.asarray(window_bases)
+                results['dxy'] = cp.where(wb > 0,
+                                          acc_dxy / wb, cp.nan).get()
             else:
-                results['dxy'] = dxy_sum
+                results['dxy'] = acc_dxy.get()
 
         if 'da' in statistics:
+            da_sum = acc_dxy - (acc_pi1 + acc_pi2) / 2.0
             if per_base:
-                da_sum = dxy_sum - (pi1_sum + pi2_sum) / 2.0
-                results['da'] = np.where(window_bases > 0,
-                                         da_sum / window_bases, np.nan)
+                wb = cp.asarray(window_bases)
+                results['da'] = cp.where(wb > 0,
+                                         da_sum / wb, cp.nan).get()
             else:
-                results['da'] = dxy_sum - (pi1_sum + pi2_sum) / 2.0
+                results['da'] = da_sum.get()
 
     # Delegate Garud H / scatter-add stats / per-window LD to the
     # non-chunked function (they already handle large data or operate
