@@ -15,7 +15,7 @@ The demographic model:
   - Symmetric migration rate: 1e-4
 
 Usage:
-    pixi run -e moments python examples/ld_inference_demo.py
+    pixi run -e moments python examples/moments_2pop_integration_demo.py
 
 Requires the 'moments' pixi environment (pixi install -e moments).
 """
@@ -43,7 +43,7 @@ SEQ_LEN = 1_000_000
 MUT_RATE = 1.5e-8
 REC_RATE = 1.5e-8
 SAMPLE_SIZE = 10  # diploid individuals per population
-DATA_DIR = "examples/data/ld_inference_demo"
+DATA_DIR = "examples/data/moments_2pop_integration_demo"
 R_BINS = np.array([0, 1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3])
 
 
