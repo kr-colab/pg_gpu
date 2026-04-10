@@ -25,3 +25,7 @@ commit_message.txt
 *.csv
 CLAUDE.md
 TODO_*.md
+
+# vim for the cool kids
+*.swp
+*.swo

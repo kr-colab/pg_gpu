@@ -29,22 +29,23 @@ BP_BINS = np.logspace(2, 6, 6)
 
 # Simulation parameters
 N_SAMPLES = 10
-SEQ_LEN = 500_000
+SEQ_LEN = 1_000_000
+N_REPS = 3
 REC_RATE = 1e-8
 MUT_RATE = 1e-7
 SEED = 42
 
 
 def simulate_data(n_pops):
-    """Simulate an N-population tree and write VCF + pop file."""
+    """Simulate N_REPS replicate regions and write VCFs + pop file."""
     CACHE_DIR.mkdir(exist_ok=True)
-    vcf_path = CACHE_DIR / f"{n_pops}pop_geno_benchmark.vcf"
+    vcf_paths = [CACHE_DIR / f"{n_pops}pop_geno_benchmark_rep{i}.vcf" for i in range(N_REPS)]
     pop_path = CACHE_DIR / f"{n_pops}pop_geno_benchmark_pops.txt"
     pops = [f"pop{i}" for i in range(n_pops)]
 
-    if vcf_path.exists() and pop_path.exists():
+    if all(p.exists() for p in vcf_paths) and pop_path.exists():
         print("  Simulation: loaded from cache")
-        return str(vcf_path), str(pop_path), pops
+        return [str(p) for p in vcf_paths], str(pop_path), pops
 
     demography = msprime.Demography()
     for i in range(n_pops):
@@ -59,30 +60,31 @@ def simulate_data(n_pops):
         prev = anc
 
     samples = {p: N_SAMPLES for p in pops}
-    ts = msprime.sim_ancestry(
+    tree_sequences = msprime.sim_ancestry(
         samples=samples, demography=demography,
         sequence_length=SEQ_LEN, recombination_rate=REC_RATE,
-        random_seed=SEED)
-    ts = msprime.sim_mutations(ts, rate=MUT_RATE, random_seed=SEED)
+        num_replicates=N_REPS, random_seed=SEED)
 
-    with open(vcf_path, 'w') as f:
-        ts.write_vcf(f, allow_position_zero=True)
+    for i, (ts, vcf_path) in enumerate(zip(tree_sequences, vcf_paths)):
+        ts = msprime.sim_mutations(ts, rate=MUT_RATE, random_seed=SEED + i)
+        with open(vcf_path, 'w') as f:
+            ts.write_vcf(f, allow_position_zero=True)
 
-    with open(pop_path, 'w') as f:
-        f.write("sample\tpop\n")
-        for ind in ts.individuals():
-            pop_name = ts.population(ind.population).metadata.get(
-                'name', f"pop{ind.population}")
-            f.write(f"tsk_{ind.id}\t{pop_name}\n")
+        if i == 0:
+            with open(pop_path, 'w') as f:
+                f.write("sample\tpop\n")
+                for ind in ts.individuals():
+                    pop_name = ts.population(ind.population).metadata.get(
+                        'name', f"pop{ind.population}")
+                    f.write(f"tsk_{ind.id}\t{pop_name}\n")
 
-    n_vars = ts.num_sites
-    print(f"  Simulated {n_vars:,} variants, {N_SAMPLES} samples x {n_pops} pops")
-    return str(vcf_path), str(pop_path), pops
+    print(f"  Simulated {N_REPS} x {SEQ_LEN/1e6:.0f}Mb regions, {N_SAMPLES} samples x {n_pops} pops")
+    return [str(p) for p in vcf_paths], str(pop_path), pops
 
 
-def run_moments(vcf_path, pop_path, pops, n_pops, use_cache=True):
+def run_moments(vcf_paths, pop_path, pops, n_pops, use_cache=True):
     """Run moments LD computation with genotype counts (with disk cache)."""
-    cache_file = CACHE_DIR / f"moments_ld_geno_{n_pops}pop.pkl"
+    cache_file = CACHE_DIR / f"moments_ld_geno_{n_pops}pop_{N_REPS}rep.pkl"
 
     if use_cache and cache_file.exists():
         with open(cache_file, 'rb') as f:
@@ -91,39 +93,48 @@ def run_moments(vcf_path, pop_path, pops, n_pops, use_cache=True):
         return result['stats'], result['time']
 
     t0 = time.time()
-    ld_stats = mParsing.compute_ld_statistics(
-        vcf_path, pop_file=pop_path, pops=pops,
-        bp_bins=BP_BINS, use_genotypes=True, report=False)
+    ld_stats = {
+        vcf: mParsing.compute_ld_statistics(
+            vcf, pop_file=pop_path, pops=pops,
+            bp_bins=BP_BINS, use_genotypes=True, report=False)
+        for vcf in vcf_paths
+    }
     elapsed = time.time() - t0
 
+    # return just the last rep's stats for comparison
+    last_stats = ld_stats[vcf_paths[-1]]
     with open(cache_file, 'wb') as f:
-        pickle.dump({'stats': ld_stats, 'time': elapsed}, f)
+        pickle.dump({'stats': last_stats, 'time': elapsed}, f)
 
-    print(f"  moments: computed in {elapsed:.1f}s (cached for next run)")
-    return ld_stats, elapsed
+    print(f"  moments: {N_REPS} reps computed in {elapsed:.1f}s (cached for next run)")
+    return last_stats, elapsed
 
 
-def run_pg_gpu(vcf_path, pop_path, pops):
-    """Run pg_gpu genotype LD computation (VCF pre-loaded, only GPU time measured)."""
+def run_pg_gpu(vcf_paths, pop_path, pops):
+    """Run pg_gpu genotype LD computation across all reps."""
     from pg_gpu.genotype_matrix import GenotypeMatrix
 
-    gm = GenotypeMatrix.from_vcf(vcf_path)
+    # Warmup on first rep
+    gm = GenotypeMatrix.from_vcf(vcf_paths[0])
     gm.load_pop_file(pop_path, pops=pops)
     gm = gm.apply_biallelic_filter()
     gm.transfer_to_gpu()
-
-    # Warmup
     _ = compute_ld_statistics(
         pops=pops, bp_bins=BP_BINS, report=False,
         genotype_matrix=gm, use_genotypes=True, ac_filter=False)
 
     t0 = time.time()
-    gpu_stats = compute_ld_statistics(
-        pops=pops, bp_bins=BP_BINS, report=False,
-        genotype_matrix=gm, use_genotypes=True, ac_filter=False)
+    for vcf in vcf_paths:
+        gm = GenotypeMatrix.from_vcf(vcf)
+        gm.load_pop_file(pop_path, pops=pops)
+        gm = gm.apply_biallelic_filter()
+        gm.transfer_to_gpu()
+        gpu_stats = compute_ld_statistics(
+            pops=pops, bp_bins=BP_BINS, report=False,
+            genotype_matrix=gm, use_genotypes=True, ac_filter=False)
     elapsed = time.time() - t0
 
-    print(f"  pg_gpu: computed in {elapsed:.3f}s")
+    print(f"  pg_gpu: {N_REPS} reps computed in {elapsed:.3f}s")
     return gpu_stats, elapsed
 
 
@@ -227,11 +238,11 @@ def main():
     print("=" * 60)
 
     print("\nSimulating data ...")
-    vcf_path, pop_path, pops = simulate_data(n_pops)
+    vcf_paths, pop_path, pops = simulate_data(n_pops)
 
     print("\nComputing LD statistics (genotype mode) ...")
-    moments_stats, t_moments = run_moments(vcf_path, pop_path, pops, n_pops)
-    gpu_stats, t_pg = run_pg_gpu(vcf_path, pop_path, pops)
+    moments_stats, t_moments = run_moments(vcf_paths, pop_path, pops, n_pops)
+    gpu_stats, t_pg = run_pg_gpu(vcf_paths, pop_path, pops)
 
     print("\nValidation:")
     mom, gpu, labels, stat_names = compare(moments_stats, gpu_stats)

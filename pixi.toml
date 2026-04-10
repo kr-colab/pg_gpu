@@ -37,6 +37,8 @@ ruff = ">=0.4"
 
 [feature.moments.pypi-dependencies]
 moments-popgen = "*"
+demesdraw = "*"
+demes = "*"
 
 [feature.docs.dependencies]
 sphinx = ">=4.0"
