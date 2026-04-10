@@ -222,10 +222,16 @@ if __name__ == "__main__":
         logger.info("Simulating chunks of sequence")
         vcf_paths, map_path, samples_path = simulate_data(demes.load(true_yaml_path), vcf_path)
 
+        # ── pg_gpu drop-in replacement ─────────────────────────────
+        #
+        # This is the key integration point: pg_gpu.moments_ld.compute_ld_statistics
+        # is a GPU-accelerated drop-in replacement for
+        # moments.LD.Parsing.compute_ld_statistics. Same arguments, same output
+        # format — just swap the import and everything downstream (bootstrapping,
+        # optimization, uncertainty estimation) works unchanged.
+        #
         logger.info("Calculating statistics across chunks with pg_gpu")
         ld_stats = {
-            # NB: this is where pg_gpu fits into the workflow, by providing a
-            # *drop-in replacement* for the moments.LD function of the same name
             vcf: pg_gpu.moments_ld.compute_ld_statistics(
                 vcf, rec_map_file=map_path, pop_file=samples_path,
                 pops=SAMPLE_POPS, r_bins=R_BINS, report=False,
