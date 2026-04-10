@@ -380,6 +380,7 @@ def main():
 
     results = []
     for name, pg_fn, allel_fn_wrapped in benchmarks:
+        cp.get_default_memory_pool().free_all_blocks()
         t_pg = bench(pg_fn, sync_gpu=True)
         t_al = bench(allel_fn_wrapped, sync_gpu=False) if allel_fn_wrapped else None
 
