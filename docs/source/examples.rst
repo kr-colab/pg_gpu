@@ -76,7 +76,7 @@ Integration with moments
 
 For a complete end-to-end workflow using ``pg_gpu`` as a drop-in replacement for
 ``moments.LD.Parsing.compute_ld_statistics()``, see
-``examples/moments_3pop_integration_demo.py``.
+``examples/moments_integration_demo.py``.
 Full details in :doc:`moments_integration`.
 
 LD Pruning

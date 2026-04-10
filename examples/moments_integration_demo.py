@@ -6,7 +6,7 @@ recent admixture using msprime, then computes LD statistics with pg_gpu,
 then fits the demographic model using the `Demes` inference engine from moments.LD.
 
 Usage:
-    pixi run -e moments python examples/moments_3pop_integration_demo.py
+    pixi run -e moments python examples/moments_integration_demo.py
 
 Requires the 'moments' pixi environment (pixi install -e moments).
 """

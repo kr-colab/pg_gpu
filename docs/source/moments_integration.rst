@@ -103,7 +103,7 @@ LD parsing time across 3 replicate 1Mb regions (10 diploid individuals per popul
 Example
 -------
 
-See ``examples/moments_3pop_integration_demo.py`` for a complete working example
+See ``examples/moments_integration_demo.py`` for a complete working example
 that simulates 200 replicate regions under a three-population model with
 migration, computes LD statistics with pg_gpu, fits the model using the
 ``moments.Demes`` inference engine, computes Godambe standard errors, and plots
@@ -111,4 +111,4 @@ fitted vs observed LD curves:
 
 .. code-block:: bash
 
-   pixi run -e moments python examples/moments_3pop_integration_demo.py
+   pixi run -e moments python examples/moments_integration_demo.py
