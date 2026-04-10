@@ -804,13 +804,30 @@ def _twopop_site_components(hap1, hap2):
       between = between-pop mean pairwise difference per site
 
     All quantities use per-site valid counts (missing-data aware).
+    Reduces along the sample axis in chunks to avoid materializing
+    full (n_hap, n_var) float64 intermediates.
     """
-    valid1 = (hap1 >= 0).astype(cp.float64)
-    valid2 = (hap2 >= 0).astype(cp.float64)
-    ac1 = cp.sum(cp.where(hap1 >= 0, hap1, 0), axis=0).astype(cp.float64)
-    n1 = cp.sum(valid1, axis=0).astype(cp.float64)
-    ac2 = cp.sum(cp.where(hap2 >= 0, hap2, 0), axis=0).astype(cp.float64)
-    n2 = cp.sum(valid2, axis=0).astype(cp.float64)
+    n_var = hap1.shape[1]
+
+    # Compute per-site allele counts and valid counts via chunked reduction.
+    # Only allocates (n_hap, chunk) temporaries instead of (n_hap, n_var).
+    ac1 = cp.zeros(n_var, dtype=cp.float64)
+    n1 = cp.zeros(n_var, dtype=cp.float64)
+    ac2 = cp.zeros(n_var, dtype=cp.float64)
+    n2 = cp.zeros(n_var, dtype=cp.float64)
+    chunk = max(1, n_var // 20)
+    for s in range(0, n_var, chunk):
+        e = min(s + chunk, n_var)
+        h1c = hap1[:, s:e]
+        v1 = h1c >= 0
+        n1[s:e] = cp.sum(v1, axis=0)
+        ac1[s:e] = cp.sum(cp.where(v1, h1c, 0), axis=0)
+        del h1c, v1
+        h2c = hap2[:, s:e]
+        v2 = h2c >= 0
+        n2[s:e] = cp.sum(v2, axis=0)
+        ac2[s:e] = cp.sum(cp.where(v2, h2c, 0), axis=0)
+        del h2c, v2
 
     # Within-pop mean pairwise differences
     n1_pairs = n1 * (n1 - 1) / 2
