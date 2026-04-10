@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """
 An example of demographic inference from LD statistics using pg_gpu + moments.
-Simulates replicate 1Mb regions under an isolation-with-migration model using
-msprime, computes LD statistics with pg_gpu, then fits the demographic model
-using moments' inference engine.
+This script simulates replicate 1Mb regions under a three population model with
+recent admixture using msprime, then computes LD statistics with pg_gpu,
+then fits the demographic model using the `Demes` inference engine from moments.LD.
 
 Usage:
     pixi run -e moments python examples/moments_3pop_integration_demo.py
@@ -24,6 +24,8 @@ import moments.LD
 import logging
 import sys
 from collections import OrderedDict
+from math import ceil
+
 import pg_gpu.moments_ld
 
 logger = logging.getLogger()
@@ -43,49 +45,12 @@ SAMPLE_SIZE = 10  # diploids per population
 SAMPLE_POPS = ["deme0", "deme1", "deme2"]
 DATA_DIR = "examples/data/moments_3pop_integration_demo"
 R_BINS = np.array([0, 1e-7, 5e-7, 1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4])
-GENERATIVE_PARAMS = OrderedDict({
-    "N_anc":         1.0e4,  # ancestral size
-    "N_trunk":       2.0e4,  # trunk (1,2) size
-    "N_deme0_start": 5.0e3,  # deme 0 start size
-    "N_deme0_end":   5.0e4,  # deme 0 end size
-    "N_deme1":       2.0e4,  # deme 1 size
-    "N_deme2":       2.0e4,  # deme 2 size
-    "D_trunk":       1.0e4,  # duration during which trunk and deme 0 exist
-    "D_recent":      5.0e3,  # duration during which demes 0,1,2 exist
-    "M_deme0_deme2": 1.0e-4, # migration rate between demes 0 and 2
-})
-OVERWRITE = True  # overwrite the computationally intensive stuff
+OVERWRITE = False  # don't use the cache and overwrite intermediate output
 
 
-# ── Model definition and simulation ─────────────────────────────────────────────────
+# ── Model definition and simulation ────────────────────────────
 
-
-def demographic_model(
-    N_anc: float,
-    N_trunk: float,
-    N_deme0_start: float,
-    N_deme0_end: float,
-    N_deme1: float,
-    N_deme2: float,
-    D_trunk: float,
-    D_recent: float,
-    M_deme0_deme2: float,
-):
-    """
-    The demographic model to be fit (and simulated from), in demes format
-    """
-    b = demes.Builder()
-    b.add_deme("anc", epochs=[dict(start_size=N_anc, end_time=D_trunk + D_recent)])
-    b.add_deme("trunk", ancestors=["anc"], epochs=[dict(start_size=N_trunk, end_time=D_recent)])
-    b.add_deme("deme0", ancestors=["anc"], epochs=[dict(start_size=N_deme0_start, end_size=N_deme0_end)])
-    b.add_deme("deme1", ancestors=["trunk"], epochs=[dict(start_size=N_deme1)])
-    b.add_deme("deme2", ancestors=["trunk"], epochs=[dict(start_size=N_deme2)])
-    # in the demes specification, source to dest is *forwards in time*
-    b.add_migration(source="deme0", dest="deme2", rate=M_deme0_deme2)
-    return b.resolve()
-
-
-def simulate_data(demographic_parameters, vcf_dir):
+def simulate_data(demographic_model, vcf_dir):
     """
     Simulate replicate regions with msprime and write VCFs, alongside
     samples-to-deme map and flat recombination map. Return paths to
@@ -96,10 +61,9 @@ def simulate_data(demographic_parameters, vcf_dir):
     map_path = os.path.join(vcf_dir, "flat_map.txt")
     samples_path = os.path.join(vcf_dir, "samples.txt")
 
-    demog = demographic_model(**demographic_parameters)
     tree_sequences = msprime.sim_ancestry(
         {pop: SAMPLE_SIZE for pop in SAMPLE_POPS},
-        demography=msprime.Demography.from_demes(demog),
+        demography=msprime.Demography.from_demes(demographic_model),
         sequence_length=SEQ_LEN,
         recombination_rate=REC_RATE,
         num_replicates=NUM_REPS,
@@ -127,8 +91,41 @@ def simulate_data(demographic_parameters, vcf_dir):
     return vcf_paths, map_path, samples_path
 
 
+generative_model = """
+# YAML of the generative model to simulate and subsequently fit.
+# See the demes docs for details on the specification:
+# https://popsim-consortium.github.io/demes-docs/latest/introduction.html
+time_units: generations
+generation_time: 1
+demes:
+    - name: anc
+      epochs:
+        - {end_time: 15000.0, start_size: 10000.0}
+    - name: trunk
+      ancestors: [anc]
+      epochs:
+        - {end_time: 5000.0, start_size: 20000.0}
+    - name: deme0
+      ancestors: [anc]
+      epochs:
+        - {end_time: 0, start_size: 5000.0, end_size: 50000.0}
+    - name: deme1
+      ancestors: [trunk]
+      epochs:
+        - {end_time: 0, start_size: 20000.0}
+    - name: deme2
+      ancestors: [trunk]
+      epochs:
+        - {end_time: 0, start_size: 20000.0}
+migrations:
+    - {source: deme0, dest: deme2, rate: 0.0001}
+"""
+
+
 moments_optimization_options = """
-# this is a yaml mapping parameters to slots in the demes model
+# YAML mapping parameters to slots in the demes model.
+# See the moments.Demes documentation for more details:
+# https://momentsld.github.io/moments/extensions/demes.html
 parameters:
     - name: N_anc
       description: Size of ancestral population
@@ -197,18 +194,22 @@ constraints:
 """
 
 
-# ── Actual usage ─────────────────────────────────────────────────
+# ── Usage ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":
 
     logger.info(f"Output will be saved to {DATA_DIR}")
     os.makedirs(DATA_DIR, exist_ok=True)
 
+    true_yaml_path = os.path.join(DATA_DIR, "true_model.yaml")
+    logger.info(f"Writing generative model to {true_yaml_path}:\n{generative_model.strip()}")
+    with open(true_yaml_path, "w") as handle:
+        handle.write(generative_model)
 
     true_model_path = os.path.join(DATA_DIR, "true_model.png")
     logger.info(f"Plotting generative model at {true_model_path}")
     fig, axs = plt.subplots(1, figsize=(4, 4), constrained_layout=True)
-    demesdraw.tubes(demographic_model(**GENERATIVE_PARAMS))
+    demesdraw.tubes(demes.load(true_yaml_path))
     plt.savefig(true_model_path)
     plt.close(fig)
 
@@ -219,11 +220,12 @@ if __name__ == "__main__":
     if not os.path.exists(cache_path) or OVERWRITE:
 
         logger.info("Simulating chunks of sequence")
-        vcf_paths, map_path, samples_path = simulate_data(GENERATIVE_PARAMS, vcf_path)
+        vcf_paths, map_path, samples_path = simulate_data(demes.load(true_yaml_path), vcf_path)
 
         logger.info("Calculating statistics across chunks with pg_gpu")
         ld_stats = {
-            # NB: this is a *drop-in replacement* for the moments.LD function of the same name
+            # NB: this is where pg_gpu fits into the workflow, by providing a
+            # *drop-in replacement* for the moments.LD function of the same name
             vcf: pg_gpu.moments_ld.compute_ld_statistics(
                 vcf, rec_map_file=map_path, pop_file=samples_path,
                 pops=SAMPLE_POPS, r_bins=R_BINS, report=False,
@@ -231,9 +233,8 @@ if __name__ == "__main__":
         }
         with open(cache_path, "wb") as handle:
             pickle.dump(ld_stats, handle)
-    else:
-        with open(cache_path, "rb") as handle:
-            ld_stats = pickle.load(handle)
+    with open(cache_path, "rb") as handle:
+        ld_stats = pickle.load(handle)
 
 
     logger.info("Bootstrapping and averaging chunks")
@@ -248,7 +249,6 @@ if __name__ == "__main__":
 
 
     logger.info("Optimizing model")
-    true_yaml_path = os.path.join(DATA_DIR, "true_model.yaml")
     fitted_yaml_path = os.path.join(DATA_DIR, "fitted_model.yaml")
     optim_options_path = os.path.join(DATA_DIR, "options.yaml")
     if not os.path.exists(fitted_yaml_path) or OVERWRITE:
@@ -257,9 +257,6 @@ if __name__ == "__main__":
         with open(optim_options_path, "w") as handle:
             handle.write(moments_optimization_options)
 
-        logger.info(f"Writing demes model to {true_yaml_path}")
-        demes.dump(demographic_model(**GENERATIVE_PARAMS), true_yaml_path)
-
         logger.info(f"Fitting and writing the optimized model to {fitted_yaml_path}")
         fitted_parameters = moments.Demes.Inference.optimize_LD(
             true_yaml_path,
@@ -267,6 +264,7 @@ if __name__ == "__main__":
             bootstrap_means,
             bootstrap_varcovs,
             pop_ids=SAMPLE_POPS,
+            perturb=0,
             rs=R_BINS,
             normalization=SAMPLE_POPS[0],
             method="powell",
@@ -293,7 +291,6 @@ if __name__ == "__main__":
             method="GIM",
             output=summary_path,
         )
-
     with open(summary_path) as handle:
         logger.info(f"Wrote estimates to {summary_path}:\n{handle.read().strip()}")
 
@@ -309,7 +306,7 @@ if __name__ == "__main__":
     fitted = moments.LD.Inference.remove_normalized_lds(fitted, normalization=0)
     ld_stat_names, het_stat_names = bootstrap_stats
     cols = 4
-    rows = int(len(ld_stat_names) / cols + 1)
+    rows = ceil(len(ld_stat_names) / cols)
     fig = moments.LD.Plotting.plot_ld_curves_comp(
         fitted,
         bootstrap_means,
