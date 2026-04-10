@@ -1263,35 +1263,39 @@ void fused_windowed_twopop(const signed char* hap1_t,
         return;
     }
 
-    double dn1 = (double)n_hap1;
-    double dn2 = (double)n_hap2;
-
-    // Weir-Cockerham constants (haploid, r=2, constant sample sizes)
-    double n_total = dn1 + dn2;
-    double n_bar = n_total / 2.0;
-    double n_C = (n_total - (dn1*dn1 + dn2*dn2) / n_total);  // r-1 = 1
-
     double t_fst_num = 0.0, t_fst_den = 0.0;
     double t_dxy = 0.0, t_pi1 = 0.0, t_pi2 = 0.0;
     double t_wc_a = 0.0, t_wc_ab = 0.0;
 
+    // n_hap1 and n_hap2 are used only for array indexing (row stride);
+    // per-site valid counts (dn1, dn2) are computed inside the loop.
+
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
 
-        int ac1_1 = 0, ac2_1 = 0;
+        // Count valid (non-missing) samples and alt alleles per site
+        int ac1_1 = 0, valid1 = 0;
         const signed char* row1 = hap1_t + (long long)v * n_hap1;
         for (int h = 0; h < n_hap1; h++) {
-            if (row1[h] > 0) ac1_1++;
+            signed char a = row1[h];
+            if (a >= 0) { valid1++; if (a > 0) ac1_1++; }
         }
+        int ac2_1 = 0, valid2 = 0;
         const signed char* row2 = hap2_t + (long long)v * n_hap2;
         for (int h = 0; h < n_hap2; h++) {
-            if (row2[h] > 0) ac2_1++;
+            signed char a = row2[h];
+            if (a >= 0) { valid2++; if (a > 0) ac2_1++; }
         }
 
+        double dn1 = (double)valid1;
+        double dn2 = (double)valid2;
         double ac1_0 = dn1 - ac1_1;
         double ac2_0 = dn2 - ac2_1;
         double d_ac1_1 = (double)ac1_1;
         double d_ac2_1 = (double)ac2_1;
+
+        // Skip sites with no valid samples in either population
+        if (valid1 == 0 || valid2 == 0) continue;
 
         // Hudson: within-pop mean pairwise difference
         double n1_pairs = dn1 * (dn1 - 1.0) / 2.0;
@@ -1315,7 +1319,10 @@ void fused_windowed_twopop(const signed char* hap1_t,
         t_pi1 += mpd1;
         t_pi2 += mpd2;
 
-        // Weir-Cockerham (haploid, h_bar=0, r=2)
+        // Weir-Cockerham (haploid, h_bar=0, r=2, per-site sample sizes)
+        double n_total = dn1 + dn2;
+        double n_bar = n_total / 2.0;
+        double n_C = (n_total - (dn1*dn1 + dn2*dn2) / n_total);
         double p1 = d_ac1_1 / dn1;
         double p2 = d_ac2_1 / dn2;
         double p_bar = (dn1 * p1 + dn2 * p2) / n_total;
@@ -1666,9 +1673,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         if pop1 is None or pop2 is None:
             raise ValueError("pop1 and pop2 required for fst/dxy/da")
 
-        # Use filtered matrix so inaccessible variants are excluded
-        m1 = get_population_matrix(matrix, pop1)
-        m2 = get_population_matrix(matrix, pop2)
+        # Use the original (unsubsetted) matrix for population lookup
+        m1 = get_population_matrix(haplotype_matrix, pop1)
+        m2 = get_population_matrix(haplotype_matrix, pop2)
         if m1.device == 'CPU':
             m1.transfer_to_gpu()
         if m2.device == 'CPU':
@@ -2068,9 +2075,9 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         if pop1 is None or pop2 is None:
             raise ValueError("pop1 and pop2 required for fst/dxy/da")
 
-        # Get population haplotype indices for GPU slicing
-        pop1_idx = matrix.sample_sets[pop1]
-        pop2_idx = matrix.sample_sets[pop2]
+        # Get population haplotype indices from the original (unsubsetted) matrix
+        pop1_idx = haplotype_matrix.sample_sets[pop1]
+        pop2_idx = haplotype_matrix.sample_sets[pop2]
         n1 = len(pop1_idx)
         n2 = len(pop2_idx)
         # Chunk size based on the larger population
@@ -2651,9 +2658,9 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
         if pop1 is None or pop2 is None:
             raise ValueError("pop1 and pop2 required for fst/dxy")
 
-        # Use filtered matrix so inaccessible variants are excluded
-        m1 = get_population_matrix(matrix, pop1)
-        m2 = get_population_matrix(matrix, pop2)
+        # Use the original (unsubsetted) matrix for population lookup
+        m1 = get_population_matrix(haplotype_matrix, pop1)
+        m2 = get_population_matrix(haplotype_matrix, pop2)
         if m1.device == 'CPU':
             m1.transfer_to_gpu()
         if m2.device == 'CPU':

@@ -459,3 +459,106 @@ class TestChunkedFused:
         for k in ('fst', 'fst_wc', 'dxy', 'da'):
             np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
+
+    def test_mixed_single_twopop_chunked(self, matrix_with_pops):
+        """Mixed single+two-pop stats should not crash (KeyError regression)."""
+        from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked
+        from pg_gpu import _memutil
+
+        hm = matrix_with_pops
+        hm.transfer_to_gpu()
+
+        bp_bins = np.arange(0, 500_001, 50_000, dtype=np.float64)
+
+        orig = _memutil.estimate_fused_chunk_size
+        _memutil.estimate_fused_chunk_size = lambda n, memory_fraction=0.35: 500
+        try:
+            r = windowed_statistics_fused_chunked(
+                hm, bp_bins=bp_bins,
+                statistics=('pi', 'theta_w', 'fst', 'fst_wc', 'dxy'),
+                population='pop1', pop1='pop1', pop2='pop2')
+        finally:
+            _memutil.estimate_fused_chunk_size = orig
+
+        for k in ('pi', 'theta_w', 'fst', 'fst_wc', 'dxy'):
+            assert k in r, f"Missing {k}"
+            assert len(r[k]) > 0
+
+
+class TestFusedMissingData:
+    """Fused two-pop kernel must use per-site valid counts under missingness."""
+
+    @pytest.fixture
+    def matrix_with_missing(self):
+        """Two-pop matrix where ~50% of sites have missing data in one pop."""
+        rng = np.random.RandomState(123)
+        n_hap, n_var = 40, 2000
+        hap = rng.randint(0, 2, (n_hap, n_var), dtype=np.int8)
+        # Inject missing data: ~50% of pop1 entries at odd-indexed variants
+        for v in range(0, n_var, 2):
+            for h in range(n_hap // 2):
+                if rng.random() < 0.5:
+                    hap[h, v] = -1
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {
+            "pop1": list(range(n_hap // 2)),
+            "pop2": list(range(n_hap // 2, n_hap)),
+        }
+        return hm
+
+    def _compare_fused_vs_scatter(self, hm):
+        """Compare fused kernel FST with scatter-add FST using aligned windows.
+
+        Uses windowed_analysis() which routes to scatter-add for pure two-pop,
+        vs calling windowed_statistics_fused() directly.
+        Both paths use the same window boundaries via the convenience function.
+        """
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+
+        hm.transfer_to_gpu()
+
+        # Use windowed_analysis to get scatter-add results (pure two-pop request)
+        r_scatter = windowed_analysis(
+            hm, window_size=50_000,
+            statistics=["fst", "dxy"],
+            populations=["pop1", "pop2"],
+            span_normalize=False)
+
+        # Build the same windows the scatter path used
+        ws = r_scatter['start'].values.astype(np.float64)
+        we = r_scatter['stop'].values.astype(np.float64)
+        bp_bins = np.concatenate([ws, [we[-1]]])
+
+        # Fused kernel path with identical windows
+        r_fused = windowed_statistics_fused(
+            hm, bp_bins=bp_bins,
+            statistics=('fst', 'dxy'),
+            pop1='pop1', pop2='pop2',
+            _win_starts=ws, _win_stops=we,
+            per_base=False)
+
+        both_valid = np.isfinite(r_fused['fst']) & np.isfinite(r_scatter['fst'].values)
+        assert np.sum(both_valid) > 0, "No valid FST values to compare"
+        np.testing.assert_allclose(
+            r_fused['fst'][both_valid],
+            r_scatter['fst'].values[both_valid],
+            rtol=1e-10,
+            err_msg="Fused kernel FST disagrees with scatter-add")
+
+    def test_fused_twopop_missing_matches_scatter(self, matrix_with_missing):
+        """Fused kernel FST must match scatter-add FST under missingness."""
+        self._compare_fused_vs_scatter(matrix_with_missing)
+
+    def test_fused_twopop_no_missing_matches_scatter(self, matrix_with_missing):
+        """Sanity: without missing data, fused and scatter should agree."""
+        rng = np.random.RandomState(456)
+        n_hap, n_var = 40, 2000
+        hap = rng.randint(0, 2, (n_hap, n_var), dtype=np.int8)
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {
+            "pop1": list(range(n_hap // 2)),
+            "pop2": list(range(n_hap // 2, n_hap)),
+        }
+        self._compare_fused_vs_scatter(hm)
