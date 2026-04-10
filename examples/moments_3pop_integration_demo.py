@@ -29,7 +29,8 @@ import pg_gpu.moments_ld
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter('[%(asctime)s] %(message)s', datefmt='%H:%M:%S')
-for handler in logger.handlers: handler.setFormatter(formatter)
+for handler in logger.handlers:
+    handler.setFormatter(formatter)
 
 
 # ── Settings ───────────────────────────────────────────────────
@@ -42,7 +43,7 @@ SAMPLE_SIZE = 10  # diploids per population
 SAMPLE_POPS = ["deme0", "deme1", "deme2"]
 DATA_DIR = "examples/data/moments_3pop_integration_demo"
 R_BINS = np.array([0, 1e-7, 5e-7, 1e-6, 5e-6, 1e-5, 5e-5, 1e-4, 5e-4])
-GENERATIVE_PARAMS = OrderedDict({ 
+GENERATIVE_PARAMS = OrderedDict({
     "N_anc":         1.0e4,  # ancestral size
     "N_trunk":       2.0e4,  # trunk (1,2) size
     "N_deme0_start": 5.0e3,  # deme 0 start size
@@ -133,56 +134,56 @@ parameters:
       description: Size of ancestral population
       values:
         - demes:
-            anc: 
+            anc:
                 epochs:
                     0: start_size
     - name: N_trunk
       description: Size of ancestor of deme1 and deme2
       values:
         - demes:
-            trunk: 
+            trunk:
                 epochs:
                     0: start_size
     - name: N_deme0_start
       description: Historical size of deme0
       values:
         - demes:
-            deme0: 
+            deme0:
                 epochs:
                     0: start_size
     - name: N_deme0_end
       description: Contemporary size of deme0
       values:
         - demes:
-            deme0: 
+            deme0:
                 epochs:
                     0: end_size
     - name: N_deme1
       description: Size of deme1
       values:
         - demes:
-            deme1: 
+            deme1:
                 epochs:
                     0: start_size
     - name: N_deme2
       description: Size of deme2
       values:
         - demes:
-            deme2: 
+            deme2:
                 epochs:
                     0: start_size
     - name: T_trunk
       description: Time ago where deme0 and trunk merge
       values:
         - demes:
-            anc: 
+            anc:
                 epochs:
                     0: end_time
     - name: T_recent
       description: Time ago where deme1 and deme2 merge
       values:
         - demes:
-            trunk: 
+            trunk:
                 epochs:
                     0: end_time
     - name: M_deme0_deme2
@@ -228,19 +229,19 @@ if __name__ == "__main__":
                 pops=SAMPLE_POPS, r_bins=R_BINS, report=False,
             ) for vcf in vcf_paths
         }
-        with open(cache_path, "wb") as handle: 
+        with open(cache_path, "wb") as handle:
             pickle.dump(ld_stats, handle)
     else:
-        with open(cache_path, "rb") as handle: 
+        with open(cache_path, "rb") as handle:
             ld_stats = pickle.load(handle)
 
 
     logger.info("Bootstrapping and averaging chunks")
     bootstrap_mean_variance = moments.LD.Parsing.bootstrap_data(ld_stats)
     bootstrap_means, bootstrap_varcovs, bootstrap_stats = moments.LD.Inference.remove_normalized_data(
-        bootstrap_mean_variance["means"], 
+        bootstrap_mean_variance["means"],
         bootstrap_mean_variance["varcovs"],
-        normalization=0, 
+        normalization=0,
         num_pops=len(SAMPLE_POPS),
         statistics=bootstrap_mean_variance["stats"],
     )
