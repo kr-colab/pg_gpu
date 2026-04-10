@@ -78,27 +78,27 @@ All statistics are validated against moments at machine precision
 Performance
 -----------
 
-On a two-population IM model (20 diploid individuals per population):
+LD parsing time across 3 replicate 1Mb regions (10 diploid individuals per population):
 
 .. list-table::
    :header-rows: 1
 
-   * - Step
+   * - Populations
      - moments
      - pg_gpu
      - Speedup
-   * - LD parsing (20 replicates)
-     - 403s
-     - 1.5s
-     - **275x**
-   * - Inference
-     - 11s
-     - 11s
-     - 1x (same optimizer)
-   * - **Total**
-     - **414s**
-     - **13s**
-     - **32x**
+   * - 2
+     - 190s
+     - 0.9s
+     - **214x**
+   * - 3
+     - 638s
+     - 2.9s
+     - **219x**
+   * - 4
+     - 1630s
+     - 7.3s
+     - **224x**
 
 Example
 -------
