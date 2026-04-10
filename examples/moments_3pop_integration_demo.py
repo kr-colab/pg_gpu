@@ -222,9 +222,9 @@ if __name__ == "__main__":
         logger.info("Simulating chunks of sequence")
         vcf_paths, map_path, samples_path = simulate_data(demes.load(true_yaml_path), vcf_path)
 
-        # ── pg_gpu drop-in replacement ─────────────────────────────
+        # ── pg_gpu drop-in replacement !!! ─────────────────────────────
         #
-        # This is the key integration point: pg_gpu.moments_ld.compute_ld_statistics
+        # This is the *key* integration point: pg_gpu.moments_ld.compute_ld_statistics
         # is a GPU-accelerated drop-in replacement for
         # moments.LD.Parsing.compute_ld_statistics. Same arguments, same output
         # format — just swap the import and everything downstream (bootstrapping,
