@@ -103,14 +103,12 @@ On a two-population IM model (20 diploid individuals per population):
 Example
 -------
 
-See ``examples/moments_integration_demo.py`` for a complete working example
-that:
-
-1. Simulates 20 replicate 1Mb regions under an isolation-with-migration model
-2. Computes LD statistics with pg_gpu
-3. Runs demographic inference with moments
-4. Reports inferred vs true parameters
+See ``examples/moments_3pop_integration_demo.py`` for a complete working example
+that simulates 200 replicate regions under a three-population model with
+admixture, computes LD statistics with pg_gpu, fits the model using the
+``moments.Demes`` inference engine, computes Godambe standard errors, and plots
+fitted vs observed LD curves:
 
 .. code-block:: bash
 
-   pixi run -e moments python examples/moments_integration_demo.py
+   pixi run -e moments python examples/moments_3pop_integration_demo.py
