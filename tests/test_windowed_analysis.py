@@ -5,7 +5,7 @@ Tests for windowed analysis module.
 import pytest
 import numpy as np
 import pandas as pd
-from pg_gpu import HaplotypeMatrix
+from pg_gpu import HaplotypeMatrix, diversity, divergence
 from pg_gpu.windowed_analysis import (
     WindowedAnalyzer, windowed_analysis, WindowParams,
     WindowIterator, WindowData
@@ -700,3 +700,146 @@ class TestFullyMaskedWindowNaN:
         assert np.isnan(r["mu_var"][fully_masked]).all(), (
             "fully-masked windows must report mu_var = NaN, got "
             f"{r['mu_var'][fully_masked]}")
+
+
+class TestOverlappingWindowsScatter:
+    """Regression tests for issue #64.
+
+    The scatter-add path in ``_windowed_thetas_scatter`` and
+    ``_windowed_twopop_scatter`` used to assign each variant to exactly
+    one window (the latest one whose start was <= pos), which for
+    overlapping windows (``step_size < window_size``) under-counted
+    every variant by ``step_size / window_size``. The fix replicates
+    each variant's contribution across every window that actually
+    contains it.
+    """
+
+    @pytest.fixture(scope="class")
+    def sim_hm(self):
+        import msprime
+        ts = msprime.sim_ancestry(
+            samples=50, sequence_length=1_000_000,
+            recombination_rate=1e-8, population_size=10_000,
+            ploidy=2, random_seed=42)
+        ts = msprime.sim_mutations(ts, rate=1e-8, random_seed=42)
+        hm = HaplotypeMatrix.from_ts(ts)
+        n = hm.num_haplotypes
+        hm.sample_sets = {
+            "pop1": list(range(n // 2)),
+            "pop2": list(range(n // 2, n)),
+        }
+        return hm
+
+    @pytest.mark.parametrize("step", [10_000, 5_000, 2_000, 1_000])
+    def test_pi_overlapping_mean_matches_scalar(self, sim_hm, step):
+        scalar = diversity.pi(sim_hm)
+        df = windowed_analysis(sim_hm, window_size=10_000, step_size=step,
+                               statistics=['pi'])
+        # Coverage-weighted mean: each base is covered by up to
+        # ceil(window/step) overlapping windows, so the mean of finite
+        # per-window pi values is an unbiased estimator of the scalar.
+        mean_pi = df['pi'].mean()
+        assert np.isclose(mean_pi, scalar, rtol=0.1), (
+            f"step={step}: mean_pi={mean_pi:.3e}, scalar={scalar:.3e}")
+
+    @pytest.mark.parametrize("step", [10_000, 5_000, 1_000])
+    def test_theta_w_overlapping_mean_matches_scalar(self, sim_hm, step):
+        scalar = diversity.theta_w(sim_hm)
+        df = windowed_analysis(sim_hm, window_size=10_000, step_size=step,
+                               statistics=['theta_w'])
+        mean_tw = df['theta_w'].mean()
+        assert np.isclose(mean_tw, scalar, rtol=0.1), (
+            f"step={step}: mean_theta_w={mean_tw:.3e}, scalar={scalar:.3e}")
+
+    def _window_subset(self, hm, start, stop):
+        """Build a fresh HM covering positions in [start, stop)."""
+        import cupy as cp
+        pos = hm.positions.get() if isinstance(hm.positions, cp.ndarray) else np.asarray(hm.positions)
+        hap = hm.haplotypes.get() if isinstance(hm.haplotypes, cp.ndarray) else np.asarray(hm.haplotypes)
+        mask = (pos >= start) & (pos < stop)
+        return HaplotypeMatrix(hap[:, mask], pos[mask],
+                               chrom_start=int(start), chrom_end=int(stop))
+
+    def test_overlapping_matches_per_window_reference(self):
+        """Every window's scatter output equals diversity.pi on its subset."""
+        rng = np.random.RandomState(7)
+        seq_len = 100_000
+        positions = np.sort(rng.choice(np.arange(1, seq_len), size=600,
+                                        replace=False))
+        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+        hm = HaplotypeMatrix(hap, positions, chrom_start=0, chrom_end=seq_len)
+
+        window_size, step_size = 20_000, 5_000
+        df = windowed_analysis(hm, window_size=window_size,
+                               step_size=step_size, statistics=['pi'],
+                               span_normalize=False)
+        for start, pi_scatter in zip(df['start'], df['pi']):
+            stop = start + window_size
+            if stop > seq_len:
+                continue  # edge windows use clipped spans — skip
+            sub = self._window_subset(hm, start, stop)
+            pi_ref = (diversity.pi(sub, span_normalize=False)
+                      if sub.num_variants > 0 else 0.0)
+            assert np.isclose(pi_scatter, pi_ref, rtol=1e-10, atol=1e-12), (
+                f"window [{start}, {stop}): scatter={pi_scatter}, "
+                f"ref={pi_ref}")
+
+    def test_twopop_overlapping_mean_matches_scalar(self, sim_hm):
+        scalar_dxy = divergence.dxy(sim_hm, "pop1", "pop2")
+        for step in (10_000, 5_000, 1_000):
+            df = windowed_analysis(sim_hm, window_size=10_000, step_size=step,
+                                   statistics=['dxy', 'fst'],
+                                   populations=['pop1', 'pop2'])
+            mean_dxy = df['dxy'].mean()
+            assert np.isclose(mean_dxy, scalar_dxy, rtol=0.1), (
+                f"step={step}: mean_dxy={mean_dxy:.3e}, "
+                f"scalar_dxy={scalar_dxy:.3e}")
+            # fst is already a ratio so replication should leave it invariant
+            # across step sizes (modulo sampling from different windows).
+            assert df['fst'].notna().any()
+            assert (df['fst'].dropna() >= -0.5).all()
+
+    def test_non_overlapping_unchanged(self, sim_hm):
+        """Guard: step==window path (n_per_var=1) matches per-window reference."""
+        window_size, step_size = 50_000, 50_000
+        df = windowed_analysis(sim_hm, window_size=window_size,
+                               step_size=step_size, statistics=['pi'],
+                               span_normalize=False)
+        for start, pi_scatter in zip(df['start'], df['pi']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            pi_ref = (diversity.pi(sub, span_normalize=False)
+                      if sub.num_variants > 0 else 0.0)
+            assert np.isclose(pi_scatter, pi_ref, rtol=1e-10, atol=1e-12)
+
+    def test_max_daf_overlapping_windows(self):
+        """max_daf per window reflects max DAF among contained variants,
+        including variants shared between overlapping windows."""
+        rng = np.random.RandomState(3)
+        seq_len = 50_000
+        positions = np.sort(rng.choice(np.arange(1, seq_len), size=300,
+                                        replace=False))
+        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+        hm = HaplotypeMatrix(hap, positions, chrom_start=0, chrom_end=seq_len)
+
+        window_size, step_size = 10_000, 2_500
+        df = windowed_analysis(hm, window_size=window_size,
+                               step_size=step_size, statistics=['max_daf'])
+        # Reference: brute-force per-window max of d/n for variants in window
+        dac = hap.sum(axis=0).astype(float)
+        n = hap.shape[0]
+        daf_all = dac / n
+        for start, max_daf_scatter in zip(df['start'], df['max_daf']):
+            stop = start + window_size
+            in_win = (positions >= start) & (positions < stop)
+            if not in_win.any():
+                assert max_daf_scatter == 0.0
+                continue
+            seg = (dac > 0) & (dac < n)
+            contrib = np.where(seg & in_win, daf_all, 0.0)
+            ref = float(contrib.max()) if contrib.size else 0.0
+            assert np.isclose(max_daf_scatter, ref, atol=1e-12), (
+                f"window [{start}, {stop}): scatter={max_daf_scatter}, "
+                f"ref={ref}")

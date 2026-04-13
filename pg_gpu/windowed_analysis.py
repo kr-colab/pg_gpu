@@ -636,6 +636,54 @@ class WindowedAnalyzer:
                 yield pd.DataFrame(batch_results)
 
 
+def _build_scatter_indices(pos_cpu, chrom_start, chrom_end,
+                           window_size, step_size):
+    """Build window indices for scatter-add over (possibly overlapping) windows.
+
+    When step_size < window_size, each variant falls inside up to
+    n_per_var = ceil(window_size / step_size) consecutive windows. We
+    replicate each variant's slot into those candidate windows, then mask
+    out candidates that are either out of range or whose window stop is
+    <= the variant position (which can happen at the low end when
+    window_size is not a multiple of step_size, or at chromosome edges).
+
+    Returns
+    -------
+    win_starts, win_stops : np.ndarray, float64, shape (n_windows,)
+    n_windows : int
+    n_per_var : int
+    k_safe : np.ndarray, int64, shape (n_variants, n_per_var)
+        Clipped candidate window indices per variant, safe for indexing
+        into arrays of length n_windows. Rows where `contains` is False
+        must be ignored.
+    contains : np.ndarray, bool, shape (n_variants, n_per_var)
+        True where the candidate window actually contains the variant.
+    win_idx_gpu : cp.ndarray, int64, shape (n_variants * n_per_var,)
+    mask_gpu : cp.ndarray, bool, shape (n_variants * n_per_var,)
+
+    The 2D arrays are raveled in row-major (C) order so that broadcasting
+    `values[:, None]` across n_per_var and raveling yields values aligned
+    with win_idx_gpu / mask_gpu.
+    """
+    win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
+                           dtype=np.float64)
+    win_stops = win_starts + window_size
+    n_windows = len(win_starts)
+    n_per_var = int(np.ceil(window_size / step_size))
+
+    k_hi = np.searchsorted(win_starts, pos_cpu, side='right') - 1
+    offsets = np.arange(n_per_var, dtype=np.int64)[None, :]
+    k_cand = k_hi[:, None] - offsets
+    in_range = (k_cand >= 0) & (k_cand < n_windows)
+    k_safe = np.clip(k_cand, 0, n_windows - 1)
+    contains = in_range & (pos_cpu[:, None] < win_stops[k_safe])
+
+    win_idx_gpu = cp.asarray(k_safe.ravel())
+    mask_gpu = cp.asarray(contains.ravel())
+    return (win_starts, win_stops, n_windows, n_per_var,
+            k_safe, contains, win_idx_gpu, mask_gpu)
+
+
 def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
                               statistics, populations, missing_data,
                               span_normalize):
@@ -670,26 +718,22 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     else:
         pos_cpu = np.asarray(pos)
 
-    # Window boundaries
     chrom_start = (matrix.chrom_start if matrix.chrom_start is not None
                    else int(pos_cpu[0]))
     chrom_end = (matrix.chrom_end if matrix.chrom_end is not None
                  else int(pos_cpu[-1]))
-    win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
-                           dtype=np.float64)
-    win_stops = win_starts + window_size
-    n_windows = len(win_starts)
-
-    # Map variants to windows
-    win_idx = np.searchsorted(win_starts, pos_cpu, side='right') - 1
-    win_idx = np.clip(win_idx, 0, n_windows - 1)
-    in_window = pos_cpu < win_stops[win_idx]
-    win_idx_gpu = cp.asarray(win_idx)
-    mask = cp.asarray(in_window)
+    (win_starts, win_stops, n_windows, n_per_var,
+     k_safe, contains, win_idx_gpu, mask_gpu) = _build_scatter_indices(
+        pos_cpu, chrom_start, chrom_end, window_size, step_size)
 
     def scatter_sum(values):
         out = cp.zeros(n_windows, dtype=cp.float64)
-        scatter_add(out, win_idx_gpu, values * mask)
+        if n_per_var == 1:
+            scatter_add(out, win_idx_gpu, values * mask_gpu)
+        else:
+            rep = cp.broadcast_to(values[:, None],
+                                  (values.shape[0], n_per_var)).ravel()
+            scatter_add(out, win_idx_gpu, rep * mask_gpu)
         return out
 
     # Compute requested per-variant contributions and scatter
@@ -741,9 +785,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         is_sing = seg & ((dac == 1) | (dac == n_valid - 1))
         sing_count = scatter_sum(is_sing.astype(cp.float64))
     if 'max_daf' in stats_set:
-        dafs = cp.where(seg & mask, d / n_safe, 0.0).get()
+        dafs = cp.where(seg, d / n_safe, 0.0).get()
+        rep_dafs = np.broadcast_to(dafs[:, None], contains.shape) * contains
         max_daf_arr = np.zeros(n_windows)
-        np.maximum.at(max_daf_arr, win_idx, dafs)
+        np.maximum.at(max_daf_arr, k_safe.ravel(), rep_dafs.ravel())
 
     # Build output — theta estimators as per-base rates
     for est_name, out_name in [('pi', 'pi'), ('watterson', 'theta_w'),
@@ -896,27 +941,24 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     else:
         pos_cpu = np.asarray(pos)
 
-    # Window boundaries (same pattern as _windowed_thetas_scatter)
     chrom_start = (haplotype_matrix.chrom_start
                    if haplotype_matrix.chrom_start is not None
                    else int(pos_cpu[0]))
     chrom_end = (haplotype_matrix.chrom_end
                  if haplotype_matrix.chrom_end is not None
                  else int(pos_cpu[-1]))
-    win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
-                           dtype=np.float64)
-    win_stops = win_starts + window_size
-    n_windows = len(win_starts)
-
-    win_idx = np.searchsorted(win_starts, pos_cpu, side='right') - 1
-    win_idx = np.clip(win_idx, 0, n_windows - 1)
-    in_window = pos_cpu < win_stops[win_idx]
-    win_idx_gpu = cp.asarray(win_idx)
-    mask = cp.asarray(in_window)
+    (win_starts, win_stops, n_windows, n_per_var,
+     k_safe, contains, win_idx_gpu, mask_gpu) = _build_scatter_indices(
+        pos_cpu, chrom_start, chrom_end, window_size, step_size)
 
     def scatter_sum(values):
         out = cp.zeros(n_windows, dtype=cp.float64)
-        scatter_add(out, win_idx_gpu, values * mask)
+        if n_per_var == 1:
+            scatter_add(out, win_idx_gpu, values * mask_gpu)
+        else:
+            rep = cp.broadcast_to(values[:, None],
+                                  (values.shape[0], n_per_var)).ravel()
+            scatter_add(out, win_idx_gpu, rep * mask_gpu)
         return out
 
     results = {}
