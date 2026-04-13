@@ -130,6 +130,22 @@ SFS and Admixture
    )
    print(f"D = {d:.4f}, SE = {se:.4f}, Z = {z:.2f}")
 
+Admixture Detection (end-to-end)
+--------------------------------
+
+``examples/admixture_detection.py`` is a self-contained demo: it
+simulates two 4-population msprime tree sequences (one null, one with
+a 10% C -> B admixture pulse), loads each into a ``HaplotypeMatrix`` via
+``from_ts``, and computes ``average_patterson_d`` with a block-jackknife
+95% CI. The null scenario's CI overlaps zero; the admixed scenario's
+excludes it. A two-panel figure shows the per-block D distribution and
+point estimates with CIs.
+
+.. code-block:: bash
+
+   pixi run python examples/admixture_detection.py
+   pixi run python examples/admixture_detection.py --length 20_000_000 --samples 20
+
 PBS (Population Branch Statistic)
 ---------------------------------
 
