@@ -130,6 +130,60 @@ SFS and Admixture
    )
    print(f"D = {d:.4f}, SE = {se:.4f}, Z = {z:.2f}")
 
+Admixture Detection (end-to-end)
+--------------------------------
+
+``examples/admixture_detection.py`` is a self-contained demo: it
+simulates two 4-population msprime tree sequences (one null, one with
+a 10% C -> B admixture pulse), loads each into a ``HaplotypeMatrix`` via
+``from_ts``, and computes ``average_patterson_d`` with a block-jackknife
+95% CI. The null scenario's CI overlaps zero; the admixed scenario's
+excludes it. A two-panel figure shows the per-block D distribution and
+point estimates with CIs.
+
+.. code-block:: bash
+
+   pixi run python examples/admixture_detection.py
+   pixi run python examples/admixture_detection.py --length 20_000_000 --samples 20
+
+Accessibility Mask (end-to-end)
+-------------------------------
+
+``examples/accessibility_mask.py`` demonstrates what an accessibility
+mask actually does to windowed statistics. It simulates a 1 Mb
+chromosome with a 200 kb block of 100x lower mutation rate (a stand-in
+for a low-callability exon), then computes windowed π twice — once
+without a mask, once with the exon flagged inaccessible via an
+in-memory numpy bool array. The unmasked trace shows a misleading dip
+over the low-μ region; the masked trace drops those windows entirely
+(NaN → visual gap) and the flanking π sits at its expected 4·Ne·μ
+value. A two-panel figure with the excluded region shaded makes the
+contrast visible at a glance.
+
+.. code-block:: bash
+
+   pixi run python examples/accessibility_mask.py
+   pixi run python examples/accessibility_mask.py --window 20_000
+
+LD Block Partitioning (end-to-end)
+----------------------------------
+
+``examples/ld_blocks.py`` partitions a chromosome into LD blocks using
+pg_gpu's GPU-fast pairwise r² as the input. It simulates a 1 Mb
+chromosome with two recombination hotspots (so ground truth = 3 blocks),
+computes the full r² matrix on the GPU, and locates block boundaries by
+scanning a *bridging score*: at each candidate breakpoint the mean r² is
+computed across a sliding (left-window, right-window) pair. The score is
+high inside a block and dips at hotspots; ``scipy.signal.find_peaks``
+then identifies the dips. A three-panel figure shows the r² heatmap with
+detected boundaries, the bridging-score trace, and the simulated
+recombination map for comparison.
+
+.. code-block:: bash
+
+   pixi run python examples/ld_blocks.py
+   pixi run python examples/ld_blocks.py --window 200 --max-score 0.02
+
 PBS (Population Branch Statistic)
 ---------------------------------
 
@@ -197,6 +251,20 @@ Compute multiple statistics across thousands of windows without Python loops:
        statistics=('pi', 'fst', 'dxy'),
        pop1='CEU', pop2='YRI'
    )
+
+Utility Scripts
+---------------
+
+The top-level ``utils/`` directory contains standalone command-line scripts:
+
+- ``vcf_to_zarr.py`` — convert a bgzipped VCF (or BCF) to a VCZ-format zarr store
+  using ``HaplotypeMatrix.vcf_to_zarr``. Takes ``--workers`` to control parallelism.
+- ``genome_scan.py`` — end-to-end genome scan workflow. Loads VCF or zarr data,
+  optionally assigns populations from a tab-delimited file, computes windowed
+  diversity / divergence / Garud's H and scalar summaries on the GPU, and writes
+  a multi-panel scan figure (PDF).
+
+Run either with ``pixi run python utils/<script>.py --help`` for usage.
 
 Missing Data
 ------------
