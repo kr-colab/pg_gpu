@@ -82,17 +82,13 @@ def build_mask() -> np.ndarray:
 
 def run_windowed(hm, label, window, step):
     """Compute sliding-window pi and print a one-line summary."""
+    # span_normalize=True (the default) divides each window's sum of
+    # per-site pi by its accessible-base count; fully-masked windows
+    # come back as NaN, which renders as a gap in the plot below.
     df = windowed_analysis(
         hm, window_size=window, step_size=step,
         statistics=["pi"], span_normalize=True,
     )
-    # pg_gpu clamps an all-masked window's denominator to 1.0 to avoid
-    # div-by-zero, so those windows come back as pi=0 rather than NaN.
-    # Rewrite to NaN for clarity in the plot.
-    if hm.has_accessible_mask:
-        accessible = hm.accessible_mask.count_accessible_windows(
-            df["start"].to_numpy(), df["stop"].to_numpy())
-        df.loc[accessible == 0, "pi"] = np.nan
     pi = df["pi"].to_numpy()
     finite = np.isfinite(pi)
     mean_pi = pi[finite].mean() if finite.any() else float("nan")
