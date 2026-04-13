@@ -165,6 +165,25 @@ contrast visible at a glance.
    pixi run python examples/accessibility_mask.py
    pixi run python examples/accessibility_mask.py --window 20_000
 
+LD Block Partitioning (end-to-end)
+----------------------------------
+
+``examples/ld_blocks.py`` partitions a chromosome into LD blocks using
+pg_gpu's GPU-fast pairwise r² as the input. It simulates a 1 Mb
+chromosome with two recombination hotspots (so ground truth = 3 blocks),
+computes the full r² matrix on the GPU, and locates block boundaries by
+scanning a *bridging score*: at each candidate breakpoint the mean r² is
+computed across a sliding (left-window, right-window) pair. The score is
+high inside a block and dips at hotspots; ``scipy.signal.find_peaks``
+then identifies the dips. A three-panel figure shows the r² heatmap with
+detected boundaries, the bridging-score trace, and the simulated
+recombination map for comparison.
+
+.. code-block:: bash
+
+   pixi run python examples/ld_blocks.py
+   pixi run python examples/ld_blocks.py --window 200 --max-score 0.02
+
 PBS (Population Branch Statistic)
 ---------------------------------
 
