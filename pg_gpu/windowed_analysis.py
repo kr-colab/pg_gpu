@@ -671,8 +671,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         pos_cpu = np.asarray(pos)
 
     # Window boundaries
-    chrom_start = matrix.chrom_start or int(pos_cpu[0])
-    chrom_end = matrix.chrom_end or int(pos_cpu[-1])
+    chrom_start = (matrix.chrom_start if matrix.chrom_start is not None
+                   else int(pos_cpu[0]))
+    chrom_end = (matrix.chrom_end if matrix.chrom_end is not None
+                 else int(pos_cpu[-1]))
     win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
                            dtype=np.float64)
     win_stops = win_starts + window_size
@@ -883,8 +885,12 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         pos_cpu = np.asarray(pos)
 
     # Window boundaries (same pattern as _windowed_thetas_scatter)
-    chrom_start = haplotype_matrix.chrom_start or int(pos_cpu[0])
-    chrom_end = haplotype_matrix.chrom_end or int(pos_cpu[-1])
+    chrom_start = (haplotype_matrix.chrom_start
+                   if haplotype_matrix.chrom_start is not None
+                   else int(pos_cpu[0]))
+    chrom_end = (haplotype_matrix.chrom_end
+                 if haplotype_matrix.chrom_end is not None
+                 else int(pos_cpu[-1]))
     win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
                            dtype=np.float64)
     win_stops = win_starts + window_size

@@ -562,3 +562,58 @@ class TestFusedMissingData:
             "pop2": list(range(n_hap // 2, n_hap)),
         }
         self._compare_fused_vs_scatter(hm)
+
+
+class TestChromStartZero:
+    """Windows must be anchored at chrom_start=0, not the first variant position.
+
+    Regression: `chrom_start or int(pos_cpu[0])` used truthy-check, which
+    treats an explicit chrom_start of 0 as unset and falls back to the first
+    variant. Windows then start at pos[0] instead of 0, mis-aligning every
+    user-provided interval (BED boundaries, accessibility masks, exon
+    coordinates, etc.) against the reported window boundaries.
+    """
+
+    def _simple_hm(self, seq_len=100_000, first_pos=243):
+        """Haplotype matrix with chrom_start=0 and a first variant > 0."""
+        rng = np.random.RandomState(7)
+        positions = np.concatenate([
+            [first_pos],
+            np.sort(rng.choice(
+                np.arange(first_pos + 1, seq_len), size=499, replace=False)),
+        ])
+        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+        return HaplotypeMatrix(hap, positions,
+                               chrom_start=0, chrom_end=seq_len)
+
+    def test_single_pop_windows_start_at_zero(self):
+        hm = self._simple_hm()
+        df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                               statistics=["pi"])
+        assert int(df["start"].iloc[0]) == 0, (
+            f"first window start should be chrom_start=0, got "
+            f"{int(df['start'].iloc[0])} (likely the first variant position)")
+        # Windows should tile [0, 100_000) exactly: 10 windows, step=10k
+        assert list(df["start"]) == list(range(0, 100_000, 10_000))
+
+    def test_twopop_windows_start_at_zero(self):
+        hm = self._simple_hm()
+        hm.sample_sets = {"a": list(range(0, 10)), "b": list(range(10, 20))}
+        df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                               statistics=["fst", "dxy"],
+                               populations=["a", "b"])
+        assert int(df["start"].iloc[0]) == 0
+        assert list(df["start"]) == list(range(0, 100_000, 10_000))
+
+    def test_non_zero_chrom_start_still_honored(self):
+        """chrom_start=50_000 should anchor windows at 50_000."""
+        rng = np.random.RandomState(11)
+        positions = np.sort(rng.choice(
+            np.arange(50_100, 150_000), size=500, replace=False))
+        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+        hm = HaplotypeMatrix(hap, positions,
+                             chrom_start=50_000, chrom_end=150_000)
+        df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                               statistics=["pi"])
+        assert int(df["start"].iloc[0]) == 50_000
+        assert list(df["start"]) == list(range(50_000, 150_000, 10_000))
