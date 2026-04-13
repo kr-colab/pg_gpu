@@ -617,3 +617,86 @@ class TestChromStartZero:
                                statistics=["pi"])
         assert int(df["start"].iloc[0]) == 50_000
         assert list(df["start"]) == list(range(50_000, 150_000, 10_000))
+
+
+class TestFullyMaskedWindowNaN:
+    """Windows with zero accessible bases must return NaN per-base rates.
+
+    Regression: `spans = np.maximum(spans, 1.0)` clamped the denominator
+    to 1.0 for fully-masked windows, so the output was 0 (numerator also
+    0 after variant filtering). A per-base rate with zero accessible
+    territory is undefined, not zero.
+    """
+
+    def _build_hm_with_mask(self, seq_len=100_000, mask_start=40_000,
+                            mask_end=60_000):
+        """HM with a contiguous inaccessible region in the middle."""
+        rng = np.random.RandomState(13)
+        positions = np.sort(rng.choice(np.arange(1, seq_len), size=400,
+                                        replace=False))
+        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+        hm = HaplotypeMatrix(hap, positions,
+                             chrom_start=0, chrom_end=seq_len)
+        mask = np.ones(seq_len, dtype=bool)
+        mask[mask_start:mask_end] = False
+        hm.set_accessible_mask(mask)
+        return hm, mask_start, mask_end
+
+    def test_pi_is_nan_for_fully_masked_windows(self):
+        hm, ms, me = self._build_hm_with_mask()
+        df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                               statistics=["pi", "theta_w"])
+        fully_masked = (df["start"] >= ms) & (df["stop"] <= me)
+        assert fully_masked.sum() > 0, "test needs at least one fully-masked window"
+        assert df.loc[fully_masked, "pi"].isna().all(), (
+            "fully-masked windows must report pi = NaN, got "
+            f"{df.loc[fully_masked, 'pi'].tolist()}")
+        assert df.loc[fully_masked, "theta_w"].isna().all()
+
+    def test_accessible_windows_unaffected(self):
+        hm, ms, me = self._build_hm_with_mask()
+        df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                               statistics=["pi"])
+        # Windows entirely outside the mask should have finite pi.
+        accessible = (df["stop"] <= ms) | (df["start"] >= me)
+        assert accessible.sum() > 0
+        assert df.loc[accessible, "pi"].notna().all()
+        assert (df.loc[accessible, "pi"] > 0).all()
+
+    def test_segregating_sites_stays_zero_not_nan(self):
+        """Raw-count stats remain 0 (not NaN) for fully-masked windows."""
+        hm, ms, me = self._build_hm_with_mask()
+        df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                               statistics=["segregating_sites"])
+        fully_masked = (df["start"] >= ms) & (df["stop"] <= me)
+        assert (df.loc[fully_masked, "segregating_sites"] == 0).all()
+
+    def test_twopop_dxy_is_nan_for_fully_masked_windows(self):
+        hm, ms, me = self._build_hm_with_mask()
+        hm.sample_sets = {"a": list(range(0, 10)), "b": list(range(10, 20))}
+        df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                               statistics=["dxy", "da"],
+                               populations=["a", "b"])
+        fully_masked = (df["start"] >= ms) & (df["stop"] <= me)
+        assert fully_masked.sum() > 0
+        assert df.loc[fully_masked, "dxy"].isna().all()
+        assert df.loc[fully_masked, "da"].isna().all()
+
+    def test_mu_var_is_nan_for_fully_masked_windows(self):
+        """Fused snp_dist path: mu_var should be NaN, not 1.0 or count."""
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+
+        hm, ms, me = self._build_hm_with_mask()
+        hm.transfer_to_gpu()
+        bp_bins = np.arange(0, 100_001, 10_000, dtype=np.float64)
+        r = windowed_statistics_fused(
+            hm, bp_bins=bp_bins, statistics=("mu_var",),
+            per_base=True)
+
+        starts = r["window_start"]
+        stops = r["window_stop"]
+        fully_masked = (starts >= ms) & (stops <= me)
+        assert fully_masked.sum() > 0
+        assert np.isnan(r["mu_var"][fully_masked]).all(), (
+            "fully-masked windows must report mu_var = NaN, got "
+            f"{r['mu_var'][fully_masked]}")

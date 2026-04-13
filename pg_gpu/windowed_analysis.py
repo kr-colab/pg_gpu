@@ -709,9 +709,14 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             spans = (win_stops - win_starts) * matrix.n_total_sites / total_span
         else:
             spans = np.minimum(win_stops, chrom_end) - win_starts
+        # Windows with zero span (fully inaccessible) divide to NaN rather
+        # than 0 — the per-base rate is undefined, not zero. Clamp for
+        # safe division and carry the zero-span mask for post-processing.
+        zero_span = spans <= 0
         spans = np.maximum(spans, 1.0)
     else:
         spans = np.ones(n_windows)
+        zero_span = np.zeros(n_windows, dtype=bool)
 
     stats_set = set(statistics)
 
@@ -793,6 +798,13 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         H = (raw['pi'] - raw['theta_h']).get() / spans
         results['zeng_dh'] = np.where(
             (tajd < 0) & (H < 0), tajd * H, 0.0)
+
+    # Windows with no accessible bases get NaN for every per-base rate.
+    if zero_span.any():
+        for name in ('pi', 'theta_w', 'theta_h', 'theta_l',
+                     'fay_wu_h', 'zeng_dh'):
+            if name in results:
+                results[name] = np.where(zero_span, np.nan, results[name])
 
     return pd.DataFrame(results)
 
@@ -922,9 +934,14 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             spans = (win_stops - win_starts) * haplotype_matrix.n_total_sites / total_span
         else:
             spans = np.minimum(win_stops, chrom_end) - win_starts
+        # Windows with zero span (fully inaccessible) divide to NaN rather
+        # than 0 — the per-base rate is undefined, not zero. Clamp for
+        # safe division and carry the zero-span mask for post-processing.
+        zero_span = spans <= 0
         spans = np.maximum(spans, 1.0)
     else:
         spans = np.ones(n_windows)
+        zero_span = np.zeros(n_windows, dtype=bool)
 
     # Compute per-site components (single pass over the data)
     mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
@@ -958,6 +975,12 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
 
     if 'da' in stats_set:
         results['da'] = ((between_sum - (pi1_sum + pi2_sum) / 2.0) / spans_gpu).get()
+
+    # Windows with no accessible bases get NaN for every per-base rate.
+    if zero_span.any():
+        for name in ('dxy', 'da'):
+            if name in results:
+                results[name] = np.where(zero_span, np.nan, results[name])
 
     return pd.DataFrame(results)
 
@@ -1798,7 +1821,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             s, e = int(ws_np[wi]), int(we_np[wi])
             if e - s < 2:
                 if e - s == 1:
-                    mu_var_arr[wi] = 1.0 / window_bases[wi] if per_base and window_bases[wi] > 0 else 1.0
+                    if per_base:
+                        mu_var_arr[wi] = (1.0 / window_bases[wi]
+                                          if window_bases[wi] > 0 else np.nan)
+                    else:
+                        mu_var_arr[wi] = 1.0
                 continue
             win_pos = pos_cpu[s:e]
             gaps = np.diff(win_pos).astype(np.float64)
@@ -1806,7 +1833,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             sd_var[wi] = np.var(gaps)
             sd_min[wi] = np.min(gaps)
             sd_max[wi] = np.max(gaps)
-            mu_var_arr[wi] = len(win_pos) / window_bases[wi] if per_base and window_bases[wi] > 0 else float(len(win_pos))
+            if per_base:
+                mu_var_arr[wi] = (len(win_pos) / window_bases[wi]
+                                  if window_bases[wi] > 0 else np.nan)
+            else:
+                mu_var_arr[wi] = float(len(win_pos))
 
         for stat, arr in [('snp_dist_mean', sd_mean), ('snp_dist_var', sd_var),
                           ('snp_dist_min', sd_min), ('snp_dist_max', sd_max),
