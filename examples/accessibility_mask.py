@@ -8,9 +8,7 @@ an accessibility mask that excludes that block.
 
 The unmasked trace shows a misleading dip where mutation is low; the
 masked trace drops those windows entirely (NaN -> visual gap) or
-correctly normalizes surrounding windows by accessible bases only. The
-comparison makes the role of the mask obvious without a paragraph of
-explanation.
+correctly normalizes surrounding windows by accessible bases only.
 
 Usage
 -----
@@ -34,8 +32,8 @@ from pg_gpu.windowed_analysis import windowed_analysis
 
 
 # ── simulation ──────────────────────────────────────────────────────────────
-# A single 10 Mb chromosome with a central low-mutation region acting as
-# a stand-in for a low-callability exon: density of segregating sites
+# A single 1 Mb chromosome with a central low-mutation region acting as
+# a stand-in for a constrained exon: density of segregating sites
 # drops there even though the underlying genealogy is identical to the
 # flanking neutral sequence.
 
@@ -168,9 +166,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    # Non-overlapping windows: pg_gpu's fused scatter kernel has a known
-    # issue with overlapping windows (tracked upstream as issue #64) that
-    # undercounts variants in every window. step == window avoids it.
+    # Non-overlapping windows
     step = args.step if args.step is not None else args.window
 
     print(f"Simulating {SEQ_LEN/1e6:.1f} Mb chromosome with low-mutation "
