@@ -146,6 +146,25 @@ point estimates with CIs.
    pixi run python examples/admixture_detection.py
    pixi run python examples/admixture_detection.py --length 20_000_000 --samples 20
 
+Accessibility Mask (end-to-end)
+-------------------------------
+
+``examples/accessibility_mask.py`` demonstrates what an accessibility
+mask actually does to windowed statistics. It simulates a 1 Mb
+chromosome with a 200 kb block of 100x lower mutation rate (a stand-in
+for a low-callability exon), then computes windowed π twice — once
+without a mask, once with the exon flagged inaccessible via an
+in-memory numpy bool array. The unmasked trace shows a misleading dip
+over the low-μ region; the masked trace drops those windows entirely
+(NaN → visual gap) and the flanking π sits at its expected 4·Ne·μ
+value. A two-panel figure with the excluded region shaded makes the
+contrast visible at a glance.
+
+.. code-block:: bash
+
+   pixi run python examples/accessibility_mask.py
+   pixi run python examples/accessibility_mask.py --window 20_000
+
 PBS (Population Branch Statistic)
 ---------------------------------
 
