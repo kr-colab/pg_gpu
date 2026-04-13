@@ -40,12 +40,8 @@ def _simulate(seed):
 
 
 def _ts_to_hm(ts):
-    hm = HaplotypeMatrix.from_ts(ts)
-    hm.sample_sets = {
-        "pop1": list(range(0, N_HAPS_PER_POP)),
-        "pop2": list(range(N_HAPS_PER_POP, 2 * N_HAPS_PER_POP)),
-    }
-    return hm
+    # sample_sets are auto-populated from the named populations in ts.
+    return HaplotypeMatrix.from_ts(ts)
 
 
 def _add_missing(hm, rate, rng):

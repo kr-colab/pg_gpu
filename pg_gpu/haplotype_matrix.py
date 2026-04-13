@@ -476,6 +476,15 @@ class HaplotypeMatrix:
 
         Returns:
             HaplotypeMatrix: A new HaplotypeMatrix instance
+
+        Notes:
+            Populations declared in the tree sequence (with a name in
+            metadata) are automatically registered in ``sample_sets``:
+            each pop name maps to the haplotype row indices of its
+            samples. The no-demography case (``sim_ancestry(samples=N)``
+            with a single unnamed population) leaves ``sample_sets``
+            unset. Users who need custom groupings can overwrite
+            ``hm.sample_sets`` after construction.
         """
         # Convert ts to haplotype matrix
         haplotypes = ts.genotype_matrix().T
@@ -493,6 +502,19 @@ class HaplotypeMatrix:
                  n_total_sites=n_total_sites)
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
+
+        sample_sets = {}
+        sample_idx = {s: i for i, s in enumerate(ts.samples())}
+        for pop in ts.populations():
+            name = pop.metadata.get("name") if pop.metadata else None
+            if name is None:
+                continue
+            nodes = ts.samples(population=pop.id)
+            if len(nodes):
+                sample_sets[name] = [sample_idx[s] for s in nodes]
+        if sample_sets:
+            hm.sample_sets = sample_sets
+
         return hm
 
     def get_matrix(self) -> cp.ndarray:

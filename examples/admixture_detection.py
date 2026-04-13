@@ -94,24 +94,6 @@ def simulate(demography, length, n_diploids, seed):
     return ts
 
 
-def load_and_label(ts) -> HaplotypeMatrix:
-    """Build a HaplotypeMatrix from the ts and assign sample_sets by pop name."""
-    # from_ts does NOT carry over msprime population labels, so we rebuild
-    # the {name: [row indices]} mapping from the tskit sample nodes ourselves.
-    # (GPU transfer is automatic on the first stat call, no device= needed.)
-    hm = HaplotypeMatrix.from_ts(ts)
-    sample_idx = {int(s): i for i, s in enumerate(ts.samples())}
-    sample_sets = {}
-    for pop in ts.populations():
-        name = pop.metadata.get("name") if pop.metadata else None
-        if name is None or name not in POPS:
-            continue
-        sample_sets[name] = [sample_idx[int(s)]
-                             for s in ts.samples(population=pop.id)]
-    hm.sample_sets = sample_sets
-    return hm
-
-
 # ── D test ──────────────────────────────────────────────────────────────────
 
 def run_d_test(hm, scenario, label, blen=None):
@@ -226,7 +208,9 @@ def main():
         with_pulse = scenario == "admixed"
         print(f"\nSimulating {label!r} (seed={seed})...")
         ts = simulate(build_demography(with_pulse), args.length, args.samples, seed)
-        hm = load_and_label(ts)
+        # from_ts auto-populates hm.sample_sets from the ts population metadata,
+        # so the A/B/C/D labels flow through without an extra loop here.
+        hm = HaplotypeMatrix.from_ts(ts)
         print(f"  {ts.num_sites:,} variants, {hm.num_haplotypes} haplotypes across "
               f"{len(hm.sample_sets)} populations")
         results.append(run_d_test(hm, scenario, label, blen=args.blen))

@@ -75,6 +75,66 @@ def test_from_ts(sample_ts):
     assert cp.allclose(D, D.T)  # Check symmetry
     assert cp.all(cp.abs(D) <= 0.25)  # D is bounded by ±0.25
 
+
+def test_from_ts_default_population(sample_ts):
+    """sim_ancestry(samples=N) with no explicit Demography -> msprime
+    still names a default 'pop_0' population; hm.sample_sets exposes it."""
+    hm = HaplotypeMatrix.from_ts(sample_ts)
+    assert list(hm.sample_sets.keys()) == ["pop_0"]
+    assert len(hm.sample_sets["pop_0"]) == hm.num_haplotypes
+
+
+def test_from_ts_populates_sample_sets_from_demography():
+    """Named populations in the tree sequence auto-register as sample_sets."""
+    demography = msprime.Demography()
+    demography.add_population(name="A", initial_size=10_000)
+    demography.add_population(name="B", initial_size=10_000)
+    demography.add_population(name="AB", initial_size=10_000)
+    demography.add_population_split(time=5_000, derived=["A", "B"],
+                                    ancestral="AB")
+    ts = msprime.sim_ancestry(
+        samples={"A": 12, "B": 8},
+        sequence_length=100_000,
+        recombination_rate=1e-8,
+        demography=demography,
+        random_seed=42, ploidy=2)
+    ts = msprime.sim_mutations(ts, rate=1e-8, random_seed=42)
+
+    hm = HaplotypeMatrix.from_ts(ts)
+
+    # Extant pops A and B should be present; the ancestral AB has no living
+    # samples and should NOT appear.
+    assert set(hm.sample_sets.keys()) == {"A", "B"}
+    assert len(hm.sample_sets["A"]) == 2 * 12
+    assert len(hm.sample_sets["B"]) == 2 * 8
+
+    # Row indices must actually refer to samples drawn from that population
+    # in the tree sequence, not just any rows.
+    all_samples = list(ts.samples())
+    a_nodes = set(int(s) for s in ts.samples(population=0))
+    b_nodes = set(int(s) for s in ts.samples(population=1))
+    assert set(all_samples[i] for i in hm.sample_sets["A"]) == a_nodes
+    assert set(all_samples[i] for i in hm.sample_sets["B"]) == b_nodes
+
+
+def test_from_ts_user_can_overwrite_sample_sets():
+    """Callers who want custom groupings can still reassign the dict."""
+    demography = msprime.Demography()
+    demography.add_population(name="P", initial_size=10_000)
+    ts = msprime.sim_ancestry(samples={"P": 20},
+                              sequence_length=50_000,
+                              demography=demography,
+                              random_seed=7, ploidy=2)
+    ts = msprime.sim_mutations(ts, rate=1e-8, random_seed=7)
+    hm = HaplotypeMatrix.from_ts(ts)
+    assert list(hm.sample_sets.keys()) == ["P"]
+
+    n = hm.num_haplotypes
+    hm.sample_sets = {"left": list(range(n // 2)),
+                      "right": list(range(n // 2, n))}
+    assert set(hm.sample_sets.keys()) == {"left", "right"}
+
+
 def test_shape(sample_vcf):
     """Test the shape property."""
     hap_matrix = HaplotypeMatrix.from_vcf(sample_vcf)
