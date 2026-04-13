@@ -198,6 +198,20 @@ Compute multiple statistics across thousands of windows without Python loops:
        pop1='CEU', pop2='YRI'
    )
 
+Utility Scripts
+---------------
+
+The ``examples/utils/`` directory contains standalone command-line scripts:
+
+- ``vcf_to_zarr.py`` — convert a bgzipped VCF (or BCF) to a VCZ-format zarr store
+  using ``HaplotypeMatrix.vcf_to_zarr``. Takes ``--workers`` to control parallelism.
+- ``genome_scan.py`` — end-to-end genome scan workflow. Loads VCF or zarr data,
+  optionally assigns populations from a tab-delimited file, computes windowed
+  diversity / divergence / Garud's H and scalar summaries on the GPU, and writes
+  a multi-panel scan figure (PDF).
+
+Run either with ``pixi run python examples/utils/<script>.py --help`` for usage.
+
 Missing Data
 ------------
 
