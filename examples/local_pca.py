@@ -10,11 +10,12 @@ Pipeline:
        the sample-sample covariance matrix.
     3. `pc_dist` → Frobenius distance matrix between windows.
     4. `pcoa` on the distance matrix → 2D MDS embedding.
-    5. `corners` → highlight the windows sitting at the extremes of MDS,
-       which should coincide with the sweep region (where the partial-sweep
-       haplotype split creates local population structure).
-    6. For comparison, also scan Garud H12 and H2/H1 along the chromosome
-       (canonical haplotype-frequency sweep statistics).
+    5. 1D k-means (k=3) on MDS1 values to partition windows into
+       neutral / linked / sweep regimes based on how far each window's
+       MDS1 sits from the chromosome-wide baseline.
+    6. `corners` → highlight the windows sitting at the extremes of MDS.
+    7. For comparison, scan Garud H12 along the chromosome (a canonical
+       haplotype-frequency sweep statistic).
 
 Usage
 -----
@@ -31,9 +32,33 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import msprime
 import numpy as np
+from scipy.cluster.vq import kmeans2
 
 from pg_gpu import HaplotypeMatrix, windowed_analysis
 from pg_gpu.decomposition import corners, pc_dist, pcoa
+
+
+REGIME_NAMES = ("neutral", "linked", "sweep")
+REGIME_COLORS = {"neutral": "#4C9AFF", "linked": "#F2B84B", "sweep": "#D94E4E"}
+
+
+def _cluster_mds1(mds1: np.ndarray, seed: int):
+    """1D k-means (k=3) on MDS1, relabeled as neutral / linked / sweep.
+
+    Clusters are ordered by distance of their centroid from the
+    chromosome-wide median: closest → neutral, middle → linked,
+    farthest → sweep. This works regardless of the sign of the sweep
+    signal in MDS space.
+    """
+    centroids, labels = kmeans2(mds1.astype(np.float64), k=3,
+                                minit='++', seed=seed)
+    dist = np.abs(centroids - np.median(mds1))
+    rank = np.argsort(dist)
+    remap = np.empty(3, dtype=np.int64)
+    for rank_idx, cluster_idx in enumerate(rank):
+        remap[cluster_idx] = rank_idx
+    regime = np.array([REGIME_NAMES[remap[l]] for l in labels])
+    return regime, centroids[rank]
 
 
 SEQ_LEN = 10_000_000
@@ -121,13 +146,13 @@ def main() -> None:
                          random_state=args.seed)
     print(f"  corner_idx shape={corner_idx.shape}")
 
+    print("Clustering MDS1 into neutral / linked / sweep regimes (k=3) ...")
+    regime, regime_centroids = _cluster_mds1(mds[:, 0], seed=args.seed)
+    for name, centroid in zip(REGIME_NAMES, regime_centroids):
+        print(f"  {name:8s}  MDS1 centroid={centroid:+.3f}  "
+              f"n_windows={(regime == name).sum()}")
+
     centers = result.windows['center'].to_numpy()
-    # Define a 200 kb "sweep region" around the focal site for highlighting.
-    sweep_half_width = 100_000
-    in_sweep = (centers >= SWEEP_POS - sweep_half_width) & \
-               (centers <= SWEEP_POS + sweep_half_width)
-    print(f"  windows within ±{sweep_half_width:,} bp of sweep: "
-          f"{in_sweep.sum()} / {len(centers)}")
 
     # Scalar summary statistics along the chromosome (bp windows, for the
     # right-hand panels). Garud H12 is a classic sweep detector that peaks
@@ -159,38 +184,42 @@ def main() -> None:
     ax_mds1 = fig.add_subplot(gs[0, 1])
     ax_h12 = fig.add_subplot(gs[1, 1], sharex=ax_mds1)
 
-    # Left panel: MDS scatter
-    ax_mds.scatter(mds[:, 0], mds[:, 1], c='lightgray', s=30,
-                   edgecolors='white', linewidths=0.3,
-                   label='other windows')
-    colors = plt.get_cmap("tab10")(range(args.n_corners))
+    # Left panel: MDS scatter, colored by k-means regime
+    for name in REGIME_NAMES:
+        mask = regime == name
+        ax_mds.scatter(mds[mask, 0], mds[mask, 1],
+                       c=REGIME_COLORS[name], s=35,
+                       edgecolors='white', linewidths=0.3,
+                       label=f"{name} (n={mask.sum()})")
+    corner_edge_colors = plt.get_cmap("tab10")(range(args.n_corners))
     for i in range(args.n_corners):
         ax_mds.scatter(mds[corner_idx[:, i], 0], mds[corner_idx[:, i], 1],
-                       c=[colors[i]], s=60, edgecolors='black',
-                       linewidths=0.5, label=f'corner {i+1}')
-    ax_mds.scatter(mds[in_sweep, 0], mds[in_sweep, 1],
-                   facecolors='none', edgecolors='red', s=120,
-                   linewidths=1.5, label='sweep-proximal windows')
+                       facecolors='none',
+                       edgecolors=[corner_edge_colors[i]], s=140,
+                       linewidths=1.4, label=f'corner {i+1}')
     ax_mds.set_xlabel("MDS 1")
     ax_mds.set_ylabel("MDS 2")
-    ax_mds.set_title("Local-PCA MDS of window distances")
+    ax_mds.set_title("Local-PCA MDS, colored by k-means regime")
     ax_mds.legend(loc='best', fontsize=8)
 
-    # Top-right: MDS1 along the chromosome
-    ax_mds1.scatter(centers / 1e6, mds[:, 0], c='gray', s=20,
-                    label='all windows')
-    ax_mds1.scatter(centers[in_sweep] / 1e6, mds[in_sweep, 0],
-                    c='red', s=30, label='sweep-proximal windows')
+    # Top-right: MDS1 along the chromosome, colored by regime
+    for name in REGIME_NAMES:
+        mask = regime == name
+        ax_mds1.scatter(centers[mask] / 1e6, mds[mask, 0],
+                        c=REGIME_COLORS[name], s=25,
+                        edgecolors='white', linewidths=0.2,
+                        label=name)
     for i in range(args.n_corners):
         ax_mds1.scatter(centers[corner_idx[:, i]] / 1e6,
                         mds[corner_idx[:, i], 0],
-                        c=[colors[i]], s=40, edgecolors='black',
-                        linewidths=0.4)
+                        facecolors='none',
+                        edgecolors=[corner_edge_colors[i]], s=70,
+                        linewidths=1.0)
     ax_mds1.axvline(SWEEP_POS / 1e6, color='orange', linestyle='--',
                     alpha=0.7, label='sweep focal site')
     ax_mds1.set_ylabel("MDS 1")
-    ax_mds1.set_title(f"MDS1 and Garud H12 along the chromosome "
-                      f"(end_freq={args.end_freq})")
+    ax_mds1.set_title(f"MDS1 (k-means regime) and Garud H12 along the "
+                      f"chromosome (end_freq={args.end_freq})")
     ax_mds1.set_xlim(0, SEQ_LEN / 1e6)
     ax_mds1.legend(loc='best', fontsize=8)
     plt.setp(ax_mds1.get_xticklabels(), visible=False)

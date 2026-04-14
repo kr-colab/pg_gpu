@@ -173,10 +173,14 @@ pipeline. It simulates a 10 Mb chromosome under ``msprime`` with
 ``SweepGenicSelection`` at the midpoint (final sweep frequency 0.5, i.e.
 a partial / incomplete sweep), runs per-window local PCA, computes the
 Frobenius pairwise distance between windows, and reduces with classical
-MDS. ``corners()`` picks the extreme windows on the MDS embedding, which
-coincide with the sweep region. A two-panel figure shows the MDS scatter
-on the left and shared-x stacks of MDS1 and Garud H12 along the
-chromosome on the right — H12 peaks sharply at the sweep focal site.
+MDS. 1D k-means (k=3) on the resulting MDS1 values partitions windows
+into neutral / linked / sweep regimes, ordered by how far each
+cluster's centroid sits from the chromosome-wide median. ``corners()``
+picks the extreme windows on the MDS embedding, which coincide with
+the sweep region. A two-panel figure shows the MDS scatter (colored by
+regime) on the left and shared-x stacks of MDS1 and Garud H12 along
+the chromosome on the right — the sweep cluster and H12 peak both
+land on the sweep focal site.
 
 .. code-block:: bash
 

@@ -182,6 +182,30 @@ def test_parity_mds_procrustes(pg_local_pca_result):
         f"Procrustes residual too large: {resid} (ref_norm={ref_norm})")
 
 
+def test_parity_pcoa_matches_cmdscale():
+    """pg_gpu.pcoa on a fixed distance matrix matches R's cmdscale output.
+
+    The ``mds_coords`` field in ``lostruct_reference_corners.json`` was
+    produced by R's ``cmdscale(dist_L1, k=2)``; this test runs our ``pcoa``
+    on the exact same distance matrix and checks the two outputs agree up
+    to the rotation/reflection/scale ambiguity that classical MDS does not
+    pin down (measured via ``scipy.spatial.procrustes``).
+    """
+    _skip_if_missing(PCDIST_PATH)
+    _skip_if_missing(CORNERS_PATH)
+    from scipy.spatial import procrustes
+
+    dist_ref = _to_array(_load_json(PCDIST_PATH)['dist_L1'])
+    mds_r = _to_array(_load_json(CORNERS_PATH)['mds_coords'])
+
+    mds_ours, _ = pcoa(dist_ref, n_components=2)
+    assert mds_ours.shape == mds_r.shape
+    _, _, disparity = procrustes(mds_r, mds_ours)
+    # Same algorithm on the same inputs should land at machine precision.
+    assert disparity < 1e-10, (
+        f"pcoa vs cmdscale disparity {disparity:.3e} exceeds 1e-10")
+
+
 # ---------------------------------------------------------------------------
 # Jackknife parity
 # ---------------------------------------------------------------------------
