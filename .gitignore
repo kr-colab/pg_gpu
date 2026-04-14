@@ -17,6 +17,7 @@ pixi.lock
 reference_code/*
 docs/build/
 data/
+!tests/data/
 cache/
 moments/
 simulations/

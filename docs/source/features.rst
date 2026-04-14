@@ -78,6 +78,7 @@ Diversity Statistics
    * - ``diversity_stats``
      - All core diversity statistics in one call
      -
+
 Divergence Statistics
 ---------------------
 
@@ -329,6 +330,18 @@ Dimensionality Reduction and Distance
    * - ``pcoa``
      - Principal Coordinate Analysis (classical MDS)
      -
+   * - ``local_pca``
+     - Per-window PCA (lostruct); GPU-batched ``eigh`` over stacked per-window Gram matrices
+     - Li & Ralph (2019)
+   * - ``local_pca_jackknife``
+     - Delete-1 block jackknife SE of local PCs (batched)
+     - Li & Ralph (2019)
+   * - ``pc_dist``
+     - Frobenius distance between per-window low-rank covariance reps
+     - Li & Ralph (2019)
+   * - ``corners``
+     - Extreme-cluster selection in a 2D MDS embedding (Welzl MEC)
+     - Li & Ralph (2019)
 
 Relatedness and Kinship
 -----------------------
@@ -407,3 +420,5 @@ windows in a single GPU pass via fused CUDA kernels.
      - Garud's H statistics per window
    * - ``mean_nsl``
      - Mean nSL per window
+   * - ``local_pca``
+     - Per-window local PCA (lostruct); returns a ``LocalPCAResult`` with eigvals, eigvecs, and window metadata

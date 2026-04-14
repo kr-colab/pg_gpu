@@ -165,6 +165,41 @@ contrast visible at a glance.
    pixi run python examples/accessibility_mask.py
    pixi run python examples/accessibility_mask.py --window 20_000
 
+Local PCA / lostruct (end-to-end)
+---------------------------------
+
+``examples/local_pca.py`` is a self-contained demo of the GPU lostruct
+pipeline. It simulates a 10 Mb chromosome under ``msprime`` with
+``SweepGenicSelection`` at the midpoint (final sweep frequency 0.5, i.e.
+a partial / incomplete sweep), runs per-window local PCA, computes the
+Frobenius pairwise distance between windows, and reduces with classical
+MDS. ``corners()`` picks the extreme windows on the MDS embedding, which
+coincide with the sweep region. A two-panel figure shows the MDS scatter
+on the left and shared-x stacks of MDS1 and Garud H12 along the
+chromosome on the right — H12 peaks sharply at the sweep focal site.
+
+.. code-block:: bash
+
+   pixi run python examples/local_pca.py
+   pixi run python examples/local_pca.py --window 300 --seed 7
+   pixi run python examples/local_pca.py --s 0.05 --end-freq 0.3
+
+Python API:
+
+.. code-block:: python
+
+   from pg_gpu import HaplotypeMatrix, windowed_analysis
+   from pg_gpu.decomposition import pc_dist, pcoa, corners
+
+   # `local_pca` statistic routes through the GPU-batched eigh pipeline
+   result = windowed_analysis(
+       hm, window_size=500, step_size=250,
+       statistics=['local_pca'], window_type='snp', k=2)
+
+   dist = pc_dist(result, npc=2, normalize='L1')
+   mds, _ = pcoa(dist, n_components=2)
+   extremes = corners(mds, prop=0.05, k=3)
+
 LD Block Partitioning (end-to-end)
 ----------------------------------
 

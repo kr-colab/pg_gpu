@@ -18,6 +18,11 @@ from . import ld_statistics
 from . import divergence
 from . import diversity
 
+# Kwargs that the 'local_pca' dispatch consumes but scalar-stat paths don't
+# accept. Filtered out before the recursive call to scalar windowed_analysis.
+_LOCAL_PCA_ONLY_KWARGS = frozenset(
+    {'k', 'scaler', 'population', 'batch_size', 'window_type', 'regions'})
+
 
 def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
                           is_accessible=None):
@@ -1074,6 +1079,57 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix.set_accessible_mask(accessible_bed, chrom=chrom)
     if step_size is None:
         step_size = window_size
+
+    # Local PCA dispatch: vector-valued per-window output; cannot live in the
+    # scalar-stat DataFrame pipeline. Return a LocalPCAResult (with scalar
+    # stats merged into .windows if requested alongside).
+    if 'local_pca' in statistics:
+        from . import decomposition
+        local_pca_kwargs = {
+            'k': kwargs.get('k', 2),
+            'scaler': kwargs.get('scaler', None),
+            'missing_data': missing_data,
+            'population': kwargs.get('population', None),
+            'batch_size': kwargs.get('batch_size', None),
+            'window_size': window_size,
+            'step_size': step_size,
+            'window_type': kwargs.get('window_type', 'bp'),
+            'regions': kwargs.get('regions', None),
+        }
+        result = decomposition.local_pca(haplotype_matrix, **local_pca_kwargs)
+        other_stats = [s for s in statistics if s != 'local_pca']
+        if other_stats:
+            scalar_df = windowed_analysis(
+                haplotype_matrix,
+                window_size=window_size,
+                step_size=step_size,
+                statistics=other_stats,
+                populations=populations,
+                missing_data=missing_data,
+                span_normalize=span_normalize,
+                accessible_bed=None,  # already applied above
+                chrom=chrom,
+                **{k: v for k, v in kwargs.items()
+                   if k not in _LOCAL_PCA_ONLY_KWARGS},
+            )
+            # The scalar dispatch paths use inconsistent window column names
+            # ('window_id' in StatisticsComputer, 'start' in scatter, neither
+            # in fused); see issue #70. Join on whichever is available.
+            if 'window_id' in scalar_df.columns:
+                merged = result.windows.merge(
+                    scalar_df, on='window_id', how='left',
+                    suffixes=('', '_scalar'))
+            elif 'start' in scalar_df.columns:
+                merged = result.windows.merge(
+                    scalar_df, on='start', how='left',
+                    suffixes=('', '_scalar'))
+            else:
+                merged = result.windows.merge(
+                    scalar_df.rename(columns={'window_start': 'start',
+                                              'window_stop': 'end'}),
+                    on='start', how='left', suffixes=('', '_scalar'))
+            result.windows = merged
+        return result
 
     # Scatter-add path: single-pop theta estimators via dac_and_n + scatter
     scatter_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',

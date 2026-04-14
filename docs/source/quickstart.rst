@@ -245,6 +245,47 @@ PCA and Distance
    # PCoA from distance matrix
    coords, var_ratio = decomposition.pcoa(dist)
 
+Local PCA / lostruct
+~~~~~~~~~~~~~~~~~~~~
+
+GPU port of Li & Ralph's (2019) ``lostruct`` method for detecting
+genomic regions where population structure differs from the
+chromosome-wide pattern (inversions, introgression, low-recombination
+regions). All four steps of the pipeline are available:
+
+.. code-block:: python
+
+   from pg_gpu.decomposition import local_pca, pc_dist, corners, pcoa
+
+   # 1. Per-window top-k eigendecomposition (GPU-batched eigh)
+   result = local_pca(h, window_size=500, window_type='snp', k=2)
+   # result is a LocalPCAResult with:
+   #   result.windows  -> DataFrame (chrom, start, end, center, n_variants, window_id)
+   #   result.eigvals  -> (n_windows, k)
+   #   result.eigvecs  -> (n_windows, k, n_samples)
+   #   result.sumsq    -> (n_windows,)
+
+   # 2. Frobenius distance between windows' low-rank covariance reps
+   d = pc_dist(result, npc=2, normalize='L1')   # 'L1' | 'L2' | None
+
+   # 3. MDS on the window-by-window distance matrix
+   coords, _ = pcoa(d, n_components=2)
+
+   # 4. Extreme-cluster detection in MDS space (Welzl MEC)
+   corner_idx = corners(coords, prop=0.05, k=3)
+
+   # Optional: delete-1 block jackknife SE of local PCs
+   from pg_gpu.decomposition import local_pca_jackknife
+   se = local_pca_jackknife(h, window_size=500, window_type='snp',
+                            k=2, n_blocks=10)  # (n_windows, k)
+
+``local_pca`` can also be requested through ``windowed_analysis``; when
+mixed with scalar statistics, the scalar columns are merged onto
+``result.windows`` so you get one object with both kinds of output.
+
+For an end-to-end example with a simulated partial sweep, see
+``examples/local_pca.py``.
+
 Windowed Statistics (GPU-Native)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -285,6 +326,7 @@ Supported fused windowed statistics:
 - **Single-pop**: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``
 - **Two-pop**: ``fst``, ``fst_hudson``, ``fst_wc``, ``dxy``, ``da``
 - **Selection**: ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``, ``mean_nsl``
+- **Structure**: ``local_pca`` (lostruct); returns a ``LocalPCAResult`` rather than a scalar-stat DataFrame. See the `Local PCA / lostruct`_ section.
 
 For advanced usage with custom bin edges, use ``windowed_statistics_fused()``
 directly:

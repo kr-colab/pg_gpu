@@ -22,7 +22,7 @@ Overview
 pg_gpu provides GPU-accelerated computation of population genetics statistics
 using CuPy. It covers linkage disequilibrium, diversity, divergence, selection
 scans, site frequency spectra, admixture statistics, and dimensionality
-reduction (PCA, PCoA).
+reduction (PCA, PCoA, local PCA / lostruct).
 
 Key Features
 ~~~~~~~~~~~~

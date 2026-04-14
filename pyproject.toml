@@ -21,6 +21,7 @@ pythonpath = [
 ]
 markers = [
     "slow: marks tests as slow (deselected by default, run with --slow)",
+    "requires_r: developer-local test that shells out to R (skipped when R is unavailable; never run in CI)",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:cupyx",

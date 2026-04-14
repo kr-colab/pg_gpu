@@ -4,126 +4,209 @@ Changelog
 v0.1.0 (Current)
 -----------------
 
-This release focuses on correctness auditing against scikit-allel, GPU kernel
-optimization, and comprehensive fused windowed analysis.
+First public release of pg_gpu.
 
-Correctness Fixes
-~~~~~~~~~~~~~~~~~
-
-* **Divergence statistics audited against scikit-allel**
-
-  - Hudson FST: switched from average-of-ratios to ratio-of-averages
-  - Weir-Cockerham FST: corrected haploid variance components (h_bar=0), fixed s_squared divisor
-  - Nei FST: switched to ratio-of-averages
-  - All FST estimators and Da: removed incorrect clipping of negative values to zero
-  - All divergence stats now match scikit-allel at machine precision
-
-* **Diversity statistics fixes**
-
-  - ``theta_h()`` / ``theta_l()``: fixed inclusion of non-segregating sites (fixed derived and monomorphic)
-  - ``tajimas_d()``: fixed harmonic mean float-to-int truncation (199.999 -> 199 instead of 200)
-  - Same fix in ``normalized_fay_wus_h()`` and ``zeng_e()`` via ``_effective_n_and_S()``
-
-Data Loading and I/O
+Core Data Structures
 ~~~~~~~~~~~~~~~~~~~~
 
-* **Sample names stored** in ``HaplotypeMatrix`` -- ``from_vcf()`` now preserves
-  VCF sample names as ``self.samples``, eliminating the need to re-read VCFs
-  for population assignment.
+* ``HaplotypeMatrix`` -- phased haplotype data (0/1 with -1 for missing).
+  Loaders: ``from_vcf`` (with ``region=`` and ``samples=`` subsetting),
+  ``from_zarr`` (auto-detects VCZ / scikit-allel / chromosome-grouped
+  layouts), ``from_ts``, and direct NumPy construction. ``to_zarr`` writes
+  VCZ by default. ``vcf_to_zarr`` provides multicore VCF→zarr conversion.
+  Sample names from VCFs are preserved; ``load_pop_file('pops.txt')``
+  assigns populations using stored sample names.
 
-* **Region queries** -- ``from_vcf(region='chr1:1M-2M')`` loads a genomic subset
-  via tabix. ``from_vcf(samples=[...])`` loads a sample subset.
+* ``GenotypeMatrix`` -- diploid genotypes (0/1/2). Same loaders and
+  zarr round-trip as ``HaplotypeMatrix``. Many public functions
+  auto-dispatch on input type (haplotype vs genotype).
 
-* **Zarr support** -- ``to_zarr()`` / ``from_zarr()`` for fast columnar data
-  storage. Significantly faster than VCF for repeated loading.
+Linkage Disequilibrium
+~~~~~~~~~~~~~~~~~~~~~~
 
-* **Bio2zarr VCZ format** -- ``from_zarr()`` auto-detects VCZ (bio2zarr),
-  scikit-allel, and chromosome-grouped zarr layouts. ``vcf_to_zarr()`` provides
-  multicore VCF-to-zarr conversion via bio2zarr. ``to_zarr()`` now writes VCZ
-  format by default. ``GenotypeMatrix`` gains ``from_zarr()`` / ``to_zarr()``.
+* Core statistics: ``r``, ``r_squared``, ``dd`` (D-squared), ``dz``,
+  ``pi2`` (Ragsdale & Gravel 2019), ``zns`` (Kelly), ``omega``
+  (Kim & Nielsen), ``mu_ld`` (RAiSD).
+* LD pruning: ``locate_unlinked``; windowed r² decay:
+  ``windowed_r_squared``.
+* Two-population LD via ``compute_ld_statistics_gpu_two_pops`` with
+  chunked GPU execution.
 
-* **Simplified missing data interface** -- reduced from four modes (include,
-  exclude, pairwise, project) to two (include, exclude). Simulation testing
-  confirms ``include`` mode is unbiased under MCAR. LD projection estimator
-  moved to ``estimator='sigma_d2'`` parameter on ``zns()`` / ``omega()``.
-  Fixed WC FST bias under missing data (numerator/denominator mismatch).
+Diversity Statistics
+~~~~~~~~~~~~~~~~~~~~
 
-* **Unified span normalization** -- replaced ``span_normalize`` + ``span_denominator``
-  with a single ``span_normalize`` parameter. ``True`` (default) auto-detects
-  the best denominator (accessible bases if mask set, else genomic span).
-  Consistent across pi, theta_w, dxy, da, and all theta estimators.
-  ``FrequencySpectrum.theta()`` now auto-detects span from source matrix.
+* Theta estimators: ``pi``, ``theta_w``, ``theta_h``, ``theta_l``,
+  ``eta1``, ``eta1_star``, ``minus_eta1``, ``minus_eta1_star``.
+* Neutrality tests: ``tajimas_d``, ``fay_wus_h``,
+  ``normalized_fay_wus_h``, ``zeng_e``, ``zeng_dh``.
+* Heterozygosity / inbreeding: ``heterozygosity_expected``,
+  ``heterozygosity_observed``, ``inbreeding_coefficient``.
+* Haplotype-level: ``haplotype_diversity``, ``haplotype_count``,
+  ``daf_histogram``, ``diplotype_frequency_spectrum``.
+* ``FrequencySpectrum`` class for custom weight functions, SFS
+  projection, and the Achaz (2009) variance framework.
+* All statistics accept ``missing_data='include' | 'exclude'`` and a
+  unified ``span_normalize`` parameter that auto-detects the best
+  denominator (accessible bases if mask set, else genomic span).
 
-* **Population file loading** -- ``load_pop_file('pops.txt')`` assigns populations
-  from a tab-delimited file using stored sample names.
+Divergence Statistics
+~~~~~~~~~~~~~~~~~~~~~
 
-* **API consistency** -- all public functions now return NumPy arrays (not CuPy).
-  Users no longer need to call ``.get()`` on results.
+* FST estimators: ``fst_hudson`` (ratio of averages),
+  ``fst_weir_cockerham``, ``fst_nei``; ``pairwise_fst`` for multiple
+  populations.
+* Absolute / net divergence: ``dxy``, ``da``.
+* Population Branch Statistic: ``pbs`` (normalized PBSn1).
+* Distance-based two-population statistics (Schrider et al. 2018 and
+  related): ``snn``, ``dxy_min``, ``gmin``, ``dd``, ``dd_rank``, ``zx``.
+  Callers can pre-compute ``pairwise_distance_matrix`` once and pass it
+  to multiple stats, or use the combined ``distance_based_stats``.
 
-Performance Improvements
+Selection Scans
+~~~~~~~~~~~~~~~
+
+* Haplotype-based: ``ihs`` (fused CUDA kernel, bitmask pair tracking,
+  block-level EHH reductions), ``nsl``, ``xpehh``, ``xpnsl``,
+  ``ehh_decay``.
+* Garud's H: ``garud_h`` (H1, H12, H123, H2/H1) via GPU dot-product
+  hashing of haplotypes; ``moving_garud_h`` uses cumulative prefix sums
+  for O(1) per-window hash computation.
+* Standardization: ``standardize``, ``standardize_by_allele_count``.
+* Diploid variants: ``zns_diploid``, ``omega_diploid``,
+  ``garud_h_diploid``, ``daf_histogram_diploid``.
+
+Site Frequency Spectrum
+~~~~~~~~~~~~~~~~~~~~~~~
+
+* Unfolded and folded SFS: ``sfs``, ``sfs_folded``, ``sfs_scaled``,
+  ``sfs_folded_scaled``.
+* Two-population joint SFS: ``joint_sfs``, ``joint_sfs_folded``,
+  ``joint_sfs_scaled``, ``joint_sfs_folded_scaled``.
+* Folding utilities: ``fold_sfs``, ``fold_joint_sfs``.
+
+Admixture / F-Statistics
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-* **Fused windowed analysis** via ``windowed_analysis()``
+* Per-variant: ``patterson_f2`` (F2 branch length), ``patterson_f3``
+  (admixture test), ``patterson_d`` (ABBA-BABA).
+* Windowed: ``moving_patterson_f3``, ``moving_patterson_d``.
+* Block-jackknife with SE: ``average_patterson_f3``,
+  ``average_patterson_d``.
 
-  All supported statistics now route through fused CUDA kernels when using
-  non-overlapping windows with ``missing_data='include'``. A single kernel
-  launch processes all windows in parallel.
-
-  Supported fused windowed stats:
-
-  - Single-pop: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``
-  - Two-pop: ``fst``, ``fst_hudson``, ``fst_wc``, ``dxy``, ``da``
-  - Selection: ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``, ``mean_nsl``
-
-  Windowed speedups at 5.3M variants (100kb windows, 200 haplotypes):
-
-  - pi + theta_w + tajimas_d: **60x** vs allel
-  - All 5 single-pop stats: **13-22x** vs allel
-  - All 12 stats together: **0.66s** total
-
-* **Fused iHS kernel**: one thread block per focal variant with bitmask-based
-  pair tracking and block-level EHH reductions. Eliminates O(n_variants^2)
-  histogram memory. Single kernel launch, no chunking.
-
-  - iHS: **6.7x** faster than allel at 255k variants
-  - Memory: O(n_variants) instead of O(n_variants^2)
-
-* **Vectorized haplotype operations** via GPU dot-product hashing
-
-  - ``haplotype_diversity()``: 37s -> 0.05s (**780x** internal speedup)
-  - ``garud_h()``: 9s -> 3ms (**3000x** internal speedup)
-  - ``moving_garud_h()``: 7.5s -> 50ms (**150x**), uses cumulative prefix sums
-    for O(1) per-window hash computation
-
-* **SFS optimization**: int32 bincount (30x faster than int64), ``cp.maximum``
-  for missing data clamping
-
-New Features
-~~~~~~~~~~~~
-
-* **New windowed statistics**
-
-  - ``da`` (net divergence) in fused two-pop kernel
-  - ``fst_wc`` (Weir-Cockerham) in fused two-pop kernel
-  - ``fst_hudson`` as explicit alias for ``fst`` in fused path
-  - ``garud_h1``/``garud_h12``/``garud_h123``/``garud_h2h1`` via fused kernel
-    with shared-memory odd-even sort
-  - ``mean_nsl`` via per-site nSL computation + scatter binning
-
-* **Cross-validation script** (``tests/validate_against_allel.py``)
-
-  Standalone script comparing 31 statistics against scikit-allel using real
-  Ag1000G data (1M variants, 200 haplotypes). Includes timing comparison table.
-  Run with: ``pixi run python tests/validate_against_allel.py``
-
-* **Example notebook** (``examples/pg_gpu_tour.ipynb``)
-
-  Interactive tour of all major features using Anopheles gambiae X chromosome
-  data: VCF loading, GPU transfer, SFS, diversity, divergence, windowed scans,
-  LD, PCA, and selection scans.
-
-Performance Summary (vs scikit-allel)
+Dimensionality Reduction and Distance
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``pca`` -- GPU-accelerated SVD PCA.
+* ``randomized_pca`` -- truncated-SVD approximation for large
+  datasets.
+* ``pairwise_distance`` -- GPU-accelerated with memory-safe batching.
+* ``pcoa`` -- classical MDS from a distance matrix.
+* ``local_pca`` -- GPU port of Li & Ralph (2019) lostruct for detecting
+  regions where population structure differs from the chromosome-wide
+  pattern. Per-window top-k eigendecomposition via a single batched
+  ``cp.linalg.eigh`` over a stacked
+  ``(n_windows, n_samples, n_samples)`` tensor.
+* ``pc_dist`` -- Frobenius distance between per-window low-rank
+  covariance reps via the trace identity (no cov-matrix
+  re-materialization). L1, L2, or no normalization.
+* ``corners`` -- extreme-cluster selection in a 2D MDS embedding via
+  Welzl's minimum enclosing circle.
+* ``local_pca_jackknife`` -- delete-1 block jackknife SE of local PCs,
+  also GPU-batched with sign-aligned replicates.
+* ``LocalPCAResult`` dataclass with ``.windows`` / ``.eigvals`` /
+  ``.eigvecs`` / ``.sumsq`` plus ``.to_lostruct_matrix()`` for
+  compatibility with the R ``lostruct::eigen_windows`` layout.
+
+Relatedness and Kinship
+~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``grm`` -- Genetic Relationship Matrix (Yang et al. 2011).
+* ``ibs`` -- pairwise Identity-By-State proportions.
+
+Fused Windowed Analysis
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``windowed_analysis()`` convenience function routes through fused
+CUDA kernels (one kernel launch for all windows) when using
+non-overlapping windows with ``missing_data='include'``:
+
+* Single-population: ``pi``, ``theta_w``, ``tajimas_d``,
+  ``segregating_sites``, ``singletons``.
+* Two-population: ``fst``, ``fst_hudson``, ``fst_wc``, ``dxy``, ``da``.
+* Selection: ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``,
+  ``mean_nsl``.
+* Structure: ``local_pca`` (returns a ``LocalPCAResult``; scalar stats
+  requested alongside are merged onto ``result.windows``).
+
+Lower-level windowed entry points: ``windowed_statistics`` (scatter-add
+aggregation) and ``windowed_statistics_fused`` (custom bin edges, one
+thread block per window).
+
+Distance Distribution Statistics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``pairwise_diffs`` -- Hamming distance distributions (haploid or
+  diploid).
+* ``dist_var``, ``dist_skew``, ``dist_kurt`` -- moments of the
+  pairwise-distance distribution (Schrider et al. 2018).
+* ``dist_moments`` -- all three in one call.
+
+diploSHIC / RAiSD Statistics
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* ``mu_var``, ``mu_sfs`` -- SNP density and SFS edge fraction (RAiSD).
+* ``max_daf`` -- maximum derived allele frequency.
+
+Visualization (``pg_gpu.plotting``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* SFS: ``plot_sfs``, ``plot_joint_sfs``.
+* LD: ``plot_pairwise_ld``, ``plot_ld_decay``.
+* PCA / structure: ``plot_pca``, ``plot_pairwise_distance``.
+* Windowed statistics: ``plot_windowed``, ``plot_windowed_panel``.
+* Haplotypes: ``plot_haplotype_frequencies``, ``plot_variant_locator``.
+
+Missing Data Handling
+~~~~~~~~~~~~~~~~~~~~~
+
+* Missing values are encoded as ``-1`` (haplotype) or ``-1`` sentinel
+  (genotype).
+* Every statistic accepts ``missing_data='include'`` (per-site valid
+  data, default) or ``missing_data='exclude'`` (only fully genotyped
+  sites). Simulation testing confirms ``include`` is unbiased under
+  MCAR.
+* LD projection estimator available via ``estimator='sigma_d2'`` on
+  ``zns`` / ``omega``.
+
+Moments Integration
+~~~~~~~~~~~~~~~~~~~
+
+``pg_gpu.moments_ld.compute_ld_statistics`` is a GPU drop-in for
+``moments.LD.Parsing.compute_ld_statistics``. Returns the 15
+two-population LD statistics and 3 heterozygosity statistics in the
+exact layout moments expects for demographic inference. Requires the
+``moments`` pixi environment: ``pixi install -e moments``.
+
+Validation
+~~~~~~~~~~
+
+* Cross-validation script (``tests/validate_against_allel.py``)
+  comparing 31 statistics against scikit-allel on real Ag1000G data
+  (1M variants, 200 haplotypes). Divergence, diversity, and selection
+  statistics match scikit-allel at machine precision; a timing table
+  is included.
+* Local PCA (lostruct) outputs validated against the R ``lostruct``
+  package via frozen JSON references committed under ``tests/data/``.
+  R is **not** a dependency of the pixi env or CI -- the comparison
+  runs against the committed JSON. An optional ``requires_r`` test
+  regenerates the references via rpy2 when R + lostruct are available
+  locally.
+
+Performance
+~~~~~~~~~~~
+
+All statistics run on CuPy with custom CUDA kernels for compute-bound
+paths.
 
 Scalar statistics at 1M variants, 200 haplotypes:
 
@@ -168,7 +251,7 @@ Scalar statistics at 1M variants, 200 haplotypes:
      - 0.016
      - **4x**
 
-Windowed statistics at 5.3M variants, 100kb windows:
+Windowed statistics at 5.3M variants, 100kb windows, 200 haplotypes:
 
 .. list-table::
    :header-rows: 1
@@ -195,99 +278,26 @@ Windowed statistics at 5.3M variants, 100kb windows:
      - 0.66
      - single call
 
+Examples
+~~~~~~~~
 
-v0.1.0
-------
+End-to-end demo scripts in ``examples/``:
 
-New Modules
-~~~~~~~~~~~
-
-* **Selection Scan Statistics** (``pg_gpu.selection``)
-
-  - ``ihs()`` - Integrated Haplotype Score with CUDA kernel acceleration
-  - ``xpehh()`` - Cross-population Extended Haplotype Homozygosity
-  - ``nsl()`` - Number of Segregating sites by Length
-  - ``xpnsl()`` - Cross-population nSL
-  - ``ehh_decay()`` - Extended Haplotype Homozygosity decay
-  - ``garud_h()`` / ``moving_garud_h()`` - Garud's H1/H12/H123/H2H1 statistics
-  - ``standardize()`` / ``standardize_by_allele_count()`` - Score normalization
-  - 10-45x speedup over scikit-allel at typical dataset sizes
-
-* **Site Frequency Spectrum** (``pg_gpu.sfs``)
-
-  - ``sfs()`` / ``sfs_folded()`` / ``sfs_scaled()`` / ``sfs_folded_scaled()``
-  - ``joint_sfs()`` / ``joint_sfs_folded()`` / ``joint_sfs_scaled()`` / ``joint_sfs_folded_scaled()``
-  - ``fold_sfs()`` / ``fold_joint_sfs()`` - Folding utilities
-  - Scaling utilities for neutral expectation comparison
-
-* **Admixture / F-Statistics** (``pg_gpu.admixture``)
-
-  - ``patterson_f2()`` - Branch length between populations
-  - ``patterson_f3()`` - Three-population admixture test
-  - ``patterson_d()`` - ABBA-BABA (D-statistic / F4)
-  - ``moving_patterson_f3()`` / ``moving_patterson_d()`` - Windowed variants
-  - ``average_patterson_f3()`` / ``average_patterson_d()`` - Block-jackknife with SE
-
-New Functions
-~~~~~~~~~~~~~
-
-* **LD Statistics**
-
-  - ``r()`` / ``r_squared()`` - Pearson correlation from haplotype counts
-  - ``locate_unlinked()`` - GPU-accelerated LD pruning
-  - ``windowed_r_squared()`` - Percentile of r-squared in distance bins
-
-* **Diversity Statistics**
-
-  - ``heterozygosity_expected()`` - Gene diversity per variant
-  - ``heterozygosity_observed()`` - Observed heterozygosity (diploid)
-  - ``inbreeding_coefficient()`` - Wright's F per variant
-
-* **Divergence Statistics**
-
-  - ``pbs()`` - Population Branch Statistic (normalized PBSn1)
-
-* **Dimensionality Reduction** (``pg_gpu.decomposition``)
-
-  - ``pca()`` - GPU-accelerated PCA via SVD (up to 56x faster than allel)
-  - ``randomized_pca()`` - Truncated SVD approximation for large datasets
-  - ``pairwise_distance()`` - GPU-accelerated with memory-safe batching
-  - ``pcoa()`` - Principal Coordinate Analysis
-
-* **GPU-Native Windowed Statistics** (``pg_gpu.windowed_analysis``)
-
-  - ``windowed_statistics()`` - Compute pi, theta_w, tajimas_d, FST, Dxy across all windows in one GPU pass using scatter_add aggregation
-  - ``windowed_statistics_fused()`` - Fused CUDA kernel variant with one thread block per window
-  - Up to 4.3x speedup over allel for windowed FST at scale
-
-* **Visualization** (``pg_gpu.plotting``)
-
-  - ``plot_sfs()``, ``plot_joint_sfs()`` - SFS bar plots and heatmaps
-  - ``plot_pairwise_ld()``, ``plot_ld_decay()`` - LD heatmap and decay curves
-  - ``plot_pca()`` - PCA scatter with population labels
-  - ``plot_pairwise_distance()`` - Distance matrix heatmap
-  - ``plot_windowed()``, ``plot_windowed_panel()`` - Genome-wide windowed stat plots
-  - ``plot_haplotype_frequencies()``, ``plot_variant_locator()`` - Haplotype and variant viz
-  - Built on matplotlib + seaborn
-
-* **GenotypeMatrix** (``pg_gpu.genotype_matrix``)
-
-  - Diploid genotype storage (0/1/2 alt allele counts)
-  - Conversion to/from HaplotypeMatrix, VCF loading
-
-* **diploSHIC-Derived Statistics**
-
-  - ``zns()``, ``omega()`` - Kelly's ZnS and Kim & Nielsen's Omega (GPU prefix-sum Omega)
-  - ``mu_ld()`` - Haplotype pattern exclusivity (RAiSD)
-  - ``mu_var()``, ``mu_sfs()`` - SNP density and SFS edge fraction (RAiSD)
-  - ``theta_h()``, ``max_daf()``, ``haplotype_count()``, ``daf_histogram()``
-  - ``dist_var()``, ``dist_skew()``, ``dist_kurt()`` - Pairwise distance moments
-  - Diploid variants: ``zns_diploid()``, ``omega_diploid()``, ``garud_h_diploid()``, ``diplotype_frequency_spectrum()``, ``daf_histogram_diploid()``
+* ``pg_gpu_tour.ipynb`` -- interactive tour using Anopheles gambiae X
+  chromosome data.
+* ``admixture_detection.py`` -- block-jackknife ABBA-BABA on simulated
+  null and admixed msprime scenarios.
+* ``accessibility_mask.py`` -- windowed π with and without an
+  accessibility mask over a low-μ "exon" region.
+* ``ld_blocks.py`` -- LD-block partitioning via r² bridging scores.
+* ``local_pca.py`` -- lostruct pipeline on a simulated partial
+  selective sweep (``SweepGenicSelection`` with end frequency 0.5).
 
 Infrastructure
 ~~~~~~~~~~~~~~
 
-* Migrated to pixi for unified environment management
-* Shared ``_utils.py`` module for population extraction
-* Comprehensive validation test suite against scikit-allel
-
+* pixi-based environment management; ``moments`` integration lives in
+  a separate pixi feature.
+* Shared ``_utils.py`` module for population extraction.
+* Public API returns NumPy arrays (not CuPy) -- no need to call
+  ``.get()`` on results.

@@ -1,15 +1,21 @@
 """
 GPU-accelerated dimensionality reduction and distance computation.
 
-Provides PCA, randomized PCA, PCoA, and pairwise genetic distance
-functions using CuPy for GPU acceleration.
+Provides PCA, randomized PCA, PCoA, pairwise genetic distance, and
+Li & Ralph (2019) local PCA (lostruct) functions using CuPy.
 """
+
+from dataclasses import dataclass
+from typing import Union, Optional, Tuple
 
 import numpy as np
 import cupy as cp
-from typing import Union, Optional, Tuple
+import pandas as pd
+
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
+
+_GPU_MEM_BUDGET = 0.3
 
 
 def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'):
@@ -481,3 +487,657 @@ def pcoa(dist, n_components: Optional[int] = None):
     explained_variance_ratio = eigvals / np.sum(eigvals)
 
     return coords, explained_variance_ratio
+
+
+# ---------------------------------------------------------------------------
+# Local PCA (lostruct; Li & Ralph 2019)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LocalPCAResult:
+    """Per-window local PCA output.
+
+    Attributes
+    ----------
+    windows : pandas.DataFrame
+        One row per window (chrom, start, end, center, n_variants, window_id).
+    eigvals : numpy.ndarray, float64, shape (n_windows, k)
+        Top-k eigenvalues of each window's sample-sample covariance matrix,
+        descending. NaN for windows with fewer than k variants.
+    eigvecs : numpy.ndarray, float64, shape (n_windows, k, n_samples)
+        Top-k eigenvectors. NaN for invalid windows.
+    sumsq : numpy.ndarray, float64, shape (n_windows,)
+        Sum of squared entries of each window's covariance matrix; used by
+        `pc_dist` for the proportion-of-variance denominator.
+    k : int
+        Number of PCs retained.
+    scaler : str or None
+    missing_data : str
+    """
+
+    windows: "pd.DataFrame"
+    eigvals: np.ndarray
+    eigvecs: np.ndarray
+    sumsq: np.ndarray
+    k: int
+    scaler: Optional[str]
+    missing_data: str
+
+    @property
+    def n_windows(self) -> int:
+        return self.eigvals.shape[0]
+
+    @property
+    def n_samples(self) -> int:
+        return self.eigvecs.shape[2]
+
+    def to_lostruct_matrix(self) -> np.ndarray:
+        """Flat `(n_windows, 1 + k + k*n_samples)` matrix matching
+        `lostruct::eigen_windows()` output layout.
+
+        Eigenvector block is column-major per R: PC_1 samples 1..N, then PC_2
+        samples 1..N, etc. That coincides with the C-order flatten of our
+        `(k, n_samples)` per-window array.
+        """
+        nw = self.n_windows
+        out = np.empty((nw, 1 + self.k + self.k * self.n_samples), dtype=np.float64)
+        out[:, 0] = self.sumsq
+        out[:, 1:1 + self.k] = self.eigvals
+        out[:, 1 + self.k:] = self.eigvecs.reshape(nw, -1)
+        return out
+
+
+def _window_gram(X: "cp.ndarray", n_var: int) -> Tuple["cp.ndarray", "cp.ndarray"]:
+    """Return lostruct-equivalent sample-sample covariance and its sum-of-squares.
+
+    Replicates R's `cov(sweep(x, 1, rowMeans(x), "-"))`: already-variant-centered
+    `X` (rows=samples, cols=variants) gets an additional sample-centering, then
+    `C = (X @ X.T) / (n_var - 1)` and `sumsq = sum(C**2)`. Sum-of-squares is
+    returned as a 0-d GPU scalar so callers can defer the host sync.
+    """
+    X = X - X.mean(axis=1, keepdims=True)
+    denom = max(n_var - 1, 1)
+    C = (X @ X.T) / denom
+    return C, (C ** 2).sum()
+
+
+def _batched_top_k_eigh(gram_stack: "cp.ndarray", k: int,
+                        batch_size: Optional[int] = None
+                        ) -> Tuple[np.ndarray, np.ndarray]:
+    """Batched eigendecomposition on a stack of symmetric matrices.
+
+    Returns top-k eigvals (descending) and eigvecs as host arrays.
+
+    Parameters
+    ----------
+    gram_stack : cupy.ndarray, float64, shape (n_windows, n, n)
+    k : int
+    batch_size : int, optional
+        Chunk size across the window axis. If None, uses all windows at once
+        unless memory budget is exceeded.
+
+    Returns
+    -------
+    eigvals : numpy.ndarray, shape (n_windows, k)
+    eigvecs : numpy.ndarray, shape (n_windows, k, n)
+    """
+    n_windows, n, _ = gram_stack.shape
+    if batch_size is None:
+        free = cp.cuda.Device().mem_info[0]
+        per_window = n * n * 8 * 4  # gram + workspace + eigvecs + scratch
+        batch_size = max(1, min(n_windows,
+                                int(free * _GPU_MEM_BUDGET) // max(per_window, 1)))
+
+    eigvals_out = np.empty((n_windows, k), dtype=np.float64)
+    eigvecs_out = np.empty((n_windows, k, n), dtype=np.float64)
+
+    for start in range(0, n_windows, batch_size):
+        end = min(start + batch_size, n_windows)
+        evals, evecs = cp.linalg.eigh(gram_stack[start:end])
+        # eigh returns ascending; top-k is the last k reversed.
+        top = cp.arange(n - 1, n - 1 - k, -1)
+        top_vals = evals[:, top]
+        top_vecs = cp.transpose(evecs[:, :, top], (0, 2, 1))
+        eigvals_out[start:end] = top_vals.get()
+        eigvecs_out[start:end] = top_vecs.get()
+
+    return eigvals_out, eigvecs_out
+
+
+def _resolve_window_params(window_params, window_size, step_size, window_type,
+                           regions, caller: str):
+    """Return a WindowParams, either passed through or built from short-hand."""
+    from .windowed_analysis import WindowParams
+
+    if window_params is not None:
+        return window_params
+    if window_size is None:
+        raise ValueError(f"{caller} requires window_params or window_size.")
+    return WindowParams(
+        window_type=window_type,
+        window_size=window_size,
+        step_size=step_size if step_size is not None else window_size,
+        regions=regions,
+    )
+
+
+def _materialize_prepared(X):
+    """If `_prepare_matrix` returned a deferred chunked view, concatenate it.
+
+    Per-window matrices are small enough that a single contiguous copy is fine
+    and it lets us apply additional in-place centering downstream.
+    """
+    if isinstance(X, _DeferredPCA):
+        n_var = X.shape[1]
+        return cp.concatenate(
+            [X._scale_chunk(s, min(s + X._chunk_size, n_var))
+             for s in range(0, n_var, X._chunk_size)], axis=1)
+    return X
+
+
+def local_pca(haplotype_matrix: "HaplotypeMatrix",
+              window_params=None,
+              k: int = 2,
+              scaler: Optional[str] = None,
+              missing_data: str = 'include',
+              population: Optional[Union[str, list]] = None,
+              batch_size: Optional[int] = None,
+              window_size: Optional[int] = None,
+              step_size: Optional[int] = None,
+              window_type: str = 'snp',
+              regions=None) -> LocalPCAResult:
+    """Local PCA along the genome (lostruct; Li & Ralph 2019).
+
+    For each genomic window, computes the top-k eigenvalues/eigenvectors of the
+    sample-sample covariance matrix. The covariance matches R's
+    `cov(sweep(x, 1, rowMeans(x), "-"))` so outputs are directly comparable to
+    `lostruct::eigen_windows()`.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    window_params : WindowParams, optional
+        Pre-built window spec. Required when ``window_size`` is not given.
+    k : int
+        Number of PCs to retain per window.
+    scaler : str or None
+        None (lostruct default), 'patterson', or 'standard'. See `pca()`.
+    missing_data : str
+        'include' (impute to per-site mean) or 'exclude' (drop missing sites).
+        lostruct uses pairwise-complete; we approximate with mean imputation.
+    population : str or list, optional
+    batch_size : int, optional
+        Windows per batched eigh call. Auto-sized if None.
+    window_size, step_size, window_type, regions
+        Short-hand for constructing a `WindowParams` without importing it.
+
+    Returns
+    -------
+    LocalPCAResult
+    """
+    from .windowed_analysis import WindowIterator
+
+    window_params = _resolve_window_params(
+        window_params, window_size, step_size, window_type, regions,
+        caller='local_pca')
+
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    n_samples = matrix.num_haplotypes
+    iterator = WindowIterator(matrix, window_params)
+    identity_placeholder = cp.eye(n_samples, dtype=cp.float64)
+    nan_scalar = cp.asarray(np.nan, dtype=cp.float64)
+
+    window_meta = []
+    gram_list = []
+    sumsq_list = []
+    valid_flags = []
+
+    for window in iterator:
+        window_meta.append(window)
+        if window.n_variants < max(k, 2):
+            gram_list.append(identity_placeholder)
+            sumsq_list.append(nan_scalar)
+            valid_flags.append(False)
+            continue
+
+        X = _prepare_matrix(window.matrix, scaler, population=None,
+                            missing_data=missing_data)
+        X = _materialize_prepared(X)
+        C, sumsq = _window_gram(X, X.shape[1])
+        gram_list.append(C)
+        sumsq_list.append(sumsq)
+        valid_flags.append(True)
+
+    if len(window_meta) == 0:
+        raise ValueError("WindowIterator produced no windows.")
+
+    gram_stack = cp.stack(gram_list, axis=0)
+    eigvals_host, eigvecs_host = _batched_top_k_eigh(gram_stack, k, batch_size)
+    sumsq_host = cp.stack(sumsq_list).get()
+
+    valid_mask = np.array(valid_flags, dtype=bool)
+    eigvals_host[~valid_mask] = np.nan
+    eigvecs_host[~valid_mask] = np.nan
+    sumsq_host[~valid_mask] = np.nan
+
+    windows_df = pd.DataFrame({
+        'chrom': [w.chrom for w in window_meta],
+        'start': [w.start for w in window_meta],
+        'end': [w.end for w in window_meta],
+        'center': [w.center for w in window_meta],
+        'n_variants': [w.n_variants for w in window_meta],
+        'window_id': [w.window_id for w in window_meta],
+    })
+
+    return LocalPCAResult(
+        windows=windows_df,
+        eigvals=eigvals_host,
+        eigvecs=eigvecs_host,
+        sumsq=sumsq_host,
+        k=k,
+        scaler=scaler,
+        missing_data=missing_data,
+    )
+
+
+def pc_dist(source, npc: Optional[int] = None,
+            normalize: Optional[str] = 'L1',
+            w=1) -> np.ndarray:
+    """Pairwise Frobenius distance between windows' low-rank covariance reps.
+
+    Implements the trace identity from ``lostruct::pc_dist``::
+
+        ||A - B||^2 = sum(a^2) + sum(b^2) - 2 * tr(diag(a) X diag(b) X^T)
+
+    where ``X = U^T V`` for eigenvector blocks U, V.
+
+    Parameters
+    ----------
+    source : LocalPCAResult or numpy.ndarray
+        Either a LocalPCAResult or a flat lostruct-style matrix of shape
+        (n_windows, 1 + k + k*n_samples).
+    npc : int, optional
+        Number of PCs to use. Defaults to ``source.k`` when ``source`` is a
+        LocalPCAResult; required when ``source`` is a flat matrix.
+    normalize : {'L1', 'L2', None}
+        Per-window eigenvalue normalization before distance computation.
+    w : array_like or scalar
+        Sample weights (default 1).
+
+    Returns
+    -------
+    numpy.ndarray, shape (n_windows, n_windows)
+        Symmetric, non-negative distance matrix. NaN for invalid windows.
+    """
+    if isinstance(source, LocalPCAResult):
+        if npc is None:
+            npc = source.k
+        eigvals = source.eigvals[:, :npc].copy()
+        eigvecs = source.eigvecs[:, :npc, :].copy()
+    else:
+        arr = np.asarray(source, dtype=np.float64)
+        if npc is None:
+            raise ValueError("npc must be provided when source is a flat matrix.")
+        n_windows = arr.shape[0]
+        n_samples = (arr.shape[1] - 1 - npc) // npc
+        eigvals = arr[:, 1:1 + npc].copy()
+        eigvecs = arr[:, 1 + npc:].reshape(n_windows, npc, n_samples).copy()
+
+    n_windows, npc_actual, n_samples = eigvecs.shape
+    if npc_actual != npc:
+        raise ValueError(f"npc mismatch: requested {npc}, have {npc_actual}")
+
+    w_arr = np.broadcast_to(np.sqrt(np.asarray(w, dtype=np.float64)),
+                            (n_samples,))
+    eigvecs = eigvecs * w_arr[None, None, :]
+
+    if normalize == 'L1':
+        denom = np.sum(np.abs(eigvals), axis=1, keepdims=True)
+        eigvals = np.divide(eigvals, denom,
+                            out=np.full_like(eigvals, np.nan),
+                            where=denom != 0)
+    elif normalize == 'L2':
+        denom = np.sqrt(np.sum(eigvals ** 2, axis=1, keepdims=True))
+        eigvals = np.divide(eigvals, denom,
+                            out=np.full_like(eigvals, np.nan),
+                            where=denom != 0)
+    elif normalize is not None:
+        raise ValueError(f"Unknown normalize: {normalize}")
+
+    vals = cp.asarray(eigvals)             # (nw, k)
+    vecs = cp.asarray(eigvecs)             # (nw, k, n_samples)
+    self_norm = cp.sum(vals ** 2, axis=1)  # (nw,)
+
+    # Trace-identity cross term (pc_dist.R:57-61):
+    #   X[i,j] = U_i^T V_j                            (k, k)
+    #   tr(diag(a_i) X diag(b_j) X^T)
+    #     = sum_{m,n} a_i[m] * b_j[n] * X[m,n]^2
+    # Full-matrix path materializes the (nw, nw, k, k) tensor; chunked path
+    # splits the outer window axis when that would exceed the memory budget.
+    nw = vals.shape[0]
+    free = cp.cuda.Device().mem_info[0]
+    k_pc = vals.shape[1]
+    full_bytes = nw * nw * k_pc * k_pc * 8
+    if full_bytes < free * _GPU_MEM_BUDGET:
+        X_all = cp.einsum('ims,jns->ijmn', vecs, vecs)
+        cross = cp.einsum('im,jn,ijmn->ij', vals, vals, X_all ** 2)
+    else:
+        cross = cp.zeros((nw, nw), dtype=cp.float64)
+        per_row_bytes = nw * k_pc * k_pc * 8 * 4
+        chunk = max(1, int(free * _GPU_MEM_BUDGET) // max(per_row_bytes, 1))
+        for start in range(0, nw, chunk):
+            end = min(start + chunk, nw)
+            X_chunk = cp.einsum('ims,jns->ijmn', vecs[start:end], vecs)
+            cross[start:end] = cp.einsum('im,jn,ijmn->ij',
+                                         vals[start:end], vals, X_chunk ** 2)
+
+    sq_dist = self_norm[:, None] + self_norm[None, :] - 2.0 * cross
+    # Symmetrize and clamp negative numerical error to 0
+    sq_dist = 0.5 * (sq_dist + sq_dist.T)
+    sq_dist = cp.maximum(sq_dist, 0.0)
+    dist = cp.sqrt(sq_dist).get()
+
+    # NaN-propagate: invalid windows (any NaN in eigvals) produce NaN rows/cols
+    if np.any(np.isnan(eigvals)):
+        bad = np.any(np.isnan(eigvals), axis=1)
+        dist[bad, :] = np.nan
+        dist[:, bad] = np.nan
+
+    return dist
+
+
+# ---------------------------------------------------------------------------
+# Minimum enclosing circle (Welzl) + corners post-processing
+# ---------------------------------------------------------------------------
+
+
+def _circle_from_2(p1, p2):
+    c = 0.5 * (p1 + p2)
+    r = float(np.linalg.norm(p1 - c))
+    return c, r
+
+
+def _circle_from_3(p1, p2, p3):
+    # Numerically-stable circumcircle via perpendicular bisectors.
+    ax, ay = p1
+    bx, by = p2
+    cx, cy = p3
+    d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        # Collinear: fall back to diameter of the farthest pair
+        pairs = [(p1, p2), (p1, p3), (p2, p3)]
+        pairs.sort(key=lambda pr: np.linalg.norm(pr[0] - pr[1]), reverse=True)
+        return _circle_from_2(*pairs[0])
+    ux = ((ax * ax + ay * ay) * (by - cy)
+          + (bx * bx + by * by) * (cy - ay)
+          + (cx * cx + cy * cy) * (ay - by)) / d
+    uy = ((ax * ax + ay * ay) * (cx - bx)
+          + (bx * bx + by * by) * (ax - cx)
+          + (cx * cx + cy * cy) * (bx - ax)) / d
+    c = np.array([ux, uy])
+    r = float(max(np.linalg.norm(p - c) for p in (p1, p2, p3)))
+    return c, r
+
+
+def _in_circle(p, c, r, tol=1e-10):
+    return float(np.linalg.norm(p - c)) <= r + tol
+
+
+def _welzl_mec(points: np.ndarray, rng: np.random.Generator):
+    """Randomized Welzl minimum enclosing circle, iterative form."""
+    pts = points.copy()
+    rng.shuffle(pts)
+    n = len(pts)
+
+    c = np.array([0.0, 0.0])
+    r = 0.0
+    boundary = []
+    for i in range(n):
+        if r > 0 and _in_circle(pts[i], c, r):
+            continue
+        # Rebuild with pts[i] on boundary
+        c, r = pts[i], 0.0
+        for j in range(i):
+            if _in_circle(pts[j], c, r):
+                continue
+            c, r = _circle_from_2(pts[i], pts[j])
+            for k in range(j):
+                if _in_circle(pts[k], c, r):
+                    continue
+                c, r = _circle_from_3(pts[i], pts[j], pts[k])
+    return c, r
+
+
+def _mec_defining_points(xy: np.ndarray, rng: np.random.Generator,
+                         tol: float = 1e-6):
+    """Find up to 3 input points that lie on the MEC boundary.
+
+    Returns (center, radius, indices_on_boundary) using original xy indices
+    (NaN rows already filtered by caller).
+    """
+    c, r = _welzl_mec(xy, rng)
+    if r <= 0:
+        return c, r, np.array([0], dtype=np.int64)
+    dists = np.linalg.norm(xy - c, axis=1)
+    on_circle = np.where(np.abs(dists - r) <= tol * max(r, 1.0))[0]
+    return c, r, on_circle
+
+
+def corners(xy: np.ndarray, prop: float, k: int = 3,
+            random_state: Optional[int] = None) -> np.ndarray:
+    """Find `k` "corner" clusters in a 2D embedding (lostruct::corners).
+
+    Computes the minimum enclosing circle of `xy`, then for each of the `k`
+    defining points returns the `int(prop * n)` nearest `xy` points. If fewer
+    than `k` defining points exist on the MEC boundary, extra corners are
+    added greedily from points farthest from the MEC center and not already
+    in an existing corner's neighborhood (mirrors `corners.R:42-53`).
+
+    Parameters
+    ----------
+    xy : numpy.ndarray, shape (n, 2)
+        Coordinates (e.g. MDS output). NaN rows are dropped before the MEC.
+    prop : float
+        Fraction of points per corner.
+    k : int
+        Number of corners (effective minimum 3, matching R).
+    random_state : int, optional
+
+    Returns
+    -------
+    numpy.ndarray, int64, shape (n_per_corner, k)
+        Column i = indices (into the original, NaN-inclusive xy) of points
+        closest to the i-th corner.
+    """
+    xy = np.asarray(xy, dtype=np.float64)
+    if xy.ndim != 2 or xy.shape[1] != 2:
+        raise ValueError("xy must have shape (n, 2)")
+
+    k_eff = max(k, 3)
+    valid_mask = ~np.any(np.isnan(xy), axis=1)
+    valid_idx = np.where(valid_mask)[0]
+    pts = xy[valid_idx]
+    if len(pts) < k_eff:
+        raise ValueError(
+            f"Need at least {k_eff} non-NaN points; got {len(pts)}")
+
+    n_per = max(1, int(prop * len(pts)))
+    rng = np.random.default_rng(random_state)
+    center, radius, boundary_local = _mec_defining_points(pts, rng)
+
+    # Build corner index list (indices into `pts`)
+    corner_point_idx = list(boundary_local[:k_eff])
+
+    # Fallback: extend with farthest-from-center points not already covered
+    if len(corner_point_idx) < k_eff:
+        used = set()
+        for ci in corner_point_idx:
+            cdist = np.linalg.norm(pts - pts[ci], axis=1)
+            nearest = np.argsort(cdist)[:n_per]
+            used.update(nearest.tolist())
+        center_dist = np.linalg.norm(pts - center, axis=1)
+        order = np.argsort(center_dist)[::-1]
+        for cand in order:
+            if len(corner_point_idx) >= k_eff:
+                break
+            if int(cand) in used:
+                continue
+            corner_point_idx.append(int(cand))
+            cdist = np.linalg.norm(pts - pts[cand], axis=1)
+            used.update(np.argsort(cdist)[:n_per].tolist())
+
+    # For each corner, take n_per nearest (in the valid point set)
+    out = np.empty((n_per, k_eff), dtype=np.int64)
+    for i, ci in enumerate(corner_point_idx[:k_eff]):
+        d = np.linalg.norm(pts - pts[ci], axis=1)
+        nearest = np.argsort(d)[:n_per]
+        # Map back to original (NaN-inclusive) indices
+        out[:, i] = valid_idx[nearest]
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Jackknife SE for local PCs
+# ---------------------------------------------------------------------------
+
+
+def _sign_align_replicates(vecs: "cp.ndarray") -> "cp.ndarray":
+    """Sign-align replicate eigenvectors to replicate 0.
+
+    Accepts either ``(n_reps, k, n_samples)`` (single window) or
+    ``(n_windows, n_reps, k, n_samples)``. For each (rep, pc) within its
+    window, flip sign if ``||v - v_0||^2 > ||v + v_0||^2``, equivalent to
+    ``sign(<v, v_0>) < 0``.
+    """
+    if vecs.ndim == 3:
+        ref = vecs[0]                                 # (k, n_samples)
+        dot = cp.einsum('rks,ks->rk', vecs, ref)      # (n_reps, k)
+        sign = cp.where(dot >= 0, 1.0, -1.0)[:, :, None]
+    elif vecs.ndim == 4:
+        ref = vecs[:, 0]                              # (n_windows, k, n_samples)
+        dot = cp.einsum('wrks,wks->wrk', vecs, ref)   # (n_windows, n_reps, k)
+        sign = cp.where(dot >= 0, 1.0, -1.0)[:, :, :, None]
+    else:
+        raise ValueError(
+            f"vecs must have 3 or 4 dims, got {vecs.ndim}")
+    return vecs * sign
+
+
+def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
+                        window_params=None,
+                        k: int = 2,
+                        n_blocks: int = 10,
+                        scaler: Optional[str] = None,
+                        missing_data: str = 'include',
+                        population: Optional[Union[str, list]] = None,
+                        aggregate: Optional[str] = 'mean',
+                        batch_size: Optional[int] = None,
+                        window_size: Optional[int] = None,
+                        step_size: Optional[int] = None,
+                        window_type: str = 'snp',
+                        regions=None) -> np.ndarray:
+    """Delete-1 block jackknife SE of local PCs (DPGP_jackknife_var.R port).
+
+    For each window, partitions variants into `n_blocks` contiguous blocks;
+    for each block, recomputes the sample-sample covariance with that block
+    removed, eigendecomposes it, takes the top-k eigenvectors, sign-aligns
+    across replicates, and computes the jackknife SE per sample.
+
+    Parameters
+    ----------
+    n_blocks : int
+        Number of jackknife blocks per window.
+    aggregate : {'mean', None}
+        'mean' returns shape (n_windows, k) — per-PC SE averaged across
+        samples (matches R's `mean(b)`). None returns the full
+        (n_windows, k, n_samples) tensor.
+
+    Returns
+    -------
+    numpy.ndarray
+        NaN rows for windows with fewer than `max(k, n_blocks+1)` variants.
+    """
+    from .windowed_analysis import WindowIterator
+
+    window_params = _resolve_window_params(
+        window_params, window_size, step_size, window_type, regions,
+        caller='local_pca_jackknife')
+
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    n_samples = matrix.num_haplotypes
+    iterator = WindowIterator(matrix, window_params)
+    identity_blocks = cp.broadcast_to(
+        cp.eye(n_samples, dtype=cp.float64),
+        (n_blocks, n_samples, n_samples))
+
+    min_variants = max(k, 2) * n_blocks
+    all_grams = []
+    valid_flags = []
+
+    for window in iterator:
+        if window.n_variants < min_variants:
+            all_grams.append(identity_blocks)
+            valid_flags.append(False)
+            continue
+
+        X = _prepare_matrix(window.matrix, scaler, population=None,
+                            missing_data=missing_data)
+        X = _materialize_prepared(X)
+        n_var_win = X.shape[1]
+        # Block width truncates (matches R's `round(nrow/10)` in DPGP_jackknife_var.R).
+        step = n_var_win // n_blocks
+        if step < 1:
+            all_grams.append(identity_blocks)
+            valid_flags.append(False)
+            continue
+
+        window_grams = cp.empty((n_blocks, n_samples, n_samples),
+                                dtype=cp.float64)
+        for b in range(n_blocks):
+            lo = b * step
+            hi = (b + 1) * step
+            keep = cp.concatenate([cp.arange(0, lo), cp.arange(hi, n_var_win)])
+            Xk = X[:, keep]
+            Xk = Xk - Xk.mean(axis=1, keepdims=True)
+            denom = max(Xk.shape[1] - 1, 1)
+            window_grams[b] = (Xk @ Xk.T) / denom
+        all_grams.append(window_grams)
+        valid_flags.append(True)
+
+    n_windows = len(all_grams)
+    if n_windows == 0:
+        raise ValueError("WindowIterator produced no windows.")
+
+    gram_stack = cp.concatenate(all_grams, axis=0)
+    eigvals_host, eigvecs_host = _batched_top_k_eigh(gram_stack, k, batch_size)
+    eigvecs_4d_gpu = cp.asarray(eigvecs_host).reshape(
+        n_windows, n_blocks, k, n_samples)
+    aligned = _sign_align_replicates(eigvecs_4d_gpu)
+    mean = aligned.mean(axis=1, keepdims=True)
+    jackknife_scale = (n_blocks - 1) / n_blocks
+    var = jackknife_scale * cp.sum((aligned - mean) ** 2, axis=1)
+    se_out = cp.sqrt(var).get()                # (n_windows, k, n_samples)
+
+    valid_mask = np.array(valid_flags, dtype=bool)
+    se_out[~valid_mask] = np.nan
+
+    if aggregate == 'mean':
+        return np.nanmean(se_out, axis=2)      # (n_windows, k)
+    elif aggregate is None:
+        return se_out
+    else:
+        raise ValueError(f"Unknown aggregate: {aggregate}")

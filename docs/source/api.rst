@@ -213,6 +213,25 @@ Distance
 .. autofunction:: pg_gpu.decomposition.pairwise_distance
 .. autofunction:: pg_gpu.decomposition.pcoa
 
+Local PCA (lostruct)
+~~~~~~~~~~~~~~~~~~~~
+
+GPU port of the ``lostruct`` method (`Li & Ralph 2019
+<https://www.genetics.org/content/211/1/289>`_) for detecting genomic
+regions where population structure differs from the chromosome-wide
+pattern (inversions, introgression, low-recombination regions). 
+.. Per-window eigendecomposition is batched with a single ``cp.linalg.eigh`` over a
+.. stacked ``(n_windows, n_samples, n_samples)`` tensor.
+
+.. autofunction:: pg_gpu.decomposition.local_pca
+.. autofunction:: pg_gpu.decomposition.local_pca_jackknife
+.. autofunction:: pg_gpu.decomposition.pc_dist
+.. autofunction:: pg_gpu.decomposition.corners
+
+.. autoclass:: pg_gpu.decomposition.LocalPCAResult
+   :members: to_lostruct_matrix, n_windows, n_samples
+   :show-inheritance:
+
 Relatedness and Kinship
 -----------------------
 
@@ -253,6 +272,10 @@ Selection scan statistics:
 
 - ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1`` -- Garud's H statistics per window (prefix-sum hashing + shared-memory sort)
 - ``mean_nsl`` -- mean nSL per window (per-site nSL + scatter binning)
+
+Structure / dimensionality reduction:
+
+- ``local_pca`` -- Li & Ralph (2019) local PCA. Vector-valued per window; dispatches to :func:`pg_gpu.decomposition.local_pca` and returns a :class:`~pg_gpu.decomposition.LocalPCAResult` instead of the scalar-stat DataFrame. Can be combined with scalar statistics in the same call; the scalar columns are merged onto ``result.windows``.
 
 Legacy Functions
 ~~~~~~~~~~~~~~~~
