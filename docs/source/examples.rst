@@ -130,6 +130,22 @@ SFS and Admixture
    )
    print(f"D = {d:.4f}, SE = {se:.4f}, Z = {z:.2f}")
 
+Bootstrap CI on Tajima's D under a Sweep
+-----------------------------------------
+
+``examples/sweep_tajimas_d_bootstrap.py`` simulates a 10 Mb chromosome
+with msprime's ``SweepGenicSelection`` targeting fixation at the midpoint,
+computes windowed Tajima's D, and uses ``block_bootstrap`` to obtain 95%
+confidence intervals for the mean Tajima's D in the sweep-local region,
+and the distal region. Under a completed sweep the
+sweep-local CI excludes zero; the distal CI
+brackets the neutral expectation.
+
+.. code-block:: bash
+
+   pixi run python examples/sweep_tajimas_d_bootstrap.py
+   pixi run python examples/sweep_tajimas_d_bootstrap.py --seed 7 --n-replicates 5000
+
 Admixture Detection (end-to-end)
 --------------------------------
 

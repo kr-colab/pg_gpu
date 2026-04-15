@@ -280,6 +280,28 @@ Admixture and F-Statistics
      - D with block-jackknife standard error
      - Patterson et al. (2012)
 
+Resampling (Block Jackknife and Bootstrap)
+-------------------------------------------
+
+.. list-table::
+   :header-rows: 1
+   :widths: 25 45 30
+
+   * - Function
+     - Description
+     - Reference
+   * - ``block_jackknife``
+     - Delete-1 block jackknife SE; supports unequal block sizes
+     - Busing et al. (1999)
+   * - ``block_bootstrap``
+     - Block bootstrap SE and replicate distribution
+     - Efron & Tibshirani (1993)
+
+Both operate on pre-binned per-block values and a user-supplied statistic,
+so any scalar aggregate (genome-wide mean Tajima's D, per-population π,
+ratio-of-sums estimators like normed F3 / D) can get a calibrated SE / CI
+with a single call.
+
 FrequencySpectrum (Power-User SFS Interface)
 ---------------------------------------------
 
