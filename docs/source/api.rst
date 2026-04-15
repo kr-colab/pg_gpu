@@ -176,6 +176,19 @@ Scaling and Folding Utilities
 .. autofunction:: pg_gpu.sfs.fold_sfs
 .. autofunction:: pg_gpu.sfs.fold_joint_sfs
 
+Resampling (Block Jackknife and Bootstrap)
+------------------------------------------
+
+General-purpose block-resampling estimators for calibrated SE / CI on any
+scalar genome-wide statistic. Both accept pre-binned per-block values
+(single 1D array or tuple of arrays for ratio-of-sums statistics) and a
+callable ``statistic``. See ``examples/sweep_tajimas_d_bootstrap.py`` for
+an end-to-end CI on Tajima's D under a completed sweep.
+
+.. autofunction:: pg_gpu.resampling.block_jackknife
+
+.. autofunction:: pg_gpu.resampling.block_bootstrap
+
 Admixture and F-Statistics
 --------------------------
 

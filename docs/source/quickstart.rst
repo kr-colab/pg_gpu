@@ -226,6 +226,39 @@ Admixture / F-Statistics
        h, 'popA', 'popB', 'popC', 'popD', blen=100
    )
 
+Resampling (Block Jackknife and Bootstrap)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Both estimators take pre-binned per-block values and a callable ``statistic``.
+For ratio-of-sums statistics, pass a tuple ``(num, den)`` and have
+``statistic`` consume both — the same block indices are applied to each
+entry (required invariant).
+
+.. code-block:: python
+
+   import numpy as np
+   from pg_gpu import block_jackknife, block_bootstrap, windowed_analysis
+
+   # 1) Jackknife SE of a windowed mean. windowed_analysis gives per-window
+   #    Tajima's D; treat each window as a block and take the mean.
+   df = windowed_analysis(h, window_size=50_000, step_size=25_000,
+                          statistics=['tajimas_d'], window_type='bp')
+   tajd = df['tajimas_d'].to_numpy()
+   tajd = tajd[np.isfinite(tajd)]
+   est, se, _ = block_jackknife(tajd, statistic=np.mean)
+
+   # 2) Bootstrap 95% CI on the same mean.
+   est, se, reps = block_bootstrap(tajd, statistic=np.mean,
+                                   n_replicates=2000, rng=0)
+   lo, hi = np.quantile(reps, [0.025, 0.975])
+
+   # 3) Ratio-of-sums pattern (same as average_patterson_d).
+   est, se, reps = block_bootstrap(
+       (num_blocks, den_blocks),
+       statistic=lambda n, d: np.sum(n) / np.sum(d),
+       n_replicates=2000, rng=0,
+   )
+
 PCA and Distance
 ~~~~~~~~~~~~~~~~
 

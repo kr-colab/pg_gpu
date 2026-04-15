@@ -93,6 +93,19 @@ Admixture / F-Statistics
 * Block-jackknife with SE: ``average_patterson_f3``,
   ``average_patterson_d``.
 
+Resampling
+~~~~~~~~~~
+
+* Public ``pg_gpu.resampling`` module with ``block_jackknife`` and
+  ``block_bootstrap`` for block-resampled SE / CIs on any scalar
+  genome-wide statistic (genome-wide mean Tajima's D, ratio-of-sums
+  estimators, etc.). Promotes the previously private ``_jackknife`` helper
+  from ``admixture``. The weighted jackknife follows the Busing et al.
+  (1999) delete-:math:`m_j` formulation for unequal block sizes.
+* ``examples/sweep_tajimas_d_bootstrap.py`` -- 95% bootstrap CI on
+  Tajima's D under a completed sweep, showing sweep-local vs distal mean
+  difference CIs that exclude zero.
+
 Dimensionality Reduction and Distance
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

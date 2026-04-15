@@ -10,6 +10,7 @@ import cupy as cp
 from typing import Union, Optional, Tuple
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
+from .resampling import block_jackknife, _moving_nansum, _moving_nanmean
 
 
 def _allele_freq(haplotype_matrix):
@@ -55,110 +56,6 @@ def _allele_freq_and_het(haplotype_matrix):
 
     return freq, h, an
 
-
-
-def _moving_nansum(values, size, start=0, stop=None, step=None):
-    """Windowed nansum on GPU via cumulative sums.
-
-    Parameters
-    ----------
-    values : cupy.ndarray, shape (n,)
-    size, start, stop, step : int
-
-    Returns
-    -------
-    cupy.ndarray, shape (n_windows,)
-    """
-    n = len(values)
-    if stop is None:
-        stop = n
-    if step is None:
-        step = size
-
-    v = cp.where(cp.isfinite(values), values, 0.0)
-    cs = cp.concatenate([cp.zeros(1, dtype=cp.float64), cp.cumsum(v)])
-    w_starts = cp.arange(start, stop - size + 1, step)
-    return cs[w_starts + size] - cs[w_starts]
-
-
-def _moving_nanmean(values, size, start=0, stop=None, step=None):
-    """Windowed nanmean on GPU via cumulative sums.
-
-    Parameters
-    ----------
-    values : cupy.ndarray, shape (n,)
-    size, start, stop, step : int
-
-    Returns
-    -------
-    cupy.ndarray, shape (n_windows,)
-    """
-    n = len(values)
-    if stop is None:
-        stop = n
-    if step is None:
-        step = size
-
-    finite = cp.isfinite(values)
-    v = cp.where(finite, values, 0.0)
-    cs = cp.concatenate([cp.zeros(1, dtype=cp.float64), cp.cumsum(v)])
-    cn = cp.concatenate([cp.zeros(1, dtype=cp.float64),
-                         cp.cumsum(finite.astype(cp.float64))])
-    w_starts = cp.arange(start, stop - size + 1, step)
-    sums = cs[w_starts + size] - cs[w_starts]
-    counts = cn[w_starts + size] - cn[w_starts]
-    return cp.where(counts > 0, sums / counts, cp.nan)
-
-
-def _jackknife(values, statistic):
-    """Block-jackknife for standard error estimation.
-
-    Parameters
-    ----------
-    values : ndarray or tuple of ndarrays
-        Block-level values.
-    statistic : callable
-        Statistic to compute from values.
-
-    Returns
-    -------
-    m : float
-        Mean of jackknife estimates.
-    se : float
-        Standard error estimate.
-    vj : ndarray
-        Per-iteration jackknife values.
-    """
-    if isinstance(values, tuple):
-        n = len(values[0])
-        masked = [np.ma.asarray(v) for v in values]
-        for m in masked:
-            m.mask = np.zeros(m.shape, dtype=bool)
-    else:
-        n = len(values)
-        masked = np.ma.asarray(values)
-        masked.mask = np.zeros(masked.shape, dtype=bool)
-
-    vj = []
-    for i in range(n):
-        if isinstance(values, tuple):
-            for m in masked:
-                m.mask[i] = True
-            x = statistic(*masked)
-            for m in masked:
-                m.mask[i] = False
-        else:
-            masked.mask[i] = True
-            x = statistic(masked)
-            masked.mask[i] = False
-        vj.append(x)
-
-    vj = np.array(vj)
-    m = vj.mean()
-    sv = ((n - 1) / n) * np.sum((vj - m) ** 2)
-    se = np.sqrt(sv)
-
-    return m, se, vj
 
 
 # ---------------------------------------------------------------------------
@@ -464,7 +361,7 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
         T_bsum = _moving_nansum(T, blen).get()
         B_bsum = _moving_nansum(B, blen).get()
         vb = T_bsum / B_bsum
-        _, se, vj = _jackknife(
+        _, se, vj = block_jackknife(
             (T_bsum, B_bsum),
             statistic=lambda t, b: np.sum(t) / np.sum(b)
         )
@@ -472,7 +369,7 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
         finite = cp.isfinite(T)
         f3 = float((cp.sum(cp.where(finite, T, 0.0)) / cp.sum(finite)).get())
         vb = _moving_nanmean(T, blen).get()
-        _, se, vj = _jackknife(vb, statistic=np.mean)
+        _, se, vj = block_jackknife(vb, statistic=np.mean)
 
     z = f3 / se
     return f3, se, z, vb, vj
@@ -519,7 +416,7 @@ def average_patterson_d(haplotype_matrix: HaplotypeMatrix,
     den_bsum = _moving_nansum(den, blen).get()
     vb = num_bsum / den_bsum
 
-    _, se, vj = _jackknife(
+    _, se, vj = block_jackknife(
         (num_bsum, den_bsum),
         statistic=lambda n, d: np.sum(n) / np.sum(d)
     )

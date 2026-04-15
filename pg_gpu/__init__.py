@@ -23,6 +23,7 @@ from . import decomposition
 from . import plotting
 from . import distance_stats
 from . import relatedness
+from . import resampling
 from .accessible import AccessibleMask, bed_to_mask, parse_bed
 from .diversity import FrequencySpectrum
 from .genotype_matrix import GenotypeMatrix
@@ -35,7 +36,8 @@ from .decomposition import (
     pc_dist,
     corners,
 )
+from .resampling import block_jackknife, block_bootstrap
 
-__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'distance_stats', 'HaplotypeMatrix', 'GenotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis', 'AccessibleMask', 'bed_to_mask', 'parse_bed', 'LocalPCAResult', 'local_pca', 'local_pca_jackknife', 'pc_dist', 'corners']
+__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'distance_stats', 'resampling', 'HaplotypeMatrix', 'GenotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis', 'AccessibleMask', 'bed_to_mask', 'parse_bed', 'LocalPCAResult', 'local_pca', 'local_pca_jackknife', 'pc_dist', 'corners', 'block_jackknife', 'block_bootstrap']
 
 __version__ = '0.1.0'
