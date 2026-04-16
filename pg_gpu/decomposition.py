@@ -514,6 +514,11 @@ class LocalPCAResult:
         Number of PCs retained.
     scaler : str or None
     missing_data : str
+    jackknife_se : numpy.ndarray or None
+        Delete-1 block jackknife SE of the top-k eigenvectors. Shape
+        ``(n_windows, k)`` with ``aggregate='mean'``, or
+        ``(n_windows, k, n_samples)`` with ``aggregate=None``.
+        ``None`` when jackknife was not computed.
     """
 
     windows: "pd.DataFrame"
@@ -523,6 +528,7 @@ class LocalPCAResult:
     k: int
     scaler: Optional[str]
     missing_data: str
+    jackknife_se: Optional[np.ndarray] = None
 
     @property
     def n_windows(self) -> int:

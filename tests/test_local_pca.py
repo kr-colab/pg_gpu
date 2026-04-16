@@ -95,6 +95,8 @@ class TestLocalPCAShape:
         assert set(CANONICAL_WINDOW_PREFIX) <= set(res.windows.columns)
         # Eigvals are sorted descending
         assert np.all(res.eigvals[:, 0] >= res.eigvals[:, 1])
+        # jackknife_se is None when jackknife not requested
+        assert res.jackknife_se is None
 
     def test_to_lostruct_matrix(self, small_hm):
         res = local_pca(small_hm, window_size=100, window_type='snp', k=3)
