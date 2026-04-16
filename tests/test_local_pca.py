@@ -303,6 +303,44 @@ class TestWindowedAnalysisDispatch:
         assert isinstance(res, LocalPCAResult)
         assert 'pi' in res.windows.columns
 
+    def test_jackknife_alone(self, small_hm):
+        res = windowed_analysis(small_hm, window_size=200_000,
+                                step_size=200_000,
+                                statistics=['local_pca_jackknife'], k=2,
+                                n_blocks=5, window_type='bp')
+        assert isinstance(res, LocalPCAResult)
+        assert res.jackknife_se is not None
+        assert res.eigvals.shape[0] == res.jackknife_se.shape[0]
+
+    def test_jackknife_with_local_pca(self, small_hm):
+        res = windowed_analysis(small_hm, window_size=200_000,
+                                step_size=200_000,
+                                statistics=['local_pca', 'local_pca_jackknife'],
+                                k=2, n_blocks=5, window_type='bp')
+        assert isinstance(res, LocalPCAResult)
+        assert res.jackknife_se is not None
+        assert np.all(np.isfinite(res.eigvals))
+
+    def test_jackknife_with_scalar_stat(self, small_hm):
+        res = windowed_analysis(small_hm, window_size=200_000,
+                                step_size=200_000,
+                                statistics=['pi', 'local_pca_jackknife'],
+                                k=2, n_blocks=5, window_type='bp')
+        assert isinstance(res, LocalPCAResult)
+        assert 'pi' in res.windows.columns
+        assert res.jackknife_se is not None
+
+    def test_jackknife_aggregate_none(self, small_hm):
+        res = windowed_analysis(small_hm, window_size=200_000,
+                                step_size=200_000,
+                                statistics=['local_pca_jackknife'], k=2,
+                                n_blocks=5, aggregate=None, window_type='bp')
+        assert isinstance(res, LocalPCAResult)
+        assert res.jackknife_se is not None
+        assert res.jackknife_se.ndim == 3
+        assert res.jackknife_se.shape == (
+            res.n_windows, 2, small_hm.num_haplotypes)
+
 
 # ---------------------------------------------------------------------------
 # Corners

@@ -18,10 +18,11 @@ from . import ld_statistics
 from . import divergence
 from . import diversity
 
-# Kwargs that the 'local_pca' dispatch consumes but scalar-stat paths don't
-# accept. Filtered out before the recursive call to scalar windowed_analysis.
+# Kwargs that the 'local_pca' / 'local_pca_jackknife' dispatch consumes but
+# scalar-stat paths don't accept. Filtered out before the recursive call.
 _LOCAL_PCA_ONLY_KWARGS = frozenset(
-    {'k', 'scaler', 'population', 'batch_size', 'window_type', 'regions'})
+    {'k', 'scaler', 'population', 'batch_size', 'window_type', 'regions',
+     'n_blocks', 'aggregate'})
 
 
 def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
@@ -1110,8 +1111,11 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     # Local PCA dispatch: vector-valued per-window output; cannot live in the
     # scalar-stat DataFrame pipeline. Return a LocalPCAResult (with scalar
     # stats merged into .windows if requested alongside).
-    if 'local_pca' in statistics:
+    # 'local_pca_jackknife' implies 'local_pca' -- the SE is meaningless
+    # without the base eigendecomposition.
+    if 'local_pca' in statistics or 'local_pca_jackknife' in statistics:
         from . import decomposition
+        want_jackknife = 'local_pca_jackknife' in statistics
         local_pca_kwargs = {
             'k': kwargs.get('k', 2),
             'scaler': kwargs.get('scaler', None),
@@ -1123,8 +1127,15 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             'window_type': kwargs.get('window_type', 'bp'),
             'regions': kwargs.get('regions', None),
         }
-        result = decomposition.local_pca(haplotype_matrix, **local_pca_kwargs)
-        other_stats = [s for s in statistics if s != 'local_pca']
+        if want_jackknife:
+            local_pca_kwargs['n_blocks'] = kwargs.get('n_blocks', 10)
+            local_pca_kwargs['aggregate'] = kwargs.get('aggregate', 'mean')
+            result = decomposition._local_pca_with_jackknife(
+                haplotype_matrix, **local_pca_kwargs)
+        else:
+            result = decomposition.local_pca(haplotype_matrix, **local_pca_kwargs)
+        other_stats = [s for s in statistics
+                       if s not in ('local_pca', 'local_pca_jackknife')]
         if other_stats:
             scalar_df = windowed_analysis(
                 haplotype_matrix,
