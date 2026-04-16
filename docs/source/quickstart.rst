@@ -307,14 +307,25 @@ regions). All four steps of the pipeline are available:
    # 4. Extreme-cluster detection in MDS space (Welzl MEC)
    corner_idx = corners(coords, prop=0.05, k=3)
 
-   # Optional: delete-1 block jackknife SE of local PCs
+   # Optional: delete-1 block jackknife SE of local PCs (standalone)
    from pg_gpu.decomposition import local_pca_jackknife
    se = local_pca_jackknife(h, window_size=500, window_type='snp',
                             k=2, n_blocks=10)  # (n_windows, k)
 
-``local_pca`` can also be requested through ``windowed_analysis``; when
-mixed with scalar statistics, the scalar columns are merged onto
-``result.windows`` so you get one object with both kinds of output.
+Both ``local_pca`` and ``local_pca_jackknife`` can be requested through
+``windowed_analysis``.  When both are requested together, per-window
+matrix preparation is shared for efficiency.  Scalar statistics can be
+mixed in the same call; the scalar columns are merged onto
+``result.windows``.
+
+.. code-block:: python
+
+   from pg_gpu import windowed_analysis
+
+   result = windowed_analysis(h, window_size=500, window_type='snp',
+                              statistics=['local_pca', 'local_pca_jackknife'],
+                              k=2, n_blocks=10)
+   result.jackknife_se  # (n_windows, k)
 
 For an end-to-end example with a simulated partial sweep, see
 ``examples/local_pca.py``.

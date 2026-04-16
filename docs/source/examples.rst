@@ -220,6 +220,13 @@ Python API:
    mds, _ = pcoa(dist, n_components=2)
    extremes = corners(mds, prop=0.05, k=3)
 
+   # With jackknife SE (shares per-window matrix prep with local_pca)
+   result = windowed_analysis(
+       hm, window_size=500, step_size=250,
+       statistics=['local_pca', 'local_pca_jackknife'],
+       window_type='snp', k=2, n_blocks=10)
+   result.jackknife_se  # (n_windows, k) SE array
+
 LD Block Partitioning (end-to-end)
 ----------------------------------
 

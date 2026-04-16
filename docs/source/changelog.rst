@@ -150,6 +150,9 @@ non-overlapping windows with ``missing_data='include'``:
   ``mean_nsl``.
 * Structure: ``local_pca`` (returns a ``LocalPCAResult``; scalar stats
   requested alongside are merged onto ``result.windows``).
+* Structure: ``local_pca_jackknife`` computes delete-1 block jackknife
+  SE and populates ``LocalPCAResult.jackknife_se``. When both are
+  requested together, per-window matrix preparation is shared.
 
 Lower-level windowed entry points: ``windowed_statistics`` (scatter-add
 aggregation) and ``windowed_statistics_fused`` (custom bin edges, one
