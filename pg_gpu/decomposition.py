@@ -753,6 +753,159 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     )
 
 
+def _local_pca_with_jackknife(
+    haplotype_matrix: "HaplotypeMatrix",
+    window_params=None,
+    k: int = 2,
+    n_blocks: int = 10,
+    scaler: Optional[str] = None,
+    missing_data: str = 'include',
+    population: Optional[Union[str, list]] = None,
+    aggregate: Optional[str] = 'mean',
+    batch_size: Optional[int] = None,
+    window_size: Optional[int] = None,
+    step_size: Optional[int] = None,
+    window_type: str = 'snp',
+    regions=None,
+) -> LocalPCAResult:
+    """Local PCA with fused jackknife SE, sharing per-window matrix preparation.
+
+    Iterates windows once; for each valid window calls ``_prepare_matrix`` once
+    and from the same materialized ``X`` computes both the full Gram matrix (for
+    eigvals/eigvecs) and the leave-one-block-out Gram matrices (for jackknife).
+
+    Two-tier validity: windows with enough variants for PCA (``>= max(k, 2)``)
+    but too few for jackknife (``< max(k, 2) * n_blocks``) get valid
+    eigvals/eigvecs but NaN ``jackknife_se``.
+    """
+    from .windowed_analysis import WindowIterator
+
+    window_params = _resolve_window_params(
+        window_params, window_size, step_size, window_type, regions,
+        caller='_local_pca_with_jackknife')
+
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
+    else:
+        matrix = haplotype_matrix
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    n_samples = matrix.num_haplotypes
+    iterator = WindowIterator(matrix, window_params)
+    identity_placeholder = cp.eye(n_samples, dtype=cp.float64)
+    nan_scalar = cp.asarray(np.nan, dtype=cp.float64)
+    identity_blocks = cp.broadcast_to(
+        identity_placeholder, (n_blocks, n_samples, n_samples))
+
+    min_pca = max(k, 2)
+    min_jk = min_pca * n_blocks
+
+    window_meta = []
+    gram_list = []
+    sumsq_list = []
+    jk_gram_list = []
+    valid_pca = []
+    valid_jk = []
+
+    for window in iterator:
+        window_meta.append(window)
+
+        if window.n_variants < min_pca:
+            # Too few variants for PCA or jackknife.
+            gram_list.append(identity_placeholder)
+            sumsq_list.append(nan_scalar)
+            jk_gram_list.append(identity_blocks)
+            valid_pca.append(False)
+            valid_jk.append(False)
+            continue
+
+        X = _prepare_matrix(window.matrix, scaler, population=None,
+                            missing_data=missing_data)
+        X = _materialize_prepared(X)
+        n_var_win = X.shape[1]
+
+        # Full Gram for local_pca.
+        C, sumsq = _window_gram(X, n_var_win)
+        gram_list.append(C)
+        sumsq_list.append(sumsq)
+        valid_pca.append(True)
+
+        # Leave-one-block-out Grams for jackknife.
+        step = n_var_win // n_blocks
+        if n_var_win < min_jk or step < 1:
+            jk_gram_list.append(identity_blocks)
+            valid_jk.append(False)
+            continue
+
+        window_grams = cp.empty((n_blocks, n_samples, n_samples),
+                                dtype=cp.float64)
+        for b in range(n_blocks):
+            lo = b * step
+            hi = (b + 1) * step
+            keep = cp.concatenate([cp.arange(0, lo), cp.arange(hi, n_var_win)])
+            Xk = X[:, keep]
+            Xk = Xk - Xk.mean(axis=1, keepdims=True)
+            denom = max(Xk.shape[1] - 1, 1)
+            window_grams[b] = (Xk @ Xk.T) / denom
+        jk_gram_list.append(window_grams)
+        valid_jk.append(True)
+
+    n_windows = len(window_meta)
+    if n_windows == 0:
+        raise ValueError("WindowIterator produced no windows.")
+
+    # --- Main eigendecomposition (local_pca) ---
+    gram_stack = cp.stack(gram_list, axis=0)
+    eigvals_host, eigvecs_host = _batched_top_k_eigh(gram_stack, k, batch_size)
+    sumsq_host = cp.stack(sumsq_list).get()
+
+    pca_mask = np.array(valid_pca, dtype=bool)
+    eigvals_host[~pca_mask] = np.nan
+    eigvecs_host[~pca_mask] = np.nan
+    sumsq_host[~pca_mask] = np.nan
+
+    # --- Jackknife eigendecomposition ---
+    jk_stack = cp.concatenate(jk_gram_list, axis=0)
+    _, jk_vecs = _batched_top_k_eigh(jk_stack, k, batch_size)
+    jk_vecs_4d = cp.asarray(jk_vecs).reshape(n_windows, n_blocks, k, n_samples)
+    aligned = _sign_align_replicates(jk_vecs_4d)
+    mean = aligned.mean(axis=1, keepdims=True)
+    jackknife_scale = (n_blocks - 1) / n_blocks
+    var = jackknife_scale * cp.sum((aligned - mean) ** 2, axis=1)
+    se_out = cp.sqrt(var).get()  # (n_windows, k, n_samples)
+
+    jk_mask = np.array(valid_jk, dtype=bool)
+    se_out[~jk_mask] = np.nan
+
+    if aggregate == 'mean':
+        jackknife_se = np.nanmean(se_out, axis=2)  # (n_windows, k)
+    elif aggregate is None:
+        jackknife_se = se_out
+    else:
+        raise ValueError(f"Unknown aggregate: {aggregate}")
+
+    windows_df = pd.DataFrame({
+        'chrom': [w.chrom for w in window_meta],
+        'start': [w.start for w in window_meta],
+        'end': [w.end for w in window_meta],
+        'center': [w.center for w in window_meta],
+        'n_variants': [w.n_variants for w in window_meta],
+        'window_id': [w.window_id for w in window_meta],
+    })
+
+    return LocalPCAResult(
+        windows=windows_df,
+        eigvals=eigvals_host,
+        eigvecs=eigvecs_host,
+        sumsq=sumsq_host,
+        k=k,
+        scaler=scaler,
+        missing_data=missing_data,
+        jackknife_se=jackknife_se,
+    )
+
+
 def pc_dist(source, npc: Optional[int] = None,
             normalize: Optional[str] = 'L1',
             w=1) -> np.ndarray:

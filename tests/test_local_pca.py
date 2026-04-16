@@ -376,3 +376,53 @@ class TestJackknife:
         V_flipped_aligned = _sign_align_replicates(V_flipped)
         var2 = cp.var(V_flipped_aligned, axis=0).get()
         np.testing.assert_allclose(var1, var2, rtol=1e-10, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Fused local_pca + jackknife
+# ---------------------------------------------------------------------------
+
+
+class TestFusedJackknife:
+
+    def test_fused_matches_separate(self, small_hm):
+        from pg_gpu.decomposition import _local_pca_with_jackknife
+
+        k, n_blocks = 2, 5
+        wkw = dict(window_size=200, window_type='snp', k=k)
+
+        fused = _local_pca_with_jackknife(small_hm, n_blocks=n_blocks,
+                                          aggregate='mean', **wkw)
+        separate_pca = local_pca(small_hm, **wkw)
+        separate_jk = local_pca_jackknife(small_hm, n_blocks=n_blocks,
+                                          aggregate='mean', **wkw)
+
+        assert isinstance(fused, LocalPCAResult)
+        np.testing.assert_allclose(fused.eigvals, separate_pca.eigvals,
+                                   rtol=1e-10)
+        np.testing.assert_allclose(fused.sumsq, separate_pca.sumsq,
+                                   rtol=1e-10)
+        assert fused.jackknife_se is not None
+        np.testing.assert_allclose(fused.jackknife_se, separate_jk,
+                                   rtol=1e-10)
+
+    def test_fused_partial_validity(self):
+        """Windows valid for PCA but not for jackknife."""
+        rng = np.random.default_rng(99)
+        # 12 variants total: with window_size=4 and n_blocks=5, the
+        # jackknife threshold (max(k,2)*n_blocks = 10) exceeds window size
+        # but PCA threshold (max(k,2) = 2) is met.
+        n_hap, n_var = 20, 12
+        hap = rng.integers(0, 2, (n_hap, n_var), dtype=np.int8)
+        pos = np.arange(n_var, dtype=np.int64) * 1000
+        hm = HaplotypeMatrix(hap, pos, 0, n_var * 1000)
+
+        from pg_gpu.decomposition import _local_pca_with_jackknife
+        result = _local_pca_with_jackknife(hm, window_size=4, window_type='snp',
+                                           k=2, n_blocks=5, aggregate='mean')
+
+        # PCA should be valid (4 >= 2)
+        assert np.all(np.isfinite(result.eigvals))
+        # Jackknife should be NaN (4 < 10)
+        assert result.jackknife_se is not None
+        assert np.all(np.isnan(result.jackknife_se))
