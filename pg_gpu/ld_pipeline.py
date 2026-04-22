@@ -113,9 +113,9 @@ def iter_pairs_within_distance(positions, max_dist, chunk_size):
             continue
         flat = cp.arange(n_pairs_chunk, dtype=cp.int64)
         var_pos = cp.searchsorted(cum_local, flat, side='right')
-        offsets = cp.concatenate(
-            [cp.zeros(1, dtype=cum_local.dtype), cum_local[:-1]])
-        within_var = flat - offsets[var_pos]
+        # Exclusive prefix-sum: inclusive cumsum minus the addend at each index.
+        exclusive = cum_local - counts_slice
+        within_var = flat - exclusive[var_pos]
         idx_i = (v_lo + var_pos).astype(cp.int32)
         idx_j = idx_i + 1 + within_var.astype(cp.int32)
         yield idx_i, idx_j
