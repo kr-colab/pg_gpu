@@ -1552,63 +1552,39 @@ class HaplotypeMatrix:
             n_haps = self.num_haplotypes
             chunk_size = _estimate_ld_chunk_size(n_haps)
 
-        # Generate distance-filtered pair indices
-        idx_i, idx_j = _generate_pairs_within_distance(pos, max_dist)
-        total_pairs = len(idx_i)
-
-        if total_pairs == 0:
-            # No pairs within distance - return zeros for all bins
-            out = {}
-            for i in range(n_bins):
-                out[(float(bp_bins[i]), float(bp_bins[i + 1]))] = (0.0, 0.0, 0.0)
-            return out
-
-        # Compute distances for all pairs
-        distances = pos[idx_j] - pos[idx_i]
-
-        # Bin assignment
+        # Bin assignment constants
         bp_bins_cp = cp.array(bp_bins)
-        bin_inds = cp.digitize(distances, bp_bins_cp) - 1
 
         # Initialize accumulators: sums and counts per bin
         # 3 statistics: DD, Dz, pi2
         bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
-        # Process in chunks
-        for chunk_start in range(0, total_pairs, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, total_pairs)
+        # Stream distance-filtered pair chunks
+        for chunk_idx_i, chunk_idx_j in _iter_pairs_within_distance(
+                pos, max_dist, chunk_size):
+            distances = pos[chunk_idx_j] - pos[chunk_idx_i]
+            chunk_bin_inds = cp.digitize(distances, bp_bins_cp) - 1
+            del distances
 
-            # Get chunk indices
-            chunk_idx_i = idx_i[chunk_start:chunk_end]
-            chunk_idx_j = idx_j[chunk_start:chunk_end]
-            chunk_bin_inds = bin_inds[chunk_start:chunk_end]
-
-            # Compute haplotype counts for this chunk (no population filter)
             counts, n_valid = _compute_counts_for_pairs(
                 self.haplotypes, chunk_idx_i, chunk_idx_j, pop_indices=None
             )
 
-            # Compute all 3 statistics for this chunk
             chunk_stats = _compute_single_pop_statistics_batch(
                 counts, n_valid, ld_statistics
             )
 
-            # Accumulate into bins using scatter_add
             valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
             valid_bin_inds = chunk_bin_inds[valid_mask]
             valid_stats = chunk_stats[valid_mask]
 
-            # Accumulate sums
             for stat_idx in range(3):
                 cp.add.at(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
 
-            # Accumulate counts
             cp.add.at(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
 
-            # Free chunk memory
-            del counts, n_valid, chunk_stats
-            del chunk_idx_i, chunk_idx_j, valid_stats
+            del counts, n_valid, chunk_stats, chunk_bin_inds, valid_stats
 
         # Build output dictionary
         out = {}
@@ -1717,49 +1693,24 @@ class HaplotypeMatrix:
             n_haps = max(len(pop1_indices), len(pop2_indices))
             chunk_size = _estimate_ld_chunk_size(n_haps)
 
-        # Generate distance-filtered pair indices
-        idx_i, idx_j = _generate_pairs_within_distance(pos, max_dist)
-        total_pairs = len(idx_i)
-
-        if total_pairs == 0:
-            # No pairs within distance - return zeros for all bins
-            out = {}
-            for i in range(n_bins):
-                out[(float(bp_bins[i]), float(bp_bins[i + 1]))] = OrderedDict([
-                    ('DD_0_0', 0.0), ('DD_0_1', 0.0), ('DD_1_1', 0.0),
-                    ('Dz_0_0_0', 0.0), ('Dz_0_0_1', 0.0), ('Dz_0_1_1', 0.0),
-                    ('Dz_1_0_0', 0.0), ('Dz_1_0_1', 0.0), ('Dz_1_1_1', 0.0),
-                    ('pi2_0_0_0_0', 0.0), ('pi2_0_0_0_1', 0.0), ('pi2_0_0_1_1', 0.0),
-                    ('pi2_0_1_0_1', 0.0), ('pi2_0_1_1_1', 0.0), ('pi2_1_1_1_1', 0.0)
-                ])
-            return out
-
-        # Compute distances for all pairs
-        distances = pos[idx_j] - pos[idx_i]
-
-        # Bin assignment
+        # Bin assignment constants
         bp_bins_cp = cp.array(bp_bins)
-        bin_inds = cp.digitize(distances, bp_bins_cp) - 1
 
-        # Initialize accumulators: sums and counts per bin
         stat_names = [
             'DD_0_0', 'DD_0_1', 'DD_1_1',
             'Dz_0_0_0', 'Dz_0_0_1', 'Dz_0_1_1', 'Dz_1_0_0', 'Dz_1_0_1', 'Dz_1_1_1',
             'pi2_0_0_0_0', 'pi2_0_0_0_1', 'pi2_0_0_1_1', 'pi2_0_1_0_1', 'pi2_0_1_1_1', 'pi2_1_1_1_1'
         ]
         bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
-        bin_counts = cp.zeros(n_bins, dtype=cp.float64)  # float64 for scatter_add compatibility
+        bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
-        # Process in chunks
-        for chunk_start in range(0, total_pairs, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, total_pairs)
+        # Stream distance-filtered pair chunks
+        for chunk_idx_i, chunk_idx_j in _iter_pairs_within_distance(
+                pos, max_dist, chunk_size):
+            distances = pos[chunk_idx_j] - pos[chunk_idx_i]
+            chunk_bin_inds = cp.digitize(distances, bp_bins_cp) - 1
+            del distances
 
-            # Get chunk indices
-            chunk_idx_i = idx_i[chunk_start:chunk_end]
-            chunk_idx_j = idx_j[chunk_start:chunk_end]
-            chunk_bin_inds = bin_inds[chunk_start:chunk_end]
-
-            # Compute haplotype counts for this chunk
             counts_pop1, n_valid1 = _compute_counts_for_pairs(
                 self.haplotypes, chunk_idx_i, chunk_idx_j, pop1_indices
             )
@@ -1767,26 +1718,21 @@ class HaplotypeMatrix:
                 self.haplotypes, chunk_idx_i, chunk_idx_j, pop2_indices
             )
 
-            # Compute all 15 statistics for this chunk
             chunk_stats = _compute_two_pop_statistics_batch(
                 counts_pop1, counts_pop2, n_valid1, n_valid2, ld_statistics
             )
 
-            # Accumulate into bins using scatter_add
             valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
             valid_bin_inds = chunk_bin_inds[valid_mask]
             valid_stats = chunk_stats[valid_mask]
 
-            # Accumulate sums per bin
             for stat_idx in range(15):
                 cp.add.at(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
 
-            # Accumulate counts
             cp.add.at(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
 
-            # Free chunk memory
             del counts_pop1, counts_pop2, n_valid1, n_valid2, chunk_stats
-            del chunk_idx_i, chunk_idx_j, valid_stats
+            del chunk_bin_inds, valid_stats
 
         # Build output dictionary
         out = {}
@@ -1821,7 +1767,7 @@ class HaplotypeMatrix:
 # =============================================================================
 from .ld_pipeline import (  # noqa: E402, F401
     estimate_ld_chunk_size as _estimate_ld_chunk_size,
-    generate_pairs_within_distance as _generate_pairs_within_distance,
+    iter_pairs_within_distance as _iter_pairs_within_distance,
     compute_counts_for_pairs as _compute_counts_for_pairs,
     compute_genotype_counts_for_pairs as _compute_genotype_counts_for_pairs,
     compute_two_pop_statistics_batch as _compute_two_pop_statistics_batch,

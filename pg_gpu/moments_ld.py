@@ -22,7 +22,7 @@ import cupy as cp
 
 from .haplotype_matrix import HaplotypeMatrix
 from .ld_pipeline import (
-    generate_pairs_within_distance as _generate_pairs_within_distance,
+    iter_pairs_within_distance as _iter_pairs_within_distance,
     compute_counts_for_pairs as _compute_counts_for_pairs,
     compute_genotype_counts_for_pairs as _compute_genotype_counts_for_pairs,
     compute_two_pop_statistics_batch as _compute_two_pop_statistics_batch,
@@ -296,30 +296,23 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
     ld_stat_names = _ld_names(num_pops)
     n_ld = len(ld_stat_names)
 
-    idx_i, idx_j = _generate_pairs_within_distance(pos, max_bp_dist)
-    if len(idx_i) == 0:
-        return np.zeros((n_bins, n_ld), dtype=np.float64)
-
+    # Genetic-distance lookup: filter once outside the loop so fancy-indexing
+    # on the keep-mask doesn't repeat per chunk.
     if gen_dists_gpu is not None:
-        if use_genotypes:
-            filtered_gen_dists = gen_dists_gpu[keep_idx]
-            distances = cp.abs(filtered_gen_dists[idx_j] - filtered_gen_dists[idx_i])
-        else:
-            distances = cp.abs(gen_dists_gpu[idx_j] - gen_dists_gpu[idx_i])
+        gen_dists_lookup = gen_dists_gpu[keep_idx] if use_genotypes else gen_dists_gpu
     else:
-        distances = pos[idx_j] - pos[idx_i]
-    bin_inds = cp.digitize(distances, bins_gpu) - 1
-    del distances
+        gen_dists_lookup = None
 
     bin_sums = cp.zeros((n_bins, n_ld), dtype=cp.float64)
-    total_pairs = len(idx_i)
     stat_specs = _generate_stat_specs(num_pops) if (num_pops != 2 or use_genotypes) else None
 
-    for chunk_start in range(0, total_pairs, chunk_size):
-        chunk_end = min(chunk_start + chunk_size, total_pairs)
-        ci = idx_i[chunk_start:chunk_end]
-        cj = idx_j[chunk_start:chunk_end]
-        cb = bin_inds[chunk_start:chunk_end]
+    for ci, cj in _iter_pairs_within_distance(pos, max_bp_dist, chunk_size):
+        if gen_dists_lookup is not None:
+            distances = cp.abs(gen_dists_lookup[cj] - gen_dists_lookup[ci])
+        else:
+            distances = pos[cj] - pos[ci]
+        cb = cp.digitize(distances, bins_gpu) - 1
+        del distances
 
         counts_list = []
         n_valid_list = []
@@ -345,9 +338,8 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
         flat_idx = vb[:, None] * n_ld + cp.arange(n_ld)[None, :]
         cp.add.at(bin_sums.ravel(), flat_idx.ravel(), vs.ravel())
 
-        del counts_list, n_valid_list, stats
+        del counts_list, n_valid_list, stats, cb
 
-    del idx_i, idx_j, bin_inds
     return bin_sums.get()
 
 

@@ -54,55 +54,72 @@ def estimate_ld_chunk_size(n_haplotypes_per_pop, available_memory_bytes=None,
 # ---------------------------------------------------------------------------
 
 
-def generate_pairs_within_distance(positions, max_dist):
+def iter_pairs_within_distance(positions, max_dist, chunk_size):
     """
-    Generate (i, j) pair indices for all variant pairs where pos[j] - pos[i] <= max_dist.
+    Yield GPU chunks of variant pair indices (i, j) with pos[j] - pos[i] <= max_dist.
 
-    Uses binary search for O(n log n) complexity instead of O(n^2).
-    Assumes positions are sorted.
+    Fully GPU-native: no CPU materialization of the full pair list. Variants
+    are partitioned into contiguous anchor blocks whose cumulative pair count
+    is close to ``chunk_size``; each block's pairs are emitted as a single
+    chunk. Overshoot above ``chunk_size`` per chunk is bounded by
+    ``max(pairs_per_variant) ~= density * max_dist``.
 
     Parameters
     ----------
     positions : cp.ndarray
-        Sorted variant positions on GPU
+        Sorted variant positions on GPU.
     max_dist : float
-        Maximum distance between variants to include
+        Maximum distance between variants to include.
+    chunk_size : int
+        Target pairs per chunk (actual chunk size may slightly exceed this).
 
-    Returns
-    -------
-    idx_i : cp.ndarray[int32]
-        First index of each pair
-    idx_j : cp.ndarray[int32]
-        Second index of each pair
+    Yields
+    ------
+    idx_i, idx_j : cp.ndarray[int32]
+        First and second variant index of each pair in the chunk.
     """
     n = len(positions)
+    if n < 2:
+        return
 
     upper_bounds = positions + max_dist
     j_max = cp.searchsorted(positions, upper_bounds, side='right')
-
     variant_indices = cp.arange(n, dtype=cp.int64)
     pairs_per_variant = cp.maximum(0, j_max - variant_indices - 1)
-    total_pairs = int(cp.sum(pairs_per_variant).get())
-
+    cumulative = cp.cumsum(pairs_per_variant)
+    total_pairs = int(cumulative[-1].get())
     if total_pairs == 0:
-        return cp.array([], dtype=cp.int32), cp.array([], dtype=cp.int32)
+        return
 
-    pairs_per_variant_cpu = pairs_per_variant.get().astype(np.int64)
-    j_max_cpu = j_max.get()
+    chunk_size = max(1, int(chunk_size))
+    n_chunks = (total_pairs + chunk_size - 1) // chunk_size
+    targets = cp.minimum(
+        cp.arange(1, n_chunks + 1, dtype=cp.int64) * chunk_size,
+        total_pairs)
+    # Exclusive upper variant for each chunk: smallest v with cumulative[v] >= target.
+    v_his = (cp.searchsorted(cumulative, targets, side='left') + 1).get()
+    v_his = np.minimum(v_his, n)
 
-    idx_i_cpu = np.empty(total_pairs, dtype=np.int32)
-    idx_j_cpu = np.empty(total_pairs, dtype=np.int32)
-
-    offset = 0
-    for i in range(n):
-        n_pairs_i = int(pairs_per_variant_cpu[i])
-        if n_pairs_i > 0:
-            idx_i_cpu[offset:offset + n_pairs_i] = i
-            idx_j_cpu[offset:offset + n_pairs_i] = np.arange(
-                i + 1, j_max_cpu[i], dtype=np.int32)
-            offset += n_pairs_i
-
-    return cp.array(idx_i_cpu), cp.array(idx_j_cpu)
+    v_lo = 0
+    for v_hi in v_his:
+        v_hi = int(v_hi)
+        if v_hi <= v_lo:
+            continue
+        counts_slice = pairs_per_variant[v_lo:v_hi]
+        cum_local = cp.cumsum(counts_slice)
+        n_pairs_chunk = int(cum_local[-1].get())
+        if n_pairs_chunk == 0:
+            v_lo = v_hi
+            continue
+        flat = cp.arange(n_pairs_chunk, dtype=cp.int64)
+        var_pos = cp.searchsorted(cum_local, flat, side='right')
+        offsets = cp.concatenate(
+            [cp.zeros(1, dtype=cum_local.dtype), cum_local[:-1]])
+        within_var = flat - offsets[var_pos]
+        idx_i = (v_lo + var_pos).astype(cp.int32)
+        idx_j = idx_i + 1 + within_var.astype(cp.int32)
+        yield idx_i, idx_j
+        v_lo = v_hi
 
 
 # ---------------------------------------------------------------------------
