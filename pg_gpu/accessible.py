@@ -15,8 +15,11 @@ class AccessibleMask:
     mask : array_like
         Boolean array where True indicates an accessible/callable site.
     offset : int
-        Genomic coordinate corresponding to index 0 of the mask array.
-        For example, if offset=1000, then mask[0] represents position 1000.
+        1-based genomic coordinate corresponding to mask[0]. For example,
+        if offset=1000, mask[0] represents 1-based position 1000.
+        Positions passed to is_accessible_at/count_accessible are interpreted
+        as 1-based (matching VCF conventions). BED intervals consumed by
+        bed_to_mask remain 0-based half-open per BED standard.
     """
 
     def __init__(self, mask, offset=0):
@@ -173,20 +176,27 @@ def bed_to_mask(path, chrom, length, offset=0):
     length : int
         Total length of the mask array (number of genomic positions to cover).
     offset : int
-        Genomic coordinate of the first position in the mask (index 0).
+        1-based genomic coordinate of mask[0].
 
     Returns
     -------
     AccessibleMask
         Boolean mask where True = accessible. Positions outside any BED
         interval are False.
+
+    Notes
+    -----
+    BED intervals are 0-based half-open: an interval (s, e) covers 1-based
+    positions s+1 through e (inclusive). Mask index k represents 1-based
+    position offset + k.
     """
     intervals = parse_bed(path, chrom=chrom)
     mask = np.zeros(length, dtype=bool)
     for _, s, e in intervals:
-        # Clip to the mask range
-        i = max(0, s - offset)
-        j = min(length, e - offset)
+        # BED (s, e) [0-based half-open] = 1-based positions s+1..e
+        # mask[k] = True for k where offset + k in [s+1, e]
+        i = max(0, s + 1 - offset)
+        j = min(length, e + 1 - offset)
         if j > i:
             mask[i:j] = True
     return AccessibleMask(mask, offset=offset)
@@ -200,7 +210,10 @@ def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):
     mask_or_path : str, path-like, numpy.ndarray, or AccessibleMask
         BED file path, boolean array, or AccessibleMask instance.
     chrom_start, chrom_end : int or None
-        Chromosome boundaries used for offset and BED loading.
+        Matrix chromosome bounds (1-based inclusive). Used to widen the
+        mask range so it covers both the matrix and the BED. This avoids
+        silently dropping BED accessible bases that fall outside the
+        matrix's variant range (relevant for variants-only VCFs).
     chrom : str, optional
         Chromosome name (required for BED file input).
 
@@ -213,11 +226,23 @@ def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):
     if isinstance(mask_or_path, np.ndarray):
         offset = chrom_start if chrom_start is not None else 0
         return AccessibleMask(mask_or_path, offset=offset)
-    # Treat as file path
-    offset = chrom_start if chrom_start is not None else 0
-    end = chrom_end if chrom_end is not None else 0
-    length = end - offset
+    # Treat as file path. Build the mask over the union of [chrom_start,
+    # chrom_end] and the BED's own extent so no accessible bases are lost
+    # when the matrix's variant range is narrower than the BED.
+    intervals = parse_bed(mask_or_path, chrom=chrom)
+    if not intervals:
+        raise ValueError(
+            f"No BED intervals found for chrom={chrom!r} in {mask_or_path}")
+    # 1-based inclusive bounds of the BED (BED is 0-based half-open: a record
+    # (s, e) covers 1-based positions s+1..e).
+    bed_min = min(s + 1 for _, s, _ in intervals)
+    bed_max = max(e for _, _, e in intervals)
+    matrix_min = chrom_start if chrom_start is not None else bed_min
+    matrix_max = chrom_end if chrom_end is not None else bed_max
+    offset = min(bed_min, matrix_min)
+    end = max(bed_max, matrix_max)
+    length = end - offset + 1
     if length <= 0:
         raise ValueError(
-            "chrom_start and chrom_end must be set to load a BED mask")
+            "Could not determine mask range from BED and chromosome bounds")
     return bed_to_mask(mask_or_path, chrom=chrom, length=length, offset=offset)

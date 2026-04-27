@@ -207,25 +207,52 @@ class HaplotypeMatrix:
         return self.n_total_sites is not None
 
     @property
-    def n_invariant_sites(self):
-        """Number of invariant (monomorphic) sites, or None if unknown.
+    def n_callable_sites(self):
+        """Total callable sites in the analysis universe.
 
-        If n_total_sites is set, computes as n_total_sites minus the number of
-        segregating sites in the matrix. If invariant sites are stored directly
-        in the matrix, counts sites where all valid alleles are identical.
+        Alias for ``n_total_sites``. When an accessible mask is set, this is
+        the BED span (mask.total_accessible). When no mask is set but the
+        matrix was loaded with ``include_invariant=True``, this is the matrix
+        length at construction. Otherwise None.
+
+        This is the denominator for per-base span normalization, and
+        ``n_callable_sites = n_segregating_sites + n_invariant_sites``.
         """
-        if self.n_total_sites is None:
-            return None
+        return self.n_total_sites
+
+    @property
+    def n_segregating_sites(self):
+        """Number of polymorphic sites in the matrix.
+
+        Counts sites where 0 < derived_count < n_valid (i.e. polymorphic
+        among observed haplotypes), with at least 2 valid samples.
+        """
         xp = cp if self.device == 'GPU' else np
         hap = self.haplotypes
         valid_mask = hap >= 0
         hap_clean = xp.where(valid_mask, hap, 0)
         derived_counts = xp.sum(hap_clean, axis=0)
         n_valid = xp.sum(valid_mask, axis=0)
-        # A site is variant if 0 < derived < n_valid (i.e. polymorphic among observed)
         is_variant = (derived_counts > 0) & (derived_counts < n_valid) & (n_valid >= 2)
-        n_variant = int(xp.sum(is_variant))
-        return self.n_total_sites - n_variant
+        return int(xp.sum(is_variant))
+
+    @property
+    def n_invariant_sites(self):
+        """Number of invariant sites in the callable span, or None if unknown.
+
+        Computed as ``n_callable_sites - n_segregating_sites``. The matrix may
+        physically contain fewer than ``n_callable_sites`` rows (e.g. for a
+        variants-only VCF the matrix has only the polymorphic rows and the
+        rest are implied invariants from the accessible-mask span); in that
+        case the returned count includes those implied invariants.
+
+        Note that ``num_variants`` (matrix row count) is generally not equal
+        to ``n_segregating_sites`` and not equal to ``n_callable_sites`` --
+        it is just the physical matrix length.
+        """
+        if self.n_total_sites is None:
+            return None
+        return self.n_total_sites - self.n_segregating_sites
 
     def transfer_to_gpu(self):
         """Transfer data from CPU to GPU."""
@@ -489,9 +516,11 @@ class HaplotypeMatrix:
         # Convert ts to haplotype matrix
         haplotypes = ts.genotype_matrix().T
         positions = ts.tables.sites.position
-        # get the chromosome start and end
+        # tskit uses 0-based exclusive ends (positions in [0, sequence_length))
+        # while pg_gpu treats chrom_end as 1-based inclusive. Subtract 1 so
+        # span = chrom_end - chrom_start + 1 == sequence_length.
         chrom_start = 0
-        chrom_end = ts.sequence_length
+        chrom_end = int(ts.sequence_length) - 1
         if device == 'GPU':
             # Convert to CuPy arrays
             haplotypes = cp.array(haplotypes)
@@ -840,29 +869,31 @@ class HaplotypeMatrix:
         span : int
             The span to use for normalization
         """
+        # chrom_start and chrom_end are 1-based inclusive throughout pg_gpu;
+        # count_accessible() is half-open, so pass end + 1 to include
+        # chrom_end itself, and the inclusive count is end - start + 1.
+        # When a mask is set, the full BED total (mask.total_accessible)
+        # is the natural denominator, matching scikit-allel's
+        # sequence_diversity(is_accessible=...) behavior.
         if mode == 'auto':
             if self.accessible_mask is not None:
-                start = self.chrom_start if self.chrom_start is not None else 0
-                end = self.chrom_end if self.chrom_end is not None else start
-                return self.accessible_mask.count_accessible(start, end)
+                return self.accessible_mask.total_accessible
             if self.n_total_sites is not None:
                 return self.n_total_sites
             if self.chrom_start is not None and self.chrom_end is not None:
-                return self.chrom_end - self.chrom_start
+                return self.chrom_end - self.chrom_start + 1
             mode = 'callable'
 
         if mode == 'accessible':
             if self.accessible_mask is not None:
-                start = self.chrom_start if self.chrom_start is not None else 0
-                end = self.chrom_end if self.chrom_end is not None else start
-                return self.accessible_mask.count_accessible(start, end)
+                return self.accessible_mask.total_accessible
             raise ValueError(
                 "mode='accessible' requires an accessible mask. "
                 "Use set_accessible_mask() first.")
 
         if mode in ('per_base', 'total'):
             if self.chrom_start is not None and self.chrom_end is not None:
-                return self.chrom_end - self.chrom_start
+                return self.chrom_end - self.chrom_start + 1
             mode = 'callable'
 
         if mode in ('per_variant', 'sites'):
