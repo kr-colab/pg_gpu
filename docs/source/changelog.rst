@@ -192,7 +192,12 @@ Missing Data Handling
   sites). Simulation testing confirms ``include`` is unbiased under
   MCAR.
 * LD projection estimator available via ``estimator='sigma_d2'`` on
-  ``zns`` / ``omega``.
+  ``zns`` / ``omega``. The default is ``estimator='auto'``, which
+  resolves to ``'sigma_d2'`` on ``HaplotypeMatrix`` inputs (the
+  recommended path; uses the unbiased Ragsdale & Gravel 2019
+  estimators) and falls back to ``'r2'`` for pre-computed r² arrays
+  or ``GenotypeMatrix`` inputs. ``windowed_analysis`` follows the
+  same default for windowed ``zns`` and ``omega``.
 
 Moments Integration
 ~~~~~~~~~~~~~~~~~~~

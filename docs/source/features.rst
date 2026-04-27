@@ -166,11 +166,14 @@ Linkage Disequilibrium
      - Two-locus nucleotide diversity
      - Ragsdale & Gravel (2019)
    * - ``zns``
-     - Kelly's ZnS (mean pairwise r-squared)
-     - Kelly (1997)
+     - Kelly's ZnS (mean pairwise LD); defaults to the unbiased
+       :math:`\sigma_D^2` estimator on ``HaplotypeMatrix`` inputs,
+       falls back to naive :math:`r^2` for pre-computed arrays.
+     - Kelly (1997); Ragsdale & Gravel (2019)
    * - ``omega``
-     - Kim & Nielsen's Omega (partitioned LD)
-     - Kim & Nielsen (2004)
+     - Kim & Nielsen's Omega (partitioned LD); same default policy
+       as ``zns``.
+     - Kim & Nielsen (2004); Ragsdale & Gravel (2019)
    * - ``mu_ld``
      - Haplotype pattern exclusivity (RAiSD LD component)
      - Alachiotis & Pavlidis (2018)

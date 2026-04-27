@@ -341,6 +341,24 @@ def _tile_sigma_d2(hi, vi, hj, vj):
     return sigma_d2, valid
 
 
+def _resolve_ld_estimator(estimator: str, is_hap_matrix: bool) -> str:
+    """Resolve an LD estimator string, including the ``'auto'`` policy.
+
+    ``'auto'`` -> ``'sigma_d2'`` when the input is a ``HaplotypeMatrix``
+    (the recommended path; uses the unbiased Ragsdale & Gravel 2019
+    estimators), and ``'r2'`` otherwise (the only thing that works for
+    pre-computed r² arrays or ``GenotypeMatrix`` inputs). Explicit
+    ``'r2'`` and ``'sigma_d2'`` pass through unchanged.
+    """
+    if estimator == 'auto':
+        return 'sigma_d2' if is_hap_matrix else 'r2'
+    if estimator not in ('r2', 'sigma_d2'):
+        raise ValueError(
+            f"Unknown estimator: {estimator!r} "
+            f"(expected one of 'auto', 'r2', 'sigma_d2')")
+    return estimator
+
+
 def _zns_tiled(mat, missing_data='include', tile_size=512):
     """Compute ZnS without materializing the full r² matrix.
 
@@ -486,7 +504,7 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
     return total / (m * (m - 1))
 
 
-def zns(r2_matrix_or_matrix, missing_data='include', estimator='r2'):
+def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     """Kelly's ZnS: mean pairwise r-squared across all SNP pairs.
 
     Parameters
@@ -500,24 +518,31 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='r2'):
         ``'include'`` (default) uses per-site valid data for frequency
         computation. ``'exclude'`` filters to sites with no missing data.
     estimator : str
-        ``'r2'`` (default) computes naive r-squared.
-        ``'sigma_d2'`` uses unbiased multinomial projection estimators
-        (Ragsdale & Gravel 2019), computing mean sigma_D^2 = D^2/pi^2
-        per pair with falling-factorial corrections. Requires
-        HaplotypeMatrix input.
+        ``'auto'`` (default) uses the unbiased ``sigma_d2`` estimator
+        when the input is a ``HaplotypeMatrix``, and falls back to
+        naive ``r2`` for pre-computed r² arrays or ``GenotypeMatrix``
+        inputs (where ``sigma_d2`` is not available).
+        ``'r2'`` always computes naive r-squared.
+        ``'sigma_d2'`` always uses the unbiased multinomial projection
+        estimators (Ragsdale & Gravel 2019), computing mean
+        :math:`\\sigma_D^2 = D^2/\\pi_2` per pair with falling-factorial
+        corrections. Requires ``HaplotypeMatrix`` input.
 
     Returns
     -------
     float
-        Mean r-squared (or mean sigma_D^2 for estimator='sigma_d2').
+        Mean r-squared (or mean sigma_D^2 when sigma_d2 is selected).
     """
     from .haplotype_matrix import HaplotypeMatrix
+
+    is_hm = isinstance(r2_matrix_or_matrix, HaplotypeMatrix)
+    estimator = _resolve_ld_estimator(estimator, is_hm)
 
     # Map estimator to internal missing_data for backward compat with _zns_tiled
     _md = 'project' if estimator == 'sigma_d2' else missing_data
 
     # Streaming path for HaplotypeMatrix: O(B²) memory instead of O(m²)
-    if isinstance(r2_matrix_or_matrix, HaplotypeMatrix):
+    if is_hm:
         return _zns_tiled(r2_matrix_or_matrix, _md)
 
     if estimator == 'sigma_d2':
@@ -561,7 +586,7 @@ def _build_sigma_d2_matrix(mat, missing_data='include'):
     return result
 
 
-def omega(r2_matrix_or_matrix, missing_data='include', estimator='r2'):
+def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     """Kim and Nielsen's Omega: max ratio of within-partition to
     cross-partition mean LD.
 
@@ -582,9 +607,14 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='r2'):
         ``'include'`` (default) uses per-site valid data for frequency
         computation. ``'exclude'`` filters to sites with no missing data.
     estimator : str
-        ``'r2'`` (default) computes naive r-squared.
-        ``'sigma_d2'`` uses unbiased sigma_D^2 = D^2/pi^2
-        (Ragsdale & Gravel 2019). Requires HaplotypeMatrix input.
+        ``'auto'`` (default) uses the unbiased ``sigma_d2`` estimator
+        when the input is a ``HaplotypeMatrix``, and falls back to
+        naive ``r2`` for pre-computed r² arrays or ``GenotypeMatrix``
+        inputs (where ``sigma_d2`` is not available).
+        ``'r2'`` always computes naive r-squared.
+        ``'sigma_d2'`` always uses unbiased
+        :math:`\\sigma_D^2 = D^2/\\pi_2` (Ragsdale & Gravel 2019).
+        Requires ``HaplotypeMatrix`` input.
 
     Returns
     -------
@@ -593,8 +623,11 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='r2'):
     """
     from .haplotype_matrix import HaplotypeMatrix
 
+    is_hm = isinstance(r2_matrix_or_matrix, HaplotypeMatrix)
+    estimator = _resolve_ld_estimator(estimator, is_hm)
+
     if estimator == 'sigma_d2':
-        if not isinstance(r2_matrix_or_matrix, HaplotypeMatrix):
+        if not is_hm:
             raise ValueError(
                 "estimator='sigma_d2' requires a HaplotypeMatrix")
         r2_matrix = _build_sigma_d2_matrix(r2_matrix_or_matrix,

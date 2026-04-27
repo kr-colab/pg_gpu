@@ -2033,9 +2033,13 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 continue
 
             if 'zns' in stat_arrays:
+                # Per-window zns defaults to the unbiased sigma_d2
+                # estimator (Ragsdale & Gravel 2019), matching the new
+                # default of ld_statistics.zns(estimator='auto') on
+                # HaplotypeMatrix inputs.
                 stat_arrays['zns'][wi] = ld_statistics._zns_from_precomputed(
                     hap_clean, valid_mask, s, e,
-                    use_projection=False)
+                    use_projection=True)
 
             if need_winmat:
                 win_mat = HaplotypeMatrix(matrix.haplotypes[:, s:e],

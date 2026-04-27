@@ -130,21 +130,31 @@ LD Estimator Choice
 For LD statistics, ``zns()`` and ``omega()`` accept an ``estimator``
 parameter independent of missing data handling:
 
-* ``estimator='r2'`` (default): naive r-squared.
-* ``estimator='sigma_d2'``: unbiased multinomial projection estimators
-  (Ragsdale & Gravel 2019), computing sigma_D^2 = D^2/pi^2 with
-  falling-factorial corrections. More robust with small or variable
-  sample sizes.
+* ``estimator='auto'`` (default): use the unbiased ``sigma_d2``
+  estimator when the input is a ``HaplotypeMatrix``, and fall back to
+  naive ``r2`` for pre-computed r² arrays or ``GenotypeMatrix`` inputs
+  (where ``sigma_d2`` is not available).
+* ``estimator='r2'``: always use naive r-squared. Convenient when you
+  want the "classical" estimator regardless of input type.
+* ``estimator='sigma_d2'``: always use the unbiased multinomial
+  projection estimators (Ragsdale & Gravel 2019), computing
+  :math:`\sigma_D^2 = D^2 / \pi_2` with falling-factorial corrections.
+  More robust with small or variable sample sizes; requires a
+  ``HaplotypeMatrix``.
 
 .. code-block:: python
 
    from pg_gpu import ld_statistics
 
-   # Default: naive r-squared
+   # Default 'auto': unbiased sigma_d2 when given a HaplotypeMatrix
    zns = ld_statistics.zns(h)
 
-   # Unbiased estimator
-   zns_unbiased = ld_statistics.zns(h, estimator='sigma_d2')
+   # Force naive r²
+   zns_naive = ld_statistics.zns(h, estimator='r2')
+
+   # Pre-computed r² array: 'auto' falls back to 'r2'
+   r2 = h.pairwise_r2()
+   zns_from_array = ld_statistics.zns(r2)
 
 Haplotype Identity and Missing Data
 ------------------------------------
@@ -372,9 +382,13 @@ Best Practices
    when you want proper handling of variable sample sizes via group-by-n
    or SFS projection.
 
-4. **Use estimator='sigma_d2'** for LD statistics (ZnS, Omega) when
-   sample sizes are small or variable. The unbiased estimators correct
-   the upward bias inherent in naive r^2.
+4. **The default ``estimator='auto'`` for ``zns()`` and ``omega()``
+   uses the unbiased ``sigma_d2`` estimator on ``HaplotypeMatrix``
+   inputs**, which corrects the upward bias inherent in naive
+   :math:`r^2` -- particularly important with small or variable
+   sample sizes. Pass ``estimator='r2'`` explicitly if you want the
+   classical naive estimator instead (e.g. for backward comparison
+   with a previous analysis).
 
 5. **Check missingness patterns** before analysis with
    ``summarize_missing_data()`` and consider filtering sites with

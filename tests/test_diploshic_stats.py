@@ -149,6 +149,40 @@ class TestZnSOmega:
         o = ld_statistics.omega_diploid(geno_data)
         assert o >= 0
 
+    def test_zns_default_is_sigma_d2_for_haplotype_matrix(self, hap_data):
+        # Default 'auto' should resolve to sigma_d2 for HaplotypeMatrix
+        # inputs, matching an explicit estimator='sigma_d2' call.
+        z_default = ld_statistics.zns(hap_data)
+        z_sigma_d2 = ld_statistics.zns(hap_data, estimator='sigma_d2')
+        z_r2 = ld_statistics.zns(hap_data, estimator='r2')
+        assert z_default == z_sigma_d2
+        # The unbiased estimator is generally smaller than naive r²,
+        # but at minimum the two are not numerically identical for any
+        # realistic dataset (they differ in their finite-sample bias).
+        assert z_default != z_r2
+
+    def test_zns_default_falls_back_to_r2_for_array(self, hap_data):
+        # Pre-computed r² array: 'auto' must fall back to 'r2' since
+        # sigma_d2 needs the haplotype data.
+        r2 = hap_data.pairwise_r2()
+        z_auto = ld_statistics.zns(r2)
+        z_r2 = ld_statistics.zns(r2, estimator='r2')
+        assert z_auto == z_r2
+
+    def test_zns_sigma_d2_requires_haplotype_matrix(self, hap_data):
+        r2 = hap_data.pairwise_r2()
+        with pytest.raises(ValueError, match="HaplotypeMatrix"):
+            ld_statistics.zns(r2, estimator='sigma_d2')
+
+    def test_omega_default_is_sigma_d2_for_haplotype_matrix(self, hap_data):
+        o_default = ld_statistics.omega(hap_data)
+        o_sigma_d2 = ld_statistics.omega(hap_data, estimator='sigma_d2')
+        assert o_default == o_sigma_d2
+
+    def test_zns_unknown_estimator_raises(self, hap_data):
+        with pytest.raises(ValueError, match="Unknown estimator"):
+            ld_statistics.zns(hap_data, estimator='nonsense')
+
 
 # ---------------------------------------------------------------------------
 # mu_ld
