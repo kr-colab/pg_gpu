@@ -20,7 +20,10 @@ relatively cold regions. The result is that many genomes naturally
 partition into blocks of high pairwise LD separated by sharp
 boundaries at the hotspots. These blocks are useful for haplotype
 analysis, association-test correction, fine-mapping, and as a unit
-for block jackknife / bootstrap.
+for block jackknife / bootstrap, where blocks separated by
+recombination hotspots form approximately independent observations
+and so give better-calibrated standard errors than arbitrary
+fixed-size windows.
 
 The bottleneck in inferring LD blocks at chromosome scale is the
 :math:`n \times n` pairwise :math:`r^2` matrix, which is

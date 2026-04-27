@@ -15,8 +15,9 @@ install lightweight):
 What it shows
 -------------
 
-`moments.LD <https://moments.readthedocs.io/>`_ (Ragsdale & Gravel
-2019) infers demographic histories by matching observed two-locus LD
+`moments.LD <https://moments.readthedocs.io/>`_ (`Ragsdale & Gravel
+2019 <https://doi.org/10.1093/molbev/msz265>`_) infers demographic
+histories by matching observed two-locus LD
 statistics to expectations under a parameterized model. The bottleneck
 in practice is *parsing* the LD statistics from genotype data: for
 :math:`V` variants and :math:`P` populations the work is :math:`O(V^2
@@ -88,8 +89,10 @@ For each pair of variants binned by recombination distance,
 ``compute_ld_statistics`` returns 15 two-locus LD statistics:
 
 - **DD** (3 stats): :math:`D^2` within and between populations.
-- **Dz** (6 stats): three-locus LD correlations.
-- **pi2** (6 stats): four-locus joint LD statistics.
+- **Dz** (6 stats): two-locus LD correlations involving three
+  populations.
+- **pi2** (6 stats): two-locus joint statistics involving four
+  populations.
 
 Plus 3 single-locus heterozygosity statistics (H_0_0, H_0_1, H_1_1).
 These are exactly the statistics that ``moments.LD`` ingests.

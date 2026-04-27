@@ -72,7 +72,11 @@ A few things to keep in mind when adapting the template:
   ``window_size`` argument to ``windowed_analysis``. It should be
   large compared to the per-site LD scale -- if windows are too
   small, sample-to-sample correlation between blocks will deflate
-  the bootstrap CI.
+  the bootstrap CI. For better-calibrated CIs in regions with very
+  uneven recombination (or where the LD-decay scale is unknown),
+  partition the chromosome into LD blocks first (see
+  :doc:`ld_blocks`) and pass those as the bootstrap unit instead of
+  fixed-size bp windows.
 * ``block_bootstrap`` accepts a tuple ``(numer, denom)`` for
   ratio-of-sums statistics (FST, F3 / D, etc.); pass per-window
   numerator and denominator instead of a per-window scalar.
