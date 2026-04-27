@@ -43,7 +43,7 @@ known, then verifies that the mask recovers it:
 1. Simulate a 1 Mb chromosome under ``msprime`` with a 200 kb central
    block of 100x lower mutation rate -- a stand-in for a low-callability
    exon. The genealogy is identical inside and outside the block, so
-   the per-site coalescence is the same; only the *probability of
+   the per-site pattern of coalescence is the same; only the *probability of
    observing* a mutation differs. Outside the block, per-bp
    diversity is :math:`4 N_e \mu_{\text{high}}`.
 2. Compute windowed :math:`\pi` twice from the same simulation:
