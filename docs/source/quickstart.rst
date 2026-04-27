@@ -7,11 +7,20 @@ Basic Usage
 Loading Data
 ~~~~~~~~~~~~
 
+The primary container, ``HaplotypeMatrix``, holds *phased* haplotypes
+(one row per haplotype, two rows per diploid sample). When loaded from a
+diploid VCF, the two haploid copies of each sample become two rows; the
+loader does not check whether your data are actually phased, so if the
+VCF contains unphased calls the resulting matrix is best thought of as a
+random-phasing of the genotypes. For unphased / diploid-aware analyses,
+use ``GenotypeMatrix`` (see "Phased to Unphased" below).
+
 .. code-block:: python
 
    from pg_gpu import HaplotypeMatrix
 
-   # From VCF file (sample names are stored automatically)
+   # From VCF file (sample names are stored automatically). Diploid VCFs
+   # are loaded as 2*n_samples haplotypes -- treated as phased.
    h = HaplotypeMatrix.from_vcf("data.vcf.gz")
 
    # Load a specific genomic region (requires tabix index)
@@ -133,6 +142,32 @@ Diversity Statistics
    # Population-specific
    pi_pop1 = diversity.pi(h, population='pop1')
 
+Theta Estimators and Neutrality Tests
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+pg_gpu ships eight theta estimators and five neutrality tests. They can
+be called individually or batched (a single GPU pass for all requested
+statistics):
+
+.. code-block:: python
+
+   from pg_gpu import diversity
+
+   # Individual statistics
+   diversity.pi(h, population="pop1")
+   diversity.theta_w(h, population="pop1")
+   diversity.tajimas_d(h, population="pop1")
+   diversity.fay_wus_h(h, population="pop1")
+
+   # Batched (single GPU pass for all)
+   stats = diversity.diversity_stats(h, population="pop1",
+       statistics=['pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'])
+
+Available estimators: ``pi``, ``theta_w``, ``theta_h``, ``theta_l``,
+``eta1``, ``eta1_star``, ``minus_eta1``, ``minus_eta1_star``. Available
+tests: ``tajimas_d``, ``fay_wus_h``, ``normalized_fay_wus_h``,
+``zeng_e``, ``zeng_dh``.
+
 Divergence Statistics
 ~~~~~~~~~~~~~~~~~~~~~
 
@@ -207,6 +242,12 @@ Site Frequency Spectrum
 Admixture / F-Statistics
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
+Patterson's F-statistics are *ratio-of-sums* statistics: each call returns
+the per-site numerator and denominator separately, so that resampling
+(jackknife / bootstrap) can be applied across sites with the correct
+covariance structure. Wrappers like ``average_patterson_d`` do the
+combine-and-jackknife step for you.
+
 .. code-block:: python
 
    from pg_gpu import admixture
@@ -214,48 +255,72 @@ Admixture / F-Statistics
    # Patterson's F2 (branch length)
    f2 = admixture.patterson_f2(h, 'pop1', 'pop2')
 
-   # Patterson's F3 (admixture test)
-   T, B = admixture.patterson_f3(h, 'test_pop', 'source1', 'source2')
-   f3_star = np.nansum(T) / np.nansum(B)
+   # Patterson's F3 (admixture test): per-site numerator and denominator.
+   # The point estimate of F3* is sum(numer) / sum(denom).
+   f3_numer, f3_denom = admixture.patterson_f3(
+       h, 'test_pop', 'source1', 'source2')
+   f3_star = np.nansum(f3_numer) / np.nansum(f3_denom)
 
-   # Patterson's D (ABBA-BABA)
-   num, den = admixture.patterson_d(h, 'popA', 'popB', 'popC', 'popD')
+   # Patterson's D (ABBA-BABA): per-site numerator and denominator.
+   d_numer, d_denom = admixture.patterson_d(
+       h, 'popA', 'popB', 'popC', 'popD')
 
-   # Block-jackknife with standard error
-   d, se, z, vb, vj = admixture.average_patterson_d(
+   # Block-jackknife wrapper for Patterson's D
+   #   d_hat   point estimate
+   #   d_se    jackknife standard error
+   #   d_z     z-score
+   #   v_block per-block leave-one-out values
+   #   v_jack  jackknife pseudo-values
+   d_hat, d_se, d_z, v_block, v_jack = admixture.average_patterson_d(
        h, 'popA', 'popB', 'popC', 'popD', blen=100
    )
 
 Resampling (Block Jackknife and Bootstrap)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Both estimators take pre-binned per-block values and a callable ``statistic``.
-For ratio-of-sums statistics, pass a tuple ``(num, den)`` and have
-``statistic`` consume both — the same block indices are applied to each
-entry (required invariant).
+``block_jackknife`` and ``block_bootstrap`` are general-purpose resampling
+estimators: you bin your data into blocks (typically genomic windows or
+chromosome chunks) and pass an array of per-block values plus a
+``statistic`` callable that maps blocks to a scalar. They return a point
+estimate, a standard error, and either jackknife pseudo-values or
+bootstrap replicates.
+
+For *ratio-of-sums* statistics (Patterson's F-statistics, FST, etc.), the
+numerator and denominator must be resampled with the same block
+assignments. Pass a tuple ``(numer_blocks, denom_blocks)`` and write
+``statistic`` to consume both arrays.
 
 .. code-block:: python
 
    import numpy as np
-   from pg_gpu import block_jackknife, block_bootstrap, windowed_analysis
+   from pg_gpu import (block_jackknife, block_bootstrap, windowed_analysis,
+                       admixture)
 
-   # 1) Jackknife SE of a windowed mean. windowed_analysis gives per-window
+   # 1) Jackknife standard error of a windowed mean. windowed_analysis gives per-window
    #    Tajima's D; treat each window as a block and take the mean.
    df = windowed_analysis(h, window_size=50_000, step_size=25_000,
                           statistics=['tajimas_d'], window_type='bp')
    tajd = df['tajimas_d'].to_numpy()
    tajd = tajd[np.isfinite(tajd)]
-   est, se, _ = block_jackknife(tajd, statistic=np.mean)
+   jack_est, jack_se, _ = block_jackknife(tajd, statistic=np.mean)
 
    # 2) Bootstrap 95% CI on the same mean.
-   est, se, reps = block_bootstrap(tajd, statistic=np.mean,
-                                   n_replicates=2000, rng=0)
+   boot_est, boot_se, reps = block_bootstrap(
+       tajd, statistic=np.mean, n_replicates=2000, rng=0)
    lo, hi = np.quantile(reps, [0.025, 0.975])
 
-   # 3) Ratio-of-sums pattern (same as average_patterson_d).
-   est, se, reps = block_bootstrap(
-       (num_blocks, den_blocks),
-       statistic=lambda n, d: np.sum(n) / np.sum(d),
+   # 3) Ratio-of-sums pattern: bin Patterson's D numer/denom into blocks
+   #    (here, equal-size chunks of consecutive sites) and bootstrap the
+   #    ratio of sums.
+   d_numer, d_denom = admixture.patterson_d(
+       h, 'popA', 'popB', 'popC', 'popD')
+   block_size = 1000
+   n_blocks = len(d_numer) // block_size
+   numer_blocks = d_numer[:n_blocks * block_size].reshape(n_blocks, -1).sum(1)
+   denom_blocks = d_denom[:n_blocks * block_size].reshape(n_blocks, -1).sum(1)
+   ratio_est, ratio_se, reps = block_bootstrap(
+       (numer_blocks, denom_blocks),
+       statistic=lambda numer, denom: np.sum(numer) / np.sum(denom),
        n_replicates=2000, rng=0,
    )
 
@@ -307,7 +372,7 @@ regions). All four steps of the pipeline are available:
    # 4. Extreme-cluster detection in MDS space (Welzl MEC)
    corner_idx = corners(coords, prop=0.05, k=3)
 
-   # Optional: delete-1 block jackknife SE of local PCs (standalone)
+   # Optional: delete-1 block jackknife standard error of local PCs (standalone)
    from pg_gpu.decomposition import local_pca_jackknife
    se = local_pca_jackknife(h, window_size=500, window_type='snp',
                             k=2, n_blocks=10)  # (n_windows, k)
@@ -384,11 +449,12 @@ directly:
        statistics=('pi', 'theta_w', 'tajimas_d'),
    )
 
-Diploid Data
-~~~~~~~~~~~~
+Phased to Unphased
+~~~~~~~~~~~~~~~~~~
 
-Use ``GenotypeMatrix`` for diploid genotypes (0/1/2). Many functions
-auto-dispatch based on input type:
+Use ``GenotypeMatrix`` for unphased diploid genotypes (entries 0 / 1 / 2
+counting alt alleles). Many functions auto-dispatch on input type, so
+the same call works on either container:
 
 .. code-block:: python
 
@@ -405,31 +471,12 @@ auto-dispatch based on input type:
    # Distance distribution moments
    var, skew, kurt = distance_stats.dist_moments(gm)
 
-Theta Estimators and Neutrality Tests
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Custom Theta via FrequencySpectrum
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-All theta estimators and neutrality tests are available as individual
-functions or batched:
-
-.. code-block:: python
-
-   from pg_gpu import diversity
-
-   # Individual statistics
-   diversity.pi(h, population="pop1")
-   diversity.theta_w(h, population="pop1")
-   diversity.tajimas_d(h, population="pop1")
-   diversity.fay_wus_h(h, population="pop1")
-
-   # Batched (single GPU pass for all)
-   stats = diversity.diversity_stats(h, population="pop1",
-       statistics=['pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'])
-
-Available estimators: pi, theta_w, theta_h, theta_l, eta1, eta1_star,
-minus_eta1, minus_eta1_star. Available tests: tajimas_d, fay_wus_h,
-normalized_fay_wus_h, zeng_e, zeng_dh.
-
-For custom weight functions or SFS projection, use ``FrequencySpectrum``:
+For custom weight functions or hypergeometric SFS projection, build a
+``FrequencySpectrum``. Any new theta estimator that can be written as a
+weighted sum over the SFS is one ``fs.theta(weight_fn)`` call away.
 
 .. code-block:: python
 
@@ -439,13 +486,53 @@ For custom weight functions or SFS projection, use ``FrequencySpectrum``:
    fs.theta(my_custom_weight_fn)
    fs.project(target_n=50).theta("pi")
 
-Missing Data
-~~~~~~~~~~~~
+Missing Data and Accessibility Masks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Missing data is encoded as -1 and handled automatically:
+Missing genotypes are encoded as ``-1`` and handled automatically. Two
+modes control how sites with missing data contribute to per-site
+statistics:
 
 .. code-block:: python
 
    # Missing data modes
    pi_include = diversity.pi(h, missing_data='include')   # default: per-site valid data
    pi_exclude = diversity.pi(h, missing_data='exclude')   # only fully genotyped sites
+
+A complementary concern is *site accessibility*: in real data, only
+some bases are reliably callable (high-coverage, non-repeat, etc.).
+Without an accessibility mask, span-normalized statistics divide by
+total genomic span and look spuriously low in low-callability regions.
+With a mask attached, both per-site sums and the denominator are
+restricted to accessible bases, so statistics report the true rate over
+the regions you can actually see.
+
+.. code-block:: python
+
+   import numpy as np
+   from pg_gpu import HaplotypeMatrix, diversity, windowed_analysis
+
+   # Simulate or load a chromosome where part of the sequence is hard
+   # to call. Build a boolean mask: True = accessible, False = excluded.
+   accessible = np.ones(seq_length, dtype=bool)
+   accessible[exon_start:exon_end] = False  # mark a region inaccessible
+
+   hm_unmasked = HaplotypeMatrix.from_ts(ts)
+   hm_masked   = HaplotypeMatrix.from_ts(ts).set_accessible_mask(accessible)
+
+   # Genome-wide pi: unmasked divides by full sequence length,
+   # masked divides by accessible bases only.
+   diversity.pi(hm_unmasked)
+   diversity.pi(hm_masked)
+
+   # Windowed pi: fully-inaccessible windows return NaN so they don't
+   # show up as a misleading dip; partially-accessible windows are
+   # normalized by their accessible base count.
+   df_unmasked = windowed_analysis(hm_unmasked, window_size=10_000,
+                                   statistics=["pi"])
+   df_masked   = windowed_analysis(hm_masked,   window_size=10_000,
+                                   statistics=["pi"])
+
+For an end-to-end demo (with simulated data and a side-by-side plot)
+see ``examples/accessibility_mask.py``. See :doc:`missing_data` for
+masks-and-modes details.

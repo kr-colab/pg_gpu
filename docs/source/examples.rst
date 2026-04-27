@@ -1,8 +1,16 @@
 Examples
 ========
 
-Complete Workflow
------------------
+Short, copy-paste-ready snippets that each demonstrate one feature.
+For longer walk-throughs that pair simulated data with narrative
+explanation -- one page per packaged script under ``examples/`` -- see
+:doc:`tutorials`.
+
+Minimal Workflow
+----------------
+
+A small end-to-end example: load a VCF, assign populations, and compute
+one statistic from each major module.
 
 .. code-block:: python
 
@@ -36,6 +44,12 @@ Complete Workflow
 Two-Population LD
 -----------------
 
+Computes the Hill-Robertson moments-LD statistics
+(:math:`D^2`, :math:`Dz`, :math:`\pi_2`, and the related two-locus
+moments) binned by physical distance, using all
+within-population and between-population sample pairs from ``pop1`` and
+``pop2``. Returns a per-bin DataFrame with one column per statistic.
+
 .. code-block:: python
 
    # Memory-efficient chunked computation
@@ -49,9 +63,14 @@ Two-Population LD
 Batch Statistics
 ----------------
 
+Fused operations may be used to compute multiple summary statistics in a
+single GPU pass, more efficiently than if they were computed
+independently. Pass an iterable of statistic names; the kernel reuses the
+intermediate haplotype-tally counts across all of them.
+
 .. code-block:: python
 
-   # Multiple LD statistics in one call
+   # Multiple LD statistics in one call (single GPU launch)
    results = ld_statistics.compute_ld_statistics(
        counts,
        statistics=['dd', 'dz', 'pi2', 'r_squared'],
@@ -59,6 +78,14 @@ Batch Statistics
 
 Integration with moments
 ------------------------
+
+The two-locus moments-LD statistics computed below are exactly the
+quantities used by `moments.LD <https://moments.readthedocs.io/>`_ for
+demographic-model fitting (Ragsdale & Gravel 2019). Because they are
+pairwise across loci they are expensive to compute on a CPU -- which
+is exactly where GPU acceleration shines: pg_gpu can replace
+``moments.LD.Parsing.compute_ld_statistics()`` as a drop-in backend
+that returns the same dictionary structure.
 
 .. code-block:: python
 
@@ -74,24 +101,35 @@ Integration with moments
        chunk_size='auto'
    )
 
-For a complete end-to-end workflow using ``pg_gpu`` as a drop-in replacement for
-``moments.LD.Parsing.compute_ld_statistics()``, see
-``examples/moments_integration_demo.py``.
-Full details in :doc:`moments_integration`.
+For a complete end-to-end workflow using pg_gpu as a drop-in replacement
+for ``moments.LD.Parsing.compute_ld_statistics()``, see the
+:doc:`tutorials/moments_integration` tutorial.
 
 LD Pruning
 ----------
 
+LD pruning thins a SNP set down to (approximately) unlinked variants --
+useful before PCA, GRM construction, or any analysis whose theory
+assumes independent sites. ``locate_unlinked`` slides a window of
+``size`` variants across the matrix and, within each window, drops
+variants whose pairwise :math:`r^2` exceeds ``threshold``; ``step``
+controls the window stride. The companion ``windowed_r_squared``
+returns the empirical LD-decay curve as a function of physical distance,
+which is useful for choosing a sensible threshold.
+
 .. code-block:: python
 
-   # Find variants in linkage equilibrium
+   # Find variants in approximate linkage equilibrium
    unlinked = h.locate_unlinked(size=100, step=20, threshold=0.1)
    h_pruned = h.get_subset(np.where(unlinked)[0])
    print(f"Kept {np.sum(unlinked)} of {h.num_variants} variants")
 
-   # Windowed r-squared decay
+   # Windowed r-squared decay (median r^2 in each bp bin)
    bins = np.arange(0, 100001, 1000)
    r2_decay, counts = h.windowed_r_squared(bins, percentile=50)
+
+See ``examples/ld_blocks.py`` for an end-to-end demo that uses pairwise
+:math:`r^2` to detect LD-block boundaries.
 
 Selection Scan Pipeline
 -----------------------
@@ -128,123 +166,7 @@ SFS and Admixture
    d, se, z, vb, vj = admixture.average_patterson_d(
        h, "popA", "popB", "popC", "popD", blen=100
    )
-   print(f"D = {d:.4f}, SE = {se:.4f}, Z = {z:.2f}")
-
-Bootstrap CI on Tajima's D under a Sweep
------------------------------------------
-
-``examples/sweep_tajimas_d_bootstrap.py`` simulates a 10 Mb chromosome
-with msprime's ``SweepGenicSelection`` targeting fixation at the midpoint,
-computes windowed Tajima's D, and uses ``block_bootstrap`` to obtain 95%
-confidence intervals for the mean Tajima's D in the sweep-local region,
-and the distal region. Under a completed sweep the
-sweep-local CI excludes zero; the distal CI
-brackets the neutral expectation.
-
-.. code-block:: bash
-
-   pixi run python examples/sweep_tajimas_d_bootstrap.py
-   pixi run python examples/sweep_tajimas_d_bootstrap.py --seed 7 --n-replicates 5000
-
-Admixture Detection (end-to-end)
---------------------------------
-
-``examples/admixture_detection.py`` is a self-contained demo: it
-simulates two 4-population msprime tree sequences (one null, one with
-a 10% C -> B admixture pulse), loads each into a ``HaplotypeMatrix`` via
-``from_ts``, and computes ``average_patterson_d`` with a block-jackknife
-95% CI. The null scenario's CI overlaps zero; the admixed scenario's
-excludes it. A two-panel figure shows the per-block D distribution and
-point estimates with CIs.
-
-.. code-block:: bash
-
-   pixi run python examples/admixture_detection.py
-   pixi run python examples/admixture_detection.py --length 20_000_000 --samples 20
-
-Accessibility Mask (end-to-end)
--------------------------------
-
-``examples/accessibility_mask.py`` demonstrates what an accessibility
-mask actually does to windowed statistics. It simulates a 1 Mb
-chromosome with a 200 kb block of 100x lower mutation rate (a stand-in
-for a low-callability exon), then computes windowed π twice — once
-without a mask, once with the exon flagged inaccessible via an
-in-memory numpy bool array. The unmasked trace shows a misleading dip
-over the low-μ region; the masked trace drops those windows entirely
-(NaN → visual gap) and the flanking π sits at its expected 4·Ne·μ
-value. A two-panel figure with the excluded region shaded makes the
-contrast visible at a glance.
-
-.. code-block:: bash
-
-   pixi run python examples/accessibility_mask.py
-   pixi run python examples/accessibility_mask.py --window 20_000
-
-Local PCA / lostruct (end-to-end)
----------------------------------
-
-``examples/local_pca.py`` is a self-contained demo of the GPU lostruct
-pipeline. It simulates a 10 Mb chromosome under ``msprime`` with
-``SweepGenicSelection`` at the midpoint (final sweep frequency 0.5, i.e.
-a partial / incomplete sweep), runs per-window local PCA, computes the
-Frobenius pairwise distance between windows, and reduces with classical
-MDS. 1D k-means (k=3) on the resulting MDS1 values partitions windows
-into neutral / linked / sweep regimes, ordered by how far each
-cluster's centroid sits from the chromosome-wide median. ``corners()``
-picks the extreme windows on the MDS embedding, which coincide with
-the sweep region. A two-panel figure shows the MDS scatter (colored by
-regime) on the left and shared-x stacks of MDS1 and Garud H12 along
-the chromosome on the right — the sweep cluster and H12 peak both
-land on the sweep focal site.
-
-.. code-block:: bash
-
-   pixi run python examples/local_pca.py
-   pixi run python examples/local_pca.py --window 300 --seed 7
-   pixi run python examples/local_pca.py --s 0.05 --end-freq 0.3
-
-Python API:
-
-.. code-block:: python
-
-   from pg_gpu import HaplotypeMatrix, windowed_analysis
-   from pg_gpu.decomposition import pc_dist, pcoa, corners
-
-   # `local_pca` statistic routes through the GPU-batched eigh pipeline
-   result = windowed_analysis(
-       hm, window_size=500, step_size=250,
-       statistics=['local_pca'], window_type='snp', k=2)
-
-   dist = pc_dist(result, npc=2, normalize='L1')
-   mds, _ = pcoa(dist, n_components=2)
-   extremes = corners(mds, prop=0.05, k=3)
-
-   # With jackknife SE (shares per-window matrix prep with local_pca)
-   result = windowed_analysis(
-       hm, window_size=500, step_size=250,
-       statistics=['local_pca', 'local_pca_jackknife'],
-       window_type='snp', k=2, n_blocks=10)
-   result.jackknife_se  # (n_windows, k) SE array
-
-LD Block Partitioning (end-to-end)
-----------------------------------
-
-``examples/ld_blocks.py`` partitions a chromosome into LD blocks using
-pg_gpu's GPU-fast pairwise r² as the input. It simulates a 1 Mb
-chromosome with two recombination hotspots (so ground truth = 3 blocks),
-computes the full r² matrix on the GPU, and locates block boundaries by
-scanning a *bridging score*: at each candidate breakpoint the mean r² is
-computed across a sliding (left-window, right-window) pair. The score is
-high inside a block and dips at hotspots; ``scipy.signal.find_peaks``
-then identifies the dips. A three-panel figure shows the r² heatmap with
-detected boundaries, the bridging-score trace, and the simulated
-recombination map for comparison.
-
-.. code-block:: bash
-
-   pixi run python examples/ld_blocks.py
-   pixi run python examples/ld_blocks.py --window 200 --max-score 0.02
+   print(f"D = {d:.4f}, standard error = {se:.4f}, Z = {z:.2f}")
 
 PBS (Population Branch Statistic)
 ---------------------------------
@@ -314,19 +236,8 @@ Compute multiple statistics across thousands of windows without Python loops:
        pop1='CEU', pop2='YRI'
    )
 
-Utility Scripts
----------------
-
-The top-level ``utils/`` directory contains standalone command-line scripts:
-
-- ``vcf_to_zarr.py`` — convert a bgzipped VCF (or BCF) to a VCZ-format zarr store
-  using ``HaplotypeMatrix.vcf_to_zarr``. Takes ``--workers`` to control parallelism.
-- ``genome_scan.py`` — end-to-end genome scan workflow. Loads VCF or zarr data,
-  optionally assigns populations from a tab-delimited file, computes windowed
-  diversity / divergence / Garud's H and scalar summaries on the GPU, and writes
-  a multi-panel scan figure (PDF).
-
-Run either with ``pixi run python utils/<script>.py --help`` for usage.
+For end-to-end command-line workflows (``vcf_to_zarr.py``,
+``genome_scan.py``), see :doc:`workflows`.
 
 Missing Data
 ------------

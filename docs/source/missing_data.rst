@@ -81,7 +81,7 @@ Every public function accepts the ``missing_data`` parameter:
      - per-site n
      - filter sites
    * - Selection scans (ihs, nsl, xpehh)
-     - wildcard in SSL
+     - wildcard in shared-site length (SSL)
      - filter sites
    * - Haplotype stats (garud_h, haplotype_diversity)
      - wildcard match
@@ -110,7 +110,7 @@ is the standard "reference vs any alternate" folding used by most
 population genetics tools.
 
 This means multiallelic VCF sites are handled correctly without
-filtering — a site with REF=A, ALT=T,C where some samples carry
+filtering -- a site with REF=A, ALT=T,C where some samples carry
 the C allele will count all non-reference haplotypes as derived.
 
 If you need strictly biallelic data (e.g., for LD statistics or
@@ -162,8 +162,12 @@ non-missing.
    from pg_gpu import selection
    h1, h12, h123, h2_h1 = selection.garud_h(h)
 
-HaplotypeMatrix Utilities
--------------------------
+HaplotypeMatrix and GenotypeMatrix Utilities
+--------------------------------------------
+
+The same utilities are available on both ``HaplotypeMatrix`` and
+``GenotypeMatrix`` -- substitute ``gm`` for ``h`` below if you are
+working with diploid genotypes.
 
 .. code-block:: python
 
@@ -176,37 +180,6 @@ HaplotypeMatrix Utilities
 
    # Summary statistics
    summary = h.summarize_missing_data()
-
-Span Normalization
-------------------
-
-Rate estimators (pi, theta_w, dxy, etc.) accept a ``span_normalize``
-parameter that controls *how results are expressed*. This is orthogonal
-to missing data handling.
-
-``span_normalize`` accepts ``True`` or ``False``:
-
-* ``True`` (default): auto-detect the best denominator. If an accessible
-  mask is set, divides by ``mask.total_accessible`` (the BED span).
-  Otherwise divides by the genomic span (1-based inclusive,
-  ``chrom_end - chrom_start + 1``).
-* ``False``: return raw sum (used internally by composite statistics like
-  Tajima's D, and by advanced users who need custom normalization).
-
-.. code-block:: python
-
-   # Per base pair (default -- auto-detects best denominator)
-   pi = diversity.pi(h)
-
-   # With accessible mask: auto uses accessible bases
-   h.set_accessible_mask("mask.bed", chrom="3L")
-   pi = diversity.pi(h)  # per accessible base, automatically
-
-   # Raw sum (no normalization)
-   pi_raw = diversity.pi(h, span_normalize=False)
-
-Test statistics (Tajima's D, Fay-Wu's H, FST) do not accept
-``span_normalize`` — they are dimensionless by definition.
 
 Accessible Site Masks
 ---------------------
@@ -311,20 +284,58 @@ active simultaneously:
                                  accessible_bed="mask.bed")
    pi = diversity.pi(h)  # uses accessible mask + per-site valid counts
 
+Span Normalization
+------------------
+
+Rate estimators (pi, theta_w, dxy, etc.) accept a ``span_normalize``
+parameter that controls *how results are expressed*. This is orthogonal
+to missing data handling.
+
+``span_normalize`` accepts ``True`` or ``False``:
+
+* ``True`` (default): auto-detect the best denominator. If an accessible
+  mask is set, divides by ``mask.total_accessible`` (the BED span).
+  Otherwise divides by the genomic span (1-based inclusive,
+  ``chrom_end - chrom_start + 1``).
+* ``False``: return raw sum (used internally by composite statistics like
+  Tajima's D, and by advanced users who need custom normalization).
+
+.. code-block:: python
+
+   # Per base pair (default -- auto-detects best denominator)
+   pi = diversity.pi(h)
+
+   # With accessible mask: auto uses accessible bases
+   h.set_accessible_mask("mask.bed", chrom="3L")
+   pi = diversity.pi(h)  # per accessible base, automatically
+
+   # Raw sum (no normalization)
+   pi_raw = diversity.pi(h, span_normalize=False)
+
+Test statistics (Tajima's D, Fay-Wu's H, FST) do not accept
+``span_normalize`` -- they are dimensionless by definition.
+
 SFS Projection
 --------------
 
-For cross-population comparison at matched sample sizes, or for
-demographic inference, ``FrequencySpectrum`` supports hypergeometric
-SFS projection (Gutenkunst et al. 2009):
+When samples are missing at different sites the per-site sample size
+varies, which complicates statistics that are sensitive to sample size
+(notably theta estimators). *Hypergeometric projection* re-expresses an
+observed SFS as the SFS that would have been seen if every site had
+been called in exactly ``target_n`` randomly chosen samples. The
+projection is unbiased and lets you build a single, comparable SFS from
+data with mixed sample sizes -- and to compare populations that were
+sequenced to different depths. ``FrequencySpectrum`` supports it
+following Marth et al. (2004) / the implementation used in
+:math:`\partial a \partial i` (Gutenkunst et al. 2009):
 
 .. code-block:: python
 
    from pg_gpu.diversity import FrequencySpectrum
 
    fs = FrequencySpectrum(h, population="pop1")
-   fs_proj = fs.project(target_n=50)
-   pi_proj = fs_proj.theta("pi")
+   fs_proj = fs.project(target_n=50)   # project down to n=50
+   pi_proj = fs_proj.theta("pi")        # any theta on the projected SFS
 
 Component-Level Access
 ----------------------

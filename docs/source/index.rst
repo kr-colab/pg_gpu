@@ -7,13 +7,15 @@ GPU-accelerated population genetics statistics for Python.
    :maxdepth: 2
    :caption: Contents:
 
+   introduction
    installation
    features
    quickstart
    api
    missing_data
    examples
-   moments_integration
+   tutorials
+   workflows
    changelog
 
 Overview

@@ -13,7 +13,7 @@ Core Data Structures
   Loaders: ``from_vcf`` (with ``region=`` and ``samples=`` subsetting),
   ``from_zarr`` (auto-detects VCZ / scikit-allel / chromosome-grouped
   layouts), ``from_ts``, and direct NumPy construction. ``to_zarr`` writes
-  VCZ by default. ``vcf_to_zarr`` provides multicore VCF→zarr conversion.
+  VCZ by default. ``vcf_to_zarr`` provides multicore VCF-to-zarr conversion.
   Sample names from VCFs are preserved; ``load_pop_file('pops.txt')``
   assigns populations using stored sample names.
 
@@ -27,7 +27,7 @@ Linkage Disequilibrium
 * Core statistics: ``r``, ``r_squared``, ``dd`` (D-squared), ``dz``,
   ``pi2`` (Ragsdale & Gravel 2019), ``zns`` (Kelly), ``omega``
   (Kim & Nielsen), ``mu_ld`` (RAiSD).
-* LD pruning: ``locate_unlinked``; windowed r² decay:
+* LD pruning: ``locate_unlinked``; windowed :math:`r^2` decay:
   ``windowed_r_squared``.
 * Two-population LD via ``compute_ld_statistics_gpu_two_pops`` with
   chunked GPU execution.
@@ -90,14 +90,14 @@ Admixture / F-Statistics
 * Per-variant: ``patterson_f2`` (F2 branch length), ``patterson_f3``
   (admixture test), ``patterson_d`` (ABBA-BABA).
 * Windowed: ``moving_patterson_f3``, ``moving_patterson_d``.
-* Block-jackknife with SE: ``average_patterson_f3``,
+* Block-jackknife with standard error: ``average_patterson_f3``,
   ``average_patterson_d``.
 
 Resampling
 ~~~~~~~~~~
 
 * Public ``pg_gpu.resampling`` module with ``block_jackknife`` and
-  ``block_bootstrap`` for block-resampled SE / CIs on any scalar
+  ``block_bootstrap`` for block-resampled standard errors / CIs on any scalar
   genome-wide statistic (genome-wide mean Tajima's D, ratio-of-sums
   estimators, etc.). Promotes the previously private ``_jackknife`` helper
   from ``admixture``. The weighted jackknife follows the Busing et al.
@@ -124,7 +124,7 @@ Dimensionality Reduction and Distance
   re-materialization). L1, L2, or no normalization.
 * ``corners`` -- extreme-cluster selection in a 2D MDS embedding via
   Welzl's minimum enclosing circle.
-* ``local_pca_jackknife`` -- delete-1 block jackknife SE of local PCs,
+* ``local_pca_jackknife`` -- delete-1 block jackknife standard error of local PCs,
   also GPU-batched with sign-aligned replicates.
 * ``LocalPCAResult`` dataclass with ``.windows`` / ``.eigvals`` /
   ``.eigvecs`` / ``.sumsq`` plus ``.to_lostruct_matrix()`` for
@@ -151,7 +151,7 @@ non-overlapping windows with ``missing_data='include'``:
 * Structure: ``local_pca`` (returns a ``LocalPCAResult``; scalar stats
   requested alongside are merged onto ``result.windows``).
 * Structure: ``local_pca_jackknife`` computes delete-1 block jackknife
-  SE and populates ``LocalPCAResult.jackknife_se``. When both are
+  standard error and populates ``LocalPCAResult.jackknife_se``. When both are
   requested together, per-window matrix preparation is shared.
 
 Lower-level windowed entry points: ``windowed_statistics`` (scatter-add
@@ -303,9 +303,10 @@ End-to-end demo scripts in ``examples/``:
   chromosome data.
 * ``admixture_detection.py`` -- block-jackknife ABBA-BABA on simulated
   null and admixed msprime scenarios.
-* ``accessibility_mask.py`` -- windowed π with and without an
-  accessibility mask over a low-μ "exon" region.
-* ``ld_blocks.py`` -- LD-block partitioning via r² bridging scores.
+* ``accessibility_mask.py`` -- windowed :math:`\pi` with and without
+  an accessibility mask over a low-:math:`\mu` "exon" region.
+* ``ld_blocks.py`` -- LD-block partitioning via :math:`r^2` bridging
+  scores.
 * ``local_pca.py`` -- lostruct pipeline on a simulated partial
   selective sweep (``SweepGenicSelection`` with end frequency 0.5).
 

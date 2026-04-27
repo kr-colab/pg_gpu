@@ -179,7 +179,7 @@ Scaling and Folding Utilities
 Resampling (Block Jackknife and Bootstrap)
 ------------------------------------------
 
-General-purpose block-resampling estimators for calibrated SE / CI on any
+General-purpose block-resampling estimators for calibrated standard error / CI on any
 scalar genome-wide statistic. Both accept pre-binned per-block values
 (single 1D array or tuple of arrays for ratio-of-sums statistics) and a
 callable ``statistic``. See ``examples/sweep_tajimas_d_bootstrap.py`` for
@@ -289,7 +289,7 @@ Selection scan statistics:
 Structure / dimensionality reduction:
 
 - ``local_pca`` -- Li & Ralph (2019) local PCA. Vector-valued per window; dispatches to :func:`pg_gpu.decomposition.local_pca` and returns a :class:`~pg_gpu.decomposition.LocalPCAResult` instead of the scalar-stat DataFrame. Can be combined with scalar statistics in the same call; the scalar columns are merged onto ``result.windows``.
-- ``local_pca_jackknife`` -- delete-1 block jackknife SE for local PCA eigenvectors. Returns a :class:`~pg_gpu.decomposition.LocalPCAResult` with the ``jackknife_se`` field populated. When requested alongside ``local_pca``, per-window matrix preparation is shared. Accepts ``n_blocks`` and ``aggregate`` kwargs.
+- ``local_pca_jackknife`` -- delete-1 block jackknife standard error for local PCA eigenvectors. Returns a :class:`~pg_gpu.decomposition.LocalPCAResult` with the ``jackknife_se`` field populated. When requested alongside ``local_pca``, per-window matrix preparation is shared. Accepts ``n_blocks`` and ``aggregate`` kwargs.
 
 Legacy Functions
 ~~~~~~~~~~~~~~~~

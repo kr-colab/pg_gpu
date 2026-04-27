@@ -291,16 +291,16 @@ Resampling (Block Jackknife and Bootstrap)
      - Description
      - Reference
    * - ``block_jackknife``
-     - Delete-1 block jackknife SE; supports unequal block sizes
+     - Delete-1 block jackknife standard error; supports unequal block sizes
      - Busing et al. (1999)
    * - ``block_bootstrap``
-     - Block bootstrap SE and replicate distribution
+     - Block bootstrap standard error and replicate distribution
      - Efron & Tibshirani (1993)
 
 Both operate on pre-binned per-block values and a user-supplied statistic,
-so any scalar aggregate (genome-wide mean Tajima's D, per-population π,
-ratio-of-sums estimators like normed F3 / D) can get a calibrated SE / CI
-with a single call.
+so any scalar aggregate (genome-wide mean Tajima's D, per-population :math:`\pi`,
+ratio-of-sums estimators like normed F3 / D) can get a calibrated
+standard error / CI with a single call.
 
 FrequencySpectrum (Power-User SFS Interface)
 ---------------------------------------------
@@ -356,7 +356,7 @@ Dimensionality Reduction and Distance
      - Per-window PCA (lostruct); GPU-batched ``eigh`` over stacked per-window Gram matrices
      - Li & Ralph (2019)
    * - ``local_pca_jackknife``
-     - Delete-1 block jackknife SE of local PCs (batched)
+     - Delete-1 block jackknife standard error of local PCs (batched)
      - Li & Ralph (2019)
    * - ``pc_dist``
      - Frobenius distance between per-window low-rank covariance reps
