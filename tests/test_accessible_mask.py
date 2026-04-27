@@ -765,8 +765,9 @@ class TestSiteCountProperties:
         n_hap = 4
         hap = np.random.RandomState(0).randint(
             0, 2, size=(n_hap, len(positions))).astype(np.int8)
+        # chrom_start/end define the analysis range (1-based inclusive).
         hm = HaplotypeMatrix(hap, positions,
-                             chrom_start=int(positions[0]),
+                             chrom_start=1,
                              chrom_end=int(positions[-1]))
 
         f = tempfile.NamedTemporaryFile(
@@ -835,9 +836,11 @@ class TestSiteCountProperties:
         try:
             for label, positions, hap in scenarios:
                 from pg_gpu import diversity as div
+                # Analysis range is [1, total_bp]; matches allel's
+                # start/stop arguments.
                 hm = HaplotypeMatrix(hap, positions,
-                                     chrom_start=int(positions[0]),
-                                     chrom_end=int(positions[-1]))
+                                     chrom_start=1,
+                                     chrom_end=total_bp)
                 hm.set_accessible_mask(bed_path, chrom="chr1")
                 pi_pg = div.pi(hm)
 

@@ -63,7 +63,11 @@ class GenotypeMatrix:
                 accessible_mask, chrom_start, chrom_end)
         self.accessible_mask = accessible_mask
         if self._accessible_mask is not None and self.n_total_sites is None:
-            self.n_total_sites = self._accessible_mask.total_accessible
+            if chrom_start is not None and chrom_end is not None:
+                self.n_total_sites = self._accessible_mask.count_accessible(
+                    chrom_start, chrom_end + 1)
+            else:
+                self.n_total_sites = self._accessible_mask.total_accessible
 
     @property
     def genotypes(self):
@@ -157,7 +161,11 @@ class GenotypeMatrix:
         """
         self.accessible_mask = resolve_accessible_mask(
             mask_or_path, self.chrom_start, self.chrom_end, chrom)
-        self.n_total_sites = self.accessible_mask.total_accessible
+        if self.chrom_start is not None and self.chrom_end is not None:
+            self.n_total_sites = self.accessible_mask.count_accessible(
+                self.chrom_start, self.chrom_end + 1)
+        else:
+            self.n_total_sites = self.accessible_mask.total_accessible
         return self
 
     def remove_accessible_mask(self):

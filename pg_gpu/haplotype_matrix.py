@@ -76,7 +76,11 @@ class HaplotypeMatrix:
                 accessible_mask, chrom_start, chrom_end)
         self.accessible_mask = accessible_mask
         if self._accessible_mask is not None and self.n_total_sites is None:
-            self.n_total_sites = self._accessible_mask.total_accessible
+            if chrom_start is not None and chrom_end is not None:
+                self.n_total_sites = self._accessible_mask.count_accessible(
+                    chrom_start, chrom_end + 1)
+            else:
+                self.n_total_sites = self._accessible_mask.total_accessible
 
     @property
     def haplotypes(self):
@@ -189,7 +193,16 @@ class HaplotypeMatrix:
         # The property setter handles _accessible_idx and cache invalidation
         self.accessible_mask = resolve_accessible_mask(
             mask_or_path, self.chrom_start, self.chrom_end, chrom)
-        self.n_total_sites = self.accessible_mask.total_accessible
+        # n_total_sites is the BED-accessible-base count within the
+        # analysis range [chrom_start, chrom_end]. The mask itself may
+        # span more (we widen it to avoid losing bases inside the range
+        # when chrom_end < BED max), but only in-range bases count toward
+        # the per-base normalization denominator.
+        if self.chrom_start is not None and self.chrom_end is not None:
+            self.n_total_sites = self.accessible_mask.count_accessible(
+                self.chrom_start, self.chrom_end + 1)
+        else:
+            self.n_total_sites = self.accessible_mask.total_accessible
         return self
 
     def remove_accessible_mask(self):
@@ -318,16 +331,30 @@ class HaplotypeMatrix:
         positions = np.array(vcf['variants/POS'])
         sample_names = list(vcf['samples'])
 
+        # When a region is given, use its bounds (1-based inclusive) so the
+        # analysis range matches what the user asked for, not just the
+        # span between the first and last observed variants. This matters
+        # for span normalization with an accessible mask: the denominator
+        # is BED accessible bases within [chrom_start, chrom_end].
+        chrom_start = int(positions[0])
+        chrom_end = int(positions[-1])
+        chrom = None
+        if region is not None:
+            chrom_part, _, range_part = region.partition(':')
+            chrom = chrom_part or None
+            if range_part:
+                start_str, _, end_str = range_part.partition('-')
+                if start_str:
+                    chrom_start = int(start_str.replace(',', ''))
+                if end_str:
+                    chrom_end = int(end_str.replace(',', ''))
+        elif 'variants/CHROM' in vcf:
+            chrom = vcf['variants/CHROM'][0]
+
         n_total_sites = num_variants if include_invariant else None
-        hm = cls(haplotypes, positions, positions[0], positions[-1],
+        hm = cls(haplotypes, positions, chrom_start, chrom_end,
                  n_total_sites=n_total_sites, samples=sample_names)
         if accessible_bed is not None:
-            # Extract chrom from region string or VCF data
-            chrom = None
-            if region is not None:
-                chrom = region.split(':')[0]
-            elif 'variants/CHROM' in vcf:
-                chrom = vcf['variants/CHROM'][0]
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
         return hm
 
@@ -872,12 +899,14 @@ class HaplotypeMatrix:
         # chrom_start and chrom_end are 1-based inclusive throughout pg_gpu;
         # count_accessible() is half-open, so pass end + 1 to include
         # chrom_end itself, and the inclusive count is end - start + 1.
-        # When a mask is set, the full BED total (mask.total_accessible)
-        # is the natural denominator, matching scikit-allel's
-        # sequence_diversity(is_accessible=...) behavior.
+        # The denominator is BED accessible bases within the analysis range
+        # [chrom_start, chrom_end], matching scikit-allel's
+        # sequence_diversity(is_accessible=..., start=..., stop=...).
         if mode == 'auto':
             if self.accessible_mask is not None:
-                return self.accessible_mask.total_accessible
+                start = self.chrom_start if self.chrom_start is not None else 0
+                end = self.chrom_end if self.chrom_end is not None else start
+                return self.accessible_mask.count_accessible(start, end + 1)
             if self.n_total_sites is not None:
                 return self.n_total_sites
             if self.chrom_start is not None and self.chrom_end is not None:
@@ -886,7 +915,9 @@ class HaplotypeMatrix:
 
         if mode == 'accessible':
             if self.accessible_mask is not None:
-                return self.accessible_mask.total_accessible
+                start = self.chrom_start if self.chrom_start is not None else 0
+                end = self.chrom_end if self.chrom_end is not None else start
+                return self.accessible_mask.count_accessible(start, end + 1)
             raise ValueError(
                 "mode='accessible' requires an accessible mask. "
                 "Use set_accessible_mask() first.")
