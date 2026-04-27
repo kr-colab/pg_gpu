@@ -19,7 +19,7 @@ Watterson's segregating-sites estimator :math:`\hat\theta_W`. Under
 neutrality at equilibrium, :math:`\mathbb{E}[D] = 0`. A recent hard
 sweep removes intermediate-frequency variation in the linked region
 and leaves an excess of singletons as new mutations enter on the
-sweep haplotype, so :math:`\hat\pi` falls relative to
+sweep haplotype, so :math:`\hat\pi` decreases relative to
 :math:`\hat\theta_W` and :math:`D` becomes negative in the local
 neighborhood of the selected site.
 
