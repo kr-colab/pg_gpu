@@ -127,7 +127,7 @@ def main() -> None:
     # Li & Ralph's lostruct pipeline: local PCA, window distance, MDS, corners.
     # this is the core of the example, and the only call to lostruct. All other
     # analyses are downstream of this.
-    
+
     print(f"Running lostruct pipeline (window={args.window} SNPs, "
           f"k={args.k}, n_corners={args.n_corners}) ...")
     res = lostruct(hm, window_size=args.window,
