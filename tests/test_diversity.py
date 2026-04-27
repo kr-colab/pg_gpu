@@ -51,7 +51,8 @@ class TestNucleotideDiversity:
 
         # Create positions with known span
         positions = np.arange(n_variants) * 100  # 100 bp spacing
-        span = positions[-1] - positions[0]
+        # chrom_end is 1-based inclusive => span = end - start + 1
+        span = positions[-1] - positions[0] + 1
 
         matrix = HaplotypeMatrix(haplotypes, positions, positions[0], positions[-1])
 

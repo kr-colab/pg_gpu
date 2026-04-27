@@ -63,7 +63,11 @@ class GenotypeMatrix:
                 accessible_mask, chrom_start, chrom_end)
         self.accessible_mask = accessible_mask
         if self._accessible_mask is not None and self.n_total_sites is None:
-            self.n_total_sites = self._accessible_mask.total_accessible
+            if chrom_start is not None and chrom_end is not None:
+                self.n_total_sites = self._accessible_mask.count_accessible(
+                    chrom_start, chrom_end + 1)
+            else:
+                self.n_total_sites = self._accessible_mask.total_accessible
 
     @property
     def genotypes(self):
@@ -157,7 +161,11 @@ class GenotypeMatrix:
         """
         self.accessible_mask = resolve_accessible_mask(
             mask_or_path, self.chrom_start, self.chrom_end, chrom)
-        self.n_total_sites = self.accessible_mask.total_accessible
+        if self.chrom_start is not None and self.chrom_end is not None:
+            self.n_total_sites = self.accessible_mask.count_accessible(
+                self.chrom_start, self.chrom_end + 1)
+        else:
+            self.n_total_sites = self.accessible_mask.total_accessible
         return self
 
     def remove_accessible_mask(self):
@@ -175,21 +183,41 @@ class GenotypeMatrix:
         return self.n_total_sites is not None
 
     @property
-    def n_invariant_sites(self):
-        """Number of invariant sites, or None if unknown."""
-        if self.n_total_sites is None:
-            return None
+    def n_callable_sites(self):
+        """Total callable sites in the analysis universe.
+
+        Alias for ``n_total_sites``. See ``HaplotypeMatrix.n_callable_sites``
+        for full semantics.
+        """
+        return self.n_total_sites
+
+    @property
+    def n_segregating_sites(self):
+        """Number of polymorphic sites in the matrix.
+
+        Counts sites where 0 < alt_count < 2 * n_valid (polymorphic among
+        observed diploid genotypes), with at least 2 valid samples.
+        """
         xp = cp if self.device == 'GPU' else np
         geno = self.genotypes
         valid_mask = geno >= 0
         geno_clean = xp.where(valid_mask, geno, 0)
         alt_counts = xp.sum(geno_clean, axis=0)
         n_valid = xp.sum(valid_mask, axis=0)
-        # max possible alt count per site (diploid: 2 * n_valid)
         max_alt = 2 * n_valid
         is_variant = (alt_counts > 0) & (alt_counts < max_alt) & (n_valid >= 2)
-        n_variant = int(xp.sum(is_variant))
-        return self.n_total_sites - n_variant
+        return int(xp.sum(is_variant))
+
+    @property
+    def n_invariant_sites(self):
+        """Number of invariant sites in the callable span, or None if unknown.
+
+        Computed as ``n_callable_sites - n_segregating_sites``. See
+        ``HaplotypeMatrix.n_invariant_sites`` for full semantics.
+        """
+        if self.n_total_sites is None:
+            return None
+        return self.n_total_sites - self.n_segregating_sites
 
     def __repr__(self):
         return (f"GenotypeMatrix(shape={self.shape}, "

@@ -157,24 +157,43 @@ class TestBedToMask:
         return f.name
 
     def test_basic_mask(self):
+        # offset is 1-based, BED is 0-based half-open. BED (10, 20) covers
+        # 1-based positions 11..20 (10 bases). BED (30, 35) covers 31..35.
         path = self._write_bed("chr1\t10\t20\nchr1\t30\t35\n")
         try:
-            am = bed_to_mask(path, chrom="chr1", length=50, offset=0)
+            am = bed_to_mask(path, chrom="chr1", length=50, offset=1)
             assert am.total_accessible == 15  # 10 + 5
-            assert am.count_accessible(10, 20) == 10
-            assert am.count_accessible(0, 10) == 0
-            assert am.count_accessible(30, 35) == 5
+            # count_accessible(start, end) is 1-based half-open
+            assert am.count_accessible(11, 21) == 10
+            assert am.count_accessible(1, 11) == 0
+            assert am.count_accessible(31, 36) == 5
         finally:
             os.unlink(path)
 
     def test_mask_with_offset(self):
         path = self._write_bed("chr1\t100\t200\n")
         try:
-            am = bed_to_mask(path, chrom="chr1", length=200, offset=50)
-            # Mask covers positions 50-250, BED interval is 100-200
-            # Mask indices: 50->0, 100->50, 200->150
-            assert am.count_accessible(100, 200) == 100
-            assert am.count_accessible(50, 100) == 0
+            am = bed_to_mask(path, chrom="chr1", length=200, offset=51)
+            # offset=51 (1-based), so mask[0] = position 51, mask[199] = 250.
+            # BED (100, 200) covers 1-based positions 101..200 (100 bases).
+            assert am.count_accessible(101, 201) == 100
+            assert am.count_accessible(51, 101) == 0
+        finally:
+            os.unlink(path)
+
+    def test_offset_one_based_roundtrip(self):
+        # Regression: BED accessible bases must equal positions surviving
+        # is_accessible_at when VCF positions match BED bases exactly.
+        # Failure mode pre-fix: each BED interval lost its rightmost base.
+        path = self._write_bed("chr1\t10\t20\nchr1\t30\t35\n")
+        try:
+            am = bed_to_mask(path, chrom="chr1", length=50, offset=1)
+            # 1-based positions in the BED accessible set: 11..20, 31..35
+            test_positions = np.concatenate([
+                np.arange(11, 21), np.arange(31, 36)])
+            keep = am.is_accessible_at(test_positions)
+            assert keep.sum() == 15
+            assert keep.all()
         finally:
             os.unlink(path)
 
@@ -275,7 +294,8 @@ class TestHaplotypeMatrixAccessibleMask:
         hm = _make_haplotype_matrix()
         hm.set_accessible_mask(mask)
         assert hm.get_span('accessible') == 900
-        assert hm.get_span('total') == 1000
+        # chrom_start=0, chrom_end=1000 are 1-based inclusive => 1001 positions
+        assert hm.get_span('total') == 1001
 
     def test_get_span_auto_uses_accessible(self):
         mask = np.ones(1000, dtype=bool)
@@ -416,8 +436,8 @@ class TestBackwardCompatibility:
         """All operations work without a mask set."""
         hm = _make_haplotype_matrix()
         assert not hm.has_accessible_mask
-        # get_span should still work
-        assert hm.get_span('total') == 1000
+        # get_span should still work; chrom_end=1000 is 1-based inclusive
+        assert hm.get_span('total') == 1001
         assert hm.get_span('sites') == 20
         # get_subset should work
         subset = hm.get_subset(np.array([0, 1]))
@@ -673,3 +693,182 @@ class TestSelectionAccessibleMask:
         score_with_mask = selection.ihs(hm)
 
         np.testing.assert_array_equal(score_no_mask, score_with_mask)
+
+
+# ---- New site-count properties ----
+
+class TestSiteCountProperties:
+    """n_segregating_sites, n_callable_sites, n_invariant_sites consistency."""
+
+    def _make_hm(self, hap, positions, chrom_start, chrom_end,
+                 n_total_sites=None):
+        return HaplotypeMatrix(
+            hap, positions, chrom_start=chrom_start, chrom_end=chrom_end,
+            n_total_sites=n_total_sites)
+
+    def test_n_callable_sites_alias(self):
+        hm = _make_haplotype_matrix()
+        hm.n_total_sites = 1234
+        assert hm.n_callable_sites == 1234
+        hm.n_total_sites = None
+        assert hm.n_callable_sites is None
+
+    def test_n_segregating_strict_polymorphic(self):
+        # 5 sites: site 0 fully ref (invariant), site 1 polymorphic,
+        # site 2 fully alt (invariant), site 3 polymorphic, site 4 all missing.
+        hap = np.array([
+            [0, 0, 1, 0, -1],
+            [0, 1, 1, 1, -1],
+            [0, 1, 1, 0, -1],
+            [0, 0, 1, 1, -1],
+        ], dtype=np.int8)
+        pos = np.array([1, 2, 3, 4, 5])
+        hm = self._make_hm(hap, pos, chrom_start=1, chrom_end=5)
+        # Sites 1 and 3 are the only polymorphic ones (0 < derived < n_valid)
+        assert hm.n_segregating_sites == 2
+
+    def test_n_invariant_identity(self):
+        # Identity: n_total = n_segregating + n_invariant when n_total set.
+        hap = np.array([
+            [0, 0, 1, 0],
+            [0, 1, 1, 1],
+            [0, 1, 1, 0],
+            [0, 0, 1, 1],
+        ], dtype=np.int8)
+        pos = np.array([1, 2, 3, 4])
+        hm = self._make_hm(hap, pos, chrom_start=1, chrom_end=4,
+                           n_total_sites=10)
+        assert hm.n_segregating_sites == 2  # sites 1 and 3
+        assert hm.n_invariant_sites == 8  # 10 - 2
+
+    def test_n_invariant_returns_none_without_total(self):
+        hap = np.array([[0, 1], [1, 0]], dtype=np.int8)
+        pos = np.array([1, 2])
+        hm = self._make_hm(hap, pos, chrom_start=1, chrom_end=2)
+        # No mask, no n_total_sites set
+        assert hm.n_total_sites is None
+        assert hm.n_invariant_sites is None
+        # n_segregating works regardless
+        assert hm.n_segregating_sites == 2
+
+    def test_post_mask_consistency_h2_scenario(self):
+        # Regression for barnacle notebook h2: filtered VCF whose positions
+        # exactly match BED accessible bases. Pre-fix this lost ~half the
+        # rows and produced negative variant_sites in user reports.
+        bed_intervals = [(0, 100), (199, 299), (399, 499),
+                         (599, 799), (899, 950)]
+        total_bed = sum(e - s for s, e in bed_intervals)  # 551
+        # Construct VCF positions that exactly match BED accessible bases
+        # (1-based: BED (s, e) -> positions s+1..e)
+        positions = np.concatenate([np.arange(s + 1, e + 1)
+                                    for s, e in bed_intervals]).astype(np.int64)
+        n_hap = 4
+        hap = np.random.RandomState(0).randint(
+            0, 2, size=(n_hap, len(positions))).astype(np.int8)
+        # chrom_start/end define the analysis range (1-based inclusive).
+        hm = HaplotypeMatrix(hap, positions,
+                             chrom_start=1,
+                             chrom_end=int(positions[-1]))
+
+        f = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.bed', delete=False)
+        for s, e in bed_intervals:
+            f.write(f"chr1\t{s}\t{e}\n")
+        f.close()
+        try:
+            hm.set_accessible_mask(f.name, chrom="chr1")
+            # All VCF positions are inside BED, so all matrix rows survive
+            assert hm.num_variants == total_bed
+            # Mask cumulative count includes every BED base (no off-by-one)
+            assert hm.accessible_mask.total_accessible == total_bed
+            assert hm.n_callable_sites == total_bed
+            # Identity holds
+            assert (hm.n_invariant_sites + hm.n_segregating_sites
+                    == hm.n_callable_sites)
+            # variant count derived as (callable - invariant) is non-negative
+            assert hm.n_segregating_sites >= 0
+            assert hm.n_invariant_sites >= 0
+        finally:
+            os.unlink(f.name)
+
+    def test_pi_matches_scikit_allel_with_mask(self):
+        # Anchor against allel.sequence_diversity, the canonical reference
+        # for per-base nucleotide diversity with an accessibility mask.
+        import allel
+
+        rng = np.random.RandomState(0)
+        n_hap = 8
+        total_bp = 1000
+        bed_intervals = [(0, 100), (199, 299), (399, 499),
+                         (599, 799), (899, 950)]
+        # Boolean mask in 1-based-index-aligned form (mask[k] = True iff
+        # 1-based position k+1 is accessible).
+        mask_array = np.zeros(total_bp, dtype=bool)
+        for s, e in bed_intervals:
+            mask_array[s:e] = True
+
+        scenarios = []
+        # Scenario A: dense (positions cover every base, e.g. raw VCF).
+        positions_A = np.arange(1, total_bp + 1)
+        hap_A = rng.randint(0, 2, size=(n_hap, total_bp)).astype(np.int8)
+        scenarios.append(("dense", positions_A, hap_A))
+        # Scenario B: sparse (positions == BED accessible bases).
+        positions_B = np.concatenate(
+            [np.arange(s + 1, e + 1) for s, e in bed_intervals]
+        ).astype(np.int64)
+        hap_B = rng.randint(0, 2,
+                            size=(n_hap, len(positions_B))).astype(np.int8)
+        scenarios.append(("sparse", positions_B, hap_B))
+        # Scenario C: variants-only (positions are a subset of BED).
+        all_acc = np.concatenate(
+            [np.arange(s + 1, e + 1) for s, e in bed_intervals])
+        sub_idx = np.sort(rng.choice(len(all_acc), 60, replace=False))
+        positions_C = all_acc[sub_idx].astype(np.int64)
+        hap_C = rng.randint(0, 2,
+                            size=(n_hap, len(positions_C))).astype(np.int8)
+        scenarios.append(("variants_only", positions_C, hap_C))
+
+        bed_path = tempfile.NamedTemporaryFile(
+            mode='w', suffix='.bed', delete=False).name
+        with open(bed_path, 'w') as f:
+            for s, e in bed_intervals:
+                f.write(f"chr1\t{s}\t{e}\n")
+        try:
+            for label, positions, hap in scenarios:
+                from pg_gpu import diversity as div
+                # Analysis range is [1, total_bp]; matches allel's
+                # start/stop arguments.
+                hm = HaplotypeMatrix(hap, positions,
+                                     chrom_start=1,
+                                     chrom_end=total_bp)
+                hm.set_accessible_mask(bed_path, chrom="chr1")
+                pi_pg = div.pi(hm)
+
+                ac = allel.HaplotypeArray(hap.T).count_alleles()
+                pi_allel = allel.sequence_diversity(
+                    positions, ac, start=1, stop=total_bp,
+                    is_accessible=mask_array)
+                assert abs(pi_pg - pi_allel) < 1e-10, (
+                    f"{label}: pg_gpu pi {pi_pg} != allel pi {pi_allel}")
+                # n_callable_sites must equal allel's accessible count
+                assert hm.n_callable_sites == int(mask_array.sum())
+        finally:
+            os.unlink(bed_path)
+
+    def test_genotype_matrix_properties(self):
+        # Mirror on GenotypeMatrix
+        rng = np.random.RandomState(0)
+        # site 0: invariant ref, site 1: polymorphic, site 2: invariant alt,
+        # site 3: polymorphic
+        geno = np.array([
+            [0, 0, 2, 0],
+            [0, 1, 2, 2],
+            [0, 2, 2, 1],
+            [0, 1, 2, 1],
+        ], dtype=np.int8)
+        pos = np.array([1, 2, 3, 4])
+        gm = GenotypeMatrix(geno, pos, chrom_start=1, chrom_end=4,
+                            n_total_sites=10)
+        assert gm.n_segregating_sites == 2
+        assert gm.n_callable_sites == 10
+        assert gm.n_invariant_sites == 8

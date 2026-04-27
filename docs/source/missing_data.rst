@@ -187,8 +187,9 @@ to missing data handling.
 ``span_normalize`` accepts ``True`` or ``False``:
 
 * ``True`` (default): auto-detect the best denominator. If an accessible
-  mask is set, divides by accessible bases. Otherwise divides by genomic
-  span (chrom_end - chrom_start).
+  mask is set, divides by ``mask.total_accessible`` (the BED span).
+  Otherwise divides by the genomic span (1-based inclusive,
+  ``chrom_end - chrom_start + 1``).
 * ``False``: return raw sum (used internally by composite statistics like
   Tajima's D, and by advanced users who need custom normalization).
 
@@ -251,11 +252,46 @@ and the mask can be swapped or removed at any time.
   for chaining. It automatically sets ``n_total_sites`` to the count
   of accessible bases.
 
-* ``get_span('accessible')`` returns the accessible base count for a
-  region, used for per-base normalization.
+* The mask covers the union of the BED's extent and the matrix's
+  ``[chrom_start, chrom_end]`` range, so BED accessible bases that
+  fall outside the variant range (common for variants-only VCFs) are
+  not silently dropped. ``n_total_sites`` always equals the full BED
+  accessible-base count.
+
+* ``get_span('accessible')`` returns the accessible base count, used
+  for per-base normalization. This matches the denominator used by
+  ``allel.sequence_diversity(is_accessible=...)``.
 
 * The mask stays on CPU and uses a lazy prefix-sum for O(1) range
   queries, so windowed analysis over many windows is efficient.
+
+Site Count Properties
+---------------------
+
+After a mask is attached (or ``include_invariant=True`` was passed at
+load time), three properties decompose the analysis universe:
+
+* ``n_callable_sites`` -- alias for ``n_total_sites``; the BED span when
+  masked, or the matrix length if loaded with ``include_invariant=True``.
+* ``n_segregating_sites`` -- polymorphic sites in the matrix
+  (``0 < derived_count < n_valid``).
+* ``n_invariant_sites`` -- ``n_callable_sites - n_segregating_sites``;
+  may include implied invariants outside the matrix when the VCF was
+  variants-only.
+
+These satisfy ``n_callable_sites == n_segregating_sites + n_invariant_sites``.
+Note that ``num_variants`` is the *physical* matrix row count and is
+generally not equal to either ``n_segregating_sites`` (which excludes
+monomorphic rows) or ``n_callable_sites`` (which can include implied
+invariants).
+
+.. code-block:: python
+
+   h.set_accessible_mask("accessibility.bed", chrom="3L")
+   h.n_callable_sites          # e.g. 30,000,000 (BED total)
+   h.n_segregating_sites       # e.g. 1,200,000  (polymorphic in matrix)
+   h.n_invariant_sites         # e.g. 28,800,000 (callable - segregating)
+   h.num_variants              # whatever rows are physically present
 
 * ``get_subset()`` and ``get_population_matrix()`` read from the
   filtered properties, so child matrices automatically contain only
