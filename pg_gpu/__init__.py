@@ -31,13 +31,15 @@ from .haplotype_matrix import HaplotypeMatrix
 from .windowed_analysis import WindowedAnalyzer, windowed_analysis
 from .decomposition import (
     LocalPCAResult,
+    LostructResult,
     local_pca,
     local_pca_jackknife,
+    lostruct,
     pc_dist,
     corners,
 )
 from .resampling import block_jackknife, block_bootstrap
 
-__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'distance_stats', 'resampling', 'HaplotypeMatrix', 'GenotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis', 'AccessibleMask', 'bed_to_mask', 'parse_bed', 'LocalPCAResult', 'local_pca', 'local_pca_jackknife', 'pc_dist', 'corners', 'block_jackknife', 'block_bootstrap']
+__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'distance_stats', 'resampling', 'HaplotypeMatrix', 'GenotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis', 'AccessibleMask', 'bed_to_mask', 'parse_bed', 'LocalPCAResult', 'LostructResult', 'local_pca', 'local_pca_jackknife', 'lostruct', 'pc_dist', 'corners', 'block_jackknife', 'block_bootstrap']
 
 __version__ = '0.1.0'

@@ -24,9 +24,11 @@ import pytest
 from pg_gpu import HaplotypeMatrix, windowed_analysis
 from pg_gpu.decomposition import (
     LocalPCAResult,
+    LostructResult,
     corners,
     local_pca,
     local_pca_jackknife,
+    lostruct,
     pc_dist,
     pcoa,
 )
@@ -374,6 +376,117 @@ class TestCorners:
         # NaN indices should not appear in output
         assert 0 not in out
         assert 5 not in out
+
+
+# ---------------------------------------------------------------------------
+# End-to-end lostruct() wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestLostructPipeline:
+    """The lostruct() wrapper should produce the same outputs as the manual
+    four-step recipe (local_pca -> pc_dist -> pcoa -> corners)."""
+
+    def _manual(self, hm, **kw):
+        pca = local_pca(
+            hm, window_size=kw['window_size'], step_size=kw['step_size'],
+            window_type=kw['window_type'], k=kw['k'])
+        dist = pc_dist(pca, npc=kw['k'], normalize=kw['normalize'])
+        mds, evr = pcoa(dist, n_components=kw['n_components'])
+        if kw['n_corners'] > 0:
+            ci = corners(mds, prop=kw['corner_prop'], k=kw['n_corners'],
+                         random_state=kw['random_state'])
+        else:
+            ci = None
+        return pca, dist, mds, evr, ci
+
+    def test_returns_lostruct_result(self, small_hm):
+        res = lostruct(small_hm, window_size=200, window_type='snp', k=2)
+        assert isinstance(res, LostructResult)
+        assert isinstance(res.local_pca, LocalPCAResult)
+        assert res.distance.shape == (res.n_windows, res.n_windows)
+        assert res.mds.shape[0] == res.n_windows
+        assert res.mds.shape[1] == 2
+        assert res.explained_variance_ratio.shape == (2,)
+        assert res.corner_indices is not None
+        assert res.corner_indices.shape[1] == 3
+        # windows convenience pointer matches
+        pd.testing.assert_frame_equal(res.windows, res.local_pca.windows)
+
+    def test_matches_manual_pipeline(self, structured_hm):
+        kw = dict(window_size=200, step_size=100, window_type='snp', k=2,
+                  normalize='L1', n_components=2,
+                  corner_prop=0.05, n_corners=3, random_state=0)
+        pca_m, dist_m, mds_m, evr_m, ci_m = self._manual(structured_hm, **kw)
+        res = lostruct(structured_hm, **kw)
+
+        # local_pca outputs match
+        assert res.local_pca.n_windows == pca_m.n_windows
+        np.testing.assert_array_equal(res.local_pca.eigvals, pca_m.eigvals)
+        np.testing.assert_array_equal(res.local_pca.eigvecs, pca_m.eigvecs)
+        # pairwise distance matches (NaN-aware)
+        np.testing.assert_array_equal(np.isnan(res.distance), np.isnan(dist_m))
+        finite = ~np.isnan(dist_m)
+        np.testing.assert_allclose(res.distance[finite], dist_m[finite])
+        # MDS coords match (sign indeterminacy on each axis is OK)
+        for axis in range(res.mds.shape[1]):
+            assert (np.allclose(res.mds[:, axis], mds_m[:, axis])
+                    or np.allclose(res.mds[:, axis], -mds_m[:, axis]))
+        np.testing.assert_allclose(res.explained_variance_ratio, evr_m)
+        # corners use the same rng -> identical output
+        np.testing.assert_array_equal(res.corner_indices, ci_m)
+
+    def test_skip_corners(self, small_hm):
+        res = lostruct(small_hm, window_size=200, window_type='snp', k=2,
+                       n_corners=0)
+        assert res.corner_indices is None
+
+    def test_npc_defaults_to_k(self, small_hm):
+        # Explicit npc=k should match the default behavior
+        a = lostruct(small_hm, window_size=200, window_type='snp', k=3,
+                     n_corners=0)
+        b = lostruct(small_hm, window_size=200, window_type='snp', k=3,
+                     npc=3, n_corners=0)
+        np.testing.assert_array_equal(a.distance, b.distance)
+
+    def test_jackknife_default_off(self, small_hm):
+        res = lostruct(small_hm, window_size=200, window_type='snp', k=2,
+                       n_corners=0)
+        assert res.jackknife_se is None
+
+    def test_jackknife_populates_se(self, small_hm):
+        res = lostruct(small_hm, window_size=200, window_type='snp', k=2,
+                       jackknife=True, n_blocks=5, n_corners=0)
+        # shortcut and underlying field agree
+        assert res.jackknife_se is not None
+        assert res.jackknife_se is res.local_pca.jackknife_se
+        # default aggregate='mean' -> (n_windows, k)
+        assert res.jackknife_se.shape == (res.n_windows, 2)
+        # downstream pipeline still produces valid outputs
+        assert np.all(np.isfinite(res.distance))
+        assert res.mds.shape[1] == 2
+
+    def test_jackknife_aggregate_none(self, small_hm):
+        res = lostruct(small_hm, window_size=200, window_type='snp', k=2,
+                       jackknife=True, n_blocks=5, jackknife_aggregate=None,
+                       n_corners=0)
+        assert res.jackknife_se is not None
+        # aggregate=None -> (n_windows, k, n_samples)
+        assert res.jackknife_se.shape == (
+            res.n_windows, 2, small_hm.num_haplotypes)
+
+    def test_jackknife_matches_combined_helper(self, structured_hm):
+        # Calling lostruct(jackknife=True) should produce the same eigvals,
+        # eigvecs, and SE as windowed_analysis with both stats requested.
+        from pg_gpu import windowed_analysis as wa
+        kw = dict(window_size=200, step_size=100, window_type='snp', k=2,
+                  n_blocks=5)
+        res = lostruct(structured_hm, **kw, jackknife=True, n_corners=0)
+        ref = wa(structured_hm, **kw,
+                 statistics=['local_pca', 'local_pca_jackknife'])
+        np.testing.assert_array_equal(res.local_pca.eigvals, ref.eigvals)
+        np.testing.assert_array_equal(res.local_pca.eigvecs, ref.eigvecs)
+        np.testing.assert_array_equal(res.jackknife_se, ref.jackknife_se)
 
 
 # ---------------------------------------------------------------------------

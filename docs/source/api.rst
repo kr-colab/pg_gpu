@@ -236,6 +236,15 @@ pattern (inversions, introgression, low-recombination regions).
 .. Per-window eigendecomposition is batched with a single ``cp.linalg.eigh`` over a
 .. stacked ``(n_windows, n_samples, n_samples)`` tensor.
 
+For most users, :func:`pg_gpu.decomposition.lostruct` is the
+one-and-done entry point: it bundles per-window local PCA, the
+between-window Frobenius distance, MDS on that distance, and corner /
+outlier detection into a single call and returns a
+:class:`~pg_gpu.decomposition.LostructResult`. The lower-level
+functions below are exposed for callers who want intermediate access
+or want to recompute one stage with different parameters.
+
+.. autofunction:: pg_gpu.decomposition.lostruct
 .. autofunction:: pg_gpu.decomposition.local_pca
 .. autofunction:: pg_gpu.decomposition.local_pca_jackknife
 .. autofunction:: pg_gpu.decomposition.pc_dist
@@ -243,6 +252,10 @@ pattern (inversions, introgression, low-recombination regions).
 
 .. autoclass:: pg_gpu.decomposition.LocalPCAResult
    :members: to_lostruct_matrix, n_windows, n_samples
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.decomposition.LostructResult
+   :members: windows, n_windows
    :show-inheritance:
 
 Relatedness and Kinship

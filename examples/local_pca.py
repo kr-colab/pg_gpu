@@ -6,15 +6,14 @@ Pipeline:
     1. Simulate a 10 Mb chromosome with msprime using
        `SweepGenicSelection` at the midpoint, targeting a final sweep
        allele frequency of 0.5 (i.e. a partial / incomplete sweep).
-    2. `local_pca` in SNP windows → per-window top-k eigendecomposition of
-       the sample-sample covariance matrix.
-    3. `pc_dist` → Frobenius distance matrix between windows.
-    4. `pcoa` on the distance matrix → 2D MDS embedding.
-    5. 1D k-means (k=3) on MDS1 values to partition windows into
+    2. `lostruct(...)` runs the full four-step Li & Ralph pipeline in
+       one call: per-window local PCA, Frobenius distance between
+       windows' covariance reps, MDS, and corner detection in MDS
+       space.
+    3. 1D k-means (k=3) on MDS1 values to partition windows into
        neutral / linked / sweep regimes based on how far each window's
        MDS1 sits from the chromosome-wide baseline.
-    6. `corners` → highlight the windows sitting at the extremes of MDS.
-    7. For comparison, scan Garud H12 along the chromosome (a canonical
+    4. For comparison, scan Garud H12 along the chromosome (a canonical
        haplotype-frequency sweep statistic).
 
 Usage
@@ -34,8 +33,7 @@ import msprime
 import numpy as np
 from scipy.cluster.vq import kmeans2
 
-from pg_gpu import HaplotypeMatrix, windowed_analysis
-from pg_gpu.decomposition import corners, pc_dist, pcoa
+from pg_gpu import HaplotypeMatrix, lostruct, windowed_analysis
 
 
 REGIME_NAMES = ("neutral", "linked", "sweep")
@@ -127,24 +125,19 @@ def main() -> None:
 
     hm = HaplotypeMatrix(hap, positions, 0, SEQ_LEN)
 
-    print(f"Running local_pca (window={args.window} SNPs, k={args.k}) ...")
-    result = windowed_analysis(
-        hm, window_size=args.window, step_size=args.window // 2,
-        statistics=['local_pca'], window_type='snp', k=args.k)
-    print(f"  n_windows={result.n_windows}")
-
-    print("Computing pc_dist (L1) ...")
-    d = pc_dist(result, npc=args.k, normalize='L1')
-    print(f"  dist matrix shape={d.shape}")
-
-    print("Computing MDS via pcoa ...")
-    mds, er = pcoa(d, n_components=2)
-    print(f"  variance explained MDS1/MDS2: {er[0]:.3f} / {er[1]:.3f}")
-
-    print(f"Identifying {args.n_corners} corner clusters ...")
-    corner_idx = corners(mds, prop=args.prop, k=args.n_corners,
-                         random_state=args.seed)
-    print(f"  corner_idx shape={corner_idx.shape}")
+    print(f"Running lostruct pipeline (window={args.window} SNPs, "
+          f"k={args.k}, n_corners={args.n_corners}) ...")
+    res = lostruct(hm, window_size=args.window,
+                   step_size=args.window // 2,
+                   window_type='snp', k=args.k,
+                   corner_prop=args.prop, n_corners=args.n_corners,
+                   random_state=args.seed)
+    mds = res.mds
+    corner_idx = res.corner_indices
+    print(f"  n_windows={res.n_windows}  "
+          f"variance explained MDS1/MDS2: "
+          f"{res.explained_variance_ratio[0]:.3f} / "
+          f"{res.explained_variance_ratio[1]:.3f}")
 
     print("Clustering MDS1 into neutral / linked / sweep regimes (k=3) ...")
     regime, regime_centroids = _cluster_mds1(mds[:, 0], seed=args.seed)
@@ -152,7 +145,7 @@ def main() -> None:
         print(f"  {name:8s}  MDS1 centroid={centroid:+.3f}  "
               f"n_windows={(regime == name).sum()}")
 
-    centers = result.windows['center'].to_numpy()
+    centers = res.windows['center'].to_numpy()
 
     # Scalar summary statistics along the chromosome (bp windows, for the
     # right-hand panels). Garud H12 is a classic sweep detector that peaks

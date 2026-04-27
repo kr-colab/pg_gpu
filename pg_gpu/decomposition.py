@@ -1164,6 +1164,189 @@ def corners(xy: np.ndarray, prop: float, k: int = 3,
 
 
 # ---------------------------------------------------------------------------
+# End-to-end lostruct pipeline
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LostructResult:
+    """End-to-end lostruct pipeline output.
+
+    Bundles the four pipeline stages into one object so a caller can run
+    ``lostruct(hm, ...)`` and pick off whichever intermediates they need.
+
+    Attributes
+    ----------
+    local_pca : LocalPCAResult
+        Per-window local PCA output (eigvals, eigvecs, sumsq, windows).
+    distance : numpy.ndarray, shape (n_windows, n_windows)
+        Pairwise Frobenius distance between windows from ``pc_dist``.
+    mds : numpy.ndarray, shape (n_windows, n_components)
+        MDS coordinates from ``pcoa``.
+    explained_variance_ratio : numpy.ndarray, shape (n_components,)
+        Variance fraction explained by each MDS axis.
+    corner_indices : numpy.ndarray or None, shape (n_per_corner, n_corners)
+        Window indices of the ``n_corners`` outlier clusters from
+        ``corners``. ``None`` when corner detection was skipped.
+    """
+
+    local_pca: "LocalPCAResult"
+    distance: np.ndarray
+    mds: np.ndarray
+    explained_variance_ratio: np.ndarray
+    corner_indices: Optional[np.ndarray]
+
+    @property
+    def windows(self) -> "pd.DataFrame":
+        """Convenience pointer at ``local_pca.windows``."""
+        return self.local_pca.windows
+
+    @property
+    def n_windows(self) -> int:
+        return self.local_pca.n_windows
+
+    @property
+    def jackknife_se(self) -> Optional[np.ndarray]:
+        """Block-within-window jackknife standard error of the top-k
+        eigenvectors, or ``None`` if ``lostruct`` was called with
+        ``jackknife=False``. Shortcut for ``self.local_pca.jackknife_se``.
+        """
+        return self.local_pca.jackknife_se
+
+
+def lostruct(haplotype_matrix: "HaplotypeMatrix",
+             *,
+             # local_pca params
+             window_params=None,
+             k: int = 2,
+             scaler: Optional[str] = None,
+             missing_data: str = 'include',
+             population: Optional[Union[str, list]] = None,
+             batch_size: Optional[int] = None,
+             window_size: Optional[int] = None,
+             step_size: Optional[int] = None,
+             window_type: str = 'snp',
+             regions=None,
+             # jackknife
+             jackknife: bool = False,
+             n_blocks: int = 10,
+             jackknife_aggregate: Optional[str] = 'mean',
+             # pc_dist params
+             npc: Optional[int] = None,
+             normalize: Optional[str] = 'L1',
+             pc_dist_weights=1,
+             # pcoa params
+             n_components: int = 2,
+             # corners params
+             corner_prop: float = 0.05,
+             n_corners: int = 3,
+             random_state: Optional[int] = None,
+             ) -> "LostructResult":
+    """End-to-end lostruct pipeline (Li & Ralph 2019).
+
+    Runs the four-step recipe in one call: per-window local PCA, pairwise
+    Frobenius distance between window covariance reps, classical MDS on
+    that distance, and corner / outlier detection in the MDS embedding.
+
+    Optionally also computes the block-within-window jackknife standard
+    error of the per-window eigenvectors (Li & Ralph 2019, Appendix);
+    when requested the SE is computed in the same window pass as the
+    base eigendecomposition (shared matrix prep), and is exposed via
+    ``LostructResult.jackknife_se``.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+
+    window_params : WindowParams, optional
+        Pre-built window spec. Required when ``window_size`` is not given.
+    k : int
+        Number of PCs retained per window in the local PCA step.
+    scaler, missing_data, population, batch_size : see :func:`local_pca`.
+    window_size, step_size, window_type, regions
+        Short-hand for constructing a ``WindowParams``.
+
+    jackknife : bool
+        If True, also compute the delete-1 block jackknife standard
+        error of the per-window top-k eigenvectors and expose it via
+        ``LostructResult.jackknife_se``. Per-window matrix preparation
+        is shared with the base eigendecomposition, so enabling this is
+        much cheaper than calling ``local_pca_jackknife`` separately.
+    n_blocks : int
+        Number of jackknife blocks per window when ``jackknife=True``.
+        Ignored otherwise.
+    jackknife_aggregate : {'mean', None}
+        ``'mean'`` returns shape ``(n_windows, k)`` -- per-PC standard
+        error averaged across samples (matches the R reference).
+        ``None`` returns the full ``(n_windows, k, n_samples)`` tensor.
+        Ignored when ``jackknife=False``.
+
+    npc : int, optional
+        Number of PCs used by ``pc_dist``. Defaults to ``k``.
+    normalize : {'L1', 'L2', None}
+        Per-window eigenvalue normalization before distance computation.
+    pc_dist_weights : array_like or scalar
+        Sample weights forwarded to ``pc_dist`` as ``w``.
+
+    n_components : int
+        Number of MDS dimensions to compute (default 2).
+
+    corner_prop : float
+        Fraction of points per corner cluster (forwarded to ``corners``).
+    n_corners : int
+        Number of corner clusters to detect. Set to 0 (or any non-positive
+        value) to skip corner detection and leave
+        ``LostructResult.corner_indices`` as None.
+    random_state : int, optional
+        RNG seed for the MEC tie-breaks inside ``corners``.
+
+    Returns
+    -------
+    LostructResult
+        Bundle of the four pipeline outputs. Each piece is also reachable
+        via the underlying functions for users who want to recompute one
+        stage with different parameters.
+
+    See Also
+    --------
+    local_pca, local_pca_jackknife, pc_dist, pcoa, corners
+
+    References
+    ----------
+    Li & Ralph (2019), Genetics. https://doi.org/10.1534/genetics.118.301747
+    """
+    if jackknife:
+        pca = _local_pca_with_jackknife(
+            haplotype_matrix,
+            window_params=window_params, k=k, n_blocks=n_blocks,
+            scaler=scaler, missing_data=missing_data,
+            population=population, aggregate=jackknife_aggregate,
+            batch_size=batch_size, window_size=window_size,
+            step_size=step_size, window_type=window_type, regions=regions)
+    else:
+        pca = local_pca(haplotype_matrix,
+                        window_params=window_params, k=k,
+                        scaler=scaler, missing_data=missing_data,
+                        population=population, batch_size=batch_size,
+                        window_size=window_size, step_size=step_size,
+                        window_type=window_type, regions=regions)
+    dist = pc_dist(pca, npc=npc, normalize=normalize, w=pc_dist_weights)
+    mds, evr = pcoa(dist, n_components=n_components)
+    if n_corners is None or n_corners <= 0:
+        corner_idx = None
+    else:
+        corner_idx = corners(mds, prop=corner_prop, k=n_corners,
+                             random_state=random_state)
+    return LostructResult(
+        local_pca=pca,
+        distance=dist,
+        mds=mds,
+        explained_variance_ratio=evr,
+        corner_indices=corner_idx,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Jackknife SE for local PCs
 # ---------------------------------------------------------------------------
 

@@ -69,7 +69,39 @@ selection summary.
 Python API
 ----------
 
-The same pipeline outside the script:
+The whole pipeline in one call:
+
+.. code-block:: python
+
+   from pg_gpu import HaplotypeMatrix, lostruct
+
+   res = lostruct(hm, window_size=500, step_size=250,
+                  window_type='snp', k=2)
+
+   res.local_pca      # LocalPCAResult: per-window eigvals / eigvecs / windows
+   res.distance       # (n_windows, n_windows) Frobenius distance
+   res.mds            # (n_windows, n_components) MDS coordinates
+   res.corner_indices # (n_per_corner, n_corners) outlier-window indices
+
+Pass ``jackknife=True`` to also compute the block-within-window
+jackknife standard error of the per-window eigenvectors -- useful as a
+signal-to-noise diagnostic for filtering noisy windows before
+downstream analysis. The standard error is computed in the same window
+pass as the base eigendecomposition, so this is much cheaper than
+calling ``local_pca_jackknife`` separately:
+
+.. code-block:: python
+
+   res = lostruct(hm, window_size=500, step_size=250,
+                  window_type='snp', k=2,
+                  jackknife=True, n_blocks=10)
+   res.jackknife_se   # (n_windows, k) per-PC standard error
+
+If you want intermediate access -- e.g. to swap in a different
+distance metric, or recompute MDS at a different ``n_components``
+without redoing the per-window eigendecomposition -- you can call the
+four constituent functions directly. ``lostruct()`` is a thin wrapper
+over them:
 
 .. code-block:: python
 
