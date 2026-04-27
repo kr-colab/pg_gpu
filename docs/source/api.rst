@@ -289,7 +289,7 @@ Selection scan statistics:
 Structure / dimensionality reduction:
 
 - ``local_pca`` -- Li & Ralph (2019) local PCA. Vector-valued per window; dispatches to :func:`pg_gpu.decomposition.local_pca` and returns a :class:`~pg_gpu.decomposition.LocalPCAResult` instead of the scalar-stat DataFrame. Can be combined with scalar statistics in the same call; the scalar columns are merged onto ``result.windows``.
-- ``local_pca_jackknife`` -- delete-1 block jackknife standard error for local PCA eigenvectors. Returns a :class:`~pg_gpu.decomposition.LocalPCAResult` with the ``jackknife_se`` field populated. When requested alongside ``local_pca``, per-window matrix preparation is shared. Accepts ``n_blocks`` and ``aggregate`` kwargs.
+- ``local_pca_jackknife`` -- delete-1 block jackknife standard error for local PCA eigenvectors. The jackknife is *block-within-window*: each window is partitioned into ``n_blocks`` SNP-blocks, the local-PCA eigendecomposition is recomputed with one block left out, and the per-window standard error is taken across the leave-one-out replicates. Sign alignment between replicates and per-window aggregation follow the procedure in `Li & Ralph (2019), Appendix <https://pmc.ncbi.nlm.nih.gov/articles/PMC6325702/>`_, which also discusses interpreting the resulting standard error as a signal-to-noise diagnostic for outlier windows. Returns a :class:`~pg_gpu.decomposition.LocalPCAResult` with the ``jackknife_se`` field populated. When requested alongside ``local_pca``, per-window matrix preparation is shared. Accepts ``n_blocks`` and ``aggregate`` kwargs.
 
 Legacy Functions
 ~~~~~~~~~~~~~~~~
