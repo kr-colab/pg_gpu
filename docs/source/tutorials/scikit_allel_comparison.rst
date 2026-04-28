@@ -15,11 +15,14 @@ Background
 ----------
 
 A common workflow on phased haplotype data is a windowed scan
-producing several diversity statistics along a chromosome. In
-``scikit-allel`` this needs three separate calls -- one per statistic
--- each rebuilding its own per-window iteration. ``pg_gpu`` collapses
-the same three statistics into a single ``windowed_analysis(...)``
-call that runs in one GPU kernel pass.
+producing several diversity statistics along a chromosome, plus an
+LD-decay curve summarising linkage disequilibrium as a function of
+physical distance. In ``scikit-allel`` each diversity stat needs a
+separate call, and the LD-decay scan requires manually pairwise-r²,
+distance binning, and median-per-bin aggregation. ``pg_gpu``
+collapses the diversity stats into a single ``windowed_analysis(...)``
+call and exposes the LD-decay path as ``HaplotypeMatrix.windowed_r_squared(estimator='rogers_huff')``,
+both running in single GPU kernel passes.
 
 This tutorial puts the two implementations next to each other on
 real Anopheles gambiae X-chromosome data (n = 100 phased haplotypes,
@@ -45,17 +48,27 @@ What the script does
    'tajimas_d'])``. Three stats from scikit-allel:
    ``allel.windowed_diversity``, ``allel.windowed_watterson_theta``,
    ``allel.windowed_tajima_d``.
-4. Verifies strict numerical agreement on all three statistics
+4. Verifies strict numerical agreement on the diversity statistics
    (NaN-aware, ``rtol=1e-5`` / ``atol=1e-8``). Trailing partial
    windows (where the chromosome end falls inside a window) are
    masked out of the comparison: the two libraries normalize the
    trailing partial window differently (allel divides by actual
    span; pg_gpu divides by the fixed window size), so a 1-window
    discrepancy there is uninteresting.
-5. Plots a 4-panel figure: pi / theta_W / Tajima's D traces overlaid
-   between the two implementations (so agreement = visual identity)
-   plus horizontal timing bars at the bottom annotated with the
-   speedup ratio.
+5. Subsamples ``--ld-snps`` (default 10,000) random SNPs and
+   computes a pairwise LD-decay curve on each side. The pg_gpu
+   path is one call:
+   ``hm_sub.windowed_r_squared(bp_bins, percentile=50, estimator='rogers_huff')``;
+   the scikit-allel path runs ``allel.rogers_huff_r``, squares it,
+   builds a pair-distance array, and bins manually. Both compute
+   the per-distance-bin median Rogers-Huff (2008) :math:`r^2`, so
+   the two curves agree to floating-point precision (the float32
+   precision floor scikit-allel sets internally). Times each side.
+6. Plots a 5-panel figure: pi / theta_W / Tajima's D traces overlaid
+   between the two implementations (agreement = visual identity),
+   the LD-decay curves overlaid on a log distance axis, and a
+   bottom panel of horizontal timing bars annotated with speedup
+   ratios for both the windowed scan and the LD-decay scan.
 
 Why it's useful as a template
 ------------------------------
@@ -72,3 +85,10 @@ multi-statistic windowed analysis. To adapt it:
 * Time at different window sizes. The default 10 kb is a typical
   diversity-scan resolution; ``--window-size`` accepts any positive
   integer.
+* Tune the LD scan for your scale of interest. ``--ld-snps``
+  controls the random subsample; larger values give a less-noisy
+  decay curve at the cost of quadratic compute. The bin edges
+  (``LD_BP_BINS`` in the script) span 100 bp to 1 Mb in 24 log-spaced
+  steps -- sensible for chromosomes with LD on the kb-to-Mb scale;
+  for tighter LD scales (e.g. recombining HIV sequences) tighten the
+  range.

@@ -38,6 +38,31 @@ ZARR_SMALL = DATA_DIR / "gamb.X.8-12Mb.n100.derived.zarr"
 
 # -- helpers -----------------------------------------------------------------
 
+def compute_genotype_codes(hm: HaplotypeMatrix) -> np.ndarray:
+    """Build a scikit-allel-style (n_variants, n_samples) int8 genotype
+    array (0 = hom ref, 1 = het, 2 = hom alt).
+
+    Pairs adjacent haplotypes (haplotypes 0,1 = sample 0; 2,3 = sample
+    1; etc.). The gamb X dataset has no missing data; this helper
+    raises if it sees any -1 sentinels.
+    """
+    hap = hm.haplotypes
+    if hasattr(hap, "get"):
+        hap = hap.get()
+    hap = np.asarray(hap, dtype=np.int8)
+    if (hap < 0).any():
+        raise ValueError(
+            "compute_genotype_codes: input haplotypes contain missing "
+            "values (-1).")
+    n_hap, _ = hap.shape
+    if n_hap % 2 != 0:
+        raise ValueError(
+            f"compute_genotype_codes: odd number of haplotypes ({n_hap}); "
+            f"cannot pair into diploids.")
+    paired = hap[0::2, :] + hap[1::2, :]
+    return paired.T.astype(np.int8)
+
+
 def compute_allele_counts(hm: HaplotypeMatrix) -> np.ndarray:
     """Build a scikit-allel-style (n_variants, 2) allele-count array.
 
@@ -87,7 +112,8 @@ def _load_data(small: bool) -> tuple:
         pos = pos.get()
     pos = np.asarray(pos, dtype=np.int64)
     ac = compute_allele_counts(hm)
-    return hm, pos, ac
+    gn = compute_genotype_codes(hm)
+    return hm, pos, ac, gn
 
 
 # -- compute paths -----------------------------------------------------------
@@ -114,6 +140,81 @@ def _compute_pg_gpu(hm: HaplotypeMatrix, window_size: int) -> tuple:
     return (df["pi"].to_numpy(),
             df["theta_w"].to_numpy(),
             df["tajimas_d"].to_numpy()), df
+
+
+# -- LD-decay compute paths --------------------------------------------------
+# Both libraries compute Rogers-Huff (2008) r on diploid 0/1/2 dosages.
+# pg_gpu exposes it via HaplotypeMatrix.windowed_r_squared(..., estimator='rogers_huff');
+# scikit-allel via allel.rogers_huff_r + manual binning. The two should
+# match numerically up to allel's float32 internal precision.
+
+LD_BP_BINS = np.logspace(2, 6, 25)  # 100 bp .. 1 Mb, 24 log-spaced bins
+
+
+def _subsample_for_ld(hm: HaplotypeMatrix,
+                      pos: np.ndarray,
+                      gn: np.ndarray,
+                      n_snps: int,
+                      seed: int) -> tuple:
+    """Pick `n_snps` random SNPs (sorted by position) and build the
+    inputs both libraries need.
+
+    Returns (hm_sub, pos_sub, gn_sub).
+    """
+    n_var = len(pos)
+    if n_snps > n_var:
+        raise ValueError(
+            f"--ld-snps={n_snps} exceeds the dataset size ({n_var})")
+    rng = np.random.RandomState(seed)
+    idx = rng.choice(n_var, size=n_snps, replace=False)
+    idx.sort()
+    pos_sub = pos[idx]
+    gn_sub = gn[idx]
+    hap_full = hm.haplotypes
+    if hasattr(hap_full, "get"):
+        hap_full = hap_full.get()
+    hap_full = np.asarray(hap_full, dtype=np.int8)
+    hap_sub = hap_full[:, idx]
+    hm_sub = HaplotypeMatrix(
+        hap_sub, pos_sub, hm.chrom_start, hm.chrom_end)
+    return hm_sub, pos_sub, gn_sub
+
+
+def _compute_allel_ld_decay(pos_sub: np.ndarray,
+                            gn_sub: np.ndarray,
+                            bp_bins: np.ndarray) -> np.ndarray:
+    """LD-decay curve via scikit-allel's Rogers-Huff path.
+
+    Computes pairwise r with `allel.rogers_huff_r`, squares it,
+    computes pairwise physical distances, bins by distance, and
+    returns the per-bin median r² (NaN for empty bins).
+    """
+    n = len(pos_sub)
+    r = allel.rogers_huff_r(gn_sub)
+    r_sq = r ** 2
+    iu = np.triu_indices(n, k=1)
+    distances = (pos_sub[iu[1]] - pos_sub[iu[0]]).astype(np.int64)
+    finite = np.isfinite(r_sq)
+    bin_idx = np.digitize(distances[finite], bp_bins) - 1
+    n_bins = len(bp_bins) - 1
+    out = np.full(n_bins, np.nan)
+    rsq_finite = r_sq[finite]
+    for b in range(n_bins):
+        mask = bin_idx == b
+        if mask.any():
+            out[b] = float(np.median(rsq_finite[mask]))
+    return out
+
+
+def _compute_pg_gpu_ld_decay(hm_sub: HaplotypeMatrix,
+                             bp_bins: np.ndarray) -> np.ndarray:
+    """LD-decay curve via pg_gpu's windowed_r_squared with the
+    Rogers-Huff estimator (matches allel exactly up to float32
+    precision)."""
+    result, _ = hm_sub.windowed_r_squared(
+        bp_bins, percentile=50, estimator='rogers_huff')
+    cp.cuda.Device().synchronize()
+    return np.asarray(result)
 
 
 def _assert_windows_aligned(allel_windows: np.ndarray,
@@ -155,13 +256,16 @@ def _plot_comparison(
     pi_a: np.ndarray, pi_g: np.ndarray,
     tw_a: np.ndarray, tw_g: np.ndarray,
     td_a: np.ndarray, td_g: np.ndarray,
+    bp_bins: np.ndarray,
+    ld_a: np.ndarray, ld_g: np.ndarray,
     t_allel: float, t_pg: float,
+    t_allel_ld: float, t_pg_ld: float,
     outpath: Path,
 ) -> None:
     sns.set_theme(style="whitegrid", context="paper", font_scale=0.95)
     fig, axes = plt.subplots(
-        4, 1, figsize=(11, 9),
-        gridspec_kw={"height_ratios": [1, 1, 1, 0.5]},
+        5, 1, figsize=(11, 12),
+        gridspec_kw={"height_ratios": [1, 1, 1, 1.1, 0.7]},
         sharex=False)
 
     # Panels 1-3: identical-shape overlays for pi / theta_w / Tajima's D.
@@ -173,25 +277,45 @@ def _plot_comparison(
         ax.plot(centers_mb, a, color=COL_ALLEL, linewidth=1.6, alpha=0.9)
         ax.plot(centers_mb, g, color=COL_PG, linewidth=0.8, alpha=0.95)
         ax.set_ylabel(ylabel)
-
     # Top-panel legend only.
     axes[0].plot([], [], color=COL_ALLEL, linewidth=1.6, label="scikit-allel")
     axes[0].plot([], [], color=COL_PG, linewidth=0.8, label="pg_gpu")
     axes[0].legend(fontsize=8, loc="upper right", frameon=False)
-
     axes[2].set_xlabel("Genomic position (Mb)")
 
-    # Panel 4: timing bars.
-    ax_t = axes[3]
-    ax_t.barh([1, 0], [t_allel, t_pg], color=[COL_ALLEL, COL_PG],
-              height=0.6)
-    ax_t.set_yticks([0, 1])
-    ax_t.set_yticklabels(["pg_gpu", "scikit-allel"])
+    # Panel 4: LD-decay curves (log-x, both libraries overlaid).
+    ax_ld = axes[3]
+    bin_centers = np.sqrt(bp_bins[:-1] * bp_bins[1:])  # log-bin midpoints
+    ax_ld.plot(bin_centers, ld_a, color=COL_ALLEL, linewidth=1.6,
+               alpha=0.9, marker="o", markersize=3)
+    ax_ld.plot(bin_centers, ld_g, color=COL_PG, linewidth=0.8,
+               alpha=0.95, marker="o", markersize=2)
+    ax_ld.set_xscale("log")
+    ax_ld.set_ylabel(r"median $r^2$")
+    ax_ld.set_xlabel("Pair distance (bp)")
+
+    # Panel 5: timing bars - 4 bars (2 libraries x 2 computations).
+    # Top-to-bottom: scikit-allel windowed, pg_gpu windowed,
+    # scikit-allel LD-decay, pg_gpu LD-decay.
+    ax_t = axes[4]
+    labels = ["pg_gpu LD-decay", "scikit-allel LD-decay",
+              "pg_gpu windowed", "scikit-allel windowed"]
+    values = [t_pg_ld, t_allel_ld, t_pg, t_allel]
+    colors = [COL_PG, COL_ALLEL, COL_PG, COL_ALLEL]
+    speeds = [
+        f"  {t_pg_ld:.2f}s ({t_allel_ld / t_pg_ld:.1f}x)",
+        f"  {t_allel_ld:.2f}s",
+        f"  {t_pg:.2f}s ({t_allel / t_pg:.1f}x)",
+        f"  {t_allel:.2f}s",
+    ]
+    y = np.arange(len(labels))
+    ax_t.barh(y, values, color=colors, height=0.6)
+    ax_t.set_yticks(y)
+    ax_t.set_yticklabels(labels)
     ax_t.set_xlabel("seconds")
-    ax_t.text(t_allel, 1, f"  {t_allel:.2f}s",
-              va="center", ha="left", fontsize=9, color="0.2")
-    ax_t.text(t_pg, 0, f"  {t_pg:.2f}s ({t_allel / t_pg:.1f}x)",
-              va="center", ha="left", fontsize=9, color="0.2")
+    for i, (v, txt) in enumerate(zip(values, speeds)):
+        ax_t.text(v, i, txt, va="center", ha="left",
+                  fontsize=9, color="0.2")
     ax_t.grid(axis="y", visible=False)
 
     fig.tight_layout()
@@ -250,7 +374,7 @@ def main() -> None:
     if args.self_test:
         _run_self_test()
         return
-    hm, pos, ac = _load_data(args.small)
+    hm, pos, ac, gn = _load_data(args.small)
 
     print("Computing windows ...", flush=True)
     windows = allel.position_windows(
@@ -298,12 +422,34 @@ def main() -> None:
     print(f"  theta_w:   max abs diff = {md_tw:.3e}")
     print(f"  tajimas_d: max abs diff = {md_td:.3e}")
 
+    print(f"Subsampling {args.ld_snps:,} SNPs for LD-decay (seed={args.seed}) ...",
+          flush=True)
+    hm_sub, pos_sub, gn_sub = _subsample_for_ld(
+        hm, pos, gn, args.ld_snps, args.seed)
+    bp_bins = LD_BP_BINS
+
+    print(f"Timing LD-decay (n_warmup={args.n_warmup}) ...", flush=True)
+    ld_a, t_allel_ld = _time(
+        lambda: _compute_allel_ld_decay(pos_sub, gn_sub, bp_bins),
+        n_warmup=args.n_warmup)
+    ld_g, t_pg_ld = _time(
+        lambda: _compute_pg_gpu_ld_decay(hm_sub, bp_bins),
+        n_warmup=args.n_warmup)
+    speedup_ld = t_allel_ld / t_pg_ld
+    print(f"  scikit-allel: {t_allel_ld:6.2f}s")
+    print(f"  pg_gpu:       {t_pg_ld:6.2f}s  ({speedup_ld:.1f}x speedup)")
+
+    md_ld = _verify_strict("ld_decay", ld_a, ld_g, rtol=1e-4, atol=1e-6)
+    print(f"  median r²: max abs diff = {md_ld:.3e}")
+
     if not args.no_plot:
         centers_mb = (df["start"].to_numpy() + df["end"].to_numpy()) / 2 / 1e6
         _plot_comparison(
             centers_mb,
             pi_a, pi_g, tw_a, tw_g, td_a, td_g,
+            bp_bins=bp_bins, ld_a=ld_a, ld_g=ld_g,
             t_allel=t_allel, t_pg=t_pg,
+            t_allel_ld=t_allel_ld, t_pg_ld=t_pg_ld,
             outpath=args.output)
     return
 
@@ -317,6 +463,11 @@ def _parse_args() -> argparse.Namespace:
                    help="Window size in bp (default: 10 kb)")
     p.add_argument("--n-warmup", type=int, default=1,
                    help="Discarded runs before timing (default: 1)")
+    p.add_argument("--ld-snps", type=int, default=10_000,
+                   help="SNPs subsampled for the LD-decay scan "
+                        "(default: 10_000)")
+    p.add_argument("--seed", type=int, default=0,
+                   help="RNG seed for SNP subsampling (default: 0)")
     p.add_argument("--no-plot", action="store_true",
                    help="Skip the matplotlib figure")
     p.add_argument("-o", "--output", type=Path,
@@ -328,7 +479,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _run_self_test() -> None:
-    """Quick host-side sanity check on compute_allele_counts."""
+    """Quick host-side sanity check on the helpers."""
     # 4 haplotypes, 3 variants, no missing
     hap = np.array([
         [0, 1, 0],
@@ -341,6 +492,10 @@ def _run_self_test() -> None:
     ac = compute_allele_counts(hm)
     np.testing.assert_array_equal(ac[:, 0], [3, 1, 3])
     np.testing.assert_array_equal(ac[:, 1], [1, 3, 1])
+    gn = compute_genotype_codes(hm)
+    assert gn.shape == (3, 2), gn.shape
+    np.testing.assert_array_equal(gn[:, 0], [1, 2, 0])
+    np.testing.assert_array_equal(gn[:, 1], [0, 1, 1])
     print("self-test OK")
 
 
