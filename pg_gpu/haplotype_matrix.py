@@ -1135,13 +1135,34 @@ class HaplotypeMatrix:
         cp.fill_diagonal(D, 0)
         return D
 
-    def pairwise_r2(self) -> cp.ndarray:
+    def pairwise_r2(self, estimator: str = 'r2') -> cp.ndarray:
         """Pairwise r-squared for all variant pairs.
+
+        Parameters
+        ----------
+        estimator : str
+            ``'r2'`` (default) -- naive haplotype r² from
+            frequency-based formula. ``'rogers_huff'`` -- Rogers-Huff
+            r² computed on diploid 0/1/2 dosages obtained by pairing
+            adjacent haplotypes (sample 0 = haplotypes 0,1; sample 1
+            = haplotypes 2,3; ...). Matches
+            :func:`scikit-allel.rogers_huff_r` ** 2.
 
         Returns
         -------
         cupy.ndarray, float64, shape (n_variants, n_variants)
         """
+        if estimator == 'rogers_huff':
+            from .ld_statistics import _rogers_huff_pairwise_r
+            r_full = _rogers_huff_pairwise_r(self)
+            r2 = r_full ** 2
+            r2 = cp.where(cp.isnan(r2), 0.0, r2)
+            cp.fill_diagonal(r2, 0)
+            return r2
+        if estimator != 'r2':
+            raise ValueError(
+                f"Unknown estimator: {estimator!r} "
+                f"(expected 'r2' or 'rogers_huff')")
         D, p = self._pairwise_ld_core()
         denom_squared = cp.outer(p * (1 - p), p * (1 - p))
         r2 = cp.where(denom_squared > 0, (D ** 2) / denom_squared, 0)
@@ -1211,7 +1232,8 @@ class HaplotypeMatrix:
 
         return loc
 
-    def windowed_r_squared(self, bp_bins, percentile=50, pop=None):
+    def windowed_r_squared(self, bp_bins, percentile=50, pop=None,
+                           estimator: str = 'r2'):
         """Compute percentiles of r-squared in genomic distance bins.
 
         Parameters
@@ -1222,6 +1244,11 @@ class HaplotypeMatrix:
             Percentile(s) to compute within each bin.
         pop : str, optional
             Population key to use.
+        estimator : str
+            ``'r2'`` (default) -- naive haplotype r² from frequency
+            counts. ``'rogers_huff'`` -- Rogers-Huff r² on diploid
+            0/1/2 dosages obtained by pairing adjacent haplotypes;
+            matches :func:`scikit-allel.rogers_huff_r` ** 2.
 
         Returns
         -------
@@ -1239,10 +1266,25 @@ class HaplotypeMatrix:
 
         m = self.num_variants
 
-        # compute counts and r² via tally
-        counts_arr, n_valid = self.tally_gpu_haplotypes(pop=pop)
-        from pg_gpu import ld_statistics
-        r2_vals = ld_statistics.r_squared(counts_arr, n_valid=n_valid)
+        if estimator == 'rogers_huff':
+            if pop is not None:
+                raise NotImplementedError(
+                    "windowed_r_squared(estimator='rogers_huff', pop=...) "
+                    "is not yet implemented; pass the full matrix or "
+                    "subset to the desired haplotypes first.")
+            from pg_gpu.ld_statistics import _rogers_huff_pairwise_r
+            r_full = _rogers_huff_pairwise_r(self)
+            iu = cp.triu_indices(m, k=1)
+            r2_vals = (r_full[iu]) ** 2
+        elif estimator == 'r2':
+            # compute counts and r² via tally
+            counts_arr, n_valid = self.tally_gpu_haplotypes(pop=pop)
+            from pg_gpu import ld_statistics
+            r2_vals = ld_statistics.r_squared(counts_arr, n_valid=n_valid)
+        else:
+            raise ValueError(
+                f"Unknown estimator: {estimator!r} "
+                f"(expected 'r2' or 'rogers_huff')")
 
         # pair distances
         idx_i, idx_j = cp.triu_indices(m, k=1)
