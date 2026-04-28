@@ -105,6 +105,41 @@ class TestHaplotypeMatrixPath:
         assert out.shape == (n_var * (n_var - 1) // 2,)
 
 
+class TestKernelParity:
+    """The fused _SIGMA_D2_GENO_KERN must match the polynomial path
+    (DD_polynomial / pi2_polynomial) on the same input to floating-point
+    precision."""
+
+    @pytest.mark.parametrize("seed", [0, 1, 42, 2026])
+    def test_kernel_matches_polynomial(self, seed):
+        from pg_gpu.ld_pipeline import compute_genotype_counts_for_pairs
+        from pg_gpu.genotype_kernels import _PopDataGeno
+        from pg_gpu.ld_statistics_genotype import (
+            dd_geno_single,
+            pi2_geno_single,
+        )
+
+        gm = _random_gm(40, 25, seed=seed)
+        gm.transfer_to_gpu()
+        i, j = cp.triu_indices(25, k=1)
+        idx_i, idx_j = i.astype(cp.int32), j.astype(cp.int32)
+
+        kernel_out = sigma_d2_geno(gm, idx_i, idx_j).get()
+
+        counts, n_valid = compute_genotype_counts_for_pairs(
+            gm.genotypes, idx_i, idx_j)
+        p = _PopDataGeno(counts, n_valid)
+        dd = dd_geno_single(p).get()
+        pi2 = pi2_geno_single(p).get()
+        reference = np.where(pi2 > 0, dd / pi2, np.nan)
+
+        finite = np.isfinite(kernel_out) & np.isfinite(reference)
+        np.testing.assert_allclose(
+            kernel_out[finite], reference[finite],
+            rtol=1e-12, atol=1e-12)
+        assert np.array_equal(np.isnan(kernel_out), np.isnan(reference))
+
+
 class TestMomentsLDConsistency:
     """The per-pair sigma_d^2 estimator must use the SAME polynomial
     components that the moments-LD pipeline aggregates per bin. Sum the

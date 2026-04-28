@@ -1,13 +1,16 @@
 """
 Fused CUDA kernels for genotype-based LD statistics (DD, Dz, pi2).
 
-All multi-population pi2 and Dz cases use RawKernels that compute one
-output per GPU thread with all arithmetic in registers. Genotype counts
-use 9-way layout: (g1..g9) per locus pair per population, following the
-moments convention.
+Every LD primitive on the diploid path is kernel-backed: DD via
+_DD_GENO_SINGLE_KERN and _DD_GENO_BETWEEN_KERN, Dz via _DZ_*_KERN
+(and the upstream _DZ_PRECOMP_KERN), pi2 via _PI2_*_KERN. All
+kernels compute one output per GPU thread with arithmetic in
+registers. Genotype counts use 9-way layout: (g1..g9) per locus
+pair per population, following the moments convention.
 
-DD uses the ld_statistics_genotype polynomial formulas directly (few
-calls, already fast, not worth fused kernels).
+The polynomial formulas in pg_gpu.ld_statistics_genotype are
+retained as a readable reference and as parity targets for the
+kernels here.
 """
 import cupy as cp
 
@@ -20,11 +23,150 @@ def _launch(kernel, args, M):
 # ---------------------------------------------------------------------------
 # DD kernels
 # ---------------------------------------------------------------------------
-# Genotype DD does not have fused CUDA kernels. The number of DD calls is
-# small (at most 10 for 4 populations), so we dispatch directly to the
-# ld_statistics_genotype formula functions (dd_geno_single, dd_geno_between)
-# in the compute_all_dd_geno dispatch function below.
+
+_DD_GENO_SINGLE_KERN = cp.RawKernel(r'''
+extern "C" __global__
+void k(const double* __restrict__ g, double* __restrict__ out, const long long N){
+    const long long idx=(long long)blockDim.x*blockIdx.x+threadIdx.x;
+    if(idx>=N)return;
+    const double*row=g+9*idx;
+    double n1=row[0],n2=row[1],n3=row[2],n4=row[3],n5=row[4],
+           n6=row[5],n7=row[6],n8=row[7],n9=row[8];
+    double ns=n1+n2+n3+n4+n5+n6+n7+n8+n9;
+    if(ns<4.0){out[idx]=0.0;return;}
+    // D from genotype frequencies (matches _PopDataGeno.D_geno).
+    double Dg=-(0.5*n2+n3+0.25*n5+0.5*n6)*(0.5*n4+0.25*n5+n7+0.5*n8)
+              +(n1+0.5*n2+0.5*n4+0.25*n5)*(0.25*n5+0.5*n6+0.5*n8+n9);
+    // Polynomial numerator (transcribed from dd_geno_single in
+    // ld_statistics_genotype.py:43-135). Grouped here in monomial blocks
+    // matching the source's line layout for ease of audit.
+    double poly=
+        (n2*n4-n2*n2*n4+4.0*n3*n4-4.0*n2*n3*n4-4.0*n3*n3*n4)
+        +(-n2*n4*n4-4.0*n3*n4*n4)
+        +(n1*n5-n1*n1*n5+n3*n5+2.0*n1*n3*n5-n3*n3*n5
+          -4.0*n3*n4*n5-n1*n5*n5-n3*n5*n5)
+        +(4.0*n1*n6-4.0*n1*n1*n6+n2*n6-4.0*n1*n2*n6-n2*n2*n6
+          +2.0*n2*n4*n6-4.0*n1*n5*n6-4.0*n1*n6*n6-n2*n6*n6)
+        +(4.0*n2*n7-4.0*n2*n2*n7
+          +16.0*n3*n7-16.0*n2*n3*n7-16.0*n3*n3*n7
+          -4.0*n2*n4*n7-16.0*n3*n4*n7
+          +n5*n7+2.0*n1*n5*n7-4.0*n2*n5*n7-18.0*n3*n5*n7-n5*n5*n7
+          +4.0*n6*n7+8.0*n1*n6*n7-16.0*n3*n6*n7-4.0*n5*n6*n7-4.0*n6*n6*n7
+          -4.0*n2*n7*n7-16.0*n3*n7*n7-n5*n7*n7-4.0*n6*n7*n7)
+        +(4.0*n1*n8-4.0*n1*n1*n8+4.0*n3*n8+8.0*n1*n3*n8-4.0*n3*n3*n8
+          +n4*n8-4.0*n1*n4*n8+2.0*n2*n4*n8-n4*n4*n8
+          -4.0*n1*n5*n8-4.0*n3*n5*n8
+          +n6*n8+2.0*n2*n6*n8-4.0*n3*n6*n8+2.0*n4*n6*n8-n6*n6*n8
+          -16.0*n3*n7*n8-4.0*n6*n7*n8
+          -4.0*n1*n8*n8-4.0*n3*n8*n8-n4*n8*n8-n6*n8*n8)
+        +(16.0*n1*n9-16.0*n1*n1*n9+4.0*n2*n9-16.0*n1*n2*n9-4.0*n2*n2*n9
+          +4.0*n4*n9-16.0*n1*n4*n9+8.0*n3*n4*n9-4.0*n4*n4*n9
+          +n5*n9-18.0*n1*n5*n9-4.0*n2*n5*n9+2.0*n3*n5*n9-4.0*n4*n5*n9-n5*n5*n9
+          -16.0*n1*n6*n9-4.0*n2*n6*n9
+          +8.0*n2*n7*n9+2.0*n5*n7*n9
+          -16.0*n1*n8*n9-4.0*n4*n8*n9
+          -16.0*n1*n9*n9-4.0*n2*n9*n9-4.0*n4*n9*n9-n5*n9*n9);
+    double numer=poly*(1.0/16.0)+Dg*Dg;
+    out[idx]=4.0*numer/(ns*(ns-1.0)*(ns-2.0)*(ns-3.0));
+}''', "k", options=("-std=c++11",))
+
+_DD_GENO_BETWEEN_KERN = cp.RawKernel(r'''
+extern "C" __global__
+void k(const double*D, const double*nn,
+       const int*I, const int*J, double*out, const int M){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=M)return;
+    int i=I[t], j=J[t];
+    double den=nn[i]*(nn[i]-1.0)*nn[j]*(nn[j]-1.0);
+    out[t]=(den>0.0)?4.0*D[i]*D[j]/den:0.0;
+}''', "k", options=("-std=c++11",))
+
 # ---------------------------------------------------------------------------
+# sigma_D^2 (per-pair single-pop) -- fused DD/pi^2 ratio
+# ---------------------------------------------------------------------------
+# Inlines the DD-single and pi2-IIII polynomials and emits their ratio
+# directly. Both share the same denominator n*(n-1)*(n-2)*(n-3), which
+# cancels in the ratio, so the kernel computes only the polynomial
+# numerators and divides them. NaN is returned where ns<4 or pi2<=0.
+
+_SIGMA_D2_GENO_KERN = cp.RawKernel(r'''
+extern "C" __global__
+void k(const double* __restrict__ g, double* __restrict__ out, const long long N){
+    const long long idx=(long long)blockDim.x*blockIdx.x+threadIdx.x;
+    if(idx>=N)return;
+    const double*row=g+9*idx;
+    double n1=row[0],n2=row[1],n3=row[2],n4=row[3],n5=row[4],
+           n6=row[5],n7=row[6],n8=row[7],n9=row[8];
+    double ns=n1+n2+n3+n4+n5+n6+n7+n8+n9;
+    if(ns<4.0){out[idx]=nan("");return;}
+
+    // --- DD numerator ---
+    double Dg=-(0.5*n2+n3+0.25*n5+0.5*n6)*(0.5*n4+0.25*n5+n7+0.5*n8)
+              +(n1+0.5*n2+0.5*n4+0.25*n5)*(0.25*n5+0.5*n6+0.5*n8+n9);
+    double poly_DD=
+        (n2*n4-n2*n2*n4+4.0*n3*n4-4.0*n2*n3*n4-4.0*n3*n3*n4)
+        +(-n2*n4*n4-4.0*n3*n4*n4)
+        +(n1*n5-n1*n1*n5+n3*n5+2.0*n1*n3*n5-n3*n3*n5
+          -4.0*n3*n4*n5-n1*n5*n5-n3*n5*n5)
+        +(4.0*n1*n6-4.0*n1*n1*n6+n2*n6-4.0*n1*n2*n6-n2*n2*n6
+          +2.0*n2*n4*n6-4.0*n1*n5*n6-4.0*n1*n6*n6-n2*n6*n6)
+        +(4.0*n2*n7-4.0*n2*n2*n7
+          +16.0*n3*n7-16.0*n2*n3*n7-16.0*n3*n3*n7
+          -4.0*n2*n4*n7-16.0*n3*n4*n7
+          +n5*n7+2.0*n1*n5*n7-4.0*n2*n5*n7-18.0*n3*n5*n7-n5*n5*n7
+          +4.0*n6*n7+8.0*n1*n6*n7-16.0*n3*n6*n7-4.0*n5*n6*n7-4.0*n6*n6*n7
+          -4.0*n2*n7*n7-16.0*n3*n7*n7-n5*n7*n7-4.0*n6*n7*n7)
+        +(4.0*n1*n8-4.0*n1*n1*n8+4.0*n3*n8+8.0*n1*n3*n8-4.0*n3*n3*n8
+          +n4*n8-4.0*n1*n4*n8+2.0*n2*n4*n8-n4*n4*n8
+          -4.0*n1*n5*n8-4.0*n3*n5*n8
+          +n6*n8+2.0*n2*n6*n8-4.0*n3*n6*n8+2.0*n4*n6*n8-n6*n6*n8
+          -16.0*n3*n7*n8-4.0*n6*n7*n8
+          -4.0*n1*n8*n8-4.0*n3*n8*n8-n4*n8*n8-n6*n8*n8)
+        +(16.0*n1*n9-16.0*n1*n1*n9+4.0*n2*n9-16.0*n1*n2*n9-4.0*n2*n2*n9
+          +4.0*n4*n9-16.0*n1*n4*n9+8.0*n3*n4*n9-4.0*n4*n4*n9
+          +n5*n9-18.0*n1*n5*n9-4.0*n2*n5*n9+2.0*n3*n5*n9-4.0*n4*n5*n9-n5*n5*n9
+          -16.0*n1*n6*n9-4.0*n2*n6*n9
+          +8.0*n2*n7*n9+2.0*n5*n7*n9
+          -16.0*n1*n8*n9-4.0*n4*n8*n9
+          -16.0*n1*n9*n9-4.0*n2*n9*n9-4.0*n4*n9*n9-n5*n9*n9);
+    double DD_num=(poly_DD*(1.0/16.0)+Dg*Dg)*4.0;
+
+    // --- pi^2 numerator (factored term + 1/16 * correction) ---
+    double a1=n1+n2+n3+0.5*n4+0.5*n5+0.5*n6;
+    double a2=n1+0.5*n2+n4+0.5*n5+n7+0.5*n8;
+    double a3=0.5*n2+n3+0.5*n5+n6+0.5*n8+n9;
+    double a4=0.5*n4+0.5*n5+0.5*n6+n7+n8+n9;
+    double corr=(
+        (13.0*n2*n4-16.0*n1*n2*n4-11.0*n2*n2*n4+16.0*n3*n4-28.0*n1*n3*n4-24.0*n2*n3*n4)+
+        (-8.0*n3*n3*n4-11.0*n2*n4*n4-20.0*n3*n4*n4-6.0*n5+12.0*n1*n5-4.0*n1*n1*n5+17.0*n2*n5)+
+        (-20.0*n1*n2*n5-11.0*n2*n2*n5+12.0*n3*n5-28.0*n1*n3*n5-20.0*n2*n3*n5-4.0*n3*n3*n5)+
+        (17.0*n4*n5-20.0*n1*n4*n5-32.0*n2*n4*n5-40.0*n3*n4*n5-11.0*n4*n4*n5+11.0*n5*n5)+
+        (-16.0*n1*n5*n5-17.0*n2*n5*n5-16.0*n3*n5*n5-17.0*n4*n5*n5-6.0*n5*n5*n5+16.0*n1*n6-8.0*n1*n1*n6)+
+        (13.0*n2*n6-24.0*n1*n2*n6-11.0*n2*n2*n6-28.0*n1*n3*n6-16.0*n2*n3*n6+24.0*n4*n6)+
+        (-36.0*n1*n4*n6-38.0*n2*n4*n6-36.0*n3*n4*n6-20.0*n4*n4*n6+17.0*n5*n6-40.0*n1*n5*n6)+
+        (-32.0*n2*n5*n6-20.0*n3*n5*n6-42.0*n4*n5*n6-17.0*n5*n5*n6-20.0*n1*n6*n6-11.0*n2*n6*n6)+
+        (-20.0*n4*n6*n6-11.0*n5*n6*n6+16.0*n2*n7-28.0*n1*n2*n7-20.0*n2*n2*n7+16.0*n3*n7)+
+        (-48.0*n1*n3*n7-44.0*n2*n3*n7-16.0*n3*n3*n7-24.0*n2*n4*n7-44.0*n3*n4*n7)+
+        (12.0*n5*n7-28.0*n1*n5*n7-40.0*n2*n5*n7-48.0*n3*n5*n7-20.0*n4*n5*n7-16.0*n5*n5*n7)+
+        (16.0*n6*n7-48.0*n1*n6*n7-48.0*n2*n6*n7-44.0*n3*n6*n7-36.0*n4*n6*n7-40.0*n5*n6*n7)+
+        (-20.0*n6*n6*n7-8.0*n2*n7*n7-16.0*n3*n7*n7-4.0*n5*n7*n7-8.0*n6*n7*n7+16.0*n1*n8-8.0*n1*n1*n8)+
+        (24.0*n2*n8-36.0*n1*n2*n8-20.0*n2*n2*n8+16.0*n3*n8-48.0*n1*n3*n8-36.0*n2*n3*n8-8.0*n3*n3*n8)+
+        (13.0*n4*n8-24.0*n1*n4*n8-38.0*n2*n4*n8-48.0*n3*n4*n8-11.0*n4*n4*n8+17.0*n5*n8-40.0*n1*n5*n8)+
+        (-42.0*n2*n5*n8-40.0*n3*n5*n8-32.0*n4*n5*n8-17.0*n5*n5*n8+13.0*n6*n8-48.0*n1*n6*n8)+
+        (-38.0*n2*n6*n8-24.0*n3*n6*n8-38.0*n4*n6*n8-32.0*n5*n6*n8-11.0*n6*n6*n8-28.0*n1*n7*n8)+
+        (-36.0*n2*n7*n8-44.0*n3*n7*n8-16.0*n4*n7*n8-20.0*n5*n7*n8-24.0*n6*n7*n8-20.0*n1*n8*n8)+
+        (-20.0*n2*n8*n8-20.0*n3*n8*n8-11.0*n4*n8*n8-11.0*n5*n8*n8-11.0*n6*n8*n8+16.0*n1*n9-16.0*n1*n1*n9)+
+        (16.0*n2*n9-44.0*n1*n2*n9-20.0*n2*n2*n9-48.0*n1*n3*n9-28.0*n2*n3*n9+16.0*n4*n9)+
+        (-44.0*n1*n4*n9-48.0*n2*n4*n9-48.0*n3*n4*n9-20.0*n4*n4*n9+12.0*n5*n9-48.0*n1*n5*n9)+
+        (-40.0*n2*n5*n9-28.0*n3*n5*n9-40.0*n4*n5*n9-16.0*n5*n5*n9-44.0*n1*n6*n9-24.0*n2*n6*n9)+
+        (-36.0*n4*n6*n9-20.0*n5*n6*n9-48.0*n1*n7*n9-48.0*n2*n7*n9-48.0*n3*n7*n9-28.0*n4*n7*n9)+
+        (-28.0*n5*n7*n9-28.0*n6*n7*n9-44.0*n1*n8*n9-36.0*n2*n8*n9-28.0*n3*n8*n9-24.0*n4*n8*n9)+
+        (-20.0*n5*n8*n9-16.0*n6*n8*n9-16.0*n1*n9*n9-8.0*n2*n9*n9-8.0*n4*n9*n9-4.0*n5*n9*n9)
+    );
+    double pi2_num=a1*a2*a3*a4+corr*(1.0/16.0);
+
+    // --- ratio (denominators cancel) ---
+    out[idx]=(pi2_num>0.0)?DD_num/pi2_num:nan("");
+}''', "k", options=("-std=c++11",))
 
 
 # ---------------------------------------------------------------------------
@@ -417,20 +559,58 @@ class _GenoPopFlat:
 # ---------------------------------------------------------------------------
 
 def compute_all_dd_geno(pops, dd_calls):
-    """Compute all DD values for genotype data.
+    """Fused DD computation for all calls using genotype kernels.
 
-    DD has only ~10 calls even for 4 populations, so we dispatch directly
-    to the ld_statistics_genotype polynomial formulas rather than using
-    fused CUDA kernels.
+    Single-pop calls go through _DD_GENO_SINGLE_KERN, between-pop calls
+    through _DD_GENO_BETWEEN_KERN. Calls of each type are batched into a
+    single kernel launch so the per-launch overhead is amortized across
+    the (P*N)-element pair stream.
     """
-    from . import ld_statistics_genotype as ldg
+    P = len(pops)
+    N = pops[0].n.shape[0]
 
-    results = []
-    for i, j in dd_calls:
-        if i == j:
-            results.append(ldg.dd_geno_single(pops[i]))
-        else:
-            results.append(ldg.dd_geno_between(pops[i], pops[j]))
+    # Flatten per-pop arrays into (P*N,) once; reuse for both kernels.
+    g_moments = cp.ascontiguousarray(cp.stack([
+        cp.stack([p.g1, p.g2, p.g3, p.g4, p.g5, p.g6, p.g7, p.g8, p.g9],
+                 axis=-1)
+        for p in pops
+    ]).reshape(P * N, 9))
+    D_f = cp.ascontiguousarray(cp.concatenate([p.D_geno for p in pops]))
+    nn_f = cp.ascontiguousarray(cp.concatenate([p.n for p in pops]))
+
+    # Group calls by case type so we can launch each case once.
+    single_calls = []   # indices into dd_calls
+    between_calls = []
+    for idx, (i, j) in enumerate(dd_calls):
+        (single_calls if i == j else between_calls).append(idx)
+
+    results = [None] * len(dd_calls)
+
+    if single_calls:
+        # Concat the single-pop slices of g into one (n_calls * N, 9) block.
+        pop_idx = [dd_calls[c][0] for c in single_calls]
+        g_concat = cp.ascontiguousarray(cp.concatenate(
+            [g_moments[p * N:(p + 1) * N] for p in pop_idx], axis=0))
+        M = len(single_calls) * N
+        out = cp.empty(M, dtype=cp.float64)
+        _launch(_DD_GENO_SINGLE_KERN, (g_concat, out, M), M)
+        for k, c in enumerate(single_calls):
+            results[c] = out[k * N:(k + 1) * N]
+
+    if between_calls:
+        # Build flat I/J indices into the concatenated D_f / nn_f arrays.
+        I_arr = cp.array(
+            [dd_calls[c][0] * N + n for c in between_calls for n in range(N)],
+            dtype=cp.int32)
+        J_arr = cp.array(
+            [dd_calls[c][1] * N + n for c in between_calls for n in range(N)],
+            dtype=cp.int32)
+        M = len(between_calls) * N
+        out = cp.empty(M, dtype=cp.float64)
+        _launch(_DD_GENO_BETWEEN_KERN, (D_f, nn_f, I_arr, J_arr, out, M), M)
+        for k, c in enumerate(between_calls):
+            results[c] = out[k * N:(k + 1) * N]
+
     return results
 
 
