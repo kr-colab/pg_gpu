@@ -145,6 +145,19 @@ def _assert_windows_aligned(allel_windows: np.ndarray,
 
 # -- verify + time -----------------------------------------------------------
 
+def _time(callable_, n_warmup: int) -> tuple:
+    """Run `n_warmup` discarded calls, then one timed call.
+
+    Returns (result, elapsed_seconds).
+    """
+    for _ in range(n_warmup):
+        callable_()
+    t0 = time.perf_counter()
+    result = callable_()
+    elapsed = time.perf_counter() - t0
+    return result, elapsed
+
+
 def _verify_strict(name: str, allel_arr: np.ndarray,
                    pg_arr: np.ndarray,
                    rtol: float = 1e-5, atol: float = 1e-8) -> float:
@@ -188,10 +201,17 @@ def main() -> None:
         start=int(pos[0]), stop=int(pos[-1]))
     print(f"  {len(windows)} windows of {args.window_size:,} bp")
 
-    print("Running scikit-allel ...", flush=True)
-    pi_a, tw_a, td_a = _compute_allel(pos, ac, windows)
-    print("Running pg_gpu ...", flush=True)
-    (pi_g, tw_g, td_g), df = _compute_pg_gpu(hm, args.window_size)
+    print(f"Timing (n_warmup={args.n_warmup}) ...", flush=True)
+    (pi_a, tw_a, td_a), t_allel = _time(
+        lambda: _compute_allel(pos, ac, windows),
+        n_warmup=args.n_warmup)
+    ((pi_g, tw_g, td_g), df), t_pg = _time(
+        lambda: _compute_pg_gpu(hm, args.window_size),
+        n_warmup=args.n_warmup)
+    speedup = t_allel / t_pg
+    print(f"  scikit-allel: {t_allel:6.2f}s")
+    print(f"  pg_gpu:       {t_pg:6.2f}s  ({speedup:.1f}x speedup)")
+
     _assert_windows_aligned(windows, df)
     print(f"  {len(pi_a)} aligned windows confirmed")
 
