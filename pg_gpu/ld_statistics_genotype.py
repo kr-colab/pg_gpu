@@ -1503,3 +1503,88 @@ def pi2_geno_alldiff(pi, pj, pk, pl):
     denom = n1 * n2 * n3 * n4
     valid = (n1 >= 1) & (n2 >= 1) & (n3 >= 1) & (n4 >= 1)
     return 1.0 * _safe_div(numer, denom, valid)
+
+
+# ===========================================================================
+# Pairwise sigma_d^2 -- single-population unbiased estimator on diploids
+# ===========================================================================
+#
+# Public entry point: turns the polynomial DD / pi2 components above into
+# a per-pair sigma_d^2 = D^2 / pi^2 estimate, computed from 9-way diploid
+# genotype counts via the unbiased multinomial projection (Ragsdale &
+# Gravel 2019). This is the diploid analogue of pg_gpu.ld_statistics's
+# tile-based sigma_d2 path, which works on phased haplotypes.
+
+def sigma_d2_geno(matrix, idx_i=None, idx_j=None):
+    """Per-pair unbiased sigma_D^2 (D^2 / pi^2) for diploid data.
+
+    Computes the Ragsdale & Gravel (2019) unbiased polynomial estimator
+    on 9-way diploid genotype counts. Each pair returns a single scalar
+    -- the ratio of the per-pair D^2 component to the per-pair pi^2
+    component -- ready for downstream binning, averaging, or whatever
+    aggregation the caller wants.
+
+    Parameters
+    ----------
+    matrix : GenotypeMatrix or HaplotypeMatrix
+        Source of 0/1/2 dosages. A HaplotypeMatrix is converted to
+        diploid by pairing adjacent haplotypes (the standard pg_gpu
+        convention; missing data not allowed).
+    idx_i, idx_j : array-like of int, optional
+        Pair indices on the variant axis with ``idx_i[k] < idx_j[k]``.
+        If omitted, defaults to the full upper triangle (``m*(m-1)/2``
+        pairs). Caller is responsible for chunking when m is large.
+
+    Returns
+    -------
+    cp.ndarray of float64, shape (n_pairs,)
+        sigma_D^2 per pair. NaN where pi^2 is zero (e.g., monomorphic
+        at one or both loci, or fewer than 4 valid individuals).
+
+    Raises
+    ------
+    TypeError
+        If ``matrix`` is not a GenotypeMatrix or HaplotypeMatrix.
+    ValueError
+        If ``matrix`` contains missing values.
+    """
+    from .ld_pipeline import compute_genotype_counts_for_pairs
+    from .genotype_kernels import _PopDataGeno
+    from .genotype_matrix import GenotypeMatrix
+    from .haplotype_matrix import HaplotypeMatrix
+
+    if isinstance(matrix, GenotypeMatrix):
+        gm = matrix
+    elif isinstance(matrix, HaplotypeMatrix):
+        gm = GenotypeMatrix.from_haplotype_matrix(matrix)
+    else:
+        raise TypeError(
+            f"matrix must be a GenotypeMatrix or HaplotypeMatrix, "
+            f"got {type(matrix).__name__}")
+    if gm.device != 'GPU':
+        gm.transfer_to_gpu()
+
+    g = gm.genotypes
+    if cp.any(g < 0):
+        raise ValueError(
+            "sigma_d2_geno does not support missing values (-1); "
+            "filter or impute before calling")
+    m = g.shape[1]
+
+    if idx_i is None and idx_j is None:
+        i, j = cp.triu_indices(m, k=1)
+        idx_i = i.astype(cp.int32)
+        idx_j = j.astype(cp.int32)
+    elif idx_i is None or idx_j is None:
+        raise ValueError("idx_i and idx_j must be provided together")
+    else:
+        idx_i = cp.asarray(idx_i, dtype=cp.int32)
+        idx_j = cp.asarray(idx_j, dtype=cp.int32)
+        if idx_i.shape != idx_j.shape:
+            raise ValueError("idx_i and idx_j must have the same shape")
+
+    counts, n_valid = compute_genotype_counts_for_pairs(g, idx_i, idx_j)
+    p = _PopDataGeno(counts, n_valid)
+    DD = dd_geno_single(p)        # per-pair D^2 (numerator)
+    PI2 = pi2_geno_single(p)      # per-pair pi^2 (denominator)
+    return cp.where(PI2 > 0, DD / PI2, cp.nan)
