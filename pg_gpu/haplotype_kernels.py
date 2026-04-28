@@ -14,6 +14,55 @@ def _launch(kernel, args, M):
 
 
 # ---------------------------------------------------------------------------
+# Pearson r, r^2, and Lewontin's D' kernels (count-based)
+# ---------------------------------------------------------------------------
+
+_R_KERN = cp.RawKernel(r'''
+extern "C" __global__
+void k(const double*c11, const double*c10, const double*c01, const double*c00,
+       const double*nn, double*out, const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    double a=c11[t], b=c10[t], c=c01[t], d=c00[t], n=nn[t];
+    double pA=(a+b)/n, pB=(a+c)/n;
+    double D=(a*d-b*c)/(n*n);
+    double denom=pA*(1.0-pA)*pB*(1.0-pB);
+    out[t]=(denom>0.0)?D/sqrt(denom):nan("");
+}''', "k", options=("-std=c++11",))
+
+_R_SQUARED_KERN = cp.RawKernel(r'''
+extern "C" __global__
+void k(const double*c11, const double*c10, const double*c01, const double*c00,
+       const double*nn, double*out, const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    double a=c11[t], b=c10[t], c=c01[t], d=c00[t], n=nn[t];
+    double pA=(a+b)/n, pB=(a+c)/n;
+    double D=(a*d-b*c)/(n*n);
+    double denom=pA*(1.0-pA)*pB*(1.0-pB);
+    out[t]=(denom>0.0)?D*D/denom:nan("");
+}''', "k", options=("-std=c++11",))
+
+_D_PRIME_KERN = cp.RawKernel(r'''
+extern "C" __global__
+void k(const double*c11, const double*c10, const double*c01, const double*c00,
+       const double*nn, double*out, const int N){
+    int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
+    double a=c11[t], b=c10[t], c=c01[t], d=c00[t], n=nn[t];
+    double pA=(a+b)/n, qA=1.0-pA;
+    double pB=(a+c)/n, qB=1.0-pB;
+    double D=(a*d-b*c)/(n*n);
+    double Dmax;
+    if(D>=0.0){
+        double v1=pA*qB, v2=qA*pB;
+        Dmax=(v1<v2)?v1:v2;
+    }else{
+        double v1=pA*pB, v2=qA*qB;
+        Dmax=(v1<v2)?v1:v2;
+    }
+    out[t]=(Dmax>0.0)?D/Dmax:nan("");
+}''', "k", options=("-std=c++11",))
+
+
+# ---------------------------------------------------------------------------
 # DD kernels
 # ---------------------------------------------------------------------------
 

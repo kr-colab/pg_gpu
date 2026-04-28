@@ -19,6 +19,7 @@ time, see :doc:`examples` instead.
    tutorials/accessibility_mask
    tutorials/local_pca
    tutorials/ld_blocks
+   tutorials/scikit_allel_comparison
    tutorials/moments_integration
 
 Each tutorial follows the same structure:

@@ -8,18 +8,17 @@ genotype configuration counts.
 
 Module status
 -------------
-DD functions (dd_geno_single, dd_geno_between) are LIVE -- called
-by genotype_kernels.compute_all_dd_geno() for the small number of
-DD evaluations per chunk.
-
-Dz and pi2 functions are RETAINED AS REFERENCE but no longer called
-in the production path. They have been superseded by fused CUDA
-RawKernels in genotype_kernels.py that compute each statistic in
-a single kernel launch with all arithmetic in GPU registers. The
-CuPy-based formulas here serve as:
+All polynomial functions in this module are RETAINED AS REFERENCE
+but no longer called in the production path. They have been
+superseded by fused CUDA RawKernels in genotype_kernels.py that
+compute each statistic in a single kernel launch with all
+arithmetic in GPU registers. The CuPy-based formulas here serve
+as:
   - A readable reference for the exact polynomial expressions
   - A potential CPU-fallback path (CuPy ops work without CUDA)
-  - A validation target for the fused kernels
+  - A validation target for the fused kernels (parity tests in
+    tests/test_genotype_kernels_dd.py and friends assert the
+    kernels match these polynomials to ~1e-12)
 """
 import cupy as cp
 
@@ -30,7 +29,8 @@ def _safe_div(numer, denom, valid):
 
 
 # ===========================================================================
-# DD  (D^2 and D1*D2)  --  LIVE: called by genotype_kernels
+# DD  (D^2 and D1*D2)  --  REFERENCE ONLY: superseded by fused CUDA kernels
+#         genotype_kernels._DD_GENO_SINGLE_KERN, _DD_GENO_BETWEEN_KERN
 # ===========================================================================
 
 
@@ -616,7 +616,7 @@ def pi2_geno_single(p):
         - 20 * g5 * g7 * g8
         - 24 * g6 * g7 * g8
         - 20 * g1 * g8 ** 2
-        + 20 * g2 * g8 ** 2
+        - 20 * g2 * g8 ** 2
         - 20 * g3 * g8 ** 2
         - 11 * g4 * g8 ** 2
         - 11 * g5 * g8 ** 2
@@ -1549,7 +1549,11 @@ def sigma_d2_geno(matrix, idx_i=None, idx_j=None):
         If ``matrix`` contains missing values.
     """
     from .ld_pipeline import compute_genotype_counts_for_pairs
-    from .genotype_kernels import _PopDataGeno
+    from .genotype_kernels import (
+        _PopDataGeno,
+        _SIGMA_D2_GENO_KERN,
+        _launch,
+    )
     from .genotype_matrix import GenotypeMatrix
     from .haplotype_matrix import HaplotypeMatrix
 
@@ -1585,6 +1589,13 @@ def sigma_d2_geno(matrix, idx_i=None, idx_j=None):
 
     counts, n_valid = compute_genotype_counts_for_pairs(g, idx_i, idx_j)
     p = _PopDataGeno(counts, n_valid)
-    DD = dd_geno_single(p)        # per-pair D^2 (numerator)
-    PI2 = pi2_geno_single(p)      # per-pair pi^2 (denominator)
-    return cp.where(PI2 > 0, DD / PI2, cp.nan)
+    # Fused kernel: emits D^2 / pi^2 in one launch. Numerator and
+    # denominator share the same n*(n-1)*(n-2)*(n-3) factor, which
+    # cancels; the kernel only computes the polynomial parts.
+    g_arr = cp.ascontiguousarray(cp.stack(
+        [p.g1, p.g2, p.g3, p.g4, p.g5, p.g6, p.g7, p.g8, p.g9],
+        axis=-1))
+    N = g_arr.shape[0]
+    out = cp.empty(N, dtype=cp.float64)
+    _launch(_SIGMA_D2_GENO_KERN, (g_arr, out, N), N)
+    return out

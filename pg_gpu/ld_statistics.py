@@ -150,6 +150,20 @@ def dd_between(counts: cp.ndarray,
     return _dd_between(counts, pop1_idx, pop2_idx, n_valid)
 
 
+def _hap_count_inputs(counts, n_valid):
+    """Unpack a (N,4) counts array into the 5 contiguous float64 arrays
+    the haplotype r/r_squared/d_prime kernels expect."""
+    c11 = cp.ascontiguousarray(counts[:, 0].astype(cp.float64))
+    c10 = cp.ascontiguousarray(counts[:, 1].astype(cp.float64))
+    c01 = cp.ascontiguousarray(counts[:, 2].astype(cp.float64))
+    c00 = cp.ascontiguousarray(counts[:, 3].astype(cp.float64))
+    if n_valid is None:
+        n = c11 + c10 + c01 + c00
+    else:
+        n = cp.ascontiguousarray(n_valid.astype(cp.float64))
+    return c11, c10, c01, c00, n
+
+
 def r(counts: cp.ndarray,
       n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """
@@ -169,19 +183,12 @@ def r(counts: cp.ndarray,
         Pearson r values. NaN where computation is undefined
         (monomorphic at either locus).
     """
-    c11, c10, c01, c00 = counts[:, 0], counts[:, 1], counts[:, 2], counts[:, 3]
-    n = n_valid.astype(cp.float64) if n_valid is not None else cp.sum(counts, axis=1).astype(cp.float64)
-
-    p_A = (c11 + c10) / n
-    p_B = (c11 + c01) / n
-    D = (c11 * c00 - c10 * c01).astype(cp.float64) / (n * n)
-    denom = p_A * (1 - p_A) * p_B * (1 - p_B)
-
-    valid_mask = denom > 0
-    result = cp.full(n.shape[0], cp.nan, dtype=cp.float64)
-    result[valid_mask] = D[valid_mask] / cp.sqrt(denom[valid_mask])
-
-    return result
+    from .haplotype_kernels import _R_KERN, _launch
+    c11, c10, c01, c00, n = _hap_count_inputs(counts, n_valid)
+    N = c11.shape[0]
+    out = cp.empty(N, dtype=cp.float64)
+    _launch(_R_KERN, (c11, c10, c01, c00, n, out, N), N)
+    return out
 
 
 def r_squared(counts: cp.ndarray,
@@ -202,7 +209,12 @@ def r_squared(counts: cp.ndarray,
     cp.ndarray, float64, shape (N,)
         r-squared values. NaN where computation is undefined.
     """
-    return r(counts, n_valid) ** 2
+    from .haplotype_kernels import _R_SQUARED_KERN, _launch
+    c11, c10, c01, c00, n = _hap_count_inputs(counts, n_valid)
+    N = c11.shape[0]
+    out = cp.empty(N, dtype=cp.float64)
+    _launch(_R_SQUARED_KERN, (c11, c10, c01, c00, n, out, N), N)
+    return out
 
 
 def d_prime(counts: cp.ndarray,
@@ -226,24 +238,12 @@ def d_prime(counts: cp.ndarray,
         D' values in [-1, 1]. NaN where computation is undefined
         (monomorphic at either locus or D_max is zero).
     """
-    c11, c10, c01, c00 = counts[:, 0], counts[:, 1], counts[:, 2], counts[:, 3]
-    n = n_valid.astype(cp.float64) if n_valid is not None else cp.sum(counts, axis=1).astype(cp.float64)
-
-    p_A = (c11 + c10) / n
-    q_A = 1.0 - p_A
-    p_B = (c11 + c01) / n
-    q_B = 1.0 - p_B
-    D = (c11 * c00 - c10 * c01).astype(cp.float64) / (n * n)
-
-    D_max_pos = cp.minimum(p_A * q_B, q_A * p_B)
-    D_max_neg = cp.minimum(p_A * p_B, q_A * q_B)
-    D_max = cp.where(D >= 0, D_max_pos, D_max_neg)
-
-    valid_mask = D_max > 0
-    result = cp.full(n.shape[0], cp.nan, dtype=cp.float64)
-    result[valid_mask] = D[valid_mask] / D_max[valid_mask]
-
-    return result
+    from .haplotype_kernels import _D_PRIME_KERN, _launch
+    c11, c10, c01, c00, n = _hap_count_inputs(counts, n_valid)
+    N = c11.shape[0]
+    out = cp.empty(N, dtype=cp.float64)
+    _launch(_D_PRIME_KERN, (c11, c10, c01, c00, n, out, N), N)
+    return out
 
 
 def _prepare_segregating(mat, missing_data='include'):
