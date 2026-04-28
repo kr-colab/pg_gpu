@@ -1922,7 +1922,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                    'haplotype_count'}
     garud_requested = any(s in statistics for s in garud_stats)
     if garud_requested:
-        _compute_fused_garud_h(matrix, population,
+        # `matrix` is already population-subsetted above (line 1722); pass
+        # population=None to avoid a double lookup that would fail because
+        # the subsetted matrix has sample_sets={'all': ...}, not the original
+        # population names.
+        _compute_fused_garud_h(matrix, None,
                                win_start, win_stop, n_windows, statistics,
                                results)
 
