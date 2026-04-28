@@ -344,19 +344,191 @@ def _tile_sigma_d2(hi, vi, hj, vj):
 def _resolve_ld_estimator(estimator: str, is_hap_matrix: bool) -> str:
     """Resolve an LD estimator string, including the ``'auto'`` policy.
 
-    ``'auto'`` -> ``'sigma_d2'`` when the input is a ``HaplotypeMatrix``
-    (the recommended path; uses the unbiased Ragsdale & Gravel 2019
-    estimators), and ``'r2'`` otherwise (the only thing that works for
-    pre-computed r² arrays or ``GenotypeMatrix`` inputs). Explicit
-    ``'r2'`` and ``'sigma_d2'`` pass through unchanged.
+    ``'auto'`` resolves to:
+      - ``'sigma_d2'`` for a ``HaplotypeMatrix`` (unbiased Ragsdale &
+        Gravel 2019 estimator -- the recommended path on phased data).
+      - ``'rogers_huff'`` for a ``GenotypeMatrix`` (the natural
+        diploid-dosage estimator).
+      - ``'r2'`` otherwise (pre-computed r² arrays, etc.).
+
+    Explicit ``'r2'``, ``'sigma_d2'``, and ``'rogers_huff'`` pass
+    through unchanged.
     """
     if estimator == 'auto':
-        return 'sigma_d2' if is_hap_matrix else 'r2'
-    if estimator not in ('r2', 'sigma_d2'):
+        return 'sigma_d2' if is_hap_matrix else 'rogers_huff'
+    if estimator not in ('r2', 'sigma_d2', 'rogers_huff'):
         raise ValueError(
             f"Unknown estimator: {estimator!r} "
-            f"(expected one of 'auto', 'r2', 'sigma_d2')")
+            f"(expected one of 'auto', 'r2', 'sigma_d2', 'rogers_huff')")
     return estimator
+
+
+def _dosage_from_matrix(matrix) -> "cp.ndarray":
+    """Return a ``(n_samples, n_variants)`` float64 dosage array.
+
+    For a ``HaplotypeMatrix`` (n_haplotypes, n_variants) of 0/1, adjacent
+    haplotypes are paired into 0/1/2 dosages
+    (sample 0 = haplotypes 0,1; sample 1 = haplotypes 2,3; ...).
+    For a ``GenotypeMatrix`` (n_samples, n_variants), the genotypes are
+    used directly. Raises ``ValueError`` if missing values (-1) are
+    present, matching the convention of
+    ``scikit-allel.rogers_huff_r``.
+    """
+    from .haplotype_matrix import HaplotypeMatrix
+    from .genotype_matrix import GenotypeMatrix
+
+    if isinstance(matrix, HaplotypeMatrix):
+        if matrix.device == 'CPU':
+            matrix.transfer_to_gpu()
+        hap = matrix.haplotypes
+        if (hap < 0).any():
+            raise ValueError(
+                "rogers_huff_r: input HaplotypeMatrix contains missing "
+                "values (-1). Rogers-Huff r expects strict 0/1/2 dosage "
+                "input; drop or impute missing sites first.")
+        n_hap = hap.shape[0]
+        if n_hap % 2 != 0:
+            raise ValueError(
+                f"rogers_huff_r: HaplotypeMatrix has an odd number of "
+                f"haplotypes ({n_hap}); cannot pair into diploids.")
+        return (hap[0::2, :] + hap[1::2, :]).astype(cp.float64)
+    if isinstance(matrix, GenotypeMatrix):
+        if matrix.device == 'CPU':
+            matrix.transfer_to_gpu()
+        g = matrix.genotypes
+        if (g < 0).any():
+            raise ValueError(
+                "rogers_huff_r: input GenotypeMatrix contains missing "
+                "values (-1). Rogers-Huff r expects strict 0/1/2 dosage "
+                "input; drop or impute missing sites first.")
+        return g.astype(cp.float64)
+    raise TypeError(
+        f"rogers_huff_r: expected HaplotypeMatrix or GenotypeMatrix; "
+        f"got {type(matrix).__name__}")
+
+
+def _tile_rogers_huff_r(g_i: "cp.ndarray", g_j: "cp.ndarray",
+                        mu_i: "cp.ndarray", mu_j: "cp.ndarray",
+                        ssd_i: "cp.ndarray", ssd_j: "cp.ndarray",
+                        n_samples: int) -> "cp.ndarray":
+    """Per-tile signed Rogers-Huff r block from dosage tiles.
+
+    Parameters
+    ----------
+    g_i, g_j : (n_samples, B_i), (n_samples, B_j) float64
+        Dosage tiles (uncentered).
+    mu_i, mu_j : (B_i,), (B_j,) float64
+        Per-column means (precomputed for the full matrix).
+    ssd_i, ssd_j : (B_i,), (B_j,) float64
+        Per-column sums of squared deviations from the column mean
+        (precomputed). Equivalent to ``n_samples * variance``.
+    n_samples : int
+        Number of samples (rows of the dosage matrix).
+
+    Returns
+    -------
+    r : (B_i, B_j) float64
+        Signed Rogers-Huff r per pair. NaN where either column is
+        constant (ssd == 0); matches ``allel.rogers_huff_r``.
+
+    Notes
+    -----
+    Uses the rank-1 expansion
+    ``(g_i - mu_i)^T (g_j - mu_j) = g_i^T g_j - n * mu_i mu_j^T``
+    so the centered cross-product is one matmul plus an outer
+    product, no per-tile centering of the input.
+    """
+    cov = g_i.T @ g_j - n_samples * cp.outer(mu_i, mu_j)
+    denom = cp.sqrt(cp.outer(ssd_i, ssd_j))
+    return cp.where(denom > 0, cov / denom, cp.nan)
+
+
+def _rogers_huff_pairwise_r(matrix, tile_size: Optional[int] = None
+                            ) -> "cp.ndarray":
+    """Full ``(n_variants, n_variants)`` Rogers-Huff r matrix.
+
+    Computed tile-by-tile so peak memory is ``O(B^2)`` rather than
+    ``O(n^2)``. The diagonal is set to NaN. Sub-diagonal entries are
+    filled by symmetry.
+
+    Parameters
+    ----------
+    matrix : HaplotypeMatrix or GenotypeMatrix
+    tile_size : int, optional
+        Block size B. Defaults to ``min(n_variants, 1024)`` which
+        keeps each tile <= 8 MB at float64 for typical sample sizes.
+
+    Returns
+    -------
+    r : (n_variants, n_variants) float64 cupy.ndarray
+        Symmetric Rogers-Huff r matrix on GPU. NaN on the diagonal
+        and for variant pairs where either column is monomorphic.
+    """
+    g = _dosage_from_matrix(matrix)
+    n_samples, n_var = g.shape
+    if tile_size is None:
+        tile_size = min(n_var, 1024)
+
+    mu = g.mean(axis=0)
+    ssd = ((g - mu) ** 2).sum(axis=0)
+
+    out = cp.empty((n_var, n_var), dtype=cp.float64)
+    for i0 in range(0, n_var, tile_size):
+        i1 = min(i0 + tile_size, n_var)
+        for j0 in range(i0, n_var, tile_size):
+            j1 = min(j0 + tile_size, n_var)
+            tile = _tile_rogers_huff_r(
+                g[:, i0:i1], g[:, j0:j1],
+                mu[i0:i1], mu[j0:j1],
+                ssd[i0:i1], ssd[j0:j1],
+                n_samples)
+            out[i0:i1, j0:j1] = tile
+            if i0 != j0:
+                out[j0:j1, i0:i1] = tile.T
+    cp.fill_diagonal(out, cp.nan)
+    return out
+
+
+def rogers_huff_r(matrix, tile_size: Optional[int] = None) -> "cp.ndarray":
+    """Pairwise Rogers-Huff (2008) r for all variant pairs.
+
+    Returns the upper-triangle pairwise r values in condensed form,
+    matching the layout of :func:`scikit-allel.rogers_huff_r`: pairs
+    are ordered ``(0,1), (0,2), ..., (0,n-1), (1,2), ..., (n-2,n-1)``.
+
+    Parameters
+    ----------
+    matrix : HaplotypeMatrix or GenotypeMatrix
+        Diploid input. ``HaplotypeMatrix`` rows are paired into 0/1/2
+        dosages; ``GenotypeMatrix`` genotypes are used directly. Both
+        must be free of -1 missing sentinels (raise otherwise).
+    tile_size : int, optional
+        GPU tile size. Defaults to ``min(n_variants, 1024)``.
+
+    Returns
+    -------
+    r : cupy.ndarray, shape ``(n_variants * (n_variants - 1) // 2,)``
+        Signed Rogers-Huff r per pair. NaN where either variant is
+        monomorphic.
+
+    See Also
+    --------
+    rogers_huff_r_squared : convenience wrapper returning ``r ** 2``.
+    """
+    r_full = _rogers_huff_pairwise_r(matrix, tile_size=tile_size)
+    n = r_full.shape[0]
+    iu = cp.triu_indices(n, k=1)
+    return r_full[iu]
+
+
+def rogers_huff_r_squared(matrix, tile_size: Optional[int] = None
+                          ) -> "cp.ndarray":
+    """Pairwise Rogers-Huff r² for all variant pairs.
+
+    Convenience wrapper around :func:`rogers_huff_r` returning the
+    squared values.
+    """
+    return rogers_huff_r(matrix, tile_size=tile_size) ** 2
 
 
 def _zns_tiled(mat, missing_data='include', tile_size=512):
