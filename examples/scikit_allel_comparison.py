@@ -89,12 +89,48 @@ def compute_genotype_codes(hm: HaplotypeMatrix) -> np.ndarray:
     return paired.T.astype(np.int8)        # (n_var, n_samples)
 
 
+def _load_data(small: bool) -> tuple:
+    """Load the gamb dataset and build all four views.
+
+    Returns
+    -------
+    hm : HaplotypeMatrix
+    pos : np.ndarray, shape (n_variants,), 1-based positions
+    ac : np.ndarray, shape (n_variants, 2), allele counts for allel
+    gn : np.ndarray, shape (n_variants, n_samples), 0/1/2 codes for allel
+    """
+    path = ZARR_SMALL if small else ZARR_FULL
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Required dataset not found: {path}\n"
+            f"The data fixtures live under examples/data/ and are tracked "
+            f"in the repo. If you cloned without LFS or otherwise lack the "
+            f"file, try `git lfs pull` or refetch from the project root.")
+    print(f"Loading {path.name} ...", flush=True)
+    t0 = time.perf_counter()
+    hm = HaplotypeMatrix.from_zarr(str(path))
+    print(f"  loaded in {time.perf_counter() - t0:.2f}s; "
+          f"{hm.haplotypes.shape[0]} haplotypes, "
+          f"{hm.haplotypes.shape[1]:,} variants, "
+          f"chrom range {hm.chrom_start:,}-{hm.chrom_end:,}",
+          flush=True)
+    pos = hm.positions
+    if hasattr(pos, "get"):
+        pos = pos.get()
+    pos = np.asarray(pos, dtype=np.int64)
+    ac = compute_allele_counts(hm)
+    gn = compute_genotype_codes(hm)
+    return hm, pos, ac, gn
+
+
 def main() -> None:
     args = _parse_args()
     if args.self_test:
         _run_self_test()
         return
-    raise NotImplementedError("main not yet wired up")
+    hm, pos, ac, gn = _load_data(args.small)
+    print(f"shapes: ac={ac.shape}, gn={gn.shape}, pos[0..2]={pos[:3]}")
+    return
 
 
 def _parse_args() -> argparse.Namespace:
