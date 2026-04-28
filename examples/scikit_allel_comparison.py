@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 """
-Side-by-side: scikit-allel vs pg_gpu on a windowed diversity / LD scan.
+Side-by-side: scikit-allel vs pg_gpu on a windowed diversity scan.
 
 Loads a real Anopheles gambiae X-chromosome dataset and computes
-windowed pi, theta_w, Tajima's D, and a windowed LD summary using
-both libraries. scikit-allel takes four separate calls; pg_gpu takes
-one. The script verifies numerical agreement (or, for the LD scan,
-high rank correlation) and reports the wall-clock speedup.
+windowed pi, theta_w, and Tajima's D using both libraries.
+scikit-allel takes three separate calls; pg_gpu takes one. The script
+verifies numerical agreement and reports the wall-clock speedup.
 
 Usage
 -----
@@ -27,8 +26,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from scipy.stats import spearmanr
-
 from pg_gpu import HaplotypeMatrix
 from pg_gpu.windowed_analysis import windowed_analysis
 
@@ -61,43 +58,14 @@ def compute_allele_counts(hm: HaplotypeMatrix) -> np.ndarray:
     return ac
 
 
-def compute_genotype_codes(hm: HaplotypeMatrix) -> np.ndarray:
-    """Build a scikit-allel-style (n_variants, n_samples) int8 genotype
-    array (0 = hom ref, 1 = het, 2 = hom alt).
-
-    Pairs adjacent haplotypes (haplotypes 0,1 = sample 0; 2,3 = sample
-    1; etc.). The gamb X dataset has no missing data; this function
-    asserts that and refuses to silently fabricate codes.
-    """
-    hap = hm.haplotypes
-    if hasattr(hap, "get"):
-        hap = hap.get()
-    hap = np.asarray(hap, dtype=np.int8)
-    if (hap < 0).any():
-        raise ValueError(
-            "compute_genotype_codes: input haplotypes contain missing "
-            "values (-1). scikit-allel's rogers_huff_r expects 0/1/2 "
-            "with no missing sentinels; drop or impute missing sites "
-            "before calling.")
-    n_hap, n_var = hap.shape
-    if n_hap % 2 != 0:
-        raise ValueError(
-            f"compute_genotype_codes: odd number of haplotypes "
-            f"({n_hap}); cannot pair into diploids.")
-    # (n_haps, n_var) -> (n_samples, n_var) by summing pairs, then transpose.
-    paired = hap[0::2, :] + hap[1::2, :]   # (n_samples, n_var) int8
-    return paired.T.astype(np.int8)        # (n_var, n_samples)
-
-
 def _load_data(small: bool) -> tuple:
-    """Load the gamb dataset and build all four views.
+    """Load the gamb dataset and build the three views needed for comparison.
 
     Returns
     -------
     hm : HaplotypeMatrix
     pos : np.ndarray, shape (n_variants,), 1-based positions
     ac : np.ndarray, shape (n_variants, 2), allele counts for allel
-    gn : np.ndarray, shape (n_variants, n_samples), 0/1/2 codes for allel
     """
     path = ZARR_SMALL if small else ZARR_FULL
     if not path.exists():
@@ -119,50 +87,33 @@ def _load_data(small: bool) -> tuple:
         pos = pos.get()
     pos = np.asarray(pos, dtype=np.int64)
     ac = compute_allele_counts(hm)
-    gn = compute_genotype_codes(hm)
-    return hm, pos, ac, gn
+    return hm, pos, ac
 
 
 # -- compute paths -----------------------------------------------------------
 
-def _compute_allel(pos: np.ndarray, ac: np.ndarray, gn: np.ndarray,
+def _compute_allel(pos: np.ndarray, ac: np.ndarray,
                    windows: np.ndarray) -> tuple:
-    """Run scikit-allel's four windowed scans. Returns (pi, theta_w,
-    tajimas_d, ld_median_r2).
-
-    Note: allel.windowed_r_squared crashes in NumPy >= 1.25 when a window
-    contains exactly one variant (rogers_huff_r returns an empty r array
-    and np.percentile raises IndexError on it). We use windowed_statistic
-    directly with a guarded closure to match the intended behaviour.
-    """
+    """Run scikit-allel's three windowed diversity scans. Returns
+    (pi, theta_w, tajimas_d)."""
     pi, _, _, _ = allel.windowed_diversity(pos, ac, windows=windows)
     theta_w, _, _, _ = allel.windowed_watterson_theta(
         pos, ac, windows=windows)
     tajd, _, _ = allel.windowed_tajima_d(pos, ac, windows=windows)
-
-    def _median_r2(gnw):
-        r_sq = allel.rogers_huff_r(gnw) ** 2
-        if len(r_sq) == 0:
-            return np.nan
-        return np.percentile(r_sq, 50)
-
-    ld, _, _ = allel.windowed_statistic(
-        pos, gn, _median_r2, windows=windows, fill=np.nan)
-    return pi, theta_w, tajd, ld
+    return pi, theta_w, tajd
 
 
 def _compute_pg_gpu(hm: HaplotypeMatrix, window_size: int) -> tuple:
     """Run pg_gpu's single fused windowed_analysis call. Returns
-    (pi, theta_w, tajimas_d, zns) plus the result DataFrame so the
-    caller can inspect window edges."""
+    (pi, theta_w, tajimas_d) plus the result DataFrame so the caller
+    can inspect window edges."""
     df = windowed_analysis(
         hm, window_size=window_size, step_size=window_size,
-        statistics=["pi", "theta_w", "tajimas_d", "zns"])
+        statistics=["pi", "theta_w", "tajimas_d"])
     cp.cuda.Device().synchronize()
     return (df["pi"].to_numpy(),
             df["theta_w"].to_numpy(),
-            df["tajimas_d"].to_numpy(),
-            df["zns"].to_numpy()), df
+            df["tajimas_d"].to_numpy()), df
 
 
 def _assert_windows_aligned(allel_windows: np.ndarray,
@@ -192,12 +143,44 @@ def _assert_windows_aligned(allel_windows: np.ndarray,
             f"allel={starts_a[bad]}, pg_gpu={starts_g[bad]}")
 
 
+# -- verify + time -----------------------------------------------------------
+
+def _verify_strict(name: str, allel_arr: np.ndarray,
+                   pg_arr: np.ndarray,
+                   rtol: float = 1e-5, atol: float = 1e-8) -> float:
+    """Assert per-window agreement on a NaN-aligned mask.
+
+    Returns the max absolute difference on the comparison mask so the
+    caller can print a one-line summary.
+    """
+    finite = np.isfinite(allel_arr) & np.isfinite(pg_arr)
+    if not finite.any():
+        raise AssertionError(
+            f"[{name}] no finite windows in either array; cannot verify")
+    diff = np.abs(allel_arr[finite] - pg_arr[finite])
+    max_diff = float(diff.max())
+    try:
+        np.testing.assert_allclose(
+            allel_arr[finite], pg_arr[finite],
+            rtol=rtol, atol=atol,
+            err_msg=f"[{name}] disagreement above tolerance")
+    except AssertionError as e:
+        # Surface the worst-offender windows in the failure
+        order = np.argsort(diff)[::-1][:5]
+        finite_idx = np.where(finite)[0]
+        worst = finite_idx[order]
+        raise AssertionError(
+            f"[{name}] disagreement; worst window indices {worst.tolist()} "
+            f"(max diff = {max_diff:.3e}). Original error:\n{e}") from None
+    return max_diff
+
+
 def main() -> None:
     args = _parse_args()
     if args.self_test:
         _run_self_test()
         return
-    hm, pos, ac, gn = _load_data(args.small)
+    hm, pos, ac = _load_data(args.small)
 
     print("Computing windows ...", flush=True)
     windows = allel.position_windows(
@@ -206,11 +189,37 @@ def main() -> None:
     print(f"  {len(windows)} windows of {args.window_size:,} bp")
 
     print("Running scikit-allel ...", flush=True)
-    pi_a, tw_a, td_a, ld_a = _compute_allel(pos, ac, gn, windows)
+    pi_a, tw_a, td_a = _compute_allel(pos, ac, windows)
     print("Running pg_gpu ...", flush=True)
-    (pi_g, tw_g, td_g, ld_g), df = _compute_pg_gpu(hm, args.window_size)
+    (pi_g, tw_g, td_g), df = _compute_pg_gpu(hm, args.window_size)
     _assert_windows_aligned(windows, df)
     print(f"  {len(pi_a)} aligned windows confirmed")
+
+    # The trailing window can be partial when chrom_end is not a multiple
+    # of window_size. The two libraries normalize partial windows
+    # differently (allel divides per-site sums by actual span; pg_gpu
+    # divides by the fixed window_size parameter), which produces a real
+    # but uninteresting numerical mismatch on that one window. Mask it
+    # out so verification only compares full-width windows.
+    window_widths = windows[:, 1] - windows[:, 0] + 1
+    partial = window_widths != args.window_size
+    n_partial = int(partial.sum())
+    # Work on writable copies so we can set partial windows to NaN.
+    pi_a, tw_a, td_a = (np.array(a) for a in (pi_a, tw_a, td_a))
+    pi_g, tw_g, td_g = (np.array(a) for a in (pi_g, tw_g, td_g))
+    if n_partial:
+        for arr in (pi_a, tw_a, td_a, pi_g, tw_g, td_g):
+            arr[partial] = np.nan
+        print(f"  ({n_partial} partial trailing window(s) masked from "
+              f"comparison)")
+
+    print("Verifying ...", flush=True)
+    md_pi = _verify_strict("pi", pi_a, pi_g)
+    md_tw = _verify_strict("theta_w", tw_a, tw_g)
+    md_td = _verify_strict("tajimas_d", td_a, td_g)
+    print(f"  pi:        max abs diff = {md_pi:.3e}")
+    print(f"  theta_w:   max abs diff = {md_tw:.3e}")
+    print(f"  tajimas_d: max abs diff = {md_td:.3e}")
     return
 
 
@@ -234,7 +243,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _run_self_test() -> None:
-    """Quick host-side sanity check on the two helpers."""
+    """Quick host-side sanity check on compute_allele_counts."""
     # 4 haplotypes, 3 variants, no missing
     hap = np.array([
         [0, 1, 0],
@@ -247,10 +256,6 @@ def _run_self_test() -> None:
     ac = compute_allele_counts(hm)
     np.testing.assert_array_equal(ac[:, 0], [3, 1, 3])
     np.testing.assert_array_equal(ac[:, 1], [1, 3, 1])
-    gn = compute_genotype_codes(hm)
-    assert gn.shape == (3, 2), gn.shape
-    np.testing.assert_array_equal(gn[:, 0], [1, 2, 0])
-    np.testing.assert_array_equal(gn[:, 1], [0, 1, 1])
     print("self-test OK")
 
 
