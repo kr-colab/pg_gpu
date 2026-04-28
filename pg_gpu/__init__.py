@@ -2,15 +2,39 @@
 
 import os
 
-if os.environ.get('READTHEDOCS') != 'True':
+# Import-time CUDA check. Set PG_GPU_SKIP_CUDA_CHECK=1 to skip --
+# useful for docs builds, static analysis, type checking, and other
+# contexts that want to import pg_gpu without exercising the GPU. The
+# Read-the-Docs builder is auto-detected via READTHEDOCS=True.
+if not (os.environ.get('PG_GPU_SKIP_CUDA_CHECK')
+        or os.environ.get('READTHEDOCS') == 'True'):
     try:
-        import cupy as cp
-        cp.cuda.runtime.getDeviceCount()
-    except Exception as e:
+        import cupy as _cp  # noqa: F401  (verifying availability only)
+    except ImportError as _e:
+        raise ImportError(
+            "pg_gpu requires CuPy, but `import cupy` failed:\n"
+            f"  {_e}\n\n"
+            "Install via the project's pixi environment (recommended):\n"
+            "  git clone https://github.com/kr-colab/pg_gpu.git\n"
+            "  cd pg_gpu && pixi install && pixi shell\n\n"
+            "To import pg_gpu without CuPy (e.g. for docs builds or\n"
+            "static analysis), set PG_GPU_SKIP_CUDA_CHECK=1."
+        ) from _e
+    try:
+        if _cp.cuda.runtime.getDeviceCount() < 1:
+            raise RuntimeError("no CUDA devices found")
+    except Exception as _e:
         raise RuntimeError(
-            "pg_gpu requires a CUDA-capable GPU and CuPy installed with "
-            "working CUDA drivers. No usable GPU was detected."
-        ) from e
+            "pg_gpu requires a CUDA-capable NVIDIA GPU. CuPy imported\n"
+            f"successfully, but no usable CUDA device was found: {_e}\n\n"
+            "Common causes:\n"
+            "  - No NVIDIA driver installed; check `nvidia-smi`.\n"
+            "  - CUDA toolkit version mismatch with the system driver.\n"
+            "  - All GPUs are taken by another process (try setting\n"
+            "    CUDA_VISIBLE_DEVICES to a free index).\n\n"
+            "To import pg_gpu without a GPU (e.g. for docs builds or\n"
+            "static analysis), set PG_GPU_SKIP_CUDA_CHECK=1."
+        ) from _e
 
 from . import ld_statistics
 from . import diversity
