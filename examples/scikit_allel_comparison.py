@@ -143,6 +143,63 @@ def _assert_windows_aligned(allel_windows: np.ndarray,
             f"allel={starts_a[bad]}, pg_gpu={starts_g[bad]}")
 
 
+# -- plotting ----------------------------------------------------------------
+
+# Two-color palette: scikit-allel = warm grey, pg_gpu = blue.
+COL_ALLEL = "#9aa1ac"   # light grey-blue
+COL_PG = "#2980b9"      # pg_gpu blue (matches accessibility_mask.py)
+
+
+def _plot_comparison(
+    centers_mb: np.ndarray,
+    pi_a: np.ndarray, pi_g: np.ndarray,
+    tw_a: np.ndarray, tw_g: np.ndarray,
+    td_a: np.ndarray, td_g: np.ndarray,
+    t_allel: float, t_pg: float,
+    outpath: Path,
+) -> None:
+    sns.set_theme(style="whitegrid", context="paper", font_scale=0.95)
+    fig, axes = plt.subplots(
+        4, 1, figsize=(11, 9),
+        gridspec_kw={"height_ratios": [1, 1, 1, 0.5]},
+        sharex=False)
+
+    # Panels 1-3: identical-shape overlays for pi / theta_w / Tajima's D.
+    for ax, (a, g, ylabel) in zip(
+        axes[:3],
+        [(pi_a, pi_g, r"$\pi$"),
+         (tw_a, tw_g, r"$\theta_W$"),
+         (td_a, td_g, r"Tajima's $D$")]):
+        ax.plot(centers_mb, a, color=COL_ALLEL, linewidth=1.6, alpha=0.9)
+        ax.plot(centers_mb, g, color=COL_PG, linewidth=0.8, alpha=0.95)
+        ax.set_ylabel(ylabel)
+
+    # Top-panel legend only.
+    axes[0].plot([], [], color=COL_ALLEL, linewidth=1.6, label="scikit-allel")
+    axes[0].plot([], [], color=COL_PG, linewidth=0.8, label="pg_gpu")
+    axes[0].legend(fontsize=8, loc="upper right", frameon=False)
+
+    axes[2].set_xlabel("Genomic position (Mb)")
+
+    # Panel 4: timing bars.
+    ax_t = axes[3]
+    ax_t.barh([1, 0], [t_allel, t_pg], color=[COL_ALLEL, COL_PG],
+              height=0.6)
+    ax_t.set_yticks([0, 1])
+    ax_t.set_yticklabels(["pg_gpu", "scikit-allel"])
+    ax_t.set_xlabel("seconds")
+    ax_t.text(t_allel, 1, f"  {t_allel:.2f}s",
+              va="center", ha="left", fontsize=9, color="0.2")
+    ax_t.text(t_pg, 0, f"  {t_pg:.2f}s ({t_allel / t_pg:.1f}x)",
+              va="center", ha="left", fontsize=9, color="0.2")
+    ax_t.grid(axis="y", visible=False)
+
+    fig.tight_layout()
+    fig.savefig(outpath, bbox_inches="tight", dpi=150)
+    plt.close(fig)
+    print(f"\nFigure saved to {outpath}")
+
+
 # -- verify + time -----------------------------------------------------------
 
 def _time(callable_, n_warmup: int) -> tuple:
@@ -240,6 +297,14 @@ def main() -> None:
     print(f"  pi:        max abs diff = {md_pi:.3e}")
     print(f"  theta_w:   max abs diff = {md_tw:.3e}")
     print(f"  tajimas_d: max abs diff = {md_td:.3e}")
+
+    if not args.no_plot:
+        centers_mb = (df["start"].to_numpy() + df["end"].to_numpy()) / 2 / 1e6
+        _plot_comparison(
+            centers_mb,
+            pi_a, pi_g, tw_a, tw_g, td_a, td_g,
+            t_allel=t_allel, t_pg=t_pg,
+            outpath=args.output)
     return
 
 
