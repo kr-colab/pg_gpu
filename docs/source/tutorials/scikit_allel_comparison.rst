@@ -58,7 +58,28 @@ What the script does
 5. Selects a contiguous block of ``--ld-snps`` SNPs (default
    500,000) centered on the chromosome midpoint, drops variants
    below ``--ld-mac-min`` (default 20, i.e. MAF 0.05 in n=100
-   diploids), and computes a pairwise LD-decay curve on each side.
+   diploids), and computes *three* LD-decay curves on the same
+   pairs:
+
+   - scikit-allel Rogers-Huff :math:`r^2` (``allel.rogers_huff_r``,
+     squared, distance-binned, per-bin median)
+   - pg_gpu Rogers-Huff :math:`r^2` (one call to
+     ``hm_sub.windowed_r_squared(bp_bins, percentile=50, estimator='rogers_huff')``)
+   - pg_gpu unbiased :math:`\sigma_D^2` (Ragsdale & Gravel 2019;
+     one call to ``sigma_d2_geno(hm_sub)`` on the diploid genotype
+     view, distance-binned, per-bin median)
+
+   The first two are the *same* statistic computed by two different
+   libraries -- they agree to floating-point precision (the float32
+   precision floor scikit-allel sets internally) and serve as the
+   parity check. The third is a *different* statistic on the same
+   SNPs: rather than per-pair :math:`r^2 = D^2/\pi^2` where
+   :math:`\pi^2` is computed from the same pair, it's the unbiased
+   moments-LD polynomial estimator that subtracts a finite-sample
+   bias term derived from the multinomial projection. On panmictic
+   data with many rare variants it tracks below :math:`r^2` at
+   short distances and converges to it at long distances.
+
    A contiguous block (vs. a random subsample) gives dense coverage
    of short pair distances, which is where the LD-decay signal
    lives -- a random subsample leaves only a handful of pairs
@@ -67,19 +88,15 @@ What the script does
    variants take a tiny set of tied :math:`r^2` values (e.g., two
    non-overlapping singletons give exactly :math:`1/(n-1)^2`)
    regardless of distance, and those tied values pin the per-bin
-   median to a constant -- erasing any decay signal. The pg_gpu
-   path is one call:
-   ``hm_sub.windowed_r_squared(bp_bins, percentile=50, estimator='rogers_huff')``;
-   the scikit-allel path runs ``allel.rogers_huff_r``, squares it,
-   builds a pair-distance array, and bins manually. Both compute
-   the per-distance-bin median Rogers-Huff (2008) :math:`r^2`, so
-   the two curves agree to floating-point precision (the float32
-   precision floor scikit-allel sets internally). Times each side.
-6. Plots a 5-panel figure: pi / theta_W / Tajima's D traces overlaid
-   between the two implementations (agreement = visual identity),
-   the LD-decay curves overlaid on a log distance axis, and a
-   bottom panel of horizontal timing bars annotated with speedup
-   ratios for both the windowed scan and the LD-decay scan.
+   median to a constant -- erasing any decay signal.
+
+6. Plots a 5-panel figure: pi / theta_W / Tajima's D traces
+   overlaid between the two implementations (agreement = visual
+   identity), the three LD-decay curves overlaid on a log distance
+   axis, and a bottom panel of horizontal timing bars annotated
+   with speedup ratios for both the windowed scan and the LD-decay
+   scan. The :math:`\sigma_D^2` runtime is also reported but isn't
+   on the speedup bar (it has no scikit-allel counterpart).
 
 Why it's useful as a template
 ------------------------------

@@ -33,7 +33,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from pg_gpu import HaplotypeMatrix
+from pg_gpu import GenotypeMatrix, HaplotypeMatrix
+from pg_gpu.ld_statistics_genotype import sigma_d2_geno
 from pg_gpu.windowed_analysis import windowed_analysis
 
 
@@ -44,9 +45,11 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 ZARR_FULL = DATA_DIR / "gamb.X.phased.n100.zarr"
 ZARR_SMALL = DATA_DIR / "gamb.X.8-12Mb.n100.derived.zarr"
 
-# Plot palette: scikit-allel is warm grey, pg_gpu is blue.
+# Plot palette: scikit-allel is warm grey, pg_gpu Rogers-Huff is blue,
+# pg_gpu unbiased sigma_D^2 (Ragsdale-Gravel) is orange.
 COL_ALLEL = "#9aa1ac"
 COL_PG = "#2980b9"
+COL_PG_SIGMA = "#e67e22"
 
 # Distance bins for the LD-decay curve: 24 log-spaced bins from 100 bp
 # to 10 kb. Anopheles LD decays within a few kb, so this is the range
@@ -224,6 +227,41 @@ def _compute_pg_gpu_ld_decay(hm_sub, bp_bins):
     return np.asarray(result)
 
 
+def _compute_pg_gpu_sigma_d2_decay(hm_sub, pos_sub, bp_bins):
+    """LD-decay curve via pg_gpu's per-pair Ragsdale-Gravel sigma_D^2.
+
+    Unlike Rogers-Huff (a per-pair r-correlation estimator on dosages),
+    sigma_D^2 = D^2 / pi^2 is the unbiased moments-LD estimator that
+    underlies moments.LD inference. Computed here directly on diploid
+    9-way genotype counts via ``sigma_d2_geno``, then binned by physical
+    distance and median-aggregated to match the other two curves'
+    presentation.
+
+    There is no scikit-allel counterpart for this estimator -- it's
+    shown to demonstrate that on the *same* SNP block one can swap the
+    LD definition itself, not just the implementation.
+    """
+    gm = GenotypeMatrix.from_haplotype_matrix(hm_sub)
+    if gm.device != 'GPU':
+        gm.transfer_to_gpu()
+    n = gm.num_variants
+    sd2 = sigma_d2_geno(gm).get()  # all upper-triangle pairs
+
+    i, j = np.triu_indices(n, k=1)
+    distances = (pos_sub[j] - pos_sub[i]).astype(np.int64)
+    finite = np.isfinite(sd2)
+    distances = distances[finite]
+    sd2 = sd2[finite]
+    bin_idx = np.digitize(distances, bp_bins) - 1
+
+    out = np.full(len(bp_bins) - 1, np.nan)
+    for b in range(len(out)):
+        in_bin = bin_idx == b
+        if in_bin.any():
+            out[b] = float(np.median(sd2[in_bin]))
+    return out
+
+
 # --- 4. Verification + timing helpers ---------------------------------------
 
 def _time(callable_, n_warmup):
@@ -255,7 +293,7 @@ def _verify(name, allel_arr, pg_arr, rtol=1e-5, atol=1e-8):
 
 def _plot_comparison(centers_mb,
                      pi_a, pi_g, tw_a, tw_g, td_a, td_g,
-                     bp_bins, ld_a, ld_g,
+                     bp_bins, ld_a, ld_g, ld_sd2,
                      t_allel, t_pg, t_allel_ld, t_pg_ld,
                      outpath):
     """5-panel figure: pi / theta_W / Tajima's D / LD-decay / timings."""
@@ -283,16 +321,27 @@ def _plot_comparison(centers_mb,
     axes[0].legend(fontsize=8, loc="upper right", frameon=False)
     axes[2].set_xlabel("Genomic position (Mb)")
 
-    # LD-decay panel (log-scale x).
+    # LD-decay panel (log-scale x). Three curves on the same axis:
+    #   scikit-allel Rogers-Huff (grey)        -- median r^2 per bin
+    #   pg_gpu Rogers-Huff (blue, on top)      -- median r^2 per bin
+    #     [the two should overlap exactly: parity story]
+    #   pg_gpu unbiased sigma_D^2 (orange)     -- median sigma_D^2 per bin
+    #     [a different LD estimator on the same SNPs]
     ax_ld = axes[3]
     bin_centers = np.sqrt(bp_bins[:-1] * bp_bins[1:])  # log-bin midpoints
     ax_ld.plot(bin_centers, ld_a, color=COL_ALLEL, linewidth=1.6,
-               alpha=0.9, marker="o", markersize=3)
+               alpha=0.9, marker="o", markersize=3,
+               label=r"scikit-allel Rogers-Huff $r^2$")
     ax_ld.plot(bin_centers, ld_g, color=COL_PG, linewidth=0.8,
-               alpha=0.95, marker="o", markersize=2)
+               alpha=0.95, marker="o", markersize=2,
+               label=r"pg_gpu Rogers-Huff $r^2$")
+    ax_ld.plot(bin_centers, ld_sd2, color=COL_PG_SIGMA, linewidth=1.2,
+               alpha=0.95, marker="s", markersize=3, linestyle="--",
+               label=r"pg_gpu unbiased $\sigma_D^2$ (R-G)")
     ax_ld.set_xscale("log")
-    ax_ld.set_ylabel(r"median $r^2$")
+    ax_ld.set_ylabel("median LD")
     ax_ld.set_xlabel("Pair distance (bp)")
+    ax_ld.legend(fontsize=8, loc="upper right", frameon=False)
 
     # Timing bars: 4 bars (2 libraries x 2 computations).
     ax_t = axes[4]
@@ -384,9 +433,13 @@ def main():
     ld_g, t_pg_ld = _time(
         lambda: _compute_pg_gpu_ld_decay(hm_sub, LD_BP_BINS),
         n_warmup=args.n_warmup)
-    print(f"  scikit-allel: {t_allel_ld:6.2f}s")
-    print(f"  pg_gpu:       {t_pg_ld:6.2f}s  "
+    ld_sd2, t_pg_sd2 = _time(
+        lambda: _compute_pg_gpu_sigma_d2_decay(hm_sub, pos_sub, LD_BP_BINS),
+        n_warmup=args.n_warmup)
+    print(f"  scikit-allel Rogers-Huff: {t_allel_ld:6.2f}s")
+    print(f"  pg_gpu Rogers-Huff:       {t_pg_ld:6.2f}s  "
           f"({t_allel_ld / t_pg_ld:.1f}x speedup)")
+    print(f"  pg_gpu sigma_D^2 (R-G):   {t_pg_sd2:6.2f}s")
     print(f"  median r^2: max abs diff = "
           f"{_verify('ld_decay', ld_a, ld_g, rtol=1e-4, atol=1e-6):.3e}")
 
@@ -395,7 +448,7 @@ def main():
         _plot_comparison(
             centers_mb,
             pi_a, pi_g, tw_a, tw_g, td_a, td_g,
-            bp_bins=LD_BP_BINS, ld_a=ld_a, ld_g=ld_g,
+            bp_bins=LD_BP_BINS, ld_a=ld_a, ld_g=ld_g, ld_sd2=ld_sd2,
             t_allel=t_allel, t_pg=t_pg,
             t_allel_ld=t_allel_ld, t_pg_ld=t_pg_ld,
             outpath=args.output)
