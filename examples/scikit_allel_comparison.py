@@ -15,7 +15,6 @@ Usage
 """
 
 import argparse
-import sys
 import time
 from pathlib import Path
 
@@ -36,53 +35,6 @@ ZARR_FULL = DATA_DIR / "gamb.X.phased.n100.zarr"
 ZARR_SMALL = DATA_DIR / "gamb.X.8-12Mb.n100.derived.zarr"
 
 
-# -- helpers -----------------------------------------------------------------
-
-def compute_genotype_codes(hm: HaplotypeMatrix) -> np.ndarray:
-    """Build a scikit-allel-style (n_variants, n_samples) int8 genotype
-    array (0 = hom ref, 1 = het, 2 = hom alt).
-
-    Pairs adjacent haplotypes (haplotypes 0,1 = sample 0; 2,3 = sample
-    1; etc.). The gamb X dataset has no missing data; this helper
-    raises if it sees any -1 sentinels.
-    """
-    hap = hm.haplotypes
-    if hasattr(hap, "get"):
-        hap = hap.get()
-    hap = np.asarray(hap, dtype=np.int8)
-    if (hap < 0).any():
-        raise ValueError(
-            "compute_genotype_codes: input haplotypes contain missing "
-            "values (-1).")
-    n_hap, _ = hap.shape
-    if n_hap % 2 != 0:
-        raise ValueError(
-            f"compute_genotype_codes: odd number of haplotypes ({n_hap}); "
-            f"cannot pair into diploids.")
-    paired = hap[0::2, :] + hap[1::2, :]
-    return paired.T.astype(np.int8)
-
-
-def compute_allele_counts(hm: HaplotypeMatrix) -> np.ndarray:
-    """Build a scikit-allel-style (n_variants, 2) allele-count array.
-
-    Counts ref (0) and alt (1) calls per variant, ignoring any -1
-    missing-data sentinels.
-    """
-    hap = hm.haplotypes
-    if hasattr(hap, "get"):  # cupy -> numpy
-        hap = hap.get()
-    hap = np.asarray(hap, dtype=np.int8)
-    ac = np.empty((hap.shape[1], 2), dtype=np.int32)
-    ac[:, 0] = (hap == 0).sum(axis=0)
-    ac[:, 1] = (hap == 1).sum(axis=0)
-    # Sanity: ref + alt should equal the number of non-missing haplotypes.
-    n_called = (hap >= 0).sum(axis=0)
-    assert np.array_equal(ac.sum(axis=1), n_called), (
-        "allele counts do not match called-haplotype counts")
-    return ac
-
-
 def _load_data(small: bool) -> tuple:
     """Load the gamb dataset and build the three views needed for comparison.
 
@@ -90,7 +42,8 @@ def _load_data(small: bool) -> tuple:
     -------
     hm : HaplotypeMatrix
     pos : np.ndarray, shape (n_variants,), 1-based positions
-    ac : np.ndarray, shape (n_variants, 2), allele counts for allel
+    ac : np.ndarray, shape (n_variants, 2), allele counts (allel)
+    gn : np.ndarray, shape (n_variants, n_samples), 0/1/2 dosages (allel)
     """
     path = ZARR_SMALL if small else ZARR_FULL
     if not path.exists():
@@ -111,8 +64,16 @@ def _load_data(small: bool) -> tuple:
     if hasattr(pos, "get"):
         pos = pos.get()
     pos = np.asarray(pos, dtype=np.int64)
-    ac = compute_allele_counts(hm)
-    gn = compute_genotype_codes(hm)
+    # Build the two scikit-allel-shaped views from a single HaplotypeArray.
+    # pg_gpu stores haplotypes as (n_haplotypes, n_variants); allel wants
+    # (n_variants, n_haplotypes). Transposing once and going through allel's
+    # converters keeps us out of the hand-rolled-pairing business.
+    hap = hm.haplotypes
+    if hasattr(hap, "get"):
+        hap = hap.get()
+    ha = allel.HaplotypeArray(np.ascontiguousarray(hap.T))
+    ac = np.asarray(ha.count_alleles())
+    gn = np.asarray(ha.to_genotypes(ploidy=2).to_n_alt())
     return hm, pos, ac, gn
 
 
@@ -371,9 +332,6 @@ def _verify_strict(name: str, allel_arr: np.ndarray,
 
 def main() -> None:
     args = _parse_args()
-    if args.self_test:
-        _run_self_test()
-        return
     hm, pos, ac, gn = _load_data(args.small)
 
     print("Computing windows ...", flush=True)
@@ -470,30 +428,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("-o", "--output", type=Path,
                    default=Path("scikit_allel_comparison.png"),
                    help="Output figure path")
-    p.add_argument("--self-test", action="store_true",
-                   help=argparse.SUPPRESS)
     return p.parse_args()
-
-
-def _run_self_test() -> None:
-    """Quick host-side sanity check on the helpers."""
-    # 4 haplotypes, 3 variants, no missing
-    hap = np.array([
-        [0, 1, 0],
-        [1, 1, 0],
-        [0, 0, 0],
-        [0, 1, 1],
-    ], dtype=np.int8)
-    pos = np.array([100, 200, 300])
-    hm = HaplotypeMatrix(hap, pos, chrom_start=1, chrom_end=300)
-    ac = compute_allele_counts(hm)
-    np.testing.assert_array_equal(ac[:, 0], [3, 1, 3])
-    np.testing.assert_array_equal(ac[:, 1], [1, 3, 1])
-    gn = compute_genotype_codes(hm)
-    assert gn.shape == (3, 2), gn.shape
-    np.testing.assert_array_equal(gn[:, 0], [1, 2, 0])
-    np.testing.assert_array_equal(gn[:, 1], [0, 1, 1])
-    print("self-test OK")
 
 
 if __name__ == "__main__":
