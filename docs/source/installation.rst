@@ -75,28 +75,6 @@ environment that has both libraries installed:
 See :doc:`tutorials/moments_integration` for the full
 demographic-inference walk-through.
 
-Verify Installation
--------------------
-
-``import pg_gpu`` performs a CUDA-availability check at import time
-and raises a diagnostic error if CuPy is missing or no usable CUDA
-device is detected. So the verification is just:
-
-.. code-block:: bash
-
-   pixi run python -c "import pg_gpu; print(pg_gpu.__version__)"
-
-If you see the version printed, you are set up correctly. If the
-import fails, the error message will name the underlying cause -- the
-most common one being a mismatch between the system CUDA driver and
-the toolkit pixi installed; ``nvidia-smi`` should show a driver
-version that supports CUDA 12.
-
-For docs builds, static analysis, type checking, or any other context
-where you want to import ``pg_gpu`` without exercising the GPU, set
-``PG_GPU_SKIP_CUDA_CHECK=1`` to bypass the check. (The
-``READTHEDOCS=True`` environment variable is auto-detected.)
-
 Running Tests
 -------------
 
