@@ -161,7 +161,9 @@ def main():
     skip_allel = args.no_allel
 
     if not skip_allel:
+        # Make `allel` available to module-level helpers (_get_allel uses it).
         import allel  # noqa: F811
+        globals()['allel'] = allel
         import matplotlib
         matplotlib.use('Agg')
         import matplotlib.pyplot as plt  # noqa: F811
