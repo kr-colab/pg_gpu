@@ -56,12 +56,12 @@ What the script does
    a single-window cosmetic effect, not a real numerical
    disagreement).
 5. Selects a contiguous block of ``--ld-snps`` SNPs (default
-   10,000) centered on the chromosome midpoint, drops variants
-   below ``--ld-mac-min`` (default 10, i.e. MAF 0.05 in n=100
+   500,000) centered on the chromosome midpoint, drops variants
+   below ``--ld-mac-min`` (default 20, i.e. MAF 0.05 in n=100
    diploids), and computes a pairwise LD-decay curve on each side.
    A contiguous block (vs. a random subsample) gives dense coverage
    of short pair distances, which is where the LD-decay signal
-   lives -- a random 10k subsample leaves only a handful of pairs
+   lives -- a random subsample leaves only a handful of pairs
    in each short-distance bin and the curve washes out into noise.
    The MAC filter is equally important: pairs of near-singleton
    variants take a tiny set of tied :math:`r^2` values (e.g., two

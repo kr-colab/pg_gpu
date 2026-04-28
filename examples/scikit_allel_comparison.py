@@ -166,16 +166,23 @@ def _subsample_for_ld(hm, pos, gn, n_snps, mac_min):
     gn_blk = gn[idx]
 
     # Drop near-singleton variants. See the docstring for why.
+    # (Formula assumes biallelic, non-missing 0/1/2 dosages -- the
+    # gamb fixture is clean, so we don't validate here.)
     if mac_min > 0:
         n_alt = gn_blk.sum(axis=1)
         mac = np.minimum(n_alt, 2 * gn_blk.shape[1] - n_alt)
         keep = mac >= mac_min
         idx, pos_blk, gn_blk = idx[keep], pos_blk[keep], gn_blk[keep]
 
-    # Build the matching pg_gpu view (haplotypes subset the same way).
-    hap_full = _to_numpy(hm.haplotypes).astype(np.int8, copy=False)
+    # Slice haplotypes on whichever device they live (CPU or GPU)
+    # rather than pulling the full chromosome through host memory.
+    hap = hm.haplotypes
+    if hasattr(hap, "get"):  # CuPy array on GPU
+        hap_sub = hap[:, cp.asarray(idx)]
+    else:
+        hap_sub = hap[:, idx]
     hm_sub = HaplotypeMatrix(
-        hap_full[:, idx], pos_blk, hm.chrom_start, hm.chrom_end)
+        hap_sub, pos_blk, hm.chrom_start, hm.chrom_end)
     return hm_sub, pos_blk, gn_blk
 
 
@@ -347,14 +354,12 @@ def main():
     # When chrom_end isn't a clean multiple of window_size, the last
     # window has fewer than window_size bp. The two libraries normalize
     # that single partial window slightly differently -- a one-window
-    # cosmetic effect, not a real numerical disagreement. Mask it out
+    # cosmetic effect, not a real numerical disagreement. NaN it out
     # of the comparison so it doesn't flag a false failure.
-    arrays = [np.array(a) for a in (pi_a, tw_a, td_a, pi_g, tw_g, td_g)]
     partial = (windows[:, 1] - windows[:, 0] + 1) != args.window_size
-    if partial.any():
-        for arr in arrays:
-            arr[partial] = np.nan
-    pi_a, tw_a, td_a, pi_g, tw_g, td_g = arrays
+    pi_a, tw_a, td_a, pi_g, tw_g, td_g = (
+        np.where(partial, np.nan, np.asarray(a))
+        for a in (pi_a, tw_a, td_a, pi_g, tw_g, td_g))
 
     # Strict numerical agreement on all three diversity stats.
     print("Verifying diversity ...", flush=True)
