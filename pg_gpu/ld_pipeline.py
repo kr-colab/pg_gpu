@@ -180,6 +180,43 @@ def compute_counts_for_pairs(haplotypes, idx_i, idx_j, pop_indices=None):
 # ---------------------------------------------------------------------------
 
 
+_GENO_COUNTS_KERN = cp.RawKernel(r'''
+extern "C" __global__
+void k(const signed char* __restrict__ g,
+       const int n_indiv, const int n_var,
+       const int* __restrict__ idx_i, const int* __restrict__ idx_j,
+       int* __restrict__ counts_out,
+       int* __restrict__ n_valid_out, const int n_pairs){
+    int t=blockDim.x*blockIdx.x+threadIdx.x;
+    if(t>=n_pairs)return;
+    int i=idx_i[t], j=idx_j[t];
+    int c00=0,c01=0,c02=0,c10=0,c11=0,c12=0,c20=0,c21=0,c22=0;
+    int valid=0;
+    for(int k=0;k<n_indiv;++k){
+        signed char gi=g[k*n_var+i];
+        signed char gj=g[k*n_var+j];
+        if(gi>=0 && gj>=0){
+            int combo=gi*3+gj;
+            if(combo==0)++c00;
+            else if(combo==1)++c01;
+            else if(combo==2)++c02;
+            else if(combo==3)++c10;
+            else if(combo==4)++c11;
+            else if(combo==5)++c12;
+            else if(combo==6)++c20;
+            else if(combo==7)++c21;
+            else if(combo==8)++c22;
+            ++valid;
+        }
+    }
+    int*row=counts_out+t*9;
+    row[0]=c00; row[1]=c01; row[2]=c02;
+    row[3]=c10; row[4]=c11; row[5]=c12;
+    row[6]=c20; row[7]=c21; row[8]=c22;
+    n_valid_out[t]=valid;
+}''', "k", options=("-std=c++11",))
+
+
 def compute_genotype_counts_for_pairs(genotypes, idx_i, idx_j, pop_indices=None):
     """Compute 9-way genotype counts for variant pairs.
 
@@ -207,33 +244,23 @@ def compute_genotype_counts_for_pairs(genotypes, idx_i, idx_j, pop_indices=None)
             pop_indices = cp.array(pop_indices, dtype=cp.int32)
         genotypes = genotypes[pop_indices, :]
 
-    geno_i = genotypes[:, idx_i]
-    geno_j = genotypes[:, idx_j]
+    g = cp.ascontiguousarray(genotypes, dtype=cp.int8)
+    n_indiv, n_var = g.shape
+    idx_i_c = cp.ascontiguousarray(idx_i, dtype=cp.int32)
+    idx_j_c = cp.ascontiguousarray(idx_j, dtype=cp.int32)
+    n_pairs = int(idx_i_c.shape[0])
 
-    has_missing = cp.any(geno_i < 0) or cp.any(geno_j < 0)
+    has_missing = bool(cp.any(g < 0))
 
-    if has_missing:
-        valid_mask = (geno_i >= 0) & (geno_j >= 0)
-        n_valid = cp.sum(valid_mask, axis=0, dtype=cp.int32)
-        gi = cp.where(valid_mask, geno_i, 0)
-        gj = cp.where(valid_mask, geno_j, 0)
-    else:
-        n_valid = None
-        valid_mask = None
-        gi = geno_i
-        gj = geno_j
+    counts = cp.empty((n_pairs, 9), dtype=cp.int32)
+    n_valid = cp.empty(n_pairs, dtype=cp.int32)
+    block = 256
+    grid = (n_pairs + block - 1) // block
+    _GENO_COUNTS_KERN(
+        (grid,), (block,),
+        (g, n_indiv, n_var, idx_i_c, idx_j_c, counts, n_valid, n_pairs))
 
-    combo = gi * 3 + gj
-
-    cols = []
-    for k in range(9):
-        mask = combo == k
-        if valid_mask is not None:
-            mask = mask & valid_mask
-        cols.append(cp.sum(mask, axis=0, dtype=cp.int32))
-
-    counts = cp.stack(cols, axis=1)
-    return counts, n_valid
+    return counts, (n_valid if has_missing else None)
 
 
 # ---------------------------------------------------------------------------

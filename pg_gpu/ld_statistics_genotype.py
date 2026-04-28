@@ -1549,11 +1549,7 @@ def sigma_d2_geno(matrix, idx_i=None, idx_j=None):
         If ``matrix`` contains missing values.
     """
     from .ld_pipeline import compute_genotype_counts_for_pairs
-    from .genotype_kernels import (
-        _PopDataGeno,
-        _SIGMA_D2_GENO_KERN,
-        _launch,
-    )
+    from .genotype_kernels import _SIGMA_D2_GENO_KERN, _launch
     from .genotype_matrix import GenotypeMatrix
     from .haplotype_matrix import HaplotypeMatrix
 
@@ -1587,14 +1583,15 @@ def sigma_d2_geno(matrix, idx_i=None, idx_j=None):
         if idx_i.shape != idx_j.shape:
             raise ValueError("idx_i and idx_j must have the same shape")
 
-    counts, n_valid = compute_genotype_counts_for_pairs(g, idx_i, idx_j)
-    p = _PopDataGeno(counts, n_valid)
-    # Fused kernel: emits D^2 / pi^2 in one launch. Numerator and
-    # denominator share the same n*(n-1)*(n-2)*(n-3) factor, which
-    # cancels; the kernel only computes the polynomial parts.
-    g_arr = cp.ascontiguousarray(cp.stack(
-        [p.g1, p.g2, p.g3, p.g4, p.g5, p.g6, p.g7, p.g8, p.g9],
-        axis=-1))
+    # compute_genotype_counts_for_pairs returns counts in our convention
+    # (n00, n01, n02, n10, n11, n12, n20, n21, n22). The sigma_D^2 kernel
+    # reads in moments order (g1=n22, g2=n21, ..., g9=n00), so reverse
+    # the columns. Skip _PopDataGeno: its derived fields (D_geno,
+    # pA/qA, B_L/B_R, C00..C11, ...) are precomputed for the moments-LD
+    # multi-pop kernels but unused by the single-pop sigma_D^2 polynomial,
+    # which derives everything inline from the 9 raw counts.
+    counts, _ = compute_genotype_counts_for_pairs(g, idx_i, idx_j)
+    g_arr = cp.ascontiguousarray(counts[:, ::-1].astype(cp.float64))
     N = g_arr.shape[0]
     out = cp.empty(N, dtype=cp.float64)
     _launch(_SIGMA_D2_GENO_KERN, (g_arr, out, N), N)
