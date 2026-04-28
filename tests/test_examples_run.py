@@ -14,11 +14,13 @@ def test_scikit_allel_comparison_runs_small():
 
     Uses a smaller --ld-snps to keep the smoke test under a minute on
     CI-class hardware (the default 10_000 takes ~20s on the
-    scikit-allel side, mostly in rogers_huff_r)."""
+    scikit-allel side, mostly in rogers_huff_r). Disables the MAC
+    filter so the small block keeps enough variants for parity to be
+    meaningful."""
     script = REPO_ROOT / "examples" / "scikit_allel_comparison.py"
     result = subprocess.run(
         [sys.executable, str(script), "--small", "--no-plot",
-         "--ld-snps", "2000"],
+         "--ld-snps", "2000", "--ld-mac-min", "0"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

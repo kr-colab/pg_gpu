@@ -109,16 +109,26 @@ def _compute_pg_gpu(hm: HaplotypeMatrix, window_size: int) -> tuple:
 # scikit-allel via allel.rogers_huff_r + manual binning. The two should
 # match numerically up to allel's float32 internal precision.
 
-LD_BP_BINS = np.logspace(2, 3, 25)  # 100 bp .. 1 kb, 24 log-spaced bins
+LD_BP_BINS = np.logspace(2, 4, 25)  # 100 bp .. 10 kb, 24 log-spaced bins
 
 
 def _subsample_for_ld(hm: HaplotypeMatrix,
                       pos: np.ndarray,
                       gn: np.ndarray,
                       n_snps: int,
-                      seed: int) -> tuple:
-    """Pick `n_snps` random SNPs (sorted by position) and build the
-    inputs both libraries need.
+                      mac_min: int) -> tuple:
+    """Pick `n_snps` contiguous SNPs centered on the chromosome midpoint,
+    then drop low-frequency variants below the MAC threshold.
+
+    A contiguous block (vs. a random subsample) gives dense coverage of
+    short pair distances -- which is where the LD-decay signal lives.
+    Anchoring on the midpoint keeps us away from telomere/centromere
+    edge effects. The MAC filter then drops near-singleton variants whose
+    pairwise r^2 is dominated by tied small values (e.g., two singletons
+    that never overlap give r^2 = 1/(n_dip-1)^2 regardless of distance);
+    those tied values pin the per-bin median to a constant and erase any
+    real decay signal. A standard MAF 0.05 floor (MAC >= 10 in n=100
+    diploids) is plenty to recover decay structure.
 
     Returns (hm_sub, pos_sub, gn_sub).
     """
@@ -126,19 +136,34 @@ def _subsample_for_ld(hm: HaplotypeMatrix,
     if n_snps > n_var:
         raise ValueError(
             f"--ld-snps={n_snps} exceeds the dataset size ({n_var})")
-    rng = np.random.RandomState(seed)
-    idx = rng.choice(n_var, size=n_snps, replace=False)
-    idx.sort()
-    pos_sub = pos[idx]
-    gn_sub = gn[idx]
+    midpoint = (hm.chrom_start + hm.chrom_end) // 2
+    center_idx = int(np.searchsorted(pos, midpoint))
+    half = n_snps // 2
+    start = max(0, center_idx - half)
+    end = start + n_snps
+    if end > n_var:
+        end = n_var
+        start = end - n_snps
+    idx = np.arange(start, end)
+    pos_blk = pos[idx]
+    gn_blk = gn[idx]
+    if mac_min > 0:
+        # MAC = minor allele count under a 0/1/2 dosage encoding.
+        n_alt = np.sum(gn_blk, axis=1).astype(np.int64)
+        n_total = 2 * gn_blk.shape[1]
+        mac = np.minimum(n_alt, n_total - n_alt)
+        keep = mac >= mac_min
+        idx = idx[keep]
+        pos_blk = pos_blk[keep]
+        gn_blk = gn_blk[keep]
     hap_full = hm.haplotypes
     if hasattr(hap_full, "get"):
         hap_full = hap_full.get()
     hap_full = np.asarray(hap_full, dtype=np.int8)
     hap_sub = hap_full[:, idx]
     hm_sub = HaplotypeMatrix(
-        hap_sub, pos_sub, hm.chrom_start, hm.chrom_end)
-    return hm_sub, pos_sub, gn_sub
+        hap_sub, pos_blk, hm.chrom_start, hm.chrom_end)
+    return hm_sub, pos_blk, gn_blk
 
 
 def _compute_allel_ld_decay(pos_sub: np.ndarray,
@@ -377,10 +402,14 @@ def main() -> None:
     print(f"  theta_w:   max abs diff = {md_tw:.3e}")
     print(f"  tajimas_d: max abs diff = {md_td:.3e}")
 
-    print(f"Subsampling {args.ld_snps:,} SNPs for LD-decay (seed={args.seed}) ...",
-          flush=True)
+    print(f"Selecting contiguous block of {args.ld_snps:,} SNPs centered "
+          f"on the chromosome midpoint for LD-decay ...", flush=True)
     hm_sub, pos_sub, gn_sub = _subsample_for_ld(
-        hm, pos, gn, args.ld_snps, args.seed)
+        hm, pos, gn, args.ld_snps, args.ld_mac_min)
+    print(f"  block spans {pos_sub[0]:,}-{pos_sub[-1]:,} "
+          f"({(pos_sub[-1] - pos_sub[0]) / 1e3:.1f} kb), "
+          f"{len(pos_sub):,} variants kept (MAC >= {args.ld_mac_min})",
+          flush=True)
     bp_bins = LD_BP_BINS
 
     print(f"Timing LD-decay (n_warmup={args.n_warmup}) ...", flush=True)
@@ -418,11 +447,16 @@ def _parse_args() -> argparse.Namespace:
                    help="Window size in bp (default: 10 kb)")
     p.add_argument("--n-warmup", type=int, default=1,
                    help="Discarded runs before timing (default: 1)")
-    p.add_argument("--ld-snps", type=int, default=10_000,
-                   help="SNPs subsampled for the LD-decay scan "
-                        "(default: 10_000)")
-    p.add_argument("--seed", type=int, default=0,
-                   help="RNG seed for SNP subsampling (default: 0)")
+    p.add_argument("--ld-snps", type=int, default=100_000,
+                   help="Size of the contiguous SNP block (centered on "
+                        "the chromosome midpoint) used for the LD-decay "
+                        "scan, before the MAC filter is applied "
+                        "(default: 100_000)")
+    p.add_argument("--ld-mac-min", type=int, default=10,
+                   help="Drop variants with minor allele count below this "
+                        "threshold from the LD block. Standard MAF 0.05 "
+                        "in n=100 diploids -> 10. Set to 0 to disable. "
+                        "(default: 10)")
     p.add_argument("--no-plot", action="store_true",
                    help="Skip the matplotlib figure")
     p.add_argument("-o", "--output", type=Path,

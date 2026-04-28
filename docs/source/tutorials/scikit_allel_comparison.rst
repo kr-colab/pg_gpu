@@ -55,8 +55,19 @@ What the script does
    two libraries normalize partial windows slightly differently --
    a single-window cosmetic effect, not a real numerical
    disagreement).
-5. Subsamples ``--ld-snps`` (default 10,000) random SNPs and
-   computes a pairwise LD-decay curve on each side. The pg_gpu
+5. Selects a contiguous block of ``--ld-snps`` SNPs (default
+   10,000) centered on the chromosome midpoint, drops variants
+   below ``--ld-mac-min`` (default 10, i.e. MAF 0.05 in n=100
+   diploids), and computes a pairwise LD-decay curve on each side.
+   A contiguous block (vs. a random subsample) gives dense coverage
+   of short pair distances, which is where the LD-decay signal
+   lives -- a random 10k subsample leaves only a handful of pairs
+   in each short-distance bin and the curve washes out into noise.
+   The MAC filter is equally important: pairs of near-singleton
+   variants take a tiny set of tied :math:`r^2` values (e.g., two
+   non-overlapping singletons give exactly :math:`1/(n-1)^2`)
+   regardless of distance, and those tied values pin the per-bin
+   median to a constant -- erasing any decay signal. The pg_gpu
    path is one call:
    ``hm_sub.windowed_r_squared(bp_bins, percentile=50, estimator='rogers_huff')``;
    the scikit-allel path runs ``allel.rogers_huff_r``, squares it,
@@ -86,10 +97,11 @@ multi-statistic windowed analysis. To adapt it:
   diversity-scan resolution; ``--window-size`` accepts any positive
   integer.
 * Tune the LD scan for your scale of interest. ``--ld-snps``
-  controls the random subsample; larger values give a less-noisy
-  decay curve at the cost of quadratic compute. The bin edges
-  (``LD_BP_BINS`` in the script) span 100 bp to 1 kb in 24 log-spaced
-  steps -- appropriate for *Anopheles*-like populations where LD
-  decays within a kilobase. For organisms with longer LD scales
-  (humans, livestock) widen the range; for tighter LD scales
-  (recombining viruses) shrink it.
+  controls the size of the contiguous block (centered on the
+  chromosome midpoint); larger values widen the block's bp footprint
+  and give a less-noisy decay curve at the cost of quadratic compute.
+  The bin edges (``LD_BP_BINS`` in the script) span 100 bp to 10 kb in
+  24 log-spaced steps -- appropriate for *Anopheles*-like populations
+  where LD decays within a few kilobases. For organisms with longer LD
+  scales (humans, livestock) widen the range and use a larger
+  ``--ld-snps``; for tighter LD scales (recombining viruses) shrink it.
