@@ -78,27 +78,24 @@ demographic-inference walk-through.
 Verify Installation
 -------------------
 
-Save the following as ``check_pg_gpu.py``:
-
-.. code-block:: python
-
-   # check_pg_gpu.py
-   import pg_gpu
-   import cupy as cp
-
-   print(f"pg_gpu version:  {pg_gpu.__version__}")
-   print(f"GPU available:   {cp.cuda.is_available()}")
-   print(f"GPU device:      {cp.cuda.Device().name}")
-
-then run it via pixi:
+``import pg_gpu`` performs a CUDA-availability check at import time
+and raises a diagnostic error if CuPy is missing or no usable CUDA
+device is detected. So the verification is just:
 
 .. code-block:: bash
 
-   pixi run python check_pg_gpu.py
+   pixi run python -c "import pg_gpu; print(pg_gpu.__version__)"
 
-If the import fails or no GPU is reported, the most common cause is a
-mismatch between the system CUDA driver and the toolkit pixi installed;
-``nvidia-smi`` should show a driver version that supports CUDA 12.
+If you see the version printed, you are set up correctly. If the
+import fails, the error message will name the underlying cause -- the
+most common one being a mismatch between the system CUDA driver and
+the toolkit pixi installed; ``nvidia-smi`` should show a driver
+version that supports CUDA 12.
+
+For docs builds, static analysis, type checking, or any other context
+where you want to import ``pg_gpu`` without exercising the GPU, set
+``PG_GPU_SKIP_CUDA_CHECK=1`` to bypass the check. (The
+``READTHEDOCS=True`` environment variable is auto-detected.)
 
 Running Tests
 -------------
