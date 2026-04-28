@@ -165,6 +165,33 @@ def _compute_pg_gpu(hm: HaplotypeMatrix, window_size: int) -> tuple:
             df["zns"].to_numpy()), df
 
 
+def _assert_windows_aligned(allel_windows: np.ndarray,
+                            pg_gpu_df) -> None:
+    """Confirm both libraries laid out the same windows.
+
+    scikit-allel returns `windows` as (n_windows, 2) of (start, stop)
+    in 1-based inclusive coordinates. pg_gpu's windowed_analysis
+    returns `start` and `end` columns. We check that they match
+    exactly.
+    """
+    n_allel = allel_windows.shape[0]
+    n_pg = len(pg_gpu_df)
+    if n_allel != n_pg:
+        raise AssertionError(
+            f"window count mismatch: allel={n_allel}, pg_gpu={n_pg}. "
+            f"This means the two libraries laid out different windows "
+            f"for the same input range; the rest of the comparison "
+            f"would be apples-to-oranges. Check that window_size, "
+            f"step_size, and the chromosome range agree.")
+    starts_a = allel_windows[:, 0]
+    starts_g = pg_gpu_df["start"].to_numpy()
+    if not np.array_equal(starts_a, starts_g):
+        bad = np.where(starts_a != starts_g)[0][:5]
+        raise AssertionError(
+            f"window-start mismatch at indices {bad}: "
+            f"allel={starts_a[bad]}, pg_gpu={starts_g[bad]}")
+
+
 def main() -> None:
     args = _parse_args()
     if args.self_test:
@@ -182,7 +209,8 @@ def main() -> None:
     pi_a, tw_a, td_a, ld_a = _compute_allel(pos, ac, gn, windows)
     print("Running pg_gpu ...", flush=True)
     (pi_g, tw_g, td_g, ld_g), df = _compute_pg_gpu(hm, args.window_size)
-    print(f"allel windows: {len(pi_a)}, pg_gpu windows: {len(pi_g)}")
+    _assert_windows_aligned(windows, df)
+    print(f"  {len(pi_a)} aligned windows confirmed")
     return
 
 
