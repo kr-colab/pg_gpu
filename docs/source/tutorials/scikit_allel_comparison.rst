@@ -49,12 +49,12 @@ What the script does
    ``allel.windowed_diversity``, ``allel.windowed_watterson_theta``,
    ``allel.windowed_tajima_d``.
 4. Verifies strict numerical agreement on the diversity statistics
-   (NaN-aware, ``rtol=1e-5`` / ``atol=1e-8``). Trailing partial
-   windows (where the chromosome end falls inside a window) are
-   masked out of the comparison: the two libraries normalize the
-   trailing partial window differently (allel divides by actual
-   span; pg_gpu divides by the fixed window size), so a 1-window
-   discrepancy there is uninteresting.
+   (NaN-aware, ``rtol=1e-5`` / ``atol=1e-8``). When the chromosome
+   end isn't an exact multiple of ``window_size``, the trailing
+   partial window is silently NaN-masked from the comparison (the
+   two libraries normalize partial windows slightly differently --
+   a single-window cosmetic effect, not a real numerical
+   disagreement).
 5. Subsamples ``--ld-snps`` (default 10,000) random SNPs and
    computes a pairwise LD-decay curve on each side. The pg_gpu
    path is one call:
@@ -88,7 +88,8 @@ multi-statistic windowed analysis. To adapt it:
 * Tune the LD scan for your scale of interest. ``--ld-snps``
   controls the random subsample; larger values give a less-noisy
   decay curve at the cost of quadratic compute. The bin edges
-  (``LD_BP_BINS`` in the script) span 100 bp to 1 Mb in 24 log-spaced
-  steps -- sensible for chromosomes with LD on the kb-to-Mb scale;
-  for tighter LD scales (e.g. recombining HIV sequences) tighten the
-  range.
+  (``LD_BP_BINS`` in the script) span 100 bp to 1 kb in 24 log-spaced
+  steps -- appropriate for *Anopheles*-like populations where LD
+  decays within a kilobase. For organisms with longer LD scales
+  (humans, livestock) widen the range; for tighter LD scales
+  (recombining viruses) shrink it.

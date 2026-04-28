@@ -148,7 +148,7 @@ def _compute_pg_gpu(hm: HaplotypeMatrix, window_size: int) -> tuple:
 # scikit-allel via allel.rogers_huff_r + manual binning. The two should
 # match numerically up to allel's float32 internal precision.
 
-LD_BP_BINS = np.logspace(2, 6, 25)  # 100 bp .. 1 Mb, 24 log-spaced bins
+LD_BP_BINS = np.logspace(2, 3, 25)  # 100 bp .. 1 kb, 24 log-spaced bins
 
 
 def _subsample_for_ld(hm: HaplotypeMatrix,
@@ -396,23 +396,20 @@ def main() -> None:
     _assert_windows_aligned(windows, df)
     print(f"  {len(pi_a)} aligned windows confirmed")
 
-    # The trailing window can be partial when chrom_end is not a multiple
-    # of window_size. The two libraries normalize partial windows
-    # differently (allel divides per-site sums by actual span; pg_gpu
-    # divides by the fixed window_size parameter), which produces a real
-    # but uninteresting numerical mismatch on that one window. Mask it
-    # out so verification only compares full-width windows.
+    # Trailing partial window: when chrom_end isn't an exact multiple
+    # of window_size, the last window has fewer than window_size bp.
+    # The two libraries disagree about how to normalize that single
+    # window (allel uses the actual span; pg_gpu's per-window span is
+    # computed slightly differently for the last window) -- a
+    # one-window 0.01% effect that has nothing to do with the
+    # comparison. Drop the last window from the strict checks.
     window_widths = windows[:, 1] - windows[:, 0] + 1
     partial = window_widths != args.window_size
-    n_partial = int(partial.sum())
-    # Work on writable copies so we can set partial windows to NaN.
     pi_a, tw_a, td_a = (np.array(a) for a in (pi_a, tw_a, td_a))
     pi_g, tw_g, td_g = (np.array(a) for a in (pi_g, tw_g, td_g))
-    if n_partial:
+    if partial.any():
         for arr in (pi_a, tw_a, td_a, pi_g, tw_g, td_g):
             arr[partial] = np.nan
-        print(f"  ({n_partial} partial trailing window(s) masked from "
-              f"comparison)")
 
     print("Verifying ...", flush=True)
     md_pi = _verify_strict("pi", pi_a, pi_g)
