@@ -123,13 +123,66 @@ def _load_data(small: bool) -> tuple:
     return hm, pos, ac, gn
 
 
+# -- compute paths -----------------------------------------------------------
+
+def _compute_allel(pos: np.ndarray, ac: np.ndarray, gn: np.ndarray,
+                   windows: np.ndarray) -> tuple:
+    """Run scikit-allel's four windowed scans. Returns (pi, theta_w,
+    tajimas_d, ld_median_r2).
+
+    Note: allel.windowed_r_squared crashes in NumPy >= 1.25 when a window
+    contains exactly one variant (rogers_huff_r returns an empty r array
+    and np.percentile raises IndexError on it). We use windowed_statistic
+    directly with a guarded closure to match the intended behaviour.
+    """
+    pi, _, _, _ = allel.windowed_diversity(pos, ac, windows=windows)
+    theta_w, _, _, _ = allel.windowed_watterson_theta(
+        pos, ac, windows=windows)
+    tajd, _, _ = allel.windowed_tajima_d(pos, ac, windows=windows)
+
+    def _median_r2(gnw):
+        r_sq = allel.rogers_huff_r(gnw) ** 2
+        if len(r_sq) == 0:
+            return np.nan
+        return np.percentile(r_sq, 50)
+
+    ld, _, _ = allel.windowed_statistic(
+        pos, gn, _median_r2, windows=windows, fill=np.nan)
+    return pi, theta_w, tajd, ld
+
+
+def _compute_pg_gpu(hm: HaplotypeMatrix, window_size: int) -> tuple:
+    """Run pg_gpu's single fused windowed_analysis call. Returns
+    (pi, theta_w, tajimas_d, zns) plus the result DataFrame so the
+    caller can inspect window edges."""
+    df = windowed_analysis(
+        hm, window_size=window_size, step_size=window_size,
+        statistics=["pi", "theta_w", "tajimas_d", "zns"])
+    cp.cuda.Device().synchronize()
+    return (df["pi"].to_numpy(),
+            df["theta_w"].to_numpy(),
+            df["tajimas_d"].to_numpy(),
+            df["zns"].to_numpy()), df
+
+
 def main() -> None:
     args = _parse_args()
     if args.self_test:
         _run_self_test()
         return
     hm, pos, ac, gn = _load_data(args.small)
-    print(f"shapes: ac={ac.shape}, gn={gn.shape}, pos[0..2]={pos[:3]}")
+
+    print("Computing windows ...", flush=True)
+    windows = allel.position_windows(
+        pos, size=args.window_size, step=args.window_size,
+        start=int(pos[0]), stop=int(pos[-1]))
+    print(f"  {len(windows)} windows of {args.window_size:,} bp")
+
+    print("Running scikit-allel ...", flush=True)
+    pi_a, tw_a, td_a, ld_a = _compute_allel(pos, ac, gn, windows)
+    print("Running pg_gpu ...", flush=True)
+    (pi_g, tw_g, td_g, ld_g), df = _compute_pg_gpu(hm, args.window_size)
+    print(f"allel windows: {len(pi_a)}, pg_gpu windows: {len(pi_g)}")
     return
 
 
