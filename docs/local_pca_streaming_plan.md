@@ -52,13 +52,14 @@ Persistent GPU memory: just the haplotype matrix (~32 GB for 3R). Per-tile trans
 
 ### `sumsq` and the lostruct distance metric
 
-Lostruct computes pairwise window distances as the Frobenius distance between (eigval-weighted, optionally normalised) low-rank reconstructions of `C_w`. The current implementation needs `sumsq = ‖C_w‖_F²` to support the scaling. With the randomized SVD path we never form `C_w` explicitly, but we can recover the Frobenius norm cheaply:
+Lostruct's `LocalPCAResult` exposes `sumsq[w] = ‖C_w‖_F²` per window. By the singular-value identity, `‖C_w‖_F² = sum_i σ_i⁴ / (n_var_w − 1)²` where `σ_i` are all singular values of the centred block `X_w` -- so `sumsq` cannot be recovered from `‖X_w‖_F² = sum σ_i²` alone. Only `pc_dist` consumes the rest of `LocalPCAResult` directly; the parity tests against R lostruct compare `sumsq` against the R reference at machine precision and `pc_dist` ignores the value entirely (it parses sumsq from the flat lostruct matrix layout but never uses it in the distance math). So `sumsq` is part of the public contract but not used internally.
 
-```
-‖C_w‖_F² = sum_i σ_i⁴ / (n_var_w − 1)²
-```
+This forces a two-tier design:
 
-where `σ_i` are *all* singular values of `X_w`, not just the top `k`. We can either (a) compute `‖X_w‖_F² = sum_ij X_w[i,j]²` directly per window (one reduction over the centred block), or (b) accumulate it from `(X_w @ X_w.T).trace()` if we already have `Y = X_w Ω`. (a) is exact and trivial; we'll use it.
+- **Tier A: streaming + per-window dense eigh.** Form `C_w` transiently per window (~70 MB float64 at 2940 hap), compute `sumsq = (C_w**2).sum()` from it (one reduction), do `eigh(C_w)`, take top-k, discard `C_w` before the next window. Memory bound: `tile_size × n_hap² × 8` bytes peak. Per-window compute identical to today (`O(n_hap² × n_var_w)` Gram + `O(n_hap³)` eigh), and `sumsq` is bit-identical to the legacy path. This solves the OOM and is the default for parity correctness.
+- **Tier B: streaming + per-window randomized SVD on `X_w`.** Skip the Gram entirely. Compute top-k via the projection-and-thin-SVD recipe above (`O(n_hap × n_var_w × (k+p))` per window, ≈100× faster than tier A's per-window cost in the Ag1000G regime). Compute `sumsq ≈ sum_{i=1}^{k+p} σ_i⁴ / d²` using the singular values returned by the randomized step. With `oversample = max(20, 2k)` the sum already covers the dominant contribution; for ranks beyond the oversample budget we add an upper-bound term `(σ_{k+p+1})² × (‖X_w‖_F² − sum_{i≤k+p} σ_i²) / d²` to bracket the tail. This tier is opt-in via `engine='streaming-rsvd'` and tolerated by the parity tests under a `rtol≈5e-3` budget; it is recommended for whole-genome scans where exact `sumsq` is not load-bearing.
+
+The two tiers share the same outer streaming loop and per-tile dispatcher; only the per-window kernel differs.
 
 ### Numerical considerations
 
