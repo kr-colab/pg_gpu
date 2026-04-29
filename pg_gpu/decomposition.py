@@ -871,6 +871,70 @@ def _materialize_prepared(X):
     return X
 
 
+def _estimate_n_windows(matrix, window_params) -> int:
+    """Upper bound on the number of windows ``WindowIterator`` will yield.
+
+    Exact for ``window_type='snp'`` and ``'regions'``. For ``'bp'`` this is
+    an upper bound (some bp windows may be empty and skipped); overestimating
+    only biases the auto-selector toward streaming, which is safe.
+    """
+    if window_params.window_type == 'regions':
+        return 0 if window_params.regions is None else len(window_params.regions)
+    if window_params.window_type == 'snp':
+        n_var = matrix.num_variants
+        if n_var < window_params.window_size:
+            return 0
+        return (n_var - window_params.window_size) // window_params.step_size + 1
+    if window_params.window_type == 'bp':
+        positions = matrix.positions
+        if isinstance(positions, cp.ndarray):
+            chrom_start = int(positions[0].get())
+            chrom_end = int(positions[-1].get())
+        else:
+            chrom_start = int(positions[0])
+            chrom_end = int(positions[-1])
+        span = max(0, chrom_end - chrom_start)
+        return span // window_params.step_size + 1
+    return 0
+
+
+def _pick_dense_engine(matrix, window_params,
+                       free_bytes: Optional[int] = None,
+                       budget_fraction: float = 0.5) -> str:
+    """Choose between 'dense-eigh' and 'streaming-dense' for engine='auto'.
+
+    The dense-eigh path holds a ``(n_windows, n_hap, n_hap)`` Gram stack on
+    the GPU and runs a single batched ``cp.linalg.eigh`` (~2x faster per
+    window than streaming when it fits). It falls over when the stack plus
+    the cuSOLVER eigh workspace exceed free GPU memory. Estimate the peak
+    as 3x the Gram-stack size (Gram + workspace + eigvecs) and pick
+    streaming when that exceeds ``budget_fraction`` of free memory.
+
+    Parameters
+    ----------
+    matrix : HaplotypeMatrix
+        The (possibly population-filtered) matrix that will be windowed.
+    window_params : WindowParams
+    free_bytes : int, optional
+        Free GPU memory in bytes. Defaults to
+        ``cp.cuda.Device().mem_info[0]`` (queried once at decision time).
+    budget_fraction : float
+        Fraction of free GPU memory to budget for the Gram-stack peak.
+        Default 0.5 leaves room for the haplotype matrix, the cupy
+        memory pool's existing allocations, and other concurrent GPU work.
+    """
+    n_samples = matrix.num_haplotypes
+    n_windows_est = _estimate_n_windows(matrix, window_params)
+    if n_windows_est == 0:
+        return 'dense-eigh'
+    peak_bytes = 3 * n_windows_est * n_samples * n_samples * 8
+    if free_bytes is None:
+        free_bytes = cp.cuda.Device().mem_info[0]
+    if peak_bytes < budget_fraction * free_bytes:
+        return 'dense-eigh'
+    return 'streaming-dense'
+
+
 def local_pca(haplotype_matrix: "HaplotypeMatrix",
               window_params=None,
               k: int = 2,
@@ -911,6 +975,17 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
         Windows per batched eigh call. Auto-sized if None.
     window_size, step_size, window_type, regions
         Short-hand for constructing a `WindowParams` without importing it.
+    engine : str
+        ``'dense-eigh'`` (default) holds the full ``(n_windows, n_hap, n_hap)``
+        Gram stack on the GPU and runs a single batched ``cp.linalg.eigh``;
+        ~2x faster per window than streaming when the stack fits.
+        ``'streaming-dense'`` processes each window independently with bounded
+        peak memory; required when the Gram stack would exceed GPU memory
+        (e.g. thousands of haplotypes x thousands of windows).
+        ``'streaming-rsvd'`` is the streaming path with a randomized top-k
+        per window; chosen explicitly for very thin windows.
+        ``'auto'`` estimates the Gram-stack peak and picks ``dense-eigh``
+        when it fits in 50% of free GPU memory, ``streaming-dense`` otherwise.
 
     Returns
     -------
@@ -918,7 +993,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     """
     from .windowed_analysis import WindowIterator
 
-    valid_engines = ('dense-eigh', 'streaming-dense', 'streaming-rsvd')
+    valid_engines = ('auto', 'dense-eigh', 'streaming-dense', 'streaming-rsvd')
     if engine not in valid_engines:
         raise ValueError(
             f"engine must be one of {valid_engines}, got {engine!r}")
@@ -936,6 +1011,9 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
 
     n_samples = matrix.num_haplotypes
     iterator = WindowIterator(matrix, window_params)
+
+    if engine == 'auto':
+        engine = _pick_dense_engine(matrix, window_params)
 
     if engine in ('streaming-dense', 'streaming-rsvd'):
         return _local_pca_streaming(
