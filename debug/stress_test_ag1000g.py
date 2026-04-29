@@ -136,8 +136,24 @@ def load_data(skip_allel=False):
     return hm, (None if skip_allel else gt), positions
 
 
-def bench(fn, n_iter=N_ITER, sync_gpu=True):
-    """Run fn n_iter times, return median wall time."""
+def bench(fn, n_iter=N_ITER, n_warmup=1, sync_gpu=True):
+    """Run fn n_iter times, return median wall time.
+
+    A single untimed warmup pass is run first so the timed iterations
+    measure steady-state performance rather than first-call overhead
+    (kernel JIT, cuBLAS/cuRAND init, memory-pool growth, lazy allel
+    object construction). Without this, fast statistics dominated by
+    cold-start cost (e.g. garud_h, lexsort-based hashing) report
+    misleadingly poor speedups.
+    """
+    for _ in range(n_warmup):
+        try:
+            fn()
+        except Exception:
+            return None
+        if sync_gpu:
+            cp.cuda.Stream.null.synchronize()
+
     times = []
     for _ in range(n_iter):
         if sync_gpu:
