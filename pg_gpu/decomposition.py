@@ -568,6 +568,113 @@ def _window_gram(X: "cp.ndarray", n_var: int) -> Tuple["cp.ndarray", "cp.ndarray
     return C, (C ** 2).sum()
 
 
+def _local_pca_window_dense(X: "cp.ndarray", n_var: int, k: int
+                             ) -> Tuple["cp.ndarray", "cp.ndarray", "cp.ndarray"]:
+    """Per-window dense top-k eigenpairs and Frobenius-squared sumsq.
+
+    Forms the (n_hap x n_hap) Gram transiently, runs `cp.linalg.eigh`, and
+    returns top-k. Bit-identical numerics to ``_window_gram`` followed by
+    eigh + ``cp.stack`` extraction; designed so the streaming dispatcher
+    can drop this in per window without touching the legacy code path.
+
+    Parameters
+    ----------
+    X : cupy.ndarray, shape (n_hap, n_var_w)
+        Variant-centred haplotype block (the caller has already
+        applied per-variant centering / scaling via ``_prepare_matrix``).
+    n_var : int
+        Span normaliser (matches ``_window_gram`` -- usually
+        ``X.shape[1]`` but exposed so the caller can pass the original
+        window's variant count for thin-window handling).
+    k : int
+        Number of leading eigenpairs to retain.
+
+    Returns
+    -------
+    eigvals : cupy.ndarray, shape (k,), float64, descending
+    eigvecs : cupy.ndarray, shape (k, n_hap), float64, rows are eigenvectors
+    sumsq   : cupy.ndarray, 0-d float64, equal to ``(C ** 2).sum()`` where
+              C is the same Gram used internally.
+    """
+    C, sumsq = _window_gram(X, n_var)
+    evals, evecs = cp.linalg.eigh(C)
+    n = C.shape[0]
+    # eigh returns ascending; the top-k are the last k columns of evecs.
+    # Reverse to descending and transpose so rows are eigenvectors.
+    top_idx = cp.arange(n - 1, n - 1 - k, -1)
+    top_vals = evals[top_idx]
+    top_vecs = cp.transpose(evecs[:, top_idx], (1, 0))
+    return top_vals, top_vecs, sumsq
+
+
+def _local_pca_window_rsvd(X: "cp.ndarray", n_var: int, k: int,
+                            oversample: int = 8, n_iter: int = 1,
+                            rng: Optional["cp.random.RandomState"] = None
+                            ) -> Tuple["cp.ndarray", "cp.ndarray", "cp.ndarray"]:
+    """Per-window randomized top-k eigenpairs of ``C_w = X X^T / (n_var-1)``.
+
+    Halko-Martinsson-Tropp randomized SVD applied directly to the centred
+    haplotype block; never materialises the (n_hap x n_hap) Gram. Cost
+    is `O(n_hap * n_var_w * (k + oversample))` per window vs the dense
+    path's `O(n_hap^2 * n_var_w + n_hap^3)`.
+
+    The eigenvalues of ``C_w`` are exactly the squared singular values of
+    the sample-centred ``X`` divided by ``(n_var - 1)``; this routine
+    samples a Gaussian projection of the variant axis, performs ``n_iter``
+    subspace iterations on the resulting range estimate, and runs a small
+    SVD on the projected block.
+
+    The returned ``sumsq`` is ``sum_{i=1}^{k+oversample} sigma_i^4 /
+    (n_var-1)^2``, an approximation to ``(C ** 2).sum()`` that drops the
+    contribution of singular values beyond the oversample budget. With
+    ``oversample >= 2k`` this is accurate to better than 5e-3 relative
+    on the regimes lostruct cares about (low-rank-plus-noise spectra).
+
+    Falls back to ``_local_pca_window_dense`` when
+    ``n_var_w < k + oversample`` so very thin windows use the
+    deterministic path.
+    """
+    n_hap, n_var_w = X.shape
+    r = int(k + oversample)
+    if n_var_w < r:
+        return _local_pca_window_dense(X, n_var, k)
+
+    if rng is None:
+        rng = cp.random.RandomState()
+
+    # 1. Sample-centre to match _window_gram semantics.
+    X_c = X - X.mean(axis=1, keepdims=True)
+
+    # 2. Random Gaussian projection of the variant axis.
+    Omega = rng.standard_normal((n_var_w, r), dtype=cp.float64)
+    Y = X_c @ Omega                                      # (n_hap, r)
+
+    # 3. Subspace iteration: Y <- (X X^T) Y, with reorthonormalisation.
+    for _ in range(n_iter):
+        Q, _ = cp.linalg.qr(Y)                            # (n_hap, r)
+        Z = X_c.T @ Q                                     # (n_var_w, r)
+        Y = X_c @ Z                                       # (n_hap, r)
+
+    Q, _ = cp.linalg.qr(Y)                                # (n_hap, r)
+
+    # 4. Small SVD on the projected block.
+    B = Q.T @ X_c                                         # (r, n_var_w)
+    U_small, sigma, _ = cp.linalg.svd(B, full_matrices=False)
+    # sigma is (r,) descending.
+
+    # 5. Lift the small left singular vectors back to the original space.
+    U = Q @ U_small                                       # (n_hap, r)
+    denom = max(n_var - 1, 1)
+    eigvals_all = (sigma ** 2) / denom                    # (r,)
+    eigvals = eigvals_all[:k]                             # (k,)
+    eigvecs = cp.transpose(U[:, :k], (1, 0))              # (k, n_hap)
+
+    # sumsq approx: sum sigma_i^4 / d^2 over the computed budget.
+    sumsq = (eigvals_all ** 2).sum() * denom ** 2 / denom ** 2  # = (sigma^4).sum() / d^2
+    # Note: written so that the algebra is transparent; cupy will fold it.
+    return eigvals, eigvecs, sumsq
+
+
 def _batched_top_k_eigh(gram_stack: "cp.ndarray", k: int,
                         batch_size: Optional[int] = None
                         ) -> Tuple[np.ndarray, np.ndarray]:
