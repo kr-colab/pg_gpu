@@ -130,6 +130,20 @@ class TestEHHDecay:
         ehh = selection.ehh_decay(matrix, truncate=True)
         assert ehh[-1] > 0 or len(ehh) < 5
 
+    def test_ehh_decay_returns_full_length_with_zero_tail(self):
+        """Issue #94: post-fix ehh_decay must still return shape (n_variants,)
+        with exactly zero past the largest shared-prefix length."""
+        rng = np.random.default_rng(42)
+        n_hap, n_var = 20, 1000
+        hap = rng.integers(0, 2, (n_hap, n_var), dtype=np.int8)
+        pos = np.arange(n_var, dtype=np.int64)
+        matrix = HaplotypeMatrix(hap, pos, 0, n_var)
+        ehh = selection.ehh_decay(matrix)
+        assert ehh.shape == (n_var,)
+        nonzero = np.nonzero(ehh)[0]
+        if len(nonzero) > 0:
+            assert np.all(ehh[nonzero[-1] + 1:] == 0.0)
+
 
 class TestNSL:
     """Test nSL computation."""

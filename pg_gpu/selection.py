@@ -651,13 +651,20 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
     # compute pairwise shared prefix lengths on GPU
     spl = _pairwise_shared_prefix_lengths_gpu(hap)
 
-    # compute EHH from shared prefix lengths
-    minlength = 0 if truncate else n_variants + 1
+    # Bound the bincount range to the largest observed shared-prefix length.
+    # Past max_spl, EHH is trivially zero; allocating + scanning + transferring
+    # the (n_variants - max_spl) zero tail dominated runtime on whole-genome
+    # scans (issue #94). max_spl reduction is a few microseconds.
+    max_spl = int(spl.max())
+    minlength = 1 if truncate else max_spl + 1
     b = cp.bincount(spl, minlength=minlength)
     c = cp.cumsum(b[::-1])[:-1]
-    ehh = (c / n_pairs)[::-1]
-
-    return ehh.get()
+    ehh_short = (c / n_pairs)[::-1].get()
+    if truncate:
+        return ehh_short
+    out = np.zeros(n_variants, dtype=ehh_short.dtype)
+    out[:ehh_short.shape[0]] = ehh_short
+    return out
 
 
 # ---------------------------------------------------------------------------
