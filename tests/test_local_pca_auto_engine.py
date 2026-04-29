@@ -85,14 +85,18 @@ class TestPickDenseEngine:
     def test_threshold_boundary(self, small_hm):
         # Construct free_bytes so that peak == budget_fraction * free_bytes
         # exactly; the strict-less-than comparison should pick streaming.
+        # Pass an explicit budget_fraction so the test arithmetic is clean
+        # and decoupled from the default.
         params = WindowParams(window_type='snp', window_size=100, step_size=100)
         n_windows = _estimate_n_windows(small_hm, params)
         peak = 3 * n_windows * small_hm.num_haplotypes ** 2 * 8
         # peak < 0.5 * free  iff  free > 2 * peak. Set free = 2 * peak: NOT less than.
         free = 2 * peak
-        assert _pick_dense_engine(small_hm, params, free_bytes=free) == 'streaming-dense'
+        assert _pick_dense_engine(small_hm, params, free_bytes=free,
+                                   budget_fraction=0.5) == 'streaming-dense'
         # Bump free up by a margin: now strictly less than -> dense-eigh.
-        assert _pick_dense_engine(small_hm, params, free_bytes=free + 1) == 'dense-eigh'
+        assert _pick_dense_engine(small_hm, params, free_bytes=free + 1,
+                                   budget_fraction=0.5) == 'dense-eigh'
 
 
 # ---------------------------------------------------------------------------

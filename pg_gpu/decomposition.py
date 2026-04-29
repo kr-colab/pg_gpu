@@ -900,7 +900,7 @@ def _estimate_n_windows(matrix, window_params) -> int:
 
 def _pick_dense_engine(matrix, window_params,
                        free_bytes: Optional[int] = None,
-                       budget_fraction: float = 0.5) -> str:
+                       budget_fraction: float = 0.7) -> str:
     """Choose between 'dense-eigh' and 'streaming-dense' for engine='auto'.
 
     The dense-eigh path holds a ``(n_windows, n_hap, n_hap)`` Gram stack on
@@ -920,7 +920,7 @@ def _pick_dense_engine(matrix, window_params,
         ``cp.cuda.Device().mem_info[0]`` (queried once at decision time).
     budget_fraction : float
         Fraction of free GPU memory to budget for the Gram-stack peak.
-        Default 0.5 leaves room for the haplotype matrix, the cupy
+        Default 0.7 leaves room for the haplotype matrix, the cupy
         memory pool's existing allocations, and other concurrent GPU work.
     """
     n_samples = matrix.num_haplotypes
@@ -985,7 +985,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
         ``'streaming-rsvd'`` is the streaming path with a randomized top-k
         per window; chosen explicitly for very thin windows.
         ``'auto'`` estimates the Gram-stack peak and picks ``dense-eigh``
-        when it fits in 50% of free GPU memory, ``streaming-dense`` otherwise.
+        when it fits in 70% of free GPU memory, ``streaming-dense`` otherwise.
 
     Returns
     -------
