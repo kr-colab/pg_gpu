@@ -461,3 +461,83 @@ class TestLostructStreamingEndToEnd:
         legacy_set = set(map(tuple, np.sort(legacy.corner_indices, axis=0).T))
         new_set = set(map(tuple, np.sort(new.corner_indices, axis=0).T))
         assert legacy_set == new_set
+
+
+# ---------------------------------------------------------------------------
+# Issue #91 regression: per-window output host syncs must not return
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingHostSyncCount:
+    """The streaming dispatcher must NOT issue per-window host transfers
+    for its three outputs (eigvals / eigvecs / sumsq). Issue #91:
+    per-window ``cp.asnumpy(...)`` calls saturated host CPU on whole-
+    genome scans. The fix routes per-window outputs into GPU-resident
+    buffers and does a single bulk ``.get()`` after the loop; this test
+    pins that invariant.
+
+    The dispatcher path also includes pre-existing infrastructure host
+    syncs that are NOT part of issue #91 -- ``WindowIterator.get_subset``
+    does an ``.all()`` bounds check (2 transfers/window) and
+    ``_prepare_matrix`` does a has-missing check (1 transfer/window).
+    Plus 1 fixed transfer from iterator init and 3 fixed bulk transfers
+    at the end of the dispatcher. So the post-fix expected rate is
+    3 transfers/window + ~4 fixed = ~3.4 per window for the
+    ``structured_hm`` fixture (10 windows).
+
+    A regression that re-introduces even ONE of the three per-window
+    output syncs would push the rate to >=4 per window; restoring all
+    three would push it to ~6.4 per window. Either case fails the
+    3.5-per-window assertion below.
+
+    If the unrelated infrastructure syncs in ``get_subset`` /
+    ``_prepare_matrix`` are later optimized away, the post-fix rate
+    drops further and this test still passes.
+    """
+
+    def test_dispatcher_per_window_output_transfers_stay_constant(
+            self, structured_hm, monkeypatch):
+        import cupy as cp
+
+        n_get = {"calls": 0}
+        n_asnumpy = {"calls": 0}
+
+        real_get = cp.ndarray.get
+        real_asnumpy = cp.asnumpy
+
+        def counted_get(self, *a, **kw):
+            n_get["calls"] += 1
+            return real_get(self, *a, **kw)
+
+        def counted_asnumpy(arr, *a, **kw):
+            n_asnumpy["calls"] += 1
+            return real_asnumpy(arr, *a, **kw)
+
+        monkeypatch.setattr(cp.ndarray, "get", counted_get)
+        monkeypatch.setattr(cp, "asnumpy", counted_asnumpy)
+
+        try:
+            res = local_pca(structured_hm, window_size=300,
+                             window_type='snp', k=2,
+                             engine='streaming-dense')
+        except TypeError:
+            pytest.skip("engine= kwarg not yet implemented")
+
+        assert res.n_windows >= 5, (
+            "fixture must have >=5 windows for this ratio test to be meaningful")
+
+        total = n_get["calls"] + n_asnumpy["calls"]
+        per_window = total / res.n_windows
+
+        # Pre-fix would be ~6.4/window; partial regression (one output
+        # sync re-introduced) is ~4.4/window. Current post-fix is
+        # ~3.4/window. Set the ceiling at 3.5 to catch both partial
+        # and full regressions while leaving room for the infrastructure
+        # syncs the dispatcher legitimately performs.
+        assert per_window <= 3.5, (
+            f"streaming dispatcher made {total} host transfers "
+            f"({n_get['calls']} .get(), {n_asnumpy['calls']} cp.asnumpy) "
+            f"over {res.n_windows} windows -- {per_window:.2f}/window "
+            f"is above the 3.5/window ceiling. Regression of issue #91? "
+            f"Per-window output syncs (eigvals/eigvecs/sumsq) should be "
+            f"O(1) total, not O(n_windows).")

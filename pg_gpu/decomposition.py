@@ -705,38 +705,36 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
         rng = None
 
     window_meta = []
-    eigvals_chunks = []
-    eigvecs_chunks = []
-    sumsq_chunks = []
-    valid_chunks = []
+    eigvals_gpu_chunks = []
+    eigvecs_gpu_chunks = []
+    sumsq_gpu_chunks = []
 
-    # Keep only the small per-window metadata; the GPU-resident
-    # window.matrix returned by WindowIterator.get_subset materializes
-    # a fresh int8 copy of the haplotype block (fancy indexing makes
-    # a copy, not a view), so retaining the WindowData object across
-    # the loop would leak ~tens of GB of GPU memory by the end of a
-    # whole-arm scan. We extract only what windows_df needs.
+    # Per-window kernel outputs accumulate as GPU tensors. They are tiny
+    # (k floats + (k, n_hap) floats + 1 float per window) so retaining
+    # them for the duration of the loop is cheap, and avoiding the
+    # per-window cp.asnumpy / float(...) sync chain is the whole point
+    # of issue #91. cp.stack at the end gives a single contiguous
+    # (n_windows, ...) tensor; the .get() that follows is the only
+    # D->H transfer the dispatcher does.
     n_processed = 0
     for window in iterator:
+        is_valid = window.n_variants >= max(k, 2)
         window_meta.append((
             window.chrom, window.start, window.end, window.center,
-            window.n_variants, window.window_id,
+            window.n_variants, window.window_id, is_valid,
         ))
-        eigvals_chunks.append(None)
-        eigvecs_chunks.append(None)
-        sumsq_chunks.append(None)
-        if window.n_variants < max(k, 2):
-            eigvals_chunks[-1] = np.full(k, np.nan)
-            eigvecs_chunks[-1] = np.full((k, n_samples), np.nan)
-            sumsq_chunks[-1] = np.nan
-            valid_chunks.append(False)
+
+        if not is_valid:
+            eigvals_gpu_chunks.append(cp.full(k, cp.nan, dtype=cp.float64))
+            eigvecs_gpu_chunks.append(
+                cp.full((k, n_samples), cp.nan, dtype=cp.float64))
+            sumsq_gpu_chunks.append(cp.asarray(cp.nan, dtype=cp.float64))
             del window
             continue
 
         X = _prepare_matrix(window.matrix, scaler, population=None,
                             missing_data=missing_data)
         X = _materialize_prepared(X)
-        valid_chunks.append(True)
 
         if engine == 'streaming-dense':
             evals, evecs, sumsq = _local_pca_window_dense(
@@ -749,9 +747,9 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
                 rng=rng,
             )
 
-        eigvals_chunks[-1] = _cupy_to_host_1d(evals, k)
-        eigvecs_chunks[-1] = _cupy_to_host_2d(evecs, k, n_samples)
-        sumsq_chunks[-1] = float(cp.asnumpy(sumsq))
+        eigvals_gpu_chunks.append(evals.astype(cp.float64, copy=False))
+        eigvecs_gpu_chunks.append(evecs.astype(cp.float64, copy=False))
+        sumsq_gpu_chunks.append(sumsq.astype(cp.float64, copy=False))
 
         del X, evals, evecs, sumsq, window
         n_processed += 1
@@ -763,16 +761,22 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
     if len(window_meta) == 0:
         raise ValueError("WindowIterator produced no windows.")
 
-    eigvals_host = np.stack(eigvals_chunks, axis=0)
-    eigvecs_host = np.stack(eigvecs_chunks, axis=0)
-    sumsq_host = np.array(sumsq_chunks, dtype=np.float64)
-    valid_mask = np.array(valid_chunks, dtype=bool)
+    # Single bulk D->H transfer for all per-window outputs (issue #91).
+    eigvals_host = cp.stack(eigvals_gpu_chunks, axis=0).get()
+    eigvecs_host = cp.stack(eigvecs_gpu_chunks, axis=0).get()
+    sumsq_host = cp.stack(sumsq_gpu_chunks, axis=0).get()
+    del eigvals_gpu_chunks, eigvecs_gpu_chunks, sumsq_gpu_chunks
+    cp.get_default_memory_pool().free_all_blocks()
+
+    valid_mask = np.array(
+        [meta[6] for meta in window_meta], dtype=bool)
 
     eigvals_host[~valid_mask] = np.nan
     eigvecs_host[~valid_mask] = np.nan
     sumsq_host[~valid_mask] = np.nan
 
-    chrom_col, start_col, end_col, center_col, nvar_col, wid_col = zip(*window_meta)
+    chrom_col, start_col, end_col, center_col, nvar_col, wid_col, _ = zip(
+        *window_meta)
     windows_df = pd.DataFrame({
         'chrom': list(chrom_col),
         'start': list(start_col),
@@ -791,18 +795,6 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
         scaler=scaler,
         missing_data=missing_data,
     )
-
-
-def _cupy_to_host_1d(arr, length):
-    out = np.asarray(cp.asnumpy(arr), dtype=np.float64).reshape(-1)
-    if out.shape[0] != length:
-        raise ValueError(
-            f"expected length-{length} array, got {out.shape[0]}")
-    return out
-
-
-def _cupy_to_host_2d(arr, k, n):
-    return np.asarray(cp.asnumpy(arr), dtype=np.float64).reshape(k, n)
 
 
 def _batched_top_k_eigh(gram_stack: "cp.ndarray", k: int,
@@ -879,6 +871,70 @@ def _materialize_prepared(X):
     return X
 
 
+def _estimate_n_windows(matrix, window_params) -> int:
+    """Upper bound on the number of windows ``WindowIterator`` will yield.
+
+    Exact for ``window_type='snp'`` and ``'regions'``. For ``'bp'`` this is
+    an upper bound (some bp windows may be empty and skipped); overestimating
+    only biases the auto-selector toward streaming, which is safe.
+    """
+    if window_params.window_type == 'regions':
+        return 0 if window_params.regions is None else len(window_params.regions)
+    if window_params.window_type == 'snp':
+        n_var = matrix.num_variants
+        if n_var < window_params.window_size:
+            return 0
+        return (n_var - window_params.window_size) // window_params.step_size + 1
+    if window_params.window_type == 'bp':
+        positions = matrix.positions
+        if isinstance(positions, cp.ndarray):
+            chrom_start = int(positions[0].get())
+            chrom_end = int(positions[-1].get())
+        else:
+            chrom_start = int(positions[0])
+            chrom_end = int(positions[-1])
+        span = max(0, chrom_end - chrom_start)
+        return span // window_params.step_size + 1
+    return 0
+
+
+def _pick_dense_engine(matrix, window_params,
+                       free_bytes: Optional[int] = None,
+                       budget_fraction: float = 0.7) -> str:
+    """Choose between 'dense-eigh' and 'streaming-dense' for engine='auto'.
+
+    The dense-eigh path holds a ``(n_windows, n_hap, n_hap)`` Gram stack on
+    the GPU and runs a single batched ``cp.linalg.eigh`` (~2x faster per
+    window than streaming when it fits). It falls over when the stack plus
+    the cuSOLVER eigh workspace exceed free GPU memory. Estimate the peak
+    as 3x the Gram-stack size (Gram + workspace + eigvecs) and pick
+    streaming when that exceeds ``budget_fraction`` of free memory.
+
+    Parameters
+    ----------
+    matrix : HaplotypeMatrix
+        The (possibly population-filtered) matrix that will be windowed.
+    window_params : WindowParams
+    free_bytes : int, optional
+        Free GPU memory in bytes. Defaults to
+        ``cp.cuda.Device().mem_info[0]`` (queried once at decision time).
+    budget_fraction : float
+        Fraction of free GPU memory to budget for the Gram-stack peak.
+        Default 0.7 leaves room for the haplotype matrix, the cupy
+        memory pool's existing allocations, and other concurrent GPU work.
+    """
+    n_samples = matrix.num_haplotypes
+    n_windows_est = _estimate_n_windows(matrix, window_params)
+    if n_windows_est == 0:
+        return 'dense-eigh'
+    peak_bytes = 3 * n_windows_est * n_samples * n_samples * 8
+    if free_bytes is None:
+        free_bytes = cp.cuda.Device().mem_info[0]
+    if peak_bytes < budget_fraction * free_bytes:
+        return 'dense-eigh'
+    return 'streaming-dense'
+
+
 def local_pca(haplotype_matrix: "HaplotypeMatrix",
               window_params=None,
               k: int = 2,
@@ -919,6 +975,17 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
         Windows per batched eigh call. Auto-sized if None.
     window_size, step_size, window_type, regions
         Short-hand for constructing a `WindowParams` without importing it.
+    engine : str
+        ``'dense-eigh'`` (default) holds the full ``(n_windows, n_hap, n_hap)``
+        Gram stack on the GPU and runs a single batched ``cp.linalg.eigh``;
+        ~2x faster per window than streaming when the stack fits.
+        ``'streaming-dense'`` processes each window independently with bounded
+        peak memory; required when the Gram stack would exceed GPU memory
+        (e.g. thousands of haplotypes x thousands of windows).
+        ``'streaming-rsvd'`` is the streaming path with a randomized top-k
+        per window; chosen explicitly for very thin windows.
+        ``'auto'`` estimates the Gram-stack peak and picks ``dense-eigh``
+        when it fits in 70% of free GPU memory, ``streaming-dense`` otherwise.
 
     Returns
     -------
@@ -926,7 +993,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     """
     from .windowed_analysis import WindowIterator
 
-    valid_engines = ('dense-eigh', 'streaming-dense', 'streaming-rsvd')
+    valid_engines = ('auto', 'dense-eigh', 'streaming-dense', 'streaming-rsvd')
     if engine not in valid_engines:
         raise ValueError(
             f"engine must be one of {valid_engines}, got {engine!r}")
@@ -944,6 +1011,9 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
 
     n_samples = matrix.num_haplotypes
     iterator = WindowIterator(matrix, window_params)
+
+    if engine == 'auto':
+        engine = _pick_dense_engine(matrix, window_params)
 
     if engine in ('streaming-dense', 'streaming-rsvd'):
         return _local_pca_streaming(
