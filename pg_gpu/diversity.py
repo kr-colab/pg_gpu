@@ -1268,26 +1268,43 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
         counts = Counter(cluster_id)
         frequencies = np.array(list(counts.values())) / n_haplotypes
     else:
-        # GPU fast path: dot-product hashing with two random weight vectors
-        n_var = haplotypes.shape[1]
-        rng = cp.random.RandomState(seed=42)
-        w1 = rng.standard_normal(n_var, dtype=cp.float32)
-        w2 = rng.standard_normal(n_var, dtype=cp.float32)
-        h_f32 = haplotypes.astype(cp.float32)
-        hash1 = h_f32 @ w1
-        hash2 = h_f32 @ w2
-        order = cp.lexsort(cp.stack([hash2, hash1]))
-        s1 = hash1[order]
-        s2 = hash2[order]
-        diff = (cp.abs(s1[1:] - s1[:-1]) > 1e-3) | (cp.abs(s2[1:] - s2[:-1]) > 1e-3)
-        boundaries = cp.concatenate([cp.array([True]), diff])
-        boundary_idx = cp.where(boundaries)[0]
-        counts_gpu = cp.diff(cp.concatenate([boundary_idx,
-                                              cp.array([n_haplotypes])]))
+        _, counts_gpu = _count_unique_haplotypes_gpu(haplotypes)
         frequencies = (counts_gpu.astype(cp.float64) / n_haplotypes).get()
 
     diversity = (1.0 - np.sum(frequencies ** 2)) * n_haplotypes / (n_haplotypes - 1)
     return float(diversity)
+
+
+_HASH_SEED = 42  # fixed so identical inputs produce identical groupings across calls
+_HASH_TOL = 1e-3  # collision-safe for float32 dot products of 0/1 vectors at our n_var
+
+
+def _count_unique_haplotypes_gpu(haplotypes):
+    """Count unique haplotypes on GPU via dot-product hashing.
+
+    Caller must guarantee the input contains no missing data (-1).
+
+    Returns
+    -------
+    n_unique : int
+    counts : cupy.ndarray of group sizes (unsorted)
+    """
+    n_haplotypes, n_var = haplotypes.shape
+    rng = cp.random.RandomState(seed=_HASH_SEED)
+    w1 = rng.standard_normal(n_var, dtype=cp.float32)
+    w2 = rng.standard_normal(n_var, dtype=cp.float32)
+    h_f32 = haplotypes.astype(cp.float32)
+    hash1 = h_f32 @ w1
+    hash2 = h_f32 @ w2
+    order = cp.lexsort(cp.stack([hash2, hash1]))
+    s1 = hash1[order]
+    s2 = hash2[order]
+    diff = (cp.abs(s1[1:] - s1[:-1]) > _HASH_TOL) | (cp.abs(s2[1:] - s2[:-1]) > _HASH_TOL)
+    boundaries = cp.concatenate([cp.ones(1, dtype=cp.bool_), diff])
+    boundary_idx = cp.where(boundaries)[0]
+    tail = cp.full(1, n_haplotypes, dtype=boundary_idx.dtype)
+    counts_gpu = cp.diff(cp.concatenate([boundary_idx, tail]))
+    return boundary_idx.shape[0], counts_gpu
 
 
 def _cluster_haplotypes_with_missing(haps):
@@ -1575,14 +1592,26 @@ def haplotype_count(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    hap_cpu = matrix.haplotypes.get().astype(np.int8)
+    haplotypes = matrix.haplotypes
+    excluded = missing_data == 'exclude'
 
-    if missing_data == 'exclude':
-        missing_per_var = np.sum(hap_cpu < 0, axis=0)
-        hap_cpu = hap_cpu[:, missing_per_var == 0]
+    if excluded:
+        haplotypes = haplotypes[:, cp.sum(haplotypes < 0, axis=0) == 0]
 
-    labels = _cluster_haplotypes_with_missing(hap_cpu)
-    return len(set(labels))
+    if haplotypes.shape[0] <= 1:
+        return haplotypes.shape[0]
+
+    # 'exclude' already removed every site with a -1, so the remainder is clean
+    has_missing = False if excluded else bool(cp.any(haplotypes < 0).get())
+
+    if has_missing:
+        # Wildcard matching requires CPU pairwise comparison
+        hap_cpu = haplotypes.get().astype(np.int8)
+        labels = _cluster_haplotypes_with_missing(hap_cpu)
+        return len(set(labels))
+
+    n_unique, _ = _count_unique_haplotypes_gpu(haplotypes)
+    return n_unique
 
 
 def daf_histogram(matrix, n_bins: int = 20,

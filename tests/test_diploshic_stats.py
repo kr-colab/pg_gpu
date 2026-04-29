@@ -233,6 +233,68 @@ class TestDiversityNewStats:
         matrix = HaplotypeMatrix(hap, np.arange(5) * 100, 0, 500)
         assert diversity.haplotype_count(matrix) == 1
 
+    def test_haplotype_count_gpu_matches_naive(self):
+        """GPU dot-product hashing must match exact unique-row count on clean data."""
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 60, 2000
+        # 8 distinct founders, replicated with low mutation -> many ties
+        founders = rng.integers(0, 2, (8, n_var), dtype=np.int8)
+        idx = rng.integers(0, 8, n_hap)
+        hap = founders[idx].copy()
+        hap ^= (rng.random((n_hap, n_var)) < 0.001).astype(np.int8)
+        matrix = HaplotypeMatrix(hap, np.arange(n_var) * 100, 0, n_var * 100)
+        gpu_count = diversity.haplotype_count(matrix)
+        naive = len({h.tobytes() for h in hap})
+        assert gpu_count == naive
+
+    def test_haplotype_count_with_missing_data(self):
+        n_var = 50
+        hap_a = np.zeros(n_var, dtype=np.int8)
+        hap_b = np.ones(n_var, dtype=np.int8)
+        haps = np.stack([hap_a, hap_a.copy(), hap_b, hap_b.copy()])
+        # mask each duplicate row at sites where its template is unobserved,
+        # so the wildcard clusterer is forced to merge it back to its template
+        haps[1, :n_var // 2] = -1
+        haps[3, n_var // 2:] = -1
+        matrix = HaplotypeMatrix(haps, np.arange(n_var) * 100, 0, n_var * 100)
+        assert diversity.haplotype_count(matrix) == 2
+
+    def test_haplotype_count_exclude_filters_missing_sites(self):
+        n_var = 20
+        haps = np.zeros((4, n_var), dtype=np.int8)
+        haps[1, 0] = 1
+        haps[2, 1] = 1
+        haps[3, 2] = 1
+        haps[0, 5] = -1  # exclude drops site 5; remaining 4 haps still distinct
+        matrix = HaplotypeMatrix(haps, np.arange(n_var) * 100, 0, n_var * 100)
+        assert diversity.haplotype_count(matrix, missing_data='exclude') == 4
+
+    def test_haplotype_count_gamb_with_injected_missing(self):
+        from pathlib import Path
+        zarr_path = Path(__file__).resolve().parent.parent / "examples" / "data" / "gamb.X.8-12Mb.n100.derived.zarr"
+        if not zarr_path.exists():
+            pytest.skip(f"missing example data: {zarr_path}")
+
+        hm_full = HaplotypeMatrix.from_zarr(str(zarr_path))
+        hm_full.transfer_to_gpu()
+        hap_gpu = hm_full.haplotypes[:, :5000].copy()
+        positions = hm_full.positions[:5000].get() if hasattr(hm_full.positions, 'get') else hm_full.positions[:5000]
+
+        clean_cpu = hap_gpu.get()
+        matrix_clean = HaplotypeMatrix(clean_cpu, positions, int(positions[0]), int(positions[-1]))
+        gpu_count = diversity.haplotype_count(matrix_clean)
+        naive_count = len({h.tobytes() for h in clean_cpu})
+        assert gpu_count == naive_count
+
+        # masked rows are still compatible with their originals, so wildcard
+        # merging can only collapse groups, never split them
+        rng = np.random.default_rng(7)
+        haps_missing = clean_cpu.copy()
+        haps_missing[rng.random(haps_missing.shape) < 0.02] = -1
+        matrix_missing = HaplotypeMatrix(haps_missing, positions, int(positions[0]), int(positions[-1]))
+        missing_count = diversity.haplotype_count(matrix_missing)
+        assert 1 <= missing_count <= naive_count
+
     def test_daf_histogram(self, hap_data):
         hist, edges = diversity.daf_histogram(hap_data, n_bins=20)
         assert hist.shape == (20,)

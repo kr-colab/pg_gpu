@@ -667,31 +667,13 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
 def _distinct_haplotype_frequencies(hap):
     """Compute distinct haplotype frequencies, sorted descending.
 
-    Uses GPU dot-product hashing with two random weight vectors for
-    collision-free haplotype identification.
-
-    Parameters
-    ----------
-    hap : cupy.ndarray, shape (n_haplotypes, n_variants)
-
     Returns
     -------
     freqs : ndarray, float64, sorted descending (CPU)
     """
-    n_hap, n_var = hap.shape
-    rng = cp.random.RandomState(seed=42)
-    w1 = rng.standard_normal(n_var, dtype=cp.float32)
-    w2 = rng.standard_normal(n_var, dtype=cp.float32)
-    h_f32 = hap.astype(cp.float32)
-    hash1 = h_f32 @ w1
-    hash2 = h_f32 @ w2
-    order = cp.lexsort(cp.stack([hash2, hash1]))
-    s1 = hash1[order]
-    s2 = hash2[order]
-    diff = (cp.abs(s1[1:] - s1[:-1]) > 1e-3) | (cp.abs(s2[1:] - s2[:-1]) > 1e-3)
-    boundaries = cp.concatenate([cp.array([True]), diff])
-    boundary_idx = cp.where(boundaries)[0]
-    counts = cp.diff(cp.concatenate([boundary_idx, cp.array([n_hap])]))
+    from .diversity import _count_unique_haplotypes_gpu
+    n_hap = hap.shape[0]
+    _, counts = _count_unique_haplotypes_gpu(hap)
     freqs = cp.sort(counts)[::-1].astype(cp.float64) / n_hap
     return freqs.get()
 
