@@ -43,8 +43,8 @@ import pytest
 
 cupy = pytest.importorskip("cupy")
 
-from pg_gpu import HaplotypeMatrix
-from pg_gpu.decomposition import (
+from pg_gpu import HaplotypeMatrix  # noqa: E402
+from pg_gpu.decomposition import (  # noqa: E402
     LocalPCAResult,
     local_pca,
     lostruct,
