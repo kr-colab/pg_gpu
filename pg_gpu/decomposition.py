@@ -705,38 +705,36 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
         rng = None
 
     window_meta = []
-    eigvals_chunks = []
-    eigvecs_chunks = []
-    sumsq_chunks = []
-    valid_chunks = []
+    eigvals_gpu_chunks = []
+    eigvecs_gpu_chunks = []
+    sumsq_gpu_chunks = []
 
-    # Keep only the small per-window metadata; the GPU-resident
-    # window.matrix returned by WindowIterator.get_subset materializes
-    # a fresh int8 copy of the haplotype block (fancy indexing makes
-    # a copy, not a view), so retaining the WindowData object across
-    # the loop would leak ~tens of GB of GPU memory by the end of a
-    # whole-arm scan. We extract only what windows_df needs.
+    # Per-window kernel outputs accumulate as GPU tensors. They are tiny
+    # (k floats + (k, n_hap) floats + 1 float per window) so retaining
+    # them for the duration of the loop is cheap, and avoiding the
+    # per-window cp.asnumpy / float(...) sync chain is the whole point
+    # of issue #91. cp.stack at the end gives a single contiguous
+    # (n_windows, ...) tensor; the .get() that follows is the only
+    # D->H transfer the dispatcher does.
     n_processed = 0
     for window in iterator:
+        is_valid = window.n_variants >= max(k, 2)
         window_meta.append((
             window.chrom, window.start, window.end, window.center,
-            window.n_variants, window.window_id,
+            window.n_variants, window.window_id, is_valid,
         ))
-        eigvals_chunks.append(None)
-        eigvecs_chunks.append(None)
-        sumsq_chunks.append(None)
-        if window.n_variants < max(k, 2):
-            eigvals_chunks[-1] = np.full(k, np.nan)
-            eigvecs_chunks[-1] = np.full((k, n_samples), np.nan)
-            sumsq_chunks[-1] = np.nan
-            valid_chunks.append(False)
+
+        if not is_valid:
+            eigvals_gpu_chunks.append(cp.full(k, cp.nan, dtype=cp.float64))
+            eigvecs_gpu_chunks.append(
+                cp.full((k, n_samples), cp.nan, dtype=cp.float64))
+            sumsq_gpu_chunks.append(cp.asarray(cp.nan, dtype=cp.float64))
             del window
             continue
 
         X = _prepare_matrix(window.matrix, scaler, population=None,
                             missing_data=missing_data)
         X = _materialize_prepared(X)
-        valid_chunks.append(True)
 
         if engine == 'streaming-dense':
             evals, evecs, sumsq = _local_pca_window_dense(
@@ -749,9 +747,9 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
                 rng=rng,
             )
 
-        eigvals_chunks[-1] = _cupy_to_host_1d(evals, k)
-        eigvecs_chunks[-1] = _cupy_to_host_2d(evecs, k, n_samples)
-        sumsq_chunks[-1] = float(cp.asnumpy(sumsq))
+        eigvals_gpu_chunks.append(evals.astype(cp.float64, copy=False))
+        eigvecs_gpu_chunks.append(evecs.astype(cp.float64, copy=False))
+        sumsq_gpu_chunks.append(sumsq.astype(cp.float64, copy=False))
 
         del X, evals, evecs, sumsq, window
         n_processed += 1
@@ -763,16 +761,22 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
     if len(window_meta) == 0:
         raise ValueError("WindowIterator produced no windows.")
 
-    eigvals_host = np.stack(eigvals_chunks, axis=0)
-    eigvecs_host = np.stack(eigvecs_chunks, axis=0)
-    sumsq_host = np.array(sumsq_chunks, dtype=np.float64)
-    valid_mask = np.array(valid_chunks, dtype=bool)
+    # Single bulk D->H transfer for all per-window outputs (issue #91).
+    eigvals_host = cp.stack(eigvals_gpu_chunks, axis=0).get()
+    eigvecs_host = cp.stack(eigvecs_gpu_chunks, axis=0).get()
+    sumsq_host = cp.stack(sumsq_gpu_chunks, axis=0).get()
+    del eigvals_gpu_chunks, eigvecs_gpu_chunks, sumsq_gpu_chunks
+    cp.get_default_memory_pool().free_all_blocks()
+
+    valid_mask = np.array(
+        [meta[6] for meta in window_meta], dtype=bool)
 
     eigvals_host[~valid_mask] = np.nan
     eigvecs_host[~valid_mask] = np.nan
     sumsq_host[~valid_mask] = np.nan
 
-    chrom_col, start_col, end_col, center_col, nvar_col, wid_col = zip(*window_meta)
+    chrom_col, start_col, end_col, center_col, nvar_col, wid_col, _ = zip(
+        *window_meta)
     windows_df = pd.DataFrame({
         'chrom': list(chrom_col),
         'start': list(start_col),
@@ -791,18 +795,6 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
         scaler=scaler,
         missing_data=missing_data,
     )
-
-
-def _cupy_to_host_1d(arr, length):
-    out = np.asarray(cp.asnumpy(arr), dtype=np.float64).reshape(-1)
-    if out.shape[0] != length:
-        raise ValueError(
-            f"expected length-{length} array, got {out.shape[0]}")
-    return out
-
-
-def _cupy_to_host_2d(arr, k, n):
-    return np.asarray(cp.asnumpy(arr), dtype=np.float64).reshape(k, n)
 
 
 def _batched_top_k_eigh(gram_stack: "cp.ndarray", k: int,
