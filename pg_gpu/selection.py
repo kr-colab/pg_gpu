@@ -962,218 +962,12 @@ def _compute_gaps(pos, map_pos=None, gap_scale=20000, max_gap=200000,
 
 
 # ---------------------------------------------------------------------------
-# CUDA kernels for IHH computation (iHS, xpEHH)
-# ---------------------------------------------------------------------------
-#
-# iHS uses fused kernels: one thread block per focal variant, scanning
-# backward with block-level reductions. O(n_variants) memory.
-#
-# xpEHH uses chunked histogram kernels: one thread per pair builds SSL
-# histograms, then a separate kernel integrates IHH from histograms.
-
-_ihh01_fused_kernel = cp.RawKernel(r'''
-extern "C" __global__
-void ihh01_fused_kernel(
-    const signed char* h,   // (n_variants, n_haplotypes), row-major
-    const double* gaps,      // (n_variants - 1,)
-    int n_variants, int n_haplotypes,
-    const int* pair_j, const int* pair_k, int n_pairs,
-    double min_ehh, double min_maf, int include_edges,
-    double* out_ihh0,        // (n_variants,)
-    double* out_ihh1         // (n_variants,)
-) {
-    int vi = blockIdx.x;     // focal variant
-    int tid = threadIdx.x;
-    int nthreads = blockDim.x;
-
-    // ── shared state ──────────────────────────────────────────────────
-    __shared__ int    s_n0, s_n1;              // allele counts at vi
-    __shared__ int    s_n00, s_n11;            // total pairs per class
-    __shared__ int    s_ident_00, s_ident_11;  // identical pairs this step
-    __shared__ double s_ihh0, s_ihh1;          // accumulating IHH
-    __shared__ double s_ehh0_prev, s_ehh1_prev;
-    __shared__ int    s_done0, s_done1;        // per-class termination
-    __shared__ int    s_stop;                  // global stop
-
-    // ── count alleles at focal variant ────────────────────────────────
-    if (tid == 0) { s_n0 = 0; s_n1 = 0; }
-    __syncthreads();
-
-    for (int s = tid; s < n_haplotypes; s += nthreads) {
-        signed char a = h[(long long)vi * n_haplotypes + s];
-        if (a == 0)      atomicAdd(&s_n0, 1);
-        else if (a == 1) atomicAdd(&s_n1, 1);
-    }
-    __syncthreads();
-
-    // ── MAF check ─────────────────────────────────────────────────────
-    int total = s_n0 + s_n1;
-    if (total == 0 || (double)(s_n0 < s_n1 ? s_n0 : s_n1) / total < min_maf) {
-        if (tid == 0) {
-            out_ihh0[vi] = 0.0 / 0.0;
-            out_ihh1[vi] = 0.0 / 0.0;
-        }
-        return;
-    }
-
-    if (tid == 0) {
-        s_n00 = s_n0 * (s_n0 - 1) / 2;
-        s_n11 = s_n1 * (s_n1 - 1) / 2;
-        s_ihh0 = 0.0;  s_ihh1 = 0.0;
-        s_ehh0_prev = 1.0;  s_ehh1_prev = 1.0;
-        s_done0 = (s_n00 == 0) ? 1 : 0;
-        s_done1 = (s_n11 == 0) ? 1 : 0;
-        s_stop  = 0;
-    }
-    __syncthreads();
-
-    // ── classify pairs and init alive bitmask ─────────────────────────
-    // Each thread handles ceil(n_pairs / nthreads) consecutive pairs.
-    // We use up to 4 uint32 words = 128 bits per thread as a bitmask.
-    int ppthread = (n_pairs + nthreads - 1) / nthreads;
-    int p_start = tid * ppthread;
-    int p_end   = p_start + ppthread;
-    if (p_end > n_pairs) p_end = n_pairs;
-    int n_local = p_end - p_start;
-
-    // 4 uint32 words = 128 bits; enough for ppthread <= 128
-    unsigned int is_00[4]  = {0,0,0,0};
-    unsigned int is_11[4]  = {0,0,0,0};
-    unsigned int alive[4]  = {0,0,0,0};
-
-    for (int p = 0; p < n_local; p++) {
-        int gp = p_start + p;
-        signed char a1 = h[(long long)vi * n_haplotypes + pair_j[gp]];
-        signed char a2 = h[(long long)vi * n_haplotypes + pair_k[gp]];
-        int w = p >> 5;            // p / 32
-        unsigned int bit = 1u << (p & 31);  // p % 32
-        if (a1 == 0 && a2 == 0) {
-            is_00[w] |= bit;  alive[w] |= bit;
-        } else if (a1 == 1 && a2 == 1) {
-            is_11[w] |= bit;  alive[w] |= bit;
-        }
-    }
-
-    // ── backward scan ─────────────────────────────────────────────────
-    for (int d = 1; d <= vi; d++) {
-        if (s_stop) break;
-
-        int check_vi = vi - d;
-        int local_00 = 0, local_11 = 0;
-
-        for (int p = 0; p < n_local; p++) {
-            int w = p >> 5;
-            unsigned int bit = 1u << (p & 31);
-            if (!(alive[w] & bit)) continue;
-
-            int gp = p_start + p;
-            signed char a1 = h[(long long)check_vi * n_haplotypes + pair_j[gp]];
-            signed char a2 = h[(long long)check_vi * n_haplotypes + pair_k[gp]];
-
-            if (a1 >= 0 && a2 >= 0 && a1 != a2) {
-                alive[w] &= ~bit;    // pair diverged
-                continue;
-            }
-            // still identical (match or missing)
-            if (is_00[w] & bit) local_00++;
-            if (is_11[w] & bit) local_11++;
-        }
-
-        // block-level reduction
-        if (tid == 0) { s_ident_00 = 0; s_ident_11 = 0; }
-        __syncthreads();
-        if (local_00) atomicAdd(&s_ident_00, local_00);
-        if (local_11) atomicAdd(&s_ident_11, local_11);
-        __syncthreads();
-
-        // block leader: EHH + trapezoidal integration
-        if (tid == 0) {
-            double gap = gaps[vi - d];
-            if (gap < 0.0) {
-                // invalid gap -> NaN
-                if (!s_done0) s_ihh0 = 0.0 / 0.0;
-                if (!s_done1) s_ihh1 = 0.0 / 0.0;
-                s_done0 = 1; s_done1 = 1; s_stop = 1;
-            } else {
-                if (!s_done0) {
-                    double ehh0 = (double)s_ident_00 / s_n00;
-                    s_ihh0 += gap * (ehh0 + s_ehh0_prev) * 0.5;
-                    s_ehh0_prev = ehh0;
-                    if (ehh0 <= min_ehh) s_done0 = 1;
-                }
-                if (!s_done1) {
-                    double ehh1 = (double)s_ident_11 / s_n11;
-                    s_ihh1 += gap * (ehh1 + s_ehh1_prev) * 0.5;
-                    s_ehh1_prev = ehh1;
-                    if (ehh1 <= min_ehh) s_done1 = 1;
-                }
-                if (s_done0 && s_done1) s_stop = 1;
-            }
-        }
-        __syncthreads();
-    }
-
-    // ── write results ─────────────────────────────────────────────────
-    if (tid == 0) {
-        out_ihh0[vi] = (s_done0 || include_edges) ? s_ihh0 : (0.0/0.0);
-        out_ihh1[vi] = (s_done1 || include_edges) ? s_ihh1 : (0.0/0.0);
-    }
-}
-''', 'ihh01_fused_kernel')
-
-
-# ---------------------------------------------------------------------------
 # Histogram-based IHH (one thread per pair, chunked)
 #
 # Kernels:
-#   _ihh01_ssl_pervar_kernel -- per-variant allele-class histograms (iHS)
-#   _ihh_ssl_kernel          -- single histogram for all pairs (xpEHH)
+#   _ihh01_ssl_pervar_kernel_v2 -- per-variant allele-class histograms (iHS)
+#   _ihh_ssl_kernel             -- single histogram for all pairs (xpEHH)
 # ---------------------------------------------------------------------------
-
-_ihh01_ssl_pervar_kernel = cp.RawKernel(r'''
-extern "C" __global__
-void ihh01_ssl_pervar_kernel(
-    const signed char* h,     // (total_n_variants, n_haplotypes), full matrix
-    int chunk_len,            // number of variants in this chunk
-    int n_haplotypes,
-    const int* pair_j, const int* pair_k, int n_pairs,
-    int* hist00,              // (chunk_len, hist_size) for 0-0 pairs
-    int* hist11,              // (chunk_len, hist_size) for 1-1 pairs
-    int* ssl_state,           // (n_pairs,) persistent across chunks
-    int hist_size,
-    int chunk_start           // offset into global variant index
-) {
-    int pid = blockDim.x * blockIdx.x + threadIdx.x;
-    if (pid >= n_pairs) return;
-
-    int j = pair_j[pid];
-    int k = pair_k[pid];
-    int ssl = ssl_state[pid];
-
-    for (int ci = 0; ci < chunk_len; ci++) {
-        int vi = chunk_start + ci;  // global variant index
-        signed char h1 = h[(long long)vi * n_haplotypes + j];
-        signed char h2 = h[(long long)vi * n_haplotypes + k];
-
-        if ((h1 != h2) && (h1 >= 0) && (h2 >= 0)) {
-            ssl = 0;
-        } else {
-            ssl += 1;
-        }
-
-        int bucket = ssl < hist_size ? ssl : hist_size - 1;
-
-        if (h1 == 0 && h2 == 0) {
-            atomicAdd(&hist00[ci * hist_size + bucket], 1);
-        } else if (h1 == 1 && h2 == 1) {
-            atomicAdd(&hist11[ci * hist_size + bucket], 1);
-        }
-    }
-
-    ssl_state[pid] = ssl;
-}
-''', 'ihh01_ssl_pervar_kernel')
-
 
 _ihh01_ssl_pervar_kernel_v2 = cp.RawKernel(r'''
 extern "C" __global__
@@ -1411,9 +1205,9 @@ def _integrate_ihh_gpu(hist, gaps, n_pairs_arr, chunk_start, min_ehh,
     chunk_len, hist_size = hist.shape
     out_ihh = cp.empty(chunk_len, dtype=cp.float64)
 
-    hist = cp.ascontiguousarray(hist.astype(cp.int32))
+    hist = cp.ascontiguousarray(hist)
     gaps = cp.ascontiguousarray(gaps)
-    n_pairs_arr = cp.ascontiguousarray(n_pairs_arr.astype(cp.int32))
+    n_pairs_arr = cp.ascontiguousarray(n_pairs_arr)
 
     block = 256
     grid = (chunk_len + block - 1) // block
@@ -1430,54 +1224,6 @@ def _integrate_ihh_gpu(hist, gaps, n_pairs_arr, chunk_start, min_ehh,
 # ---------------------------------------------------------------------------
 # Private helpers: SSL-based scans for IHS
 # ---------------------------------------------------------------------------
-
-def _ihh01_scan_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
-                    include_edges=False, max_ssl_cap=None):
-    """Forward scan computing IHH for ref and alt allele classes.
-
-    Uses a fused kernel: one thread block per focal variant, scanning
-    backward with block-level reductions for EHH.  O(n_variants) memory.
-
-    Parameters
-    ----------
-    h : cupy.ndarray, shape (n_variants, n_haplotypes)
-    gaps : cupy.ndarray, float64, shape (n_variants - 1,)
-    min_ehh : float
-    min_maf : float
-    include_edges : bool
-    max_ssl_cap : int or None
-        Unused (kept for API compatibility). The fused kernel does not
-        use histograms.
-
-    Returns
-    -------
-    ihh0 : np.ndarray, float64, shape (n_variants,)
-    ihh1 : np.ndarray, float64, shape (n_variants,)
-    """
-    n_variants, n_haplotypes = h.shape
-    n_pairs = (n_haplotypes * (n_haplotypes - 1)) // 2
-
-    pair_j, pair_k = _get_pair_indices(n_haplotypes)
-    h_contig = cp.ascontiguousarray(h.astype(cp.int8))
-    gaps_contig = cp.ascontiguousarray(gaps)
-
-    out_ihh0 = cp.empty(n_variants, dtype=cp.float64)
-    out_ihh1 = cp.empty(n_variants, dtype=cp.float64)
-
-    # One block per variant; 256 threads per block.
-    # Each thread handles ceil(n_pairs/256) pairs via bitmask.
-    block = 256
-    _ihh01_fused_kernel(
-        (n_variants,), (block,),
-        (h_contig, gaps_contig,
-         np.int32(n_variants), np.int32(n_haplotypes),
-         pair_j, pair_k, np.int32(n_pairs),
-         np.float64(min_ehh), np.float64(min_maf),
-         np.int32(int(include_edges)),
-         out_ihh0, out_ihh1))
-
-    return out_ihh0.get(), out_ihh1.get()
-
 
 def _ihh01_scan_hist_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
                          include_edges=False, max_ssl_cap=None):
@@ -1528,25 +1274,27 @@ def _ihh01_scan_hist_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
     ihh1_out = cp.empty(n_variants, dtype=cp.float64)
     ssl_state = cp.zeros(n_pairs, dtype=cp.int32)
 
-    # Pre-allocate allele count buffers (reused across chunks)
+    # Pre-allocate per-chunk buffers (reused across chunks; ~2 GB hists)
     n0_buf = cp.empty(chunk_size, dtype=cp.int32)
     n1_buf = cp.empty(chunk_size, dtype=cp.int32)
+    hist00_buf = cp.empty((chunk_size, hist_size), dtype=cp.int32)
+    hist11_buf = cp.empty((chunk_size, hist_size), dtype=cp.int32)
 
     for chunk_start in range(0, n_variants, chunk_size):
         chunk_end = min(chunk_start + chunk_size, n_variants)
         c_len = chunk_end - chunk_start
 
-        hist00 = cp.zeros((c_len, hist_size), dtype=cp.int32)
-        hist11 = cp.zeros((c_len, hist_size), dtype=cp.int32)
+        hist00 = hist00_buf[:c_len]
+        hist11 = hist11_buf[:c_len]
+        hist00.fill(0)
+        hist11.fill(0)
 
-        # Launch SSL histogram kernel (stride-based, no pair arrays)
         _ihh01_ssl_pervar_kernel_v2((grid_ssl,), (block_ssl,),
             (h_view, np.int64(s0), np.int64(s1),
              np.int32(c_len), np.int32(n_haplotypes), np.int32(n_pairs),
              hist00, hist11, ssl_state, np.int32(hist_size),
              np.int32(chunk_start)))
 
-        # Fused allele counting (single kernel, stride-aware)
         n0_chunk = n0_buf[:c_len]
         n1_chunk = n1_buf[:c_len]
         _count_alleles_kernel((grid_ac_fn(c_len),), (block_ac,),
@@ -1554,7 +1302,6 @@ def _ihh01_scan_hist_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
              np.int32(c_len), np.int32(n_haplotypes),
              np.int32(chunk_start), n0_chunk, n1_chunk))
 
-        # Compute per-variant pair counts for each allele class (on GPU)
         n00 = (n0_chunk * (n0_chunk - 1) // 2).astype(cp.int32)
         n11 = (n1_chunk * (n1_chunk - 1) // 2).astype(cp.int32)
 
@@ -1562,9 +1309,7 @@ def _ihh01_scan_hist_gpu(h, gaps, min_ehh=0.05, min_maf=0.05,
                                          chunk_start, min_ehh, include_edges)
         ihh1_chunk = _integrate_ihh_gpu(hist11, gaps_contig, n11,
                                          chunk_start, min_ehh, include_edges)
-        del hist00, hist11
 
-        # Apply MAF filter (entirely on GPU)
         total = (n0_chunk + n1_chunk).astype(cp.float64)
         minor = cp.minimum(n0_chunk, n1_chunk).astype(cp.float64)
         maf_fail = (total == 0) | (minor / cp.maximum(total, 1) < min_maf)
@@ -1623,11 +1368,15 @@ def _ihh_scan_gpu(h, gaps, min_ehh=0.05, include_edges=False,
     vihh = np.empty(n_variants, dtype=np.float64)
     ssl_state = cp.zeros(n_pairs, dtype=cp.int32)
 
+    hist_buf = cp.empty((chunk_size, hist_size), dtype=cp.int32)
+    n_pairs_arr_buf = cp.full(chunk_size, n_pairs, dtype=cp.int32)
+
     for chunk_start in range(0, n_variants, chunk_size):
         chunk_end = min(chunk_start + chunk_size, n_variants)
         c_len = chunk_end - chunk_start
 
-        hist = cp.zeros((c_len, hist_size), dtype=cp.int32)
+        hist = hist_buf[:c_len]
+        hist.fill(0)
         h_chunk = h_contig[chunk_start:chunk_end]
 
         _ihh_ssl_kernel((grid_ssl,), (block_ssl,),
@@ -1635,10 +1384,8 @@ def _ihh_scan_gpu(h, gaps, min_ehh=0.05, include_edges=False,
                          pair_j, pair_k, np.int32(n_pairs), hist,
                          ssl_state, np.int32(hist_size)))
 
-        n_pairs_arr = cp.full(c_len, n_pairs, dtype=cp.int32)
-        ihh_chunk = _integrate_ihh_gpu(hist, gaps_contig, n_pairs_arr,
+        ihh_chunk = _integrate_ihh_gpu(hist, gaps_contig, n_pairs_arr_buf[:c_len],
                                         chunk_start, min_ehh, include_edges)
-        del hist
 
         vihh[chunk_start:chunk_end] = ihh_chunk.get()
 
