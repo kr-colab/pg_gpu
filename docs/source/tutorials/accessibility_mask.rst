@@ -42,7 +42,7 @@ known, then verifies that the mask recovers it:
 
 1. Simulate a 1 Mb chromosome under ``msprime`` with a 200 kb central
    block of 100x lower mutation rate -- a stand-in for a low-callability
-   exon. The genealogy is identical inside and outside the block, so
+   region. The genealogy is identical inside and outside the block, so
    the per-site pattern of coalescence is the same; only the *probability of
    observing* a mutation differs. Outside the block, per-bp
    diversity is :math:`4 N_e \mu_{\text{high}}`.
@@ -69,7 +69,7 @@ looks lower even though the genealogy is unchanged. With the mask:
 Why it's useful as a template
 -----------------------------
 
-The lesson generalizes beyond simulated exons. Any region where the
+This example is applicable to any region where the
 *probability of observing variation* differs from the surrounding
 genome (repeat masks, low-coverage regions, hard-to-map duplications,
 centromeres) biases per-bp summary statistics unless the denominator

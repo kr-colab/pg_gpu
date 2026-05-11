@@ -45,7 +45,7 @@ A100 is under five minutes -- on the same hardware, the CPU
 Recipe
 ------
 
-The core swap looks like:
+The core change between a ``moments.LD`` workflow and a ``pg_gpu``-accelerated workflow is:
 
 .. code-block:: python
 
@@ -54,7 +54,7 @@ The core swap looks like:
 
    r_bins = [0, 1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5, 1e-4]
 
-   # Step 1: GPU-accelerated LD parsing (the only line that changes
+   # Step 1: GPU-accelerated LD parsing (the only part that changes
    # vs. a pure-moments workflow).
    ld_stats = {}
    for i, vcf in enumerate(vcf_files):
