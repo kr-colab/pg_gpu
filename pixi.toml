@@ -2,7 +2,7 @@
 name = "pg_gpu"
 version = "0.1.0"
 description = "GPU-accelerated population genetics statistics"
-channels = ["conda-forge"]
+channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]
 
 [dependencies]
@@ -34,6 +34,7 @@ pytest-xdist = ">=3.0"
 ipython = ">=8.0"
 ipykernel = ">=6.0"
 ruff = ">=0.4"
+htslib = ">=1.19"  # provides bgzip/tabix for VCF round-trip tests
 
 [feature.moments.pypi-dependencies]
 moments-popgen = "*"
