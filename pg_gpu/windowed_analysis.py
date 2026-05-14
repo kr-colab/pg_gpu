@@ -1100,6 +1100,17 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             "available on the StreamingHaplotypeMatrix path; materialize "
             "the region eagerly to run it."
         )
+    _garud_stats = {"garud_h1", "garud_h12", "garud_h123", "garud_h2h1",
+                    "garud_n_distinct", "n_distinct_haps"}
+    if any(s in _garud_stats for s in statistics):
+        raise NotImplementedError(
+            "Garud H statistics use a hash basis whose length is set by "
+            "the full matrix's n_variants (windowed_analysis._garud_h_"
+            "single_pass draws w1, w2 of length n_var with seed 42), so "
+            "per-chunk calls produce different hash bases and disagree "
+            "with the eager result. Materialize the region eagerly or "
+            "wait for a position-deterministic Garud hash."
+        )
 
     parts = []
     for left, right, chunk_hm in streaming_hm.iter_gpu_chunks():

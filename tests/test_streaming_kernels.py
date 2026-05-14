@@ -259,3 +259,16 @@ class TestStreamingGuardrails:
         with pytest.raises(NotImplementedError, match="local_pca"):
             windowed_analysis(stream, window_size=5_000,
                               statistics=["local_pca"])
+
+    @pytest.mark.parametrize("stat", ["garud_h1", "garud_h12",
+                                       "garud_h123", "garud_h2h1"])
+    def test_garud_rejected(self, vcz_store, stat):
+        # Garud H's hash basis is sized to the full matrix's n_variants,
+        # so a per-chunk dispatch gets a different basis per chunk and
+        # the H values disagree with the eager result. Reject explicitly
+        # rather than silently returning wrong numbers; once Garud's
+        # hash becomes position-deterministic this guardrail can drop.
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                            chunk_bp=10_000)
+        with pytest.raises(NotImplementedError, match="Garud"):
+            windowed_analysis(stream, window_size=5_000, statistics=[stat])
