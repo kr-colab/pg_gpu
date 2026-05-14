@@ -204,8 +204,10 @@ class TestGenotypeMatrixRoundTrip:
         path = str(tmp_path / "gm.vcz.zarr")
         gm.to_zarr(path, format='vcz', contig_name='chr1')
         gm2 = GenotypeMatrix.from_zarr(path)
-        np.testing.assert_array_equal(gm.genotypes, gm2.genotypes)
-        np.testing.assert_array_equal(gm.positions, gm2.positions)
+        np.testing.assert_array_equal(_host(gm.genotypes),
+                                      _host(gm2.genotypes))
+        np.testing.assert_array_equal(_host(gm.positions),
+                                      _host(gm2.positions))
 
     def test_allel_roundtrip(self, tmp_path, hm):
         from pg_gpu.genotype_matrix import GenotypeMatrix
@@ -213,7 +215,8 @@ class TestGenotypeMatrixRoundTrip:
         path = str(tmp_path / "gm.allel.zarr")
         gm.to_zarr(path, format='scikit-allel')
         gm2 = GenotypeMatrix.from_zarr(path)
-        np.testing.assert_array_equal(gm.genotypes, gm2.genotypes)
+        np.testing.assert_array_equal(_host(gm.genotypes),
+                                      _host(gm2.genotypes))
 
 
 # ── Region Queries ──────────────────────────────────────────────────────
@@ -327,7 +330,8 @@ class TestMissingData:
         path = str(tmp_path / "gm_missing.vcz.zarr")
         gm_missing.to_zarr(path, format='vcz', contig_name='chr1')
         gm2 = GenotypeMatrix.from_zarr(path)
-        np.testing.assert_array_equal(gm_missing.genotypes, gm2.genotypes)
+        np.testing.assert_array_equal(_host(gm_missing.genotypes),
+                                      _host(gm2.genotypes))
 
 
 # ── vcf_to_zarr ─────────────────────────────────────────────────────────

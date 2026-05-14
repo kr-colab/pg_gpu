@@ -10,6 +10,23 @@ import cupy as cp
 from typing import Optional, Union
 
 
+def _raise_on_streaming_matrix(matrix, fn_name):
+    """``grm`` / ``ibs`` are inherently pairwise across the full sample
+    axis -- they need every variant in scope to compute an (n_indiv,
+    n_indiv) matrix. A streaming matrix can't be reduced chunk-by-chunk
+    without aggregating across the whole pair grid, which the current
+    kernels don't do. Raise with the ``.materialize`` hint instead of
+    failing later when the kernel touches ``.haplotypes`` / ``.genotypes``."""
+    from .streaming_matrix import _StreamingMatrixBase
+    if isinstance(matrix, _StreamingMatrixBase):
+        raise NotImplementedError(
+            f"{fn_name}() needs the full variant axis in scope at once "
+            f"and is not streamable chunk-by-chunk. Pull a sub-region "
+            f"eagerly via matrix.materialize(region=(lo, hi)) and call "
+            f"{fn_name}() on that."
+        )
+
+
 def grm(genotype_matrix_or_haplotype_matrix,
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include') -> np.ndarray:
@@ -42,6 +59,7 @@ def grm(genotype_matrix_or_haplotype_matrix,
         coefficients + 1. Off-diagonal entries are pairwise relatedness.
     """
     from ._memutil import estimate_variant_chunk_size
+    _raise_on_streaming_matrix(genotype_matrix_or_haplotype_matrix, "grm")
 
     geno, n_ind = _get_genotype_data(genotype_matrix_or_haplotype_matrix,
                                       population)
@@ -135,6 +153,7 @@ def ibs(genotype_matrix_or_haplotype_matrix,
         Diagonal is always 1.
     """
     from ._memutil import estimate_variant_chunk_size
+    _raise_on_streaming_matrix(genotype_matrix_or_haplotype_matrix, "ibs")
 
     geno, n_ind = _get_genotype_data(genotype_matrix_or_haplotype_matrix,
                                       population)

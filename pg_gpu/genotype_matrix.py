@@ -393,7 +393,12 @@ class GenotypeMatrix:
 
     @classmethod
     def from_zarr(cls, path, region=None, accessible_bed=None,
-                  include_invariant=False):
+                  include_invariant=False,
+                  pop_file=None,
+                  streaming: str = "auto",
+                  chunk_bp: int = 1_500_000,
+                  prefetch: int = 1,
+                  backend: str = "auto"):
         """Construct a GenotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
@@ -408,33 +413,115 @@ class GenotypeMatrix:
             Path to a BED file defining accessible/callable regions.
         include_invariant : bool
             If True, set n_total_sites from loaded variant count.
+        pop_file : str or False, optional
+            Tab-delimited file mapping ``sample`` -> ``pop`` in the
+            format ``GenotypeMatrix.load_pop_file`` expects. Default
+            (``None``) looks for ``<path>.pops.tsv`` next to the
+            store and loads it if present. Pass ``False`` to disable
+            the auto-load.
+        streaming : {'auto', 'always', 'never'}, optional
+            Whether to return a ``StreamingGenotypeMatrix`` that
+            iterates the store chunk-by-chunk through the GPU
+            (suitable for biobank-scale stores that do not fit
+            eagerly on the device). ``'auto'`` (default) checks the
+            projected eager footprint against free GPU memory and
+            picks streaming when the eager matrix would consume more
+            than half the device. Scikit-allel layouts always route
+            to eager because the streaming source is VCZ-only.
+        chunk_bp, prefetch, backend
+            See ``HaplotypeMatrix.from_zarr``; ignored on the eager
+            path.
 
         Returns
         -------
-        GenotypeMatrix
+        GenotypeMatrix or StreamingGenotypeMatrix
         """
+        if streaming not in ("auto", "always", "never"):
+            raise ValueError(
+                f"streaming must be 'auto', 'always', or 'never'; "
+                f"got {streaming!r}"
+            )
+        if backend not in ("auto", "host", "kvikio"):
+            raise ValueError(
+                f"backend must be 'auto', 'host', or 'kvikio'; "
+                f"got {backend!r}"
+            )
+
+        if streaming == "always":
+            return cls._build_streaming(
+                path, region=region, pop_file=pop_file,
+                chunk_bp=chunk_bp, prefetch=prefetch,
+                backend=backend,
+            )
+
+        # 'auto' and 'never' both want eager when the matrix fits;
+        # 'auto' falls back to streaming when it doesn't, 'never'
+        # raises. The decision needs the matrix's projected size,
+        # which is only available via ZarrGenotypeSource (VCZ-only).
+        # Scikit-allel stores always route to eager.
+        from .haplotype_matrix import _decide_streaming_mode
+        choice, source = _decide_streaming_mode(path, region=region,
+                                                streaming=streaming,
+                                                pop_file=pop_file)
+        if choice == "streaming":
+            return cls._build_streaming(
+                path, region=region, pop_file=pop_file,
+                chunk_bp=chunk_bp, prefetch=prefetch,
+                backend=backend, source=source,
+            )
+        return cls._build_eager(path, region=region,
+                                accessible_bed=accessible_bed,
+                                include_invariant=include_invariant,
+                                pop_file=pop_file)
+
+    @classmethod
+    def _build_eager(cls, path, *, region, accessible_bed,
+                     include_invariant, pop_file):
         from .zarr_io import read_genotypes
+        from ._gpu_genotype_prep import build_genotype_matrix
+        from .haplotype_matrix import _resolve_companion_pop_file
 
         data = read_genotypes(path, region)
         gt = data['gt']  # (n_variants, n_samples, ploidy)
         positions = data['positions']
         samples = data['samples']
 
-        missing = np.any(gt < 0, axis=2)
-        geno = np.sum(np.maximum(gt, 0), axis=2).astype(np.int8)
-        geno[missing] = -1
-        geno = geno.T  # (n_individuals, n_variants)
-
-        n_total_sites = geno.shape[1] if include_invariant else None
+        n_total_sites = gt.shape[0] if include_invariant else None
         chrom = region.split(':')[0] if region else None
 
-        gm = cls(geno, positions, chrom_start=int(positions[0]),
-                 chrom_end=int(positions[-1]),
-                 n_total_sites=n_total_sites,
-                 samples=list(samples) if samples else None)
+        gm = build_genotype_matrix(
+            gt, positions,
+            chrom_start=int(positions[0]),
+            chrom_end=int(positions[-1]),
+            n_total_sites=n_total_sites,
+            samples=list(samples) if samples else None,
+        )
         if accessible_bed is not None:
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
+
+        resolved_pop = _resolve_companion_pop_file(path, pop_file)
+        if resolved_pop is not None:
+            gm.load_pop_file(resolved_pop)
+
         return gm
+
+    @classmethod
+    def _build_streaming(cls, path, *, region, pop_file, chunk_bp, prefetch,
+                         backend="auto", source=None):
+        from .streaming_matrix import (
+            StreamingGenotypeMatrix, _pick_chunk_fetcher,
+        )
+        from .zarr_source import ZarrGenotypeSource
+
+        if source is None:
+            source = ZarrGenotypeSource(path, region=region, pop_file=pop_file)
+        else:
+            source.pop_cols = source._resolve_pop_file(pop_file)
+        fetcher = _pick_chunk_fetcher(source, backend=backend)
+        return StreamingGenotypeMatrix(
+            source, fetcher,
+            chunk_bp=chunk_bp, prefetch=prefetch,
+        )
 
     def to_zarr(self, zarr_path, format='vcz', contig_name=None):
         """Save genotype data to Zarr format.

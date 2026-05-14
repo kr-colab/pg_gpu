@@ -274,3 +274,76 @@ class TestChunkFetcherABC:
     def test_cannot_instantiate_abstract(self):
         with pytest.raises(TypeError, match="abstract"):
             ChunkFetcher()
+
+
+class TestStreamingGenotypeMatrix:
+    """StreamingGenotypeMatrix mirrors StreamingHaplotypeMatrix's shape but
+    yields per-chunk GenotypeMatrix instances (dosage-coded, n_indiv x
+    n_var) instead of haplotype-coded. Sample sets index the diploid
+    axis (0..n_indiv) rather than the haplotype axis."""
+
+    def test_streaming_always_returns_streaming_class(self, vcz_store):
+        from pg_gpu import GenotypeMatrix
+        from pg_gpu.streaming_matrix import StreamingGenotypeMatrix
+        path, _ = vcz_store
+        gm = GenotypeMatrix.from_zarr(path, streaming="always",
+                                       chunk_bp=5_000)
+        assert isinstance(gm, StreamingGenotypeMatrix)
+
+    def test_chunk_payload_is_genotype_matrix(self, vcz_store):
+        from pg_gpu import GenotypeMatrix
+        path, _ = vcz_store
+        gm_stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                              chunk_bp=5_000)
+        for left, right, chunk_gm in gm_stream.iter_gpu_chunks():
+            assert isinstance(chunk_gm, GenotypeMatrix)
+            # GenotypeMatrix layout: (n_indiv, n_var) with dosage values
+            assert chunk_gm.genotypes.shape[0] == gm_stream.num_individuals
+            break  # one chunk is enough to verify the contract
+
+    def test_sample_sets_default_to_individual_axis(self, vcz_store):
+        from pg_gpu import GenotypeMatrix
+        path, _ = vcz_store
+        gm_stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                              chunk_bp=5_000)
+        sets = gm_stream.sample_sets
+        assert set(sets.keys()) == {"all"}
+        # Genotype matrix indexes individuals, not haplotypes -- length
+        # should match num_individuals not 2*num_individuals.
+        assert len(sets["all"]) == gm_stream.num_individuals
+
+    def test_genotypes_property_raises(self, vcz_store):
+        from pg_gpu import GenotypeMatrix
+        path, _ = vcz_store
+        gm_stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                              chunk_bp=5_000)
+        with pytest.raises(NotImplementedError, match="materialized"):
+            _ = gm_stream.genotypes
+
+    def test_materialize_returns_eager_genotype_matrix(self, vcz_store):
+        from pg_gpu import GenotypeMatrix
+        path, _ = vcz_store
+        gm_stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                              chunk_bp=5_000)
+        eager = gm_stream.materialize(region=(0, 10_000))
+        assert isinstance(eager, GenotypeMatrix)
+        # genotypes are (n_indiv, n_var) dosage int8
+        assert eager.genotypes.shape[0] == gm_stream.num_individuals
+
+    def test_grm_raises_on_streaming(self, vcz_store):
+        from pg_gpu import GenotypeMatrix
+        from pg_gpu.relatedness import grm
+        path, _ = vcz_store
+        gm_stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                              chunk_bp=5_000)
+        with pytest.raises(NotImplementedError, match="materialize"):
+            grm(gm_stream)
+
+    def test_ibs_raises_on_streaming(self, vcz_store):
+        from pg_gpu import GenotypeMatrix
+        from pg_gpu.relatedness import ibs
+        path, _ = vcz_store
+        gm_stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                              chunk_bp=5_000)
+        with pytest.raises(NotImplementedError, match="materialize"):
+            ibs(gm_stream)

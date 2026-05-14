@@ -31,7 +31,7 @@ import numpy as np
 import zarr
 from kvikio.zarr import GDSStore
 
-from ._gpu_genotype_prep import build_haplotype_matrix
+from ._gpu_genotype_prep import build_genotype_matrix, build_haplotype_matrix
 
 
 def _pad_to(arr, shape):
@@ -375,19 +375,20 @@ class KvikioChunkFetcher(ChunkFetcher):
         self._gpu_buffer_active = False
 
 
-class StreamingHaplotypeMatrix:
-    """Chunked view over a ``ZarrGenotypeSource``.
+class _StreamingMatrixBase:
+    """Shared chunk-iteration machinery for streaming matrix classes.
 
-    Used by ``HaplotypeMatrix.from_zarr`` when the requested matrix
-    does not fit eagerly on the GPU. Kernels that consume this class
-    do so by iterating ``iter_gpu_chunks``; each yielded
-    ``HaplotypeMatrix`` is an eager device-resident chunk covering a
-    single genomic interval.
+    Subclasses provide the per-chunk ``_build_chunk`` (which decides
+    HaplotypeMatrix vs GenotypeMatrix layout), the sample-axis size
+    that drives the default 'all' sample set, and the data-property
+    raise text (since the eager classes' bulk-data attribute names
+    differ: ``.haplotypes`` vs ``.genotypes``).
 
-    Direct array access (``.haplotypes``, ``.positions``) is not
-    supported -- the whole point of this class is that the matrix is
-    too big to materialize. The dispatch in the kernels uses the
-    iterator instead.
+    Direct array access is not supported -- the whole point of these
+    classes is that the matrix is too big to materialize. Use
+    ``iter_gpu_chunks()`` to walk per-chunk eager matrices, pass the
+    object to a streaming-aware kernel, or call
+    ``.materialize(region=...)`` for a sub-region eager build.
 
     Parameters
     ----------
@@ -398,9 +399,9 @@ class StreamingHaplotypeMatrix:
     prefetch : int
         Read-ahead depth handed to the fetcher.
     align_bp : int, optional
-        Chunk boundaries are snapped to multiples of this so a windowed
-        kernel can guarantee windows never straddle a chunk boundary.
-        Defaults to ``chunk_bp`` (single window per chunk).
+        Chunk boundaries are snapped to multiples of this so a
+        windowed kernel can guarantee windows never straddle a chunk
+        boundary. Defaults to ``chunk_bp`` (single window per chunk).
     """
 
     def __init__(self, source, fetcher, chunk_bp, prefetch, *,
@@ -413,18 +414,14 @@ class StreamingHaplotypeMatrix:
         self._chunks = list(
             source.iter_chunks(self._chunk_bp, self._align_bp)
         )
-        # _sample_sets follows the same idiom as HaplotypeMatrix: store the
-        # explicit value (or None) and let the property fall back to a
-        # default 'all' set when no pop file resolved at source construction.
+        # Mirror the eager classes' idiom: store the explicit value
+        # (or None) and let the property fall back to a default 'all'
+        # set when no pop file resolved at source construction.
         self._sample_sets = source.pop_cols
 
     @property
     def num_variants(self):
         return self._source.num_variants
-
-    @property
-    def num_haplotypes(self):
-        return self._source.num_haplotypes
 
     @property
     def chrom(self):
@@ -443,41 +440,137 @@ class StreamingHaplotypeMatrix:
 
     @property
     def chrom_start(self):
-        """Leading edge of the analyzed region.
-
-        Returns the chunk grid origin (typically ``0``) rather than the
-        first variant position -- streaming's per-chunk windows are
-        anchored to that grid, so reporting the variant-based origin
-        would be misleading for callers building a comparable eager
-        matrix.
-        """
+        """Chunk-grid origin. Not the first variant position --
+        per-chunk windows are anchored to the chunk grid, so reporting
+        the variant-based origin would be misleading for callers
+        building a comparable eager matrix."""
         return self._chunks[0][0] if self._chunks else 0
 
     @property
     def chrom_end(self):
-        """Trailing edge of the analyzed region (chunk-grid right edge).
-
-        Reported as the chunk grid's exclusive upper bound rather than
-        the last-variant-position-inclusive form HaplotypeMatrix uses
-        elsewhere. The streaming path runs windowed_analysis once per
-        chunk and concatenates; using the chunk grid's right edge for
-        each per-chunk chrom_end keeps all interior windows at uniform
-        width. A caller building a comparable eager matrix should set
-        ``eager.chrom_end = stream.chrom_end`` for the same effect.
-        """
+        """Chunk-grid right edge (exclusive). Not the last variant
+        position; per-chunk windows are uniform width within their
+        chunk, so the right edge here is the chunk grid's exclusive
+        upper bound rather than HaplotypeMatrix's last-inclusive
+        convention."""
         return self._chunks[-1][1] if self._chunks else 0
 
     @property
     def sample_sets(self):
-        """Population -> hap-axis indices. Falls back to a single 'all' set
-        when no pop file was resolved."""
+        """Population -> sample-axis indices. Falls back to a single
+        'all' set when no pop file was resolved."""
         if self._sample_sets is None:
-            return {"all": list(range(self.num_haplotypes))}
+            return {"all": list(range(self._sample_axis_size()))}
         return self._sample_sets
 
     @sample_sets.setter
     def sample_sets(self, value):
         self._sample_sets = value
+
+    def iter_gpu_chunks(self):
+        """Yield ``(left, right, eager_matrix)`` tuples covering the source.
+
+        Each yielded eager matrix lives on the GPU and represents one
+        genomic chunk. Empty chunks (regions with no variants, e.g. an
+        acrocentric arm) are skipped -- callers see only chunks with
+        at least one variant.
+        """
+        for ci, left, right, gt, pos, t_read in self._fetcher.iter_chunks(
+                self._chunks, self._prefetch):
+            if gt.shape[0] == 0:
+                continue
+            m = self._build_chunk(
+                gt, pos,
+                # chrom_end is the chunk's exclusive right edge so the
+                # last window in each chunk does not get clipped to the
+                # last variant position the way an eager matrix would.
+                chrom_start=int(left), chrom_end=int(right),
+                sample_sets=self._sample_sets,
+            )
+            yield int(left), int(right), m
+
+    def materialize(self, *, region=None, sample_subset=None):
+        """Build an eager matrix over a sub-region.
+
+        Pairwise / cross-window kernels (``pairwise_r2``, ``grm``,
+        ``ibs``, ``locate_unlinked``, the r^2 heatmap path) can't be
+        evaluated chunk-by-chunk because they need every (variant,
+        variant) pair simultaneously. Pull the slice you want into one
+        device-resident eager matrix and run those kernels on it.
+
+        Parameters
+        ----------
+        region : tuple of int, optional
+            ``(left, right)`` bp interval to materialize. ``right`` is
+            exclusive. ``None`` materializes the full mappable range,
+            which on a biobank-scale store will OOM.
+        sample_subset : sequence of int, optional
+            Haplotype-axis indices to keep. ``None`` keeps every
+            haplotype.
+        """
+        if region is None:
+            left, right = self.chrom_start, self.chrom_end
+        else:
+            left, right = int(region[0]), int(region[1])
+
+        if sample_subset is None:
+            gt, pos = self._source.slice_region(left, right)
+        else:
+            # slice_subsample returns ``(n_var, n_hap_subset)`` int8;
+            # promote back to ``(n_var, n_dip', 2)`` so the eager
+            # build helpers' uniform input shape holds. The subsample
+            # ploidy ordering matches the source's convention: haps
+            # ``0..n_dip-1`` = ploidy 0, ``n_dip..2*n_dip-1`` = ploidy 1.
+            import numpy as _np
+            gm, pos = self._source.slice_subsample(left, right, sample_subset)
+            n_var, n_hap = gm.shape
+            if n_hap % 2 != 0:
+                raise ValueError(
+                    f"materialize(sample_subset=...) requires an even "
+                    f"count to round-trip through (n_dip, 2) layout; "
+                    f"got {n_hap}."
+                )
+            n_dip_sub = n_hap // 2
+            gt = _np.empty((n_var, n_dip_sub, 2), dtype=gm.dtype)
+            gt[:, :, 0] = gm[:, :n_dip_sub]
+            gt[:, :, 1] = gm[:, n_dip_sub:]
+
+        return self._build_chunk(
+            gt, pos,
+            chrom_start=left, chrom_end=right,
+            sample_sets=self._sample_sets,
+        )
+
+    def _sample_axis_size(self):  # pragma: no cover -- abstract
+        raise NotImplementedError
+
+    def _build_chunk(self, gt, pos, **kwargs):  # pragma: no cover -- abstract
+        raise NotImplementedError
+
+    def __repr__(self):
+        return (
+            f"{type(self).__name__}(num_variants={self.num_variants}, "
+            f"{self._repr_sample_axis()}, "
+            f"chrom={self.chrom!r}, n_chunks={len(self._chunks)}, "
+            f"chunk_bp={self._chunk_bp}, prefetch={self._prefetch})"
+        )
+
+    def _repr_sample_axis(self):  # pragma: no cover -- abstract
+        raise NotImplementedError
+
+
+class StreamingHaplotypeMatrix(_StreamingMatrixBase):
+    """Chunked view over a ``ZarrGenotypeSource``, yielding per-chunk
+    ``HaplotypeMatrix`` instances.
+
+    Returned by ``HaplotypeMatrix.from_zarr`` when the requested
+    matrix does not fit eagerly on the GPU. See ``_StreamingMatrixBase``
+    for the iteration / materialize / sample_sets contract.
+    """
+
+    @property
+    def num_haplotypes(self):
+        return self._source.num_haplotypes
 
     @property
     def haplotypes(self):
@@ -492,96 +585,48 @@ class StreamingHaplotypeMatrix:
             "object to a streaming-aware kernel like windowed_analysis."
         )
 
-    def materialize(self, *, region=None, sample_subset=None):
-        """Build an eager ``HaplotypeMatrix`` over a sub-region.
+    def _sample_axis_size(self):
+        return self.num_haplotypes
 
-        Pairwise kernels (``pairwise_r2``, the r^2 heatmap path,
-        ``locate_unlinked``) can't be evaluated chunk-by-chunk because
-        they need every (variant, variant) pair simultaneously. Use
-        this to pull the slice you want into one device-resident
-        HaplotypeMatrix and run those kernels on it.
+    def _build_chunk(self, gt, pos, **kwargs):
+        return build_haplotype_matrix(gt, pos, **kwargs)
 
-        Parameters
-        ----------
-        region : tuple of int, optional
-            ``(left, right)`` bp interval to materialize.
-            ``right`` is exclusive. ``None`` materializes the full
-            mappable range, which on a biobank-scale store will OOM.
-        sample_subset : sequence of int, optional
-            Haplotype-axis indices to keep. ``None`` keeps every
-            haplotype.
+    def _repr_sample_axis(self):
+        return f"num_haplotypes={self.num_haplotypes}"
 
-        Returns
-        -------
-        HaplotypeMatrix
-            Eager, device-resident, ready for any pg_gpu kernel.
-        """
-        from ._gpu_genotype_prep import build_haplotype_matrix
 
-        if region is None:
-            left, right = self.chrom_start, self.chrom_end
-        else:
-            left, right = int(region[0]), int(region[1])
+class StreamingGenotypeMatrix(_StreamingMatrixBase):
+    """Chunked view over a ``ZarrGenotypeSource``, yielding per-chunk
+    ``GenotypeMatrix`` (dosage-coded ``(n_indiv, n_var)``) instances.
 
-        if sample_subset is None:
-            gt, pos = self._source.slice_region(left, right)
-        else:
-            # slice_subsample returns a 2-D (n_var, n_hap_subset) int8
-            # block; HaplotypeMatrix wants (n_hap, n_var). Reshape on
-            # the GPU via build_haplotype_matrix's same prep path by
-            # promoting the 2-D subsample to a (n_var, n_dip', 2)
-            # block. The subsample's ploidy ordering follows the
-            # convention build_haplotype_matrix produces: haps
-            # 0..n_dip-1 = ploidy 0, n_dip..2*n_dip-1 = ploidy 1.
-            import numpy as _np
-            gm, pos = self._source.slice_subsample(left, right, sample_subset)
-            n_var, n_hap = gm.shape
-            # round n_hap to even for the (n_dip, 2) reshape -- if the
-            # caller picked an odd subset count we error out rather
-            # than silently splitting a diploid in half.
-            if n_hap % 2 != 0:
-                raise ValueError(
-                    f"materialize(sample_subset=...) requires an even "
-                    f"count to round-trip through (n_dip, 2) layout; "
-                    f"got {n_hap}."
-                )
-            n_dip_sub = n_hap // 2
-            gt = _np.empty((n_var, n_dip_sub, 2), dtype=gm.dtype)
-            gt[:, :, 0] = gm[:, :n_dip_sub]
-            gt[:, :, 1] = gm[:, n_dip_sub:]
+    Returned by ``GenotypeMatrix.from_zarr`` when the requested matrix
+    does not fit eagerly on the GPU. Sample sets index the diploid
+    axis (``0..num_individuals-1``), not the haplotype axis.
+    Pairwise kernels (``grm``, ``ibs``) are not chunk-streamable; use
+    ``.materialize(region=...)`` to pull a sub-region eagerly first.
+    """
 
-        return build_haplotype_matrix(
-            gt, pos,
-            chrom_start=left, chrom_end=right,
-            sample_sets=self._sample_sets,
+    @property
+    def num_individuals(self):
+        return self._source.num_diploids
+
+    @property
+    def genotypes(self):
+        raise NotImplementedError(
+            "StreamingGenotypeMatrix has no materialized .genotypes "
+            "array; the matrix is too big to fit eagerly, which is why "
+            "from_zarr returned this class instead of GenotypeMatrix. "
+            "For pairwise statistics (grm, ibs) over a sub-region, "
+            "call .materialize(region=(lo, hi)) to get an eager "
+            "GenotypeMatrix over that slice. For per-window streaming "
+            "stats, iterate .iter_gpu_chunks() directly."
         )
 
-    def iter_gpu_chunks(self):
-        """Yield ``(left, right, HaplotypeMatrix)`` tuples covering the source.
+    def _sample_axis_size(self):
+        return self.num_individuals
 
-        Each yielded HaplotypeMatrix lives on the GPU and represents one
-        genomic chunk's variants on the full haplotype axis. Empty
-        chunks (regions with no variants, e.g. an acrocentric arm) are
-        skipped -- callers see only chunks with at least one variant.
-        """
-        for ci, left, right, gt, pos, t_read in self._fetcher.iter_chunks(
-                self._chunks, self._prefetch):
-            if gt.shape[0] == 0:
-                continue
-            hm = build_haplotype_matrix(
-                gt, pos,
-                # chrom_end is the chunk's exclusive right edge so the
-                # last window in each chunk does not get clipped to the
-                # last variant position the way an eager matrix would.
-                chrom_start=int(left), chrom_end=int(right),
-                sample_sets=self._sample_sets,
-            )
-            yield int(left), int(right), hm
+    def _build_chunk(self, gt, pos, **kwargs):
+        return build_genotype_matrix(gt, pos, **kwargs)
 
-    def __repr__(self):
-        return (
-            f"StreamingHaplotypeMatrix(num_variants={self.num_variants}, "
-            f"num_haplotypes={self.num_haplotypes}, "
-            f"chrom={self.chrom!r}, n_chunks={len(self._chunks)}, "
-            f"chunk_bp={self._chunk_bp}, prefetch={self._prefetch})"
-        )
+    def _repr_sample_axis(self):
+        return f"num_individuals={self.num_individuals}"
