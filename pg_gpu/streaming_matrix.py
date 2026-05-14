@@ -252,8 +252,75 @@ class StreamingHaplotypeMatrix:
             "StreamingHaplotypeMatrix has no materialized .haplotypes "
             "array; the matrix is too big to fit eagerly, which is why "
             "from_zarr returned this class instead of HaplotypeMatrix. "
-            "Iterate chunks via .iter_gpu_chunks(), or pass this object "
-            "to a streaming-aware kernel."
+            "For pairwise / cross-window statistics over a sub-region, "
+            "call .materialize(region=(lo, hi)) to get an eager "
+            "HaplotypeMatrix over that slice. For per-window streaming "
+            "stats, iterate .iter_gpu_chunks() directly or pass this "
+            "object to a streaming-aware kernel like windowed_analysis."
+        )
+
+    def materialize(self, *, region=None, sample_subset=None):
+        """Build an eager ``HaplotypeMatrix`` over a sub-region.
+
+        Pairwise kernels (``pairwise_r2``, the r^2 heatmap path,
+        ``locate_unlinked``) can't be evaluated chunk-by-chunk because
+        they need every (variant, variant) pair simultaneously. Use
+        this to pull the slice you want into one device-resident
+        HaplotypeMatrix and run those kernels on it.
+
+        Parameters
+        ----------
+        region : tuple of int, optional
+            ``(left, right)`` bp interval to materialize.
+            ``right`` is exclusive. ``None`` materializes the full
+            mappable range, which on a biobank-scale store will OOM.
+        sample_subset : sequence of int, optional
+            Haplotype-axis indices to keep. ``None`` keeps every
+            haplotype.
+
+        Returns
+        -------
+        HaplotypeMatrix
+            Eager, device-resident, ready for any pg_gpu kernel.
+        """
+        from ._gpu_genotype_prep import build_haplotype_matrix
+
+        if region is None:
+            left, right = self.chrom_start, self.chrom_end
+        else:
+            left, right = int(region[0]), int(region[1])
+
+        if sample_subset is None:
+            gt, pos = self._source.slice_region(left, right)
+        else:
+            # slice_subsample returns a 2-D (n_var, n_hap_subset) int8
+            # block; HaplotypeMatrix wants (n_hap, n_var). Reshape on
+            # the GPU via build_haplotype_matrix's same prep path by
+            # promoting the 2-D subsample to a (n_var, n_dip', 2)
+            # block. The subsample's ploidy ordering follows the
+            # convention build_haplotype_matrix produces: haps
+            # 0..n_dip-1 = ploidy 0, n_dip..2*n_dip-1 = ploidy 1.
+            import numpy as _np
+            gm, pos = self._source.slice_subsample(left, right, sample_subset)
+            n_var, n_hap = gm.shape
+            # round n_hap to even for the (n_dip, 2) reshape -- if the
+            # caller picked an odd subset count we error out rather
+            # than silently splitting a diploid in half.
+            if n_hap % 2 != 0:
+                raise ValueError(
+                    f"materialize(sample_subset=...) requires an even "
+                    f"count to round-trip through (n_dip, 2) layout; "
+                    f"got {n_hap}."
+                )
+            n_dip_sub = n_hap // 2
+            gt = _np.empty((n_var, n_dip_sub, 2), dtype=gm.dtype)
+            gt[:, :, 0] = gm[:, :n_dip_sub]
+            gt[:, :, 1] = gm[:, n_dip_sub:]
+
+        return build_haplotype_matrix(
+            gt, pos,
+            chrom_start=left, chrom_end=right,
+            sample_sets=self._sample_sets,
         )
 
     def iter_gpu_chunks(self):
