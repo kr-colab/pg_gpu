@@ -267,7 +267,7 @@ class ZarrGenotypeSource:
         with open(pop_file) as f:
             for line in f:
                 parts = line.strip().split()
-                if len(parts) < 2 or parts[0] == "sample":
+                if len(parts) < 2 or parts[0] in ("sample", "sample_id"):
                     continue
                 sample, pop = parts[0], parts[1]
                 i = idx_by_name.get(sample)
