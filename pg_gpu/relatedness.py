@@ -11,12 +11,10 @@ from typing import Optional, Union
 
 
 def _raise_on_streaming_matrix(matrix, fn_name):
-    """``grm`` / ``ibs`` are inherently pairwise across the full sample
-    axis -- they need every variant in scope to compute an (n_indiv,
-    n_indiv) matrix. A streaming matrix can't be reduced chunk-by-chunk
-    without aggregating across the whole pair grid, which the current
-    kernels don't do. Raise with the ``.materialize`` hint instead of
-    failing later when the kernel touches ``.haplotypes`` / ``.genotypes``."""
+    """``grm`` needs chromosome-wide allele frequencies in scope before
+    it can standardize per-variant outer products, which the current
+    eager kernel does in one pass. Raise with the ``.materialize`` hint
+    rather than letting ``.haplotypes`` / ``.genotypes`` blow up later."""
     from .streaming_matrix import _StreamingMatrixBase
     if isinstance(matrix, _StreamingMatrixBase):
         raise NotImplementedError(
@@ -153,7 +151,11 @@ def ibs(genotype_matrix_or_haplotype_matrix,
         Diagonal is always 1.
     """
     from ._memutil import estimate_variant_chunk_size
-    _raise_on_streaming_matrix(genotype_matrix_or_haplotype_matrix, "ibs")
+    from .streaming_matrix import _StreamingMatrixBase
+    if isinstance(genotype_matrix_or_haplotype_matrix, _StreamingMatrixBase):
+        return _stream_ibs(genotype_matrix_or_haplotype_matrix,
+                            population=population,
+                            missing_data=missing_data)
 
     geno, n_ind = _get_genotype_data(genotype_matrix_or_haplotype_matrix,
                                       population)
@@ -303,3 +305,118 @@ def _get_diploid_genotypes(matrix, population=None):
         return geno
     else:
         raise TypeError(f"Expected HaplotypeMatrix or GenotypeMatrix, got {type(matrix)}")
+
+
+# ---------------------------------------------------------------------------
+# Streaming IBS: variant-axis stream + indiv-axis row-block tile
+# ---------------------------------------------------------------------------
+#
+# The three accumulators (ibs2, ibs1, n_joint) are each (n_ind, n_ind) and
+# decompose by sum over variants, so the variant axis can be streamed
+# chunk-by-chunk. The output itself can exceed GPU memory (80 GB at 100k
+# diploids), so the individual axis is tiled into row blocks and the
+# accumulators live on host -- only one row-block's (block_size, n_ind)
+# matmul output sits on the GPU at a time.
+
+def _stream_ibs(streaming_matrix, *, population, missing_data,
+                block_size=None):
+    from ._memutil import estimate_indiv_block_size
+
+    chunks = iter(streaming_matrix.iter_gpu_chunks())
+    first = next(chunks, None)
+    if first is None:
+        # No variants at all; mirror the eager identity-on-diagonal
+        # convention so callers don't have to special-case the empty
+        # source.
+        n_ind = _stream_n_ind(streaming_matrix, population)
+        ibs_mat = np.zeros((n_ind, n_ind), dtype=np.float64)
+        np.fill_diagonal(ibs_mat, 1.0)
+        return ibs_mat
+
+    geno_first, n_ind = _get_genotype_data(first[2], population)
+    if block_size is None:
+        # block_ibs2 + block_ibs1 + transient matmul output + slack.
+        block_size = estimate_indiv_block_size(n_ind, n_intermediates=4)
+
+    ibs2_host = np.zeros((n_ind, n_ind), dtype=np.float64)
+    ibs1_host = np.zeros((n_ind, n_ind), dtype=np.float64)
+    n_joint_host = np.zeros((n_ind, n_ind), dtype=np.float64)
+
+    _accumulate_ibs_chunk(geno_first, ibs2_host, ibs1_host, n_joint_host,
+                          block_size=block_size, missing_data=missing_data)
+    del geno_first
+    for _, _, chunk in chunks:
+        geno, _ = _get_genotype_data(chunk, population)
+        _accumulate_ibs_chunk(geno, ibs2_host, ibs1_host, n_joint_host,
+                              block_size=block_size,
+                              missing_data=missing_data)
+        del geno
+
+    ibs_mat = np.where(n_joint_host > 0,
+                        (2.0 * ibs2_host + ibs1_host) / (2.0 * n_joint_host),
+                        0.0)
+    np.fill_diagonal(ibs_mat, 1.0)
+    return ibs_mat
+
+
+def _accumulate_ibs_chunk(geno, ibs2_host, ibs1_host, n_joint_host, *,
+                          block_size, missing_data):
+    """Add one variant-chunk's contribution to the three host accumulators.
+
+    ``geno`` is ``(n_ind, n_var_chunk)`` on GPU. The genotype-value loop
+    is outermost so each full-pop indicator ``ind_full`` is built once
+    per chunk rather than once per chunk per row block; the row-block
+    loop only does matmuls and host transfers.
+
+    In the eager kernel ``ibs1 += cross + cross.T`` where
+    ``cross = (g==gval) @ (g==gval+1).T``; here the row-block slice of
+    ``cross`` is ``ind_curr[r0:r1] @ ind_next.T`` and the row-block
+    slice of ``cross.T`` is ``ind_next[r0:r1] @ ind_curr.T``.
+    """
+    valid_full = (geno >= 0).astype(cp.float64)
+    g = cp.where(geno >= 0, geno, 0).astype(cp.float64)
+    if missing_data == 'exclude':
+        site_complete = cp.all(valid_full > 0, axis=0)
+        valid_full = valid_full[:, site_complete]
+        g = g[:, site_complete]
+        if g.shape[1] == 0:
+            return
+
+    n_ind = g.shape[0]
+    for r0 in range(0, n_ind, block_size):
+        r1 = min(r0 + block_size, n_ind)
+        n_joint_host[r0:r1] += (valid_full[r0:r1] @ valid_full.T).get()
+
+    # Two indicator matrices live at a time: the current g==k and the
+    # next g==k+1 needed for the ibs1 cross. Reuse ``ind_next`` from
+    # the previous iter as the next ``ind_curr`` so g==1 is built once.
+    ind_curr = (g == 0) * valid_full
+    for gval in (0, 1, 2):
+        if gval < 2:
+            ind_next = (g == (gval + 1)) * valid_full
+        for r0 in range(0, n_ind, block_size):
+            r1 = min(r0 + block_size, n_ind)
+            ibs2_host[r0:r1] += (ind_curr[r0:r1] @ ind_curr.T).get()
+            if gval < 2:
+                ibs1_host[r0:r1] += (
+                    ind_curr[r0:r1] @ ind_next.T
+                ).get()
+                ibs1_host[r0:r1] += (
+                    ind_next[r0:r1] @ ind_curr.T
+                ).get()
+        del ind_curr
+        if gval < 2:
+            ind_curr = ind_next
+
+
+def _stream_n_ind(streaming_matrix, population):
+    """Best-effort individual count for the empty-source fallback. Uses
+    the streaming source's diploid count (halved for haplotype-layout)
+    and a population subset if requested."""
+    from .streaming_matrix import StreamingHaplotypeMatrix
+    is_hap = isinstance(streaming_matrix, StreamingHaplotypeMatrix)
+    if population is None:
+        return (streaming_matrix.num_haplotypes // 2 if is_hap
+                else streaming_matrix.num_individuals)
+    pop_set = streaming_matrix.sample_sets[population]
+    return len(pop_set) // 2 if is_hap else len(pop_set)

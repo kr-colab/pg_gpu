@@ -680,12 +680,21 @@ class HaplotypeMatrix:
         if pops is None:
             pops = sorted(found_pops)
 
-        pop_sets = {p: [] for p in pops}
+        # Block ordering: ploidy-0 indices first, then ploidy-1 indices.
+        # _get_genotype_data and _get_diploid_genotypes split the
+        # haplotype axis at hap.shape[0] // 2 to recover diploid pairs,
+        # which only gives correct pairing under this layout. Matches
+        # what ZarrGenotypeSource produces from a pop file too, so the
+        # streaming and eager paths agree.
+        pop_dips = {p: [] for p in pops}
         for i, name in enumerate(self.samples):
             pop = pop_map.get(name)
-            if pop in pop_sets:
-                pop_sets[pop].append(i)
-                pop_sets[pop].append(i + n_samples)
+            if pop in pop_dips:
+                pop_dips[pop].append(i)
+        pop_sets = {
+            p: dips + [d + n_samples for d in dips]
+            for p, dips in pop_dips.items()
+        }
 
         self.sample_sets = pop_sets
 

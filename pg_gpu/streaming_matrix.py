@@ -578,11 +578,11 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
             "StreamingHaplotypeMatrix has no materialized .haplotypes "
             "array; the matrix is too big to fit eagerly, which is why "
             "from_zarr returned this class instead of HaplotypeMatrix. "
-            "For pairwise / cross-window statistics over a sub-region, "
-            "call .materialize(region=(lo, hi)) to get an eager "
-            "HaplotypeMatrix over that slice. For per-window streaming "
-            "stats, iterate .iter_gpu_chunks() directly or pass this "
-            "object to a streaming-aware kernel like windowed_analysis."
+            "For grm or any other kernel that needs every variant in "
+            "scope at once, call .materialize(region=(lo, hi)) to get "
+            "an eager HaplotypeMatrix over a sub-region. For per-window "
+            "streaming stats, ibs, and the LD pair-bin statistics, "
+            "pass this object directly to the kernel."
         )
 
     def _sample_axis_size(self):
@@ -619,9 +619,9 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
 
     Returned by ``GenotypeMatrix.from_zarr`` when the requested matrix
     does not fit eagerly on the GPU. Sample sets index the diploid
-    axis (``0..num_individuals-1``), not the haplotype axis.
-    Pairwise kernels (``grm``, ``ibs``) are not chunk-streamable; use
-    ``.materialize(region=...)`` to pull a sub-region eagerly first.
+    axis (``0..num_individuals-1``), not the haplotype axis. ``ibs``
+    accepts this class directly; ``grm`` still needs an eager
+    sub-region via ``.materialize(region=...)``.
     """
 
     @property
@@ -634,10 +634,11 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
             "StreamingGenotypeMatrix has no materialized .genotypes "
             "array; the matrix is too big to fit eagerly, which is why "
             "from_zarr returned this class instead of GenotypeMatrix. "
-            "For pairwise statistics (grm, ibs) over a sub-region, "
-            "call .materialize(region=(lo, hi)) to get an eager "
-            "GenotypeMatrix over that slice. For per-window streaming "
-            "stats, iterate .iter_gpu_chunks() directly."
+            "For grm or any other kernel that needs every variant in "
+            "scope at once, call .materialize(region=(lo, hi)) to get "
+            "an eager GenotypeMatrix over a sub-region. For per-window "
+            "streaming stats and ibs, pass this object directly to the "
+            "kernel."
         )
 
     def _sample_axis_size(self):

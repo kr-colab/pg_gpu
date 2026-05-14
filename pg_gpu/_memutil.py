@@ -30,6 +30,27 @@ def estimate_variant_chunk_size(n_hap, bytes_per_element=4, n_intermediates=3,
     return chunk
 
 
+def estimate_indiv_block_size(n_ind, bytes_per_element=8,
+                              n_intermediates=4, memory_fraction=0.25):
+    """Pick how many individuals to process per row block when streaming
+    relatedness kernels accumulate an (n_ind, n_ind) output by tiling
+    the individual axis.
+
+    Each row block holds ~``n_intermediates`` working arrays of shape
+    ``(block_size, n_ind)`` on the GPU (typically the row-block slice
+    of the indicator matmul plus the matmul output). Budgets the
+    requested fraction of free GPU memory for those.
+
+    Returns at least 1 and at most ``n_ind`` (a single block covers
+    every individual, equivalent to no tiling).
+    """
+    free = cp.cuda.Device().mem_info[0]
+    budget = int(free * memory_fraction)
+    per_row = n_ind * bytes_per_element * n_intermediates
+    block = max(1, budget // per_row)
+    return min(block, n_ind)
+
+
 def estimate_fused_chunk_size(n_hap, memory_fraction=0.35):
     """Estimate max variants for a transposed int8 chunk in fused kernels.
 

@@ -339,11 +339,14 @@ class TestStreamingGenotypeMatrix:
         with pytest.raises(NotImplementedError, match="materialize"):
             grm(gm_stream)
 
-    def test_ibs_raises_on_streaming(self, vcz_store):
+    def test_ibs_streams(self, vcz_store):
         from pg_gpu import GenotypeMatrix
         from pg_gpu.relatedness import ibs
         path, _ = vcz_store
+        gm_eager = GenotypeMatrix.from_zarr(path, streaming="never")
         gm_stream = GenotypeMatrix.from_zarr(path, streaming="always",
                                               chunk_bp=5_000)
-        with pytest.raises(NotImplementedError, match="materialize"):
-            ibs(gm_stream)
+        # ibs streams the variant axis chunk-by-chunk and tiles the
+        # individual axis into row blocks. Result must match eager.
+        np.testing.assert_allclose(ibs(gm_stream), ibs(gm_eager),
+                                    rtol=1e-9, atol=1e-12)
