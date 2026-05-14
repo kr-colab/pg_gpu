@@ -1807,91 +1807,33 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_single_pop(bp_bins)
         >>> stats[(0.0, 10000.0)]  # (DD, Dz, pi2) for first bin
         """
-        # Apply biallelic filter if requested
         if ac_filter:
             filtered_self = self.apply_biallelic_filter()
             return filtered_self.compute_ld_statistics_gpu_single_pop(
                 bp_bins=bp_bins, raw=raw, ac_filter=False, chunk_size=chunk_size
             )
-
-        # Ensure GPU setup
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
-        from pg_gpu import ld_statistics
+        bp_bins_arr = np.array(bp_bins)
+        max_dist = float(bp_bins_arr[-1])
+        n_bins = len(bp_bins_arr) - 1
+        bp_bins_cp = cp.array(bp_bins_arr)
+        if chunk_size == 'auto':
+            chunk_size = _estimate_ld_chunk_size(self.num_haplotypes)
 
-        # Get positions and compute max distance
         pos = self.positions
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
-
-        bp_bins = np.array(bp_bins)
-        max_dist = float(bp_bins[-1])
-        n_bins = len(bp_bins) - 1
-
-        # Handle chunk_size='auto'
-        if chunk_size == 'auto':
-            n_haps = self.num_haplotypes
-            chunk_size = _estimate_ld_chunk_size(n_haps)
-
-        # Bin assignment constants
-        bp_bins_cp = cp.array(bp_bins)
-
-        # Initialize accumulators: sums and counts per bin
-        # 3 statistics: DD, Dz, pi2
         bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
-
-        # Stream distance-filtered pair chunks
-        for chunk_idx_i, chunk_idx_j in _iter_pairs_within_distance(
-                pos, max_dist, chunk_size):
-            distances = pos[chunk_idx_j] - pos[chunk_idx_i]
-            chunk_bin_inds = cp.digitize(distances, bp_bins_cp) - 1
-            del distances
-
-            counts, n_valid = _compute_counts_for_pairs(
-                self.haplotypes, chunk_idx_i, chunk_idx_j, pop_indices=None
-            )
-
-            chunk_stats = _compute_single_pop_statistics_batch(
-                counts, n_valid, ld_statistics
-            )
-
-            valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
-            valid_bin_inds = chunk_bin_inds[valid_mask]
-            valid_stats = chunk_stats[valid_mask]
-
-            for stat_idx in range(3):
-                cp.add.at(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
-
-            cp.add.at(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
-
-            del counts, n_valid, chunk_stats, chunk_bin_inds, valid_stats
-
-        # Build output dictionary
-        out = {}
-        for i in range(n_bins):
-            bin_start = float(bp_bins[i])
-            bin_end = float(bp_bins[i + 1])
-            count = int(bin_counts[i].get())
-
-            if raw:
-                out[(bin_start, bin_end)] = (
-                    float(bin_sums[i, 0].get()),
-                    float(bin_sums[i, 1].get()),
-                    float(bin_sums[i, 2].get())
-                )
-            else:
-                if count > 0:
-                    out[(bin_start, bin_end)] = (
-                        float((bin_sums[i, 0] / bin_counts[i]).get()),
-                        float((bin_sums[i, 1] / bin_counts[i]).get()),
-                        float((bin_sums[i, 2] / bin_counts[i]).get())
-                    )
-                else:
-                    out[(bin_start, bin_end)] = (0.0, 0.0, 0.0)
-
-        return out
+        _accumulate_pair_bins(
+            self.haplotypes, pos, bp_bins_cp, n_bins,
+            max_dist, int(chunk_size), n_tail=0,
+            bin_sums=bin_sums, bin_counts=bin_counts,
+            pop1_indices=None, pop2_indices=None,
+        )
+        return _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw)
 
 
     def compute_ld_statistics_gpu_two_pops(
@@ -1943,105 +1885,263 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_two_pops(bp_bins, 'pop1', 'pop2')
         >>> stats[(0.0, 10000.0)]['DD_0_0']  # D^2 for pop1 in first bin
         """
-        # Apply biallelic filter if requested
         if ac_filter:
             filtered_self = self.apply_biallelic_filter()
             return filtered_self.compute_ld_statistics_gpu_two_pops(
                 bp_bins=bp_bins, pop1=pop1, pop2=pop2, raw=raw,
                 ac_filter=False, chunk_size=chunk_size
             )
-
-        # Ensure GPU setup
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
-        from pg_gpu import ld_statistics
+        bp_bins_arr = np.array(bp_bins)
+        max_dist = float(bp_bins_arr[-1])
+        n_bins = len(bp_bins_arr) - 1
+        bp_bins_cp = cp.array(bp_bins_arr)
+        pop1_indices = self._sample_sets[pop1]
+        pop2_indices = self._sample_sets[pop2]
+        if chunk_size == 'auto':
+            chunk_size = _estimate_ld_chunk_size(
+                max(len(pop1_indices), len(pop2_indices))
+            )
 
-        # Get positions and compute max distance
         pos = self.positions
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
-
-        bp_bins = np.array(bp_bins)
-        max_dist = float(bp_bins[-1])
-        n_bins = len(bp_bins) - 1
-
-        # Get population indices
-        pop1_indices = self._sample_sets[pop1]
-        pop2_indices = self._sample_sets[pop2]
-
-        # Handle chunk_size='auto'
-        if chunk_size == 'auto':
-            n_haps = max(len(pop1_indices), len(pop2_indices))
-            chunk_size = _estimate_ld_chunk_size(n_haps)
-
-        # Bin assignment constants
-        bp_bins_cp = cp.array(bp_bins)
-
-        stat_names = [
-            'DD_0_0', 'DD_0_1', 'DD_1_1',
-            'Dz_0_0_0', 'Dz_0_0_1', 'Dz_0_1_1', 'Dz_1_0_0', 'Dz_1_0_1', 'Dz_1_1_1',
-            'pi2_0_0_0_0', 'pi2_0_0_0_1', 'pi2_0_0_1_1', 'pi2_0_1_0_1', 'pi2_0_1_1_1', 'pi2_1_1_1_1'
-        ]
         bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
+        _accumulate_pair_bins(
+            self.haplotypes, pos, bp_bins_cp, n_bins,
+            max_dist, int(chunk_size), n_tail=0,
+            bin_sums=bin_sums, bin_counts=bin_counts,
+            pop1_indices=pop1_indices, pop2_indices=pop2_indices,
+        )
+        return _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw)
 
-        # Stream distance-filtered pair chunks
-        for chunk_idx_i, chunk_idx_j in _iter_pairs_within_distance(
-                pos, max_dist, chunk_size):
-            distances = pos[chunk_idx_j] - pos[chunk_idx_i]
-            chunk_bin_inds = cp.digitize(distances, bp_bins_cp) - 1
-            del distances
 
-            counts_pop1, n_valid1 = _compute_counts_for_pairs(
-                self.haplotypes, chunk_idx_i, chunk_idx_j, pop1_indices
+# =============================================================================
+# LD pair-bin accumulator: shared by eager and streaming paths
+# =============================================================================
+#
+# Per-chunk bin sums are sum-reducible: pair counts (n11/n10/n01/n00) at
+# a variant pair are independent of every other pair, and the per-bin
+# DD / Dz / pi2 numerators are polynomials in those counts, so totals
+# decompose by pair set. The streaming path takes advantage of this by
+# carrying a tail of the last ``max_bp_dist`` of variants from the
+# previous chunk; pairs whose both endpoints fall inside that tail are
+# masked out, since they were summed on the previous chunk's pass.
+
+def _new_tail(stitched_haps, stitched_pos, max_bp_dist):
+    """Carry forward variants within ``max_bp_dist`` of the right edge
+    for the next chunk's stitch. Tail size is bounded by
+    ``max_bp_dist`` worth of variants regardless of chunk width."""
+    if stitched_pos.size == 0:
+        return None, None
+    cutoff = stitched_pos[-1] - max_bp_dist
+    keep = stitched_pos > cutoff
+    return stitched_haps[:, keep], stitched_pos[keep]
+
+
+def _stitch_with_tail(chunk_haps, chunk_pos, tail_haps, tail_pos):
+    """Return ``(stitched_haps, stitched_pos, n_tail)`` for the pair
+    iteration. ``n_tail`` is the number of leading variants drawn from
+    the previous chunk's tail; the pair mask keys off this offset."""
+    if tail_haps is None or tail_haps.shape[1] == 0:
+        return chunk_haps, chunk_pos, 0
+    stitched_haps = cp.concatenate([tail_haps, chunk_haps], axis=1)
+    stitched_pos = cp.concatenate([tail_pos, chunk_pos])
+    return stitched_haps, stitched_pos, tail_haps.shape[1]
+
+
+def _missing_flag(haps, pop_indices):
+    """Whether the (optionally pop-subset) haplotype matrix contains any
+    missing data. Cached once per chunk so ``compute_counts_for_pairs``
+    can skip its per-batch full-matrix reduction."""
+    if pop_indices is None:
+        return bool(cp.any(haps == -1))
+    if isinstance(pop_indices, list):
+        pop_indices = cp.array(pop_indices, dtype=cp.int32)
+    return bool(cp.any(haps[pop_indices] == -1))
+
+
+def _accumulate_pair_bins(
+    haps, pos, bp_bins_cp, n_bins, max_dist, chunk_size, n_tail,
+    bin_sums, bin_counts, *, pop1_indices, pop2_indices,
+):
+    """Walk pair batches on ``haps`` / ``pos``, drop already-counted
+    (tail, tail) pairs, and scatter-add per-pair statistics into
+    ``bin_sums`` / ``bin_counts``. ``pop2_indices=None`` selects the
+    single-population path; otherwise both pops feed the two-population
+    batch kernel."""
+    from pg_gpu import ld_statistics
+    two_pop = pop2_indices is not None
+    has_miss_p1 = _missing_flag(haps, pop1_indices)
+    has_miss_p2 = _missing_flag(haps, pop2_indices) if two_pop else False
+    for chunk_idx_i, chunk_idx_j in _iter_pairs_within_distance(
+            pos, max_dist, chunk_size):
+        if n_tail > 0:
+            keep = ~((chunk_idx_i < n_tail) & (chunk_idx_j < n_tail))
+            chunk_idx_i = chunk_idx_i[keep]
+            chunk_idx_j = chunk_idx_j[keep]
+            if chunk_idx_i.size == 0:
+                continue
+        distances = pos[chunk_idx_j] - pos[chunk_idx_i]
+        chunk_bin_inds = cp.digitize(distances, bp_bins_cp) - 1
+        del distances
+
+        if two_pop:
+            counts1, n_valid1 = _compute_counts_for_pairs(
+                haps, chunk_idx_i, chunk_idx_j, pop1_indices,
+                has_missing=has_miss_p1,
             )
-            counts_pop2, n_valid2 = _compute_counts_for_pairs(
-                self.haplotypes, chunk_idx_i, chunk_idx_j, pop2_indices
+            counts2, n_valid2 = _compute_counts_for_pairs(
+                haps, chunk_idx_i, chunk_idx_j, pop2_indices,
+                has_missing=has_miss_p2,
             )
-
             chunk_stats = _compute_two_pop_statistics_batch(
-                counts_pop1, counts_pop2, n_valid1, n_valid2, ld_statistics
+                counts1, counts2, n_valid1, n_valid2, ld_statistics
+            )
+        else:
+            counts, n_valid = _compute_counts_for_pairs(
+                haps, chunk_idx_i, chunk_idx_j, pop1_indices,
+                has_missing=has_miss_p1,
+            )
+            chunk_stats = _compute_single_pop_statistics_batch(
+                counts, n_valid, ld_statistics
             )
 
-            valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
-            valid_bin_inds = chunk_bin_inds[valid_mask]
-            valid_stats = chunk_stats[valid_mask]
+        valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
+        valid_bin_inds = chunk_bin_inds[valid_mask]
+        valid_stats = chunk_stats[valid_mask]
+        for s in range(chunk_stats.shape[1]):
+            cp.add.at(bin_sums[:, s], valid_bin_inds, valid_stats[:, s])
+        cp.add.at(
+            bin_counts, valid_bin_inds,
+            cp.ones(len(valid_bin_inds), dtype=cp.float64),
+        )
 
-            for stat_idx in range(15):
-                cp.add.at(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
 
-            cp.add.at(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
+def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
+                          chunk_size):
+    """Chunk-streamed dispatch for ``compute_ld_statistics_gpu_single_pop``."""
+    bp_bins_arr = np.array(bp_bins)
+    max_dist = float(bp_bins_arr[-1])
+    n_bins = len(bp_bins_arr) - 1
+    bp_bins_cp = cp.array(bp_bins_arr)
+    if chunk_size == 'auto':
+        chunk_size_int = _estimate_ld_chunk_size(streaming_hm.num_haplotypes)
+    else:
+        chunk_size_int = int(chunk_size)
+    bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
+    bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
-            del counts_pop1, counts_pop2, n_valid1, n_valid2, chunk_stats
-            del chunk_bin_inds, valid_stats
+    tail_haps, tail_pos = None, None
+    for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
+        if ac_filter:
+            chunk_hm = chunk_hm.apply_biallelic_filter()
+        chunk_haps = chunk_hm.haplotypes
+        chunk_pos = chunk_hm.positions
+        if not isinstance(chunk_pos, cp.ndarray):
+            chunk_pos = cp.array(chunk_pos)
+        if chunk_haps.shape[1] == 0:
+            continue
+        stitched_haps, stitched_pos, n_tail = _stitch_with_tail(
+            chunk_haps, chunk_pos, tail_haps, tail_pos
+        )
+        _accumulate_pair_bins(
+            stitched_haps, stitched_pos, bp_bins_cp, n_bins,
+            max_dist, chunk_size_int, n_tail,
+            bin_sums=bin_sums, bin_counts=bin_counts,
+            pop1_indices=None, pop2_indices=None,
+        )
+        tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
+        del stitched_haps, stitched_pos, chunk_haps, chunk_pos
 
-        # Build output dictionary
-        out = {}
-        for i in range(n_bins):
-            bin_start = float(bp_bins[i])
-            bin_end = float(bp_bins[i + 1])
-            count = int(bin_counts[i].get())
+    return _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw)
 
-            if raw:
-                stats_dict = OrderedDict([
-                    (name, float(bin_sums[i, j].get()))
-                    for j, name in enumerate(stat_names)
-                ])
-            else:
-                if count > 0:
-                    stats_dict = OrderedDict([
-                        (name, float((bin_sums[i, j] / bin_counts[i]).get()))
-                        for j, name in enumerate(stat_names)
-                    ])
-                else:
-                    stats_dict = OrderedDict([
-                        (name, 0.0) for name in stat_names
-                    ])
 
-            out[(bin_start, bin_end)] = stats_dict
+def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
+                        ac_filter, chunk_size):
+    """Chunk-streamed dispatch for ``compute_ld_statistics_gpu_two_pops``."""
+    bp_bins_arr = np.array(bp_bins)
+    max_dist = float(bp_bins_arr[-1])
+    n_bins = len(bp_bins_arr) - 1
+    bp_bins_cp = cp.array(bp_bins_arr)
+    pop1_indices = streaming_hm.sample_sets[pop1]
+    pop2_indices = streaming_hm.sample_sets[pop2]
+    if chunk_size == 'auto':
+        chunk_size_int = _estimate_ld_chunk_size(
+            max(len(pop1_indices), len(pop2_indices))
+        )
+    else:
+        chunk_size_int = int(chunk_size)
+    bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
+    bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
-        return out
+    tail_haps, tail_pos = None, None
+    for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
+        if ac_filter:
+            chunk_hm = chunk_hm.apply_biallelic_filter()
+        chunk_haps = chunk_hm.haplotypes
+        chunk_pos = chunk_hm.positions
+        if not isinstance(chunk_pos, cp.ndarray):
+            chunk_pos = cp.array(chunk_pos)
+        if chunk_haps.shape[1] == 0:
+            continue
+        stitched_haps, stitched_pos, n_tail = _stitch_with_tail(
+            chunk_haps, chunk_pos, tail_haps, tail_pos
+        )
+        _accumulate_pair_bins(
+            stitched_haps, stitched_pos, bp_bins_cp, n_bins,
+            max_dist, chunk_size_int, n_tail,
+            bin_sums=bin_sums, bin_counts=bin_counts,
+            pop1_indices=pop1_indices, pop2_indices=pop2_indices,
+        )
+        tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
+        del stitched_haps, stitched_pos, chunk_haps, chunk_pos
+
+    return _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw)
+
+
+def _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw):
+    # One device->host transfer for each accumulator; per-bin format
+    # then reads from host memory rather than syncing per element.
+    sums = cp.asnumpy(bin_sums)
+    counts = cp.asnumpy(bin_counts)
+    out = {}
+    for i in range(len(bp_bins_arr) - 1):
+        key = (float(bp_bins_arr[i]), float(bp_bins_arr[i + 1]))
+        if raw:
+            out[key] = (float(sums[i, 0]), float(sums[i, 1]), float(sums[i, 2]))
+        elif counts[i] > 0:
+            inv = 1.0 / float(counts[i])
+            out[key] = (
+                float(sums[i, 0]) * inv,
+                float(sums[i, 1]) * inv,
+                float(sums[i, 2]) * inv,
+            )
+        else:
+            out[key] = (0.0, 0.0, 0.0)
+    return out
+
+
+def _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw):
+    sums = cp.asnumpy(bin_sums)
+    counts = cp.asnumpy(bin_counts)
+    names = _ld_names(2)
+    out = {}
+    for i in range(len(bp_bins_arr) - 1):
+        key = (float(bp_bins_arr[i]), float(bp_bins_arr[i + 1]))
+        if raw:
+            row = sums[i]
+        elif counts[i] > 0:
+            row = sums[i] / float(counts[i])
+        else:
+            row = np.zeros(len(names))
+        out[key] = OrderedDict(
+            (name, float(row[j])) for j, name in enumerate(names)
+        )
+    return out
 
 
 # =============================================================================

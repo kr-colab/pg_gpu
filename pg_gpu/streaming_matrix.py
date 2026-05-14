@@ -594,6 +594,24 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
     def _repr_sample_axis(self):
         return f"num_haplotypes={self.num_haplotypes}"
 
+    def compute_ld_statistics_gpu_single_pop(self, bp_bins, raw=False,
+                                              ac_filter=True,
+                                              chunk_size='auto'):
+        from .haplotype_matrix import _stream_ld_single_pop
+        return _stream_ld_single_pop(
+            self, bp_bins=bp_bins, raw=raw,
+            ac_filter=ac_filter, chunk_size=chunk_size,
+        )
+
+    def compute_ld_statistics_gpu_two_pops(self, bp_bins, pop1, pop2,
+                                            raw=False, ac_filter=True,
+                                            chunk_size='auto'):
+        from .haplotype_matrix import _stream_ld_two_pops
+        return _stream_ld_two_pops(
+            self, bp_bins=bp_bins, pop1=pop1, pop2=pop2, raw=raw,
+            ac_filter=ac_filter, chunk_size=chunk_size,
+        )
+
 
 class StreamingGenotypeMatrix(_StreamingMatrixBase):
     """Chunked view over a ``ZarrGenotypeSource``, yielding per-chunk
