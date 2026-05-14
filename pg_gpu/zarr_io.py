@@ -182,7 +182,8 @@ def read_genotypes_allel_grouped(store, region):
     return {'gt': gt, 'positions': positions, 'samples': samples}
 
 
-def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None):
+def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
+              chunks=None):
     """Write genotype data in VCZ format.
 
     Parameters
@@ -197,11 +198,30 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None):
         Sample names.
     contig_name : str, optional
         Chromosome/contig name.
+    chunks : tuple of int, optional
+        Chunk shape for ``call_genotype`` and ``call_genotype_mask``,
+        e.g. ``(10000, 1000, 2)`` to mirror bio2zarr's defaults. When
+        ``None`` (default) zarr picks the chunking, which on a small
+        array is the whole array as a single chunk.
     """
     import zarr
     store = zarr.open(zarr_path, mode='w')
-    store.create_array('call_genotype', data=gt.astype(np.int8))
-    store.create_array('call_genotype_mask', data=(gt < 0))
+    cg_kwargs = {} if chunks is None else {"chunks": chunks}
+    if chunks is None:
+        store.create_array('call_genotype', data=gt.astype(np.int8))
+        store.create_array('call_genotype_mask', data=(gt < 0))
+    else:
+        # create_array with explicit chunks needs shape + dtype rather
+        # than `data=`, so the chunks=... kwarg is honored before any
+        # write resizes the array.
+        cg = store.create_array('call_genotype',
+                                shape=gt.shape, chunks=chunks,
+                                dtype='int8')
+        cg[:] = gt.astype(np.int8)
+        cm = store.create_array('call_genotype_mask',
+                                shape=gt.shape, chunks=chunks,
+                                dtype='bool')
+        cm[:] = (gt < 0)
     store.create_array('variant_position', data=positions.astype(np.int32))
     if samples is not None:
         store.create_array('sample_id', data=np.array(samples, dtype='U'))

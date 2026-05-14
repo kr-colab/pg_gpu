@@ -16,6 +16,7 @@ that want streaming on those layouts should re-encode via
 
 import warnings
 
+import cupy as cp
 import numpy as np
 import zarr
 
@@ -150,29 +151,25 @@ class ZarrGenotypeSource:
         pos = self.site_pos[lo:hi].copy()
         return gt, pos
 
-    def slice_region_gpu(self, left, right, *, gds_store):
-        """Like ``slice_region`` but reads through ``gds_store``
-        (a ``kvikio.zarr.GDSStore`` opened on the same path) so the
-        chunk lands on the GPU via the zarr GPU buffer prototype.
+    def slice_region_gpu(self, left, right, *, cg):
+        """Like ``slice_region`` but reads through a caller-provided
+        ``cg`` -- the ``call_genotype`` zarr array on a group opened
+        from a ``kvikio.zarr.GDSStore`` with the GPU buffer prototype
+        active. The chunk lands on the GPU via the active buffer
+        prototype.
 
-        Caller is responsible for activating
-        ``zarr.config.enable_gpu()`` before iterating chunks and
-        restoring the CPU buffer prototype afterwards; this method
-        does not toggle the global config so it can run inside a
-        producer thread without racing the consumer's eager calls.
+        ``cg`` is passed in (not opened here) because zarr caches the
+        codec pipeline on the group at open time; the caller opens
+        the group once after toggling ``zarr.config.enable_gpu()``
+        and reuses the resulting array across every chunk in the
+        iteration. Per-call opens would cost ~ms per chunk and add
+        nothing.
         """
-        import cupy as _cp
         lo, hi = self._site_index_range(left, right)
         if hi <= lo:
-            return (_cp.empty((0, self.num_diploids, 2), _cp.int8),
+            return (cp.empty((0, self.num_diploids, 2), cp.int8),
                     np.empty(0, np.int64))
         zlo, zhi = self._zarr_row_range(lo, hi)
-        # Open a fresh group on each call -- the group caches the
-        # codec pipeline against the active zarr.config snapshot, so
-        # reopening picks up the GPU buffer prototype the consumer
-        # enabled outside this call.
-        import zarr
-        cg = zarr.open_group(gds_store, mode="r")["call_genotype"]
         gt = cg[zlo:zhi]
         pos = self.site_pos[lo:hi].copy()
         return gt, pos
@@ -205,8 +202,7 @@ class ZarrGenotypeSource:
         if hi <= lo:
             return (np.empty((0, len(hap_cols)), np.int8),
                     np.empty(0, np.int64))
-        zlo = int(self._zarr_var_indices[lo])
-        zhi = int(self._zarr_var_indices[hi - 1]) + 1
+        zlo, zhi = self._zarr_row_range(lo, hi)
 
         # The haplotype axis indexes a flat (n_dip * 2) layout where hap j
         # = (ploidy j // n_dip, dip j % n_dip). VCZ stores (n_var, n_dip, 2)

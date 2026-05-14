@@ -114,10 +114,10 @@ def _pick_chunk_fetcher(source, *, backend):
         return KvikioChunkFetcher(source)
 
     codec = _store_call_genotype_codec(source.path)
-    chunks = _store_call_genotype_chunks(source.path)
     if codec is None:
         # codec unreadable or unsupported -> host
         return HostChunkFetcher(source)
+    chunks = source.chunks  # already cached on the source from __init__
     whole_sample_axis = (chunks is not None and len(chunks) >= 2
                          and chunks[1] >= source.num_diploids)
     if whole_sample_axis:
@@ -187,6 +187,71 @@ def _store_call_genotype_chunks(store_path):
         return None
 
 
+def _iter_chunks_with_prefetch(chunks, prefetch, slice_fn, *,
+                                thread_name="chunk-prefetch"):
+    """Shared producer-thread iteration for ``ChunkFetcher`` implementations.
+
+    ``slice_fn(left, right)`` returns ``(gt, pos)`` -- the host fetcher
+    passes a numpy-returning callable, the kvikio fetcher passes a
+    cupy-returning one, and everything else (bounded queue, error
+    propagation, daemon-thread cleanup) is identical.
+
+    Yields ``(ci, left, right, gt, pos, t_read_s)`` tuples. ``prefetch
+    <= 0`` reads serially in the consumer thread; ``prefetch >= 1``
+    runs a daemon producer that fills a bounded queue with ``prefetch``
+    chunks of read-ahead, so the next chunk's read is in flight while
+    the consumer is computing on the current chunk.
+    """
+    if prefetch <= 0:
+        for ci, (left, right) in enumerate(chunks):
+            t0 = time.perf_counter()
+            gt, pos = slice_fn(left, right)
+            yield ci, left, right, gt, pos, time.perf_counter() - t0
+        return
+
+    # bounded queue keeps host RAM at (prefetch + 1) * chunk_bytes;
+    # _END is a private sentinel; ("ERR", exc) forwards producer-side
+    # exceptions to the consumer's call stack with the traceback intact.
+    q = queue.Queue(maxsize=prefetch)
+    stop = threading.Event()
+    _END = object()
+
+    def producer():
+        try:
+            for ci, (left, right) in enumerate(chunks):
+                if stop.is_set():
+                    return
+                t0 = time.perf_counter()
+                gt, pos = slice_fn(left, right)
+                t_read = time.perf_counter() - t0
+                if stop.is_set():
+                    return
+                q.put((ci, left, right, gt, pos, t_read))
+        except BaseException as e:
+            q.put(("ERR", e))
+            return
+        q.put(_END)
+
+    t = threading.Thread(target=producer, daemon=True, name=thread_name)
+    t.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _END:
+                break
+            if isinstance(item, tuple) and item and item[0] == "ERR":
+                raise item[1]
+            yield item
+    finally:
+        stop.set()
+        try:
+            while True:
+                q.get_nowait()
+        except queue.Empty:
+            pass
+        t.join(timeout=5)
+
+
 class HostChunkFetcher(ChunkFetcher):
     """Read chunks through the source's host-buffer ``slice_region``.
 
@@ -201,62 +266,11 @@ class HostChunkFetcher(ChunkFetcher):
         self._source = source
 
     def iter_chunks(self, chunks, prefetch):
-        if prefetch <= 0:
-            yield from self._iter_serial(chunks)
-            return
-        yield from self._iter_with_producer(chunks, prefetch)
-
-    def _iter_serial(self, chunks):
-        for ci, (left, right) in enumerate(chunks):
-            t0 = time.perf_counter()
-            gt, pos = self._source.slice_region(left, right)
-            yield ci, left, right, gt, pos, time.perf_counter() - t0
-
-    def _iter_with_producer(self, chunks, prefetch):
-        # Use a bounded queue so the producer blocks once it is `prefetch`
-        # chunks ahead, preventing unbounded host RAM growth on slow
-        # consumers. _END is a private sentinel; ("ERR", exc) forwards
-        # producer-side exceptions to the consumer's call stack.
-        q = queue.Queue(maxsize=prefetch)
-        stop = threading.Event()
-        _END = object()
-
-        def producer():
-            try:
-                for ci, (left, right) in enumerate(chunks):
-                    if stop.is_set():
-                        return
-                    t0 = time.perf_counter()
-                    gt, pos = self._source.slice_region(left, right)
-                    t_read = time.perf_counter() - t0
-                    if stop.is_set():
-                        return
-                    q.put((ci, left, right, gt, pos, t_read))
-            except BaseException as e:
-                q.put(("ERR", e))
-                return
-            q.put(_END)
-
-        t = threading.Thread(target=producer, daemon=True,
-                             name="zarr-prefetch")
-        t.start()
-        try:
-            while True:
-                item = q.get()
-                if item is _END:
-                    break
-                if isinstance(item, tuple) and item and item[0] == "ERR":
-                    raise item[1]
-                yield item
-        finally:
-            stop.set()
-            # drain so the producer's last put doesn't block forever
-            try:
-                while True:
-                    q.get_nowait()
-            except queue.Empty:
-                pass
-            t.join(timeout=5)
+        yield from _iter_chunks_with_prefetch(
+            chunks, prefetch,
+            self._source.slice_region,
+            thread_name="zarr-prefetch",
+        )
 
 
 class KvikioChunkFetcher(ChunkFetcher):
@@ -284,6 +298,11 @@ class KvikioChunkFetcher(ChunkFetcher):
     """
 
     def __init__(self, source, *, compat_mode="ON", num_threads=8):
+        if compat_mode not in ("ON", "AUTO", "OFF"):
+            raise ValueError(
+                f"compat_mode must be 'ON', 'AUTO', or 'OFF'; "
+                f"got {compat_mode!r}"
+            )
         codec = _store_call_genotype_codec(source.path)
         if codec is None:
             raise ValueError(
@@ -294,10 +313,20 @@ class KvikioChunkFetcher(ChunkFetcher):
             )
         self._source = source
         self._codec = codec
+        # GDSStore is a separate handle from source._store: the codec
+        # pipeline is cached on the zarr group, and we need a group
+        # opened with the GPU buffer prototype active so nvCOMP runs
+        # the decoder on the device. Reusing source._store would
+        # pick up the wrong codec pipeline.
         self._gds_store = GDSStore(source.path)
-        mode_const = (kvikio.CompatMode.ON if compat_mode == "ON"
-                      else kvikio.CompatMode.AUTO if compat_mode == "AUTO"
-                      else kvikio.CompatMode.OFF)
+        mode_const = {"ON": kvikio.CompatMode.ON,
+                      "AUTO": kvikio.CompatMode.AUTO,
+                      "OFF": kvikio.CompatMode.OFF}[compat_mode]
+        # kvikio.defaults.set is process-global; this writes the
+        # config every time a new fetcher is constructed, so the last
+        # fetcher wins if multiple are alive at once. In practice only
+        # one streaming matrix is iterated at a time on biobank-scale
+        # work, so this is acceptable.
         kvikio.defaults.set({"compat_mode": mode_const,
                              "num_threads": int(num_threads)})
         self._gpu_buffer_active = False
@@ -305,13 +334,18 @@ class KvikioChunkFetcher(ChunkFetcher):
     def iter_chunks(self, chunks, prefetch):
         # zarr.config.enable_gpu is process-global; we flip it on for
         # the duration of the iteration and reset on every exit path
-        # so a downstream eager call gets numpy buffers back.
+        # so a downstream eager call gets numpy buffers back. The
+        # call_genotype handle is opened once here (with the GPU
+        # buffer active) and reused for every chunk read.
         self._enable_gpu_buffer()
         try:
-            if prefetch <= 0:
-                yield from self._iter_serial(chunks)
-            else:
-                yield from self._iter_with_producer(chunks, prefetch)
+            cg = zarr.open_group(self._gds_store, mode="r")["call_genotype"]
+            yield from _iter_chunks_with_prefetch(
+                chunks, prefetch,
+                lambda left, right: self._source.slice_region_gpu(
+                    left, right, cg=cg),
+                thread_name="kvikio-prefetch",
+            )
         finally:
             self._reset_gpu_buffer()
 
@@ -320,7 +354,10 @@ class KvikioChunkFetcher(ChunkFetcher):
 
         Called automatically at the end of ``iter_chunks``; exposed for
         tests and for callers that build a fetcher without immediately
-        iterating it.
+        iterating it. There is no ``__del__`` -- Python's GC timing is
+        nondeterministic, so cleanup is via try/finally inside
+        ``iter_chunks`` and explicit ``close()`` for callers that
+        construct without iterating.
         """
         self._reset_gpu_buffer()
 
@@ -329,67 +366,13 @@ class KvikioChunkFetcher(ChunkFetcher):
         self._gpu_buffer_active = True
 
     def _reset_gpu_buffer(self):
-        # __del__ may fire after a constructor raise before
-        # _gpu_buffer_active is set; getattr() guards that path.
-        if not getattr(self, "_gpu_buffer_active", False):
+        if not self._gpu_buffer_active:
             return
         zarr.config.set({
             "buffer": "zarr.core.buffer.cpu.Buffer",
             "ndbuffer": "zarr.core.buffer.cpu.NDBuffer",
         })
         self._gpu_buffer_active = False
-
-    def _iter_serial(self, chunks):
-        for ci, (left, right) in enumerate(chunks):
-            t0 = time.perf_counter()
-            gt, pos = self._source.slice_region_gpu(
-                left, right, gds_store=self._gds_store)
-            yield ci, left, right, gt, pos, time.perf_counter() - t0
-
-    def _iter_with_producer(self, chunks, prefetch):
-        q = queue.Queue(maxsize=prefetch)
-        stop = threading.Event()
-        _END = object()
-
-        def producer():
-            try:
-                for ci, (left, right) in enumerate(chunks):
-                    if stop.is_set():
-                        return
-                    t0 = time.perf_counter()
-                    gt, pos = self._source.slice_region_gpu(
-                left, right, gds_store=self._gds_store)
-                    t_read = time.perf_counter() - t0
-                    if stop.is_set():
-                        return
-                    q.put((ci, left, right, gt, pos, t_read))
-            except BaseException as e:
-                q.put(("ERR", e))
-                return
-            q.put(_END)
-
-        t = threading.Thread(target=producer, daemon=True,
-                             name="kvikio-prefetch")
-        t.start()
-        try:
-            while True:
-                item = q.get()
-                if item is _END:
-                    break
-                if isinstance(item, tuple) and item and item[0] == "ERR":
-                    raise item[1]
-                yield item
-        finally:
-            stop.set()
-            try:
-                while True:
-                    q.get_nowait()
-            except queue.Empty:
-                pass
-            t.join(timeout=5)
-
-    def __del__(self):
-        self._reset_gpu_buffer()
 
 
 class StreamingHaplotypeMatrix:

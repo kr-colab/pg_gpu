@@ -8,7 +8,6 @@ import os
 import shutil
 
 import cupy as cp
-import msprime
 import numpy as np
 import pytest
 import zarr
@@ -25,34 +24,19 @@ from .conftest import simulate_hm
 
 
 def _write_vcz_with_sample_chunk(path, hm, *, sample_chunk):
-    """Build a VCZ store at ``path`` with a specific call_genotype
-    sample-axis chunk size, so tests can pick bio2zarr-shaped vs
-    whole-sample-axis chunking explicitly."""
+    """Wrap ``zarr_io.write_vcz`` with explicit sample-axis chunking so
+    tests can opt into bio2zarr-shaped or whole-sample-axis chunking
+    without hand-rolling a VCZ writer."""
+    from pg_gpu.zarr_io import write_vcz
+    if os.path.exists(path):
+        shutil.rmtree(path)
     haps = cp.asnumpy(hm.haplotypes)
     pos = cp.asnumpy(hm.positions)
     gt = HaplotypeMatrix._haplotypes_to_gt(haps)
-    n_var, n_dip, _ = gt.shape
-
-    if os.path.exists(path):
-        shutil.rmtree(path)
-
-    g = zarr.create_group(store=path, overwrite=True)
-    g.create_array("call_genotype",
-                   shape=(n_var, n_dip, 2),
-                   chunks=(min(n_var, 10_000), sample_chunk, 2),
-                   dtype="int8")[:] = gt.astype(np.int8)
-    g.create_array("call_genotype_mask",
-                   shape=(n_var, n_dip, 2),
-                   chunks=(min(n_var, 10_000), sample_chunk, 2),
-                   dtype="bool")[:] = (gt < 0)
-    g.create_array("variant_position", shape=(n_var,),
-                   dtype="int32")[:] = pos.astype(np.int32)
-    g.create_array("variant_contig", shape=(n_var,),
-                   dtype="int32")[:] = np.zeros(n_var, dtype=np.int32)
-    g.create_array("contig_id", shape=(1,), dtype="<U16")[:] = np.asarray(
-        ["1"], dtype="<U16")
-    g.create_array("sample_id", shape=(n_dip,), dtype="<U16")[:] = np.asarray(
-        [f"s{i}" for i in range(n_dip)], dtype="<U16")
+    n_var, n_dip = gt.shape[0], gt.shape[1]
+    samples = [f"s{i}" for i in range(n_dip)]
+    write_vcz(path, gt, pos, samples=samples, contig_name="1",
+              chunks=(min(n_var, 10_000), sample_chunk, 2))
     return path
 
 
