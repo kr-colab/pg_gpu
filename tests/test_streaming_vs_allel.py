@@ -22,12 +22,23 @@ from pg_gpu import HaplotypeMatrix, windowed_analysis
 
 @pytest.fixture
 def vcz_store(tmp_path):
-    """A small msprime-derived VCZ store with samples named."""
+    """A small msprime-derived VCZ store with samples named.
+
+    Uses msprime's binary mutation model: pg_gpu's pi formula treats
+    every site as biallelic (counts the sum of int8 values as the
+    derived allele count), so on a triallelic site with hap values in
+    {0, 1, 2} the count is off and pg_gpu disagrees with allel by ~1%
+    per window. That disagreement is a pre-existing pg_gpu vs allel
+    issue on multiallelic data, not anything streaming-specific; the
+    binary model sidesteps it so this test isolates the streaming
+    dispatch.
+    """
     ts = msprime.sim_ancestry(
         samples=20, sequence_length=100_000,
         recombination_rate=1e-4, random_seed=42, ploidy=2,
     )
-    ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=42)
+    ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=42,
+                               model="binary")
     hm = HaplotypeMatrix.from_ts(ts)
     hm.samples = [f"s{i}" for i in range(hm.num_haplotypes // 2)]
     path = str(tmp_path / "trio.vcz")
@@ -94,23 +105,23 @@ class TestStreamingVsAllel:
                                    df_s["pi"].to_numpy(),
                                    rtol=1e-6, atol=1e-9)
 
-        # eager vs allel: same magnitudes, within boundary-convention
-        # tolerance. The 1% rtol is much wider than the typical
-        # eager-vs-allel scalar agreement (~1e-8 on the existing
-        # comparison tests in test_scikit_allel_comparison.py); the
-        # gap comes entirely from how each library assigns a variant
-        # to a window when its position equals a boundary.
+        # eager vs allel: on binary-only data the two libraries
+        # compute the same per-variant pi and agree to FP precision.
+        # The tolerance is loose only because allel and pg_gpu place
+        # one boundary differently for the last window (pg_gpu clips
+        # at chrom_end while allel rounds up to stop), giving a
+        # ~1.5% per-bp difference on that single window.
         ok = np.isfinite(pi_allel)
         np.testing.assert_allclose(
             df_e["pi"].to_numpy()[: len(pi_allel)][ok], pi_allel[ok],
-            rtol=5e-2, atol=1e-7,
+            rtol=2e-2, atol=1e-7,
             err_msg="pg_gpu vs allel windowed pi disagree beyond "
-                    "the boundary-convention envelope; check for a "
+                    "the last-window-boundary envelope; check for a "
                     "real regression",
         )
         # streaming vs allel follows from the two above; assert it
         # explicitly so a failure is unambiguous about which leg drifted.
         np.testing.assert_allclose(
             df_s["pi"].to_numpy()[: len(pi_allel)][ok], pi_allel[ok],
-            rtol=5e-2, atol=1e-7,
+            rtol=2e-2, atol=1e-7,
         )
