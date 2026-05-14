@@ -131,6 +131,20 @@ class TestMaybeBiobankWarn:
             warnings.simplefilter("ignore", BiobankScaleWarning)
             _maybe_biobank_warn(path, warn_samples=10)
 
+    def test_relative_and_absolute_paths_dedupe(self, tmp_path, monkeypatch):
+        # The cache canonicalizes via os.path.realpath, so a relative
+        # path and the corresponding absolute path collapse to one
+        # entry. Without this, every alias of the same file would
+        # re-warn.
+        path = tmp_path / "alias.vcf"
+        _write_minimal_vcf(str(path), n_samples=20)
+        monkeypatch.chdir(tmp_path)
+        with pytest.warns(BiobankScaleWarning):
+            _maybe_biobank_warn("alias.vcf", warn_samples=10)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", BiobankScaleWarning)
+            _maybe_biobank_warn(str(path.resolve()), warn_samples=10)
+
 
 class TestFromVcfIntegration:
 

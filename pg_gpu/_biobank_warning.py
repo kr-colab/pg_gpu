@@ -9,6 +9,7 @@ VCZ store, and subsequent reads via ``from_zarr`` are seconds to
 minutes instead of hours.
 """
 
+import collections
 import gzip
 import os
 import warnings
@@ -37,7 +38,15 @@ BIOBANK_VCF_WARN_SAMPLES = 5_000
 BIOBANK_VCF_WARN_REGION_BP = 5_000_000       # 5 Mb
 
 
-_warned_paths = set()
+#: Maximum number of distinct VCF paths the in-process warn cache will
+#: track before it starts evicting the oldest entries. Caps memory in
+#: long-running processes (Jupyter, servers) that hit many unique VCFs.
+_WARN_CACHE_MAX = 1000
+
+#: Cache of already-warned paths -- keys are canonicalized via
+#: ``os.path.realpath`` so ``./foo.vcf`` and ``/abs/foo.vcf`` collapse.
+#: Insertion-ordered: when full, the oldest entry is popped first.
+_warned_paths = collections.OrderedDict()
 
 
 def _vcf_header_sample_count(path):
@@ -120,24 +129,41 @@ def _maybe_biobank_warn(path, *, region=None,
     only warn once. Used by both ``HaplotypeMatrix.from_vcf`` and
     ``GenotypeMatrix.from_vcf``.
     """
-    if path in _warned_paths:
+    # Symlinks and relative paths to the same inode should only warn
+    # once; canonicalize before consulting the cache. Stat is cheap and
+    # only runs on a path we have not warned on yet.
+    try:
+        canonical = os.path.realpath(path)
+    except OSError:
+        canonical = path
+    if canonical in _warned_paths:
         return
     try:
-        size = os.path.getsize(path)
+        size = os.path.getsize(canonical)
     except OSError:
         return
-
-    n_samples = _vcf_header_sample_count(path)
 
     big_file = size > warn_bytes
     region_big = (region is None
                   or _region_span_bp(region) > warn_region_bp)
+
+    # The sample-count check requires opening the VCF header, which on a
+    # gzipped biobank-scale file decompresses several KB of metadata
+    # lines. Skip it when the size check already cannot trigger -- a
+    # below-threshold file with a too-small region cannot warn on
+    # sample count alone either, so the read is pure waste.
+    if not big_file and (region is not None and not region_big):
+        return
+
+    n_samples = _vcf_header_sample_count(canonical)
     too_many_samples = (n_samples is not None and n_samples > warn_samples)
 
     if (big_file and region_big) or too_many_samples:
         warnings.warn(
-            _format_warning_text(path, size, n_samples),
+            _format_warning_text(canonical, size, n_samples),
             BiobankScaleWarning,
             stacklevel=stacklevel,
         )
-        _warned_paths.add(path)
+        _warned_paths[canonical] = None
+        while len(_warned_paths) > _WARN_CACHE_MAX:
+            _warned_paths.popitem(last=False)
