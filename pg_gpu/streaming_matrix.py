@@ -20,7 +20,41 @@ import threading
 import time
 from abc import ABC, abstractmethod
 
+import numpy as np
+
 from ._gpu_genotype_prep import build_haplotype_matrix
+
+
+def _pad_to(arr, shape):
+    """Zero-pad ``arr`` to the given (potentially larger) shape."""
+    out = np.zeros(shape, dtype=arr.dtype)
+    out[tuple(slice(0, n) for n in arr.shape)] = arr
+    return out
+
+
+def _stream_sum(streaming_hm, kernel_fn):
+    """Run ``kernel_fn`` on every chunk and sum the per-chunk numpy results.
+
+    Used by SFS-style kernels whose chunk results compose by addition --
+    each chunk contributes its own bincount or joint-bincount, and the
+    chromosome-wide answer is their sum. The padding step covers the
+    edge case where two chunks produce arrays of different shapes (e.g.
+    when one chunk has a population with strictly more valid samples
+    after masking than another, giving it one more bin along that
+    axis).
+    """
+    total = None
+    for _, _, chunk in streaming_hm.iter_gpu_chunks():
+        s = np.asarray(kernel_fn(chunk), dtype=np.int64)
+        if total is None:
+            total = s.copy()
+            continue
+        if s.shape != total.shape:
+            shape = tuple(max(a, b) for a, b in zip(total.shape, s.shape))
+            total = _pad_to(total, shape)
+            s = _pad_to(s, shape)
+        total += s
+    return total
 
 
 class ChunkFetcher(ABC):

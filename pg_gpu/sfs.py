@@ -10,6 +10,7 @@ import cupy as cp
 from typing import Union, Optional
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
+from .streaming_matrix import StreamingHaplotypeMatrix, _stream_sum
 
 
 def _derived_allele_counts(haplotype_matrix, missing_data='include'):
@@ -93,6 +94,12 @@ def sfs(haplotype_matrix: HaplotypeMatrix,
     ndarray, int64, shape (n_chromosomes + 1,)
         Element k = number of variants with k derived alleles.
     """
+    if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
+        return _stream_sum(
+            haplotype_matrix,
+            lambda chunk: sfs(chunk, population=population,
+                              missing_data=missing_data),
+        )
 
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
@@ -231,6 +238,12 @@ def joint_sfs(haplotype_matrix: HaplotypeMatrix,
         Element [i, j] = number of variants with i derived alleles in pop1
         and j derived alleles in pop2.
     """
+    if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
+        return _stream_sum(
+            haplotype_matrix,
+            lambda chunk: joint_sfs(chunk, pop1=pop1, pop2=pop2,
+                                    missing_data=missing_data),
+        )
 
     m1 = _get_population_matrix(haplotype_matrix, pop1)
     m2 = _get_population_matrix(haplotype_matrix, pop2)

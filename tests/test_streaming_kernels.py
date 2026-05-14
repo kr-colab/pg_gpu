@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from pg_gpu import HaplotypeMatrix, windowed_analysis
+from pg_gpu import sfs as sfs_module
 
 
 def _simulate_hm(n_samples=20, seq_length=100_000, seed=42):
@@ -108,6 +109,37 @@ class TestWindowedAnalysisDispatch:
                                  statistics=["fst", "dxy"],
                                  populations=["pop1", "pop2"])
         _assert_frames_equivalent(df_e, df_s)
+
+
+class TestSFSDispatch:
+
+    def test_sfs_equivalent(self, vcz_store):
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                            chunk_bp=10_000)
+        s_e = sfs_module.sfs(eager)
+        s_s = sfs_module.sfs(stream)
+        np.testing.assert_array_equal(s_e, s_s)
+
+    def test_joint_sfs_equivalent(self, vcz_store, tmp_path):
+        n_dip = HaplotypeMatrix.from_zarr(vcz_store).num_haplotypes // 2
+        half = n_dip // 2
+        popfile = str(tmp_path / "pops.tsv")
+        with open(popfile, "w") as f:
+            f.write("sample\tpop\n")
+            for i in range(half):
+                f.write(f"s{i}\tpop1\n")
+            for i in range(half, n_dip):
+                f.write(f"s{i}\tpop2\n")
+
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                          pop_file=popfile)
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                            pop_file=popfile,
+                                            chunk_bp=10_000)
+        j_e = sfs_module.joint_sfs(eager, pop1="pop1", pop2="pop2")
+        j_s = sfs_module.joint_sfs(stream, pop1="pop1", pop2="pop2")
+        np.testing.assert_array_equal(j_e, j_s)
 
 
 class TestStreamingGuardrails:
