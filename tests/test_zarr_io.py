@@ -5,10 +5,20 @@ import pytest
 import zarr
 import msprime
 
+import cupy as cp
+
 from pg_gpu import HaplotypeMatrix, GenotypeMatrix
 from pg_gpu.zarr_io import (
     detect_zarr_layout, read_genotypes, write_vcz, write_allel, vcf_to_zarr,
 )
+
+
+def _host(arr):
+    """Bring an array back to the host for byte-equal comparison. from_zarr
+    returns GPU haplotypes after the GPU-side prep refactor; round-trip
+    tests compare against a host-built msprime hm, so callers need to be
+    explicit about which device they're on."""
+    return cp.asnumpy(arr) if isinstance(arr, cp.ndarray) else arr
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────
@@ -105,20 +115,20 @@ class TestHaplotypeMatrixRoundTrip:
         path = str(tmp_path / "rt.vcz.zarr")
         hm.to_zarr(path, format='vcz', contig_name='chr1')
         hm2 = HaplotypeMatrix.from_zarr(path)
-        np.testing.assert_array_equal(hm.haplotypes, hm2.haplotypes)
-        np.testing.assert_array_equal(hm.positions, hm2.positions)
+        np.testing.assert_array_equal(_host(hm.haplotypes), _host(hm2.haplotypes))
+        np.testing.assert_array_equal(_host(hm.positions), _host(hm2.positions))
 
     def test_allel_roundtrip(self, tmp_path, hm):
         path = str(tmp_path / "rt.allel.zarr")
         hm.to_zarr(path, format='scikit-allel')
         hm2 = HaplotypeMatrix.from_zarr(path)
-        np.testing.assert_array_equal(hm.haplotypes, hm2.haplotypes)
-        np.testing.assert_array_equal(hm.positions, hm2.positions)
+        np.testing.assert_array_equal(_host(hm.haplotypes), _host(hm2.haplotypes))
+        np.testing.assert_array_equal(_host(hm.positions), _host(hm2.positions))
 
     def test_cross_format_read(self, allel_store, hm):
         """Write in allel format, read with auto-detect."""
         hm2 = HaplotypeMatrix.from_zarr(allel_store)
-        np.testing.assert_array_equal(hm.haplotypes, hm2.haplotypes)
+        np.testing.assert_array_equal(_host(hm.haplotypes), _host(hm2.haplotypes))
 
     def test_samples_preserved(self, tmp_path):
         """Verify sample names survive round-trip when present."""
@@ -134,6 +144,53 @@ class TestHaplotypeMatrixRoundTrip:
     def test_invalid_format_raises(self, tmp_path, hm):
         with pytest.raises(ValueError, match="Unknown format"):
             hm.to_zarr(str(tmp_path / "bad.zarr"), format='hdf5')
+
+
+class TestPopFileKwarg:
+
+    def _write_pops_tsv(self, path, n_dip):
+        with open(path, "w") as f:
+            f.write("sample\tpop\n")
+            half = n_dip // 2
+            for i in range(half):
+                f.write(f"sample_{i}\tpop1\n")
+            for i in range(half, n_dip):
+                f.write(f"sample_{i}\tpop2\n")
+
+    def _hm_with_samples(self, tmp_path, name):
+        hm = _simulate_hm()
+        n_dip = hm.num_haplotypes // 2
+        hm.samples = [f"sample_{i}" for i in range(n_dip)]
+        path = str(tmp_path / name)
+        hm.to_zarr(path, format='vcz', contig_name='chr1')
+        return path, n_dip
+
+    def test_explicit_pop_file(self, tmp_path):
+        path, n_dip = self._hm_with_samples(tmp_path, "explicit.vcz")
+        popfile = str(tmp_path / "pops.tsv")
+        self._write_pops_tsv(popfile, n_dip)
+        hm = HaplotypeMatrix.from_zarr(path, pop_file=popfile)
+        assert set(hm.sample_sets.keys()) == {"pop1", "pop2"}
+
+    def test_companion_auto_load(self, tmp_path, capsys):
+        path, n_dip = self._hm_with_samples(tmp_path, "auto.vcz")
+        self._write_pops_tsv(path + ".pops.tsv", n_dip)
+        hm = HaplotypeMatrix.from_zarr(path)
+        assert hm.sample_sets is not None
+        assert "auto-loaded" in capsys.readouterr().err
+
+    def test_pop_file_false_disables_companion(self, tmp_path):
+        path, n_dip = self._hm_with_samples(tmp_path, "disabled.vcz")
+        self._write_pops_tsv(path + ".pops.tsv", n_dip)
+        hm = HaplotypeMatrix.from_zarr(path, pop_file=False)
+        # _sample_sets stays None; the .sample_sets property then returns
+        # the default {"all": [...]} fallback rather than custom pops.
+        assert hm._sample_sets is None
+
+    def test_no_companion_no_pop_file(self, tmp_path):
+        path, _ = self._hm_with_samples(tmp_path, "none.vcz")
+        hm = HaplotypeMatrix.from_zarr(path)
+        assert hm._sample_sets is None
 
 
 # ── GenotypeMatrix Round-Trip ───────────────────────────────────────────
@@ -237,7 +294,8 @@ class TestMissingData:
         path = str(tmp_path / "missing.vcz.zarr")
         hm_missing.to_zarr(path, format='vcz', contig_name='chr1')
         hm2 = HaplotypeMatrix.from_zarr(path)
-        np.testing.assert_array_equal(hm_missing.haplotypes, hm2.haplotypes)
+        np.testing.assert_array_equal(_host(hm_missing.haplotypes),
+                                      _host(hm2.haplotypes))
 
     def test_genotype_mask_written(self, tmp_path):
         """Verify call_genotype_mask reflects missing values."""

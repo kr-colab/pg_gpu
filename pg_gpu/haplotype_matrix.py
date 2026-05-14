@@ -7,6 +7,28 @@ from collections import Counter, OrderedDict
 from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask
 
 
+def _resolve_companion_pop_file(zarr_path, pop_file):
+    """Resolve ``from_zarr``'s ``pop_file`` argument to a path or None.
+
+    The user can pass an explicit path, ``False`` to disable the
+    auto-load, or ``None`` (default) to look for ``<zarr_path>.pops.tsv``
+    next to the store. The auto-load announces to stderr so the choice
+    is visible to the caller.
+    """
+    import os
+    import sys
+    if pop_file is False:
+        return None
+    if pop_file is not None:
+        return pop_file
+    companion = str(zarr_path).rstrip("/") + ".pops.tsv"
+    if not os.path.exists(companion):
+        return None
+    print(f"HaplotypeMatrix.from_zarr: auto-loaded pop file {companion}",
+          file=sys.stderr, flush=True)
+    return companion
+
+
 class HaplotypeMatrix:
     """Haplotype matrix for population genetics analysis.
 
@@ -360,12 +382,17 @@ class HaplotypeMatrix:
 
     @classmethod
     def from_zarr(cls, path: str, region: str = None,
-                  accessible_bed: str = None):
+                  accessible_bed: str = None,
+                  pop_file=None):
         """Construct a HaplotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
         Layout is auto-detected. For multi-chromosome stores, region
         must be specified.
+
+        Multiallelic / missing rows (genotype = -1) are dropped from
+        the returned matrix -- pg_gpu's haplotype kernels are
+        calibrated for biallelic sites.
 
         Parameters
         ----------
@@ -375,31 +402,43 @@ class HaplotypeMatrix:
             Genomic region 'chrom:start-end' to load a subset.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
+        pop_file : str or False, optional
+            Tab-delimited file mapping ``sample`` -> ``pop`` in the
+            format ``HaplotypeMatrix.load_pop_file`` expects. Default
+            (``None``) looks for ``<path>.pops.tsv`` next to the
+            store and loads it if present, announcing the auto-load
+            to stderr. Pass ``False`` to disable the auto-load.
 
         Returns
         -------
         HaplotypeMatrix
         """
         from .zarr_io import read_genotypes
+        from ._gpu_genotype_prep import build_haplotype_matrix
 
         data = read_genotypes(path, region)
         gt = data['gt']
         positions = data['positions']
         sample_names = data['samples']
 
-        num_variants, num_samples, ploidy = gt.shape
-        assert ploidy == 2
+        if gt.shape[2] != 2:
+            raise ValueError(f"expected ploidy 2; got {gt.shape[2]}")
 
-        haplotypes = np.empty((num_variants, 2 * num_samples), dtype=gt.dtype)
-        haplotypes[:, :num_samples] = gt[:, :, 0]
-        haplotypes[:, num_samples:] = gt[:, :, 1]
-        haplotypes = haplotypes.T
+        hm = build_haplotype_matrix(
+            gt, positions,
+            chrom_start=int(positions[0]),
+            chrom_end=int(positions[-1]),
+            samples=list(sample_names) if sample_names is not None else None,
+        )
 
         chrom = region.split(':')[0] if region else None
-        hm = cls(haplotypes, positions, int(positions[0]), int(positions[-1]),
-                 samples=sample_names)
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
+
+        resolved_pop = _resolve_companion_pop_file(path, pop_file)
+        if resolved_pop is not None:
+            hm.load_pop_file(resolved_pop)
+
         return hm
 
     def to_zarr(self, zarr_path: str, format: str = 'vcz',
