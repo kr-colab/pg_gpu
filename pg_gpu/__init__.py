@@ -63,7 +63,8 @@ from .decomposition import (
     corners,
 )
 from .resampling import block_jackknife, block_bootstrap
+from ._biobank_warning import BiobankScaleWarning
 
-__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'distance_stats', 'resampling', 'HaplotypeMatrix', 'GenotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis', 'AccessibleMask', 'bed_to_mask', 'parse_bed', 'LocalPCAResult', 'LostructResult', 'local_pca', 'local_pca_jackknife', 'lostruct', 'pc_dist', 'corners', 'block_jackknife', 'block_bootstrap']
+__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'distance_stats', 'resampling', 'HaplotypeMatrix', 'GenotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis', 'AccessibleMask', 'bed_to_mask', 'parse_bed', 'LocalPCAResult', 'LostructResult', 'local_pca', 'local_pca_jackknife', 'lostruct', 'pc_dist', 'corners', 'block_jackknife', 'block_bootstrap', 'BiobankScaleWarning']
 
 __version__ = '0.1.0'

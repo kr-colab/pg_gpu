@@ -357,6 +357,8 @@ class GenotypeMatrix:
         GenotypeMatrix
         """
         import allel
+        from ._biobank_warning import _maybe_biobank_warn
+        _maybe_biobank_warn(path)
         callset = allel.read_vcf(path)
         gt = callset['calldata/GT']  # (n_variants, n_samples, 2)
         pos = callset['variants/POS']

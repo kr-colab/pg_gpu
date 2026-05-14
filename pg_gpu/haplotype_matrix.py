@@ -383,6 +383,8 @@ class HaplotypeMatrix:
         HaplotypeMatrix
             Phased haplotype data with sample names stored.
         """
+        from ._biobank_warning import _maybe_biobank_warn
+        _maybe_biobank_warn(path, region=region)
         vcf = allel.read_vcf(path, region=region, samples=samples)
         if vcf is None:
             raise ValueError(f"No variants found in {path}"
