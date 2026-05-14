@@ -145,11 +145,45 @@ class ZarrGenotypeSource:
         if hi <= lo:
             return (np.empty((0, self.num_diploids, 2), np.int8),
                     np.empty(0, np.int64))
-        zlo = int(self._zarr_var_indices[lo])
-        zhi = int(self._zarr_var_indices[hi - 1]) + 1
+        zlo, zhi = self._zarr_row_range(lo, hi)
         gt = np.asarray(self._store["call_genotype"][zlo:zhi])
         pos = self.site_pos[lo:hi].copy()
         return gt, pos
+
+    def slice_region_gpu(self, left, right, *, gds_store):
+        """Like ``slice_region`` but reads through ``gds_store``
+        (a ``kvikio.zarr.GDSStore`` opened on the same path) so the
+        chunk lands on the GPU via the zarr GPU buffer prototype.
+
+        Caller is responsible for activating
+        ``zarr.config.enable_gpu()`` before iterating chunks and
+        restoring the CPU buffer prototype afterwards; this method
+        does not toggle the global config so it can run inside a
+        producer thread without racing the consumer's eager calls.
+        """
+        import cupy as _cp
+        lo, hi = self._site_index_range(left, right)
+        if hi <= lo:
+            return (_cp.empty((0, self.num_diploids, 2), _cp.int8),
+                    np.empty(0, np.int64))
+        zlo, zhi = self._zarr_row_range(lo, hi)
+        # Open a fresh group on each call -- the group caches the
+        # codec pipeline against the active zarr.config snapshot, so
+        # reopening picks up the GPU buffer prototype the consumer
+        # enabled outside this call.
+        import zarr
+        cg = zarr.open_group(gds_store, mode="r")["call_genotype"]
+        gt = cg[zlo:zhi]
+        pos = self.site_pos[lo:hi].copy()
+        return gt, pos
+
+    def _zarr_row_range(self, lo, hi):
+        """Map an in-source row range ``[lo, hi)`` to the underlying
+        zarr ``call_genotype`` row range, accounting for the region
+        filter applied at construction."""
+        zlo = int(self._zarr_var_indices[lo])
+        zhi = int(self._zarr_var_indices[hi - 1]) + 1
+        return zlo, zhi
 
     def slice_subsample(self, left, right, hap_cols):
         """Read variants in ``[left, right)`` restricted to ``hap_cols``.

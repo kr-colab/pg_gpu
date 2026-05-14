@@ -433,7 +433,8 @@ class HaplotypeMatrix:
                   pop_file=None,
                   streaming: str = "auto",
                   chunk_bp: int = 1_500_000,
-                  prefetch: int = 1):
+                  prefetch: int = 1,
+                  backend: str = "auto"):
         """Construct a HaplotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
@@ -472,6 +473,17 @@ class HaplotypeMatrix:
         prefetch : int, optional
             Read-ahead depth for the streaming path. Ignored on the
             eager path.
+        backend : {'auto', 'host', 'kvikio'}, optional
+            Streaming chunk-fetch backend. ``'kvikio'`` decodes the
+            store's codec on the GPU via ``kvikio + nvCOMP``; only
+            works when ``call_genotype``'s codec is in the
+            nvCOMP-supported list (zstd, blosc, lz4, deflate) and
+            the sample-axis chunking is bio2zarr-shaped (sample chunk
+            smaller than the full sample axis). ``'host'`` is the
+            host-buffer fallback. ``'auto'`` (default) picks
+            ``'kvikio'`` when both conditions hold and warns +
+            ``'host'`` when chunks are whole-sample-axis (the kvikio
+            path gives no speedup at that chunking).
 
         Returns
         -------
@@ -482,11 +494,17 @@ class HaplotypeMatrix:
                 f"streaming must be 'auto', 'always', or 'never'; "
                 f"got {streaming!r}"
             )
+        if backend not in ("auto", "host", "kvikio"):
+            raise ValueError(
+                f"backend must be 'auto', 'host', or 'kvikio'; "
+                f"got {backend!r}"
+            )
 
         if streaming == "always":
             return cls._build_streaming(
                 path, region=region, pop_file=pop_file,
                 chunk_bp=chunk_bp, prefetch=prefetch,
+                backend=backend,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits; 'auto'
@@ -502,7 +520,7 @@ class HaplotypeMatrix:
             return cls._build_streaming(
                 path, region=region, pop_file=pop_file,
                 chunk_bp=chunk_bp, prefetch=prefetch,
-                source=source,
+                source=source, backend=backend,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
@@ -540,8 +558,11 @@ class HaplotypeMatrix:
 
     @classmethod
     def _build_streaming(cls, path, *, region, pop_file, chunk_bp, prefetch,
-                         source=None):
-        from .streaming_matrix import HostChunkFetcher, StreamingHaplotypeMatrix
+                         source=None, backend="auto"):
+        from .streaming_matrix import (
+            HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
+            _pick_chunk_fetcher,
+        )
         from .zarr_source import ZarrGenotypeSource
 
         if source is None:
@@ -551,7 +572,7 @@ class HaplotypeMatrix:
             # to keep its size probe cheap; resolve the caller's pop_file
             # now without re-opening the zarr store.
             source.pop_cols = source._resolve_pop_file(pop_file)
-        fetcher = HostChunkFetcher(source)
+        fetcher = _pick_chunk_fetcher(source, backend=backend)
         return StreamingHaplotypeMatrix(
             source, fetcher,
             chunk_bp=chunk_bp, prefetch=prefetch,

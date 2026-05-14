@@ -21,9 +21,15 @@ this class; ``.materialize(region=...)`` returns an eager
 import queue
 import threading
 import time
+import warnings
 from abc import ABC, abstractmethod
 
+import cupy as cp
+import kvikio
+import kvikio.defaults
 import numpy as np
+import zarr
+from kvikio.zarr import GDSStore
 
 from ._gpu_genotype_prep import build_haplotype_matrix
 
@@ -83,6 +89,102 @@ class ChunkFetcher(ABC):
             Read-ahead depth. ``0`` means serial; >=1 means a worker
             thread reads ahead of the consumer.
         """
+
+
+#: Codecs the kvikio + nvCOMP path can decode on the GPU. Stores using
+#: anything else fall back to the host fetcher; on-disk pg_gpu / bio2zarr
+#: stores default to zstd, so the common case is GPU-decodable.
+_NVCOMP_SUPPORTED_CODECS = frozenset({"zstd", "blosc", "lz4", "deflate"})
+
+
+class BadlyChunkedWarning(UserWarning):
+    """Emitted when ``backend='auto'`` picks ``host`` on a store whose
+    call_genotype chunking would have defeated the kvikio fetcher's
+    win. The store is functional but a bio2zarr-style re-encode would
+    unlock the GPU-decode fast path."""
+
+
+def _pick_chunk_fetcher(source, *, backend):
+    """Pick a fetcher for ``source``. Errors and warnings reflect what the
+    caller asked for: ``backend='kvikio'`` raises on an incompatible
+    store, while ``backend='auto'`` warns once and falls back."""
+    if backend == "host":
+        return HostChunkFetcher(source)
+    if backend == "kvikio":
+        return KvikioChunkFetcher(source)
+
+    codec = _store_call_genotype_codec(source.path)
+    chunks = _store_call_genotype_chunks(source.path)
+    if codec is None:
+        # codec unreadable or unsupported -> host
+        return HostChunkFetcher(source)
+    whole_sample_axis = (chunks is not None and len(chunks) >= 2
+                         and chunks[1] >= source.num_diploids)
+    if whole_sample_axis:
+        # Whole-sample-axis chunking defeats the kvikio fetcher's win on
+        # full-haplotype reads: zarr's async pipeline already saturates
+        # ~3 cores per chunk decode, so a GPU codec on a single chunk
+        # buys nothing. Only warn when the store is large enough that
+        # the user would actually see the speedup of a rechunk -- on
+        # small test fixtures the warning is noise.
+        warn_threshold_bytes = 1 << 30  # 1 GiB of int8 footprint
+        eager_bytes = int(source.num_variants) * int(source.num_haplotypes)
+        if eager_bytes >= warn_threshold_bytes:
+            warnings.warn(
+                f"{source.path}: call_genotype.chunks={chunks} spans the "
+                f"full sample axis ({source.num_diploids} diploids); the "
+                f"kvikio fetcher gives no speedup at this chunking. "
+                f"Falling back to the host fetcher. Re-encode with "
+                f"bio2zarr-style chunking (sample_chunk ~= 1000) via "
+                f"HaplotypeMatrix.vcf_to_zarr to enable kvikio.",
+                BadlyChunkedWarning, stacklevel=4,
+            )
+        return HostChunkFetcher(source)
+    return KvikioChunkFetcher(source)
+
+
+def _store_call_genotype_codec(store_path):
+    """Return the name of the bytes-encoder codec on the store's
+    call_genotype array (e.g. ``'zstd'``), or None when the codec
+    spec cannot be read.
+
+    The codec name is what matters for picking a fetcher: nvCOMP has
+    GPU decoders for a fixed list, and the rest go through the host
+    path. Reading the spec is cheap (one JSON parse off the
+    ``call_genotype/zarr.json`` blob).
+    """
+    import json
+    import os
+    spec_path = os.path.join(str(store_path), "call_genotype", "zarr.json")
+    if not os.path.exists(spec_path):
+        return None
+    try:
+        with open(spec_path) as f:
+            spec = json.load(f)
+        for entry in spec.get("codecs", []):
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if name in _NVCOMP_SUPPORTED_CODECS:
+                return name
+            if name == "bytes":
+                continue  # transparent reinterpretation; not a real codec
+        return None
+    except (OSError, json.JSONDecodeError, KeyError):
+        return None
+
+
+def _store_call_genotype_chunks(store_path):
+    """Return ``call_genotype.chunks`` as a tuple, or None if unreadable.
+
+    Used to decide whether the store's sample-axis chunking is
+    bio2zarr-shaped (small enough chunks that kvikio's GPU codec
+    decode actually wins on sample-subset reads) or whole-axis
+    chunked (in which case the kvikio path gives no real speedup).
+    """
+    try:
+        store = zarr.open_group(store_path, mode="r")
+        return tuple(store["call_genotype"].chunks)
+    except (FileNotFoundError, KeyError, ValueError):
+        return None
 
 
 class HostChunkFetcher(ChunkFetcher):
@@ -155,6 +257,139 @@ class HostChunkFetcher(ChunkFetcher):
             except queue.Empty:
                 pass
             t.join(timeout=5)
+
+
+class KvikioChunkFetcher(ChunkFetcher):
+    """Read chunks via ``kvikio.zarr.GDSStore`` with on-GPU codec decode.
+
+    Reads the store through ``kvikio.zarr.GDSStore`` and enables
+    zarr 3's GPU buffer prototype so nvCOMP decodes the codec on the
+    GPU. The chunk array therefore lands directly on the device --
+    ``build_haplotype_matrix`` skips the host-to-device copy in
+    ``cp.asarray(gt)`` because ``gt`` is already a cupy array.
+
+    The win is in the GPU codec decode, not in GPU Direct Storage.
+    By default this fetcher sets ``kvikio.defaults.compat_mode=ON``
+    so kvikio reads bytes through posix into bounce buffers without
+    trying to negotiate a real GDS handshake (which is slower on
+    hosts without ``/etc/cufile.json`` configured); pass
+    ``compat_mode=AUTO`` if the storage path is known to be
+    GDS-capable.
+
+    Construction probes the store's call_genotype codec and raises
+    ``ValueError`` if it's not in the nvCOMP-supported list, rather
+    than silently returning incorrect data through a CPU fallback.
+    On close the zarr buffer prototype is reset so subsequent eager
+    calls in the same process get numpy buffers back.
+    """
+
+    def __init__(self, source, *, compat_mode="ON", num_threads=8):
+        codec = _store_call_genotype_codec(source.path)
+        if codec is None:
+            raise ValueError(
+                f"KvikioChunkFetcher requires a call_genotype codec "
+                f"the nvCOMP GPU decoder supports "
+                f"({sorted(_NVCOMP_SUPPORTED_CODECS)}); could not "
+                f"identify one on {source.path}"
+            )
+        self._source = source
+        self._codec = codec
+        self._gds_store = GDSStore(source.path)
+        mode_const = (kvikio.CompatMode.ON if compat_mode == "ON"
+                      else kvikio.CompatMode.AUTO if compat_mode == "AUTO"
+                      else kvikio.CompatMode.OFF)
+        kvikio.defaults.set({"compat_mode": mode_const,
+                             "num_threads": int(num_threads)})
+        self._gpu_buffer_active = False
+
+    def iter_chunks(self, chunks, prefetch):
+        # zarr.config.enable_gpu is process-global; we flip it on for
+        # the duration of the iteration and reset on every exit path
+        # so a downstream eager call gets numpy buffers back.
+        self._enable_gpu_buffer()
+        try:
+            if prefetch <= 0:
+                yield from self._iter_serial(chunks)
+            else:
+                yield from self._iter_with_producer(chunks, prefetch)
+        finally:
+            self._reset_gpu_buffer()
+
+    def close(self):
+        """Reset the zarr buffer prototype.
+
+        Called automatically at the end of ``iter_chunks``; exposed for
+        tests and for callers that build a fetcher without immediately
+        iterating it.
+        """
+        self._reset_gpu_buffer()
+
+    def _enable_gpu_buffer(self):
+        zarr.config.enable_gpu()
+        self._gpu_buffer_active = True
+
+    def _reset_gpu_buffer(self):
+        # __del__ may fire after a constructor raise before
+        # _gpu_buffer_active is set; getattr() guards that path.
+        if not getattr(self, "_gpu_buffer_active", False):
+            return
+        zarr.config.set({
+            "buffer": "zarr.core.buffer.cpu.Buffer",
+            "ndbuffer": "zarr.core.buffer.cpu.NDBuffer",
+        })
+        self._gpu_buffer_active = False
+
+    def _iter_serial(self, chunks):
+        for ci, (left, right) in enumerate(chunks):
+            t0 = time.perf_counter()
+            gt, pos = self._source.slice_region_gpu(
+                left, right, gds_store=self._gds_store)
+            yield ci, left, right, gt, pos, time.perf_counter() - t0
+
+    def _iter_with_producer(self, chunks, prefetch):
+        q = queue.Queue(maxsize=prefetch)
+        stop = threading.Event()
+        _END = object()
+
+        def producer():
+            try:
+                for ci, (left, right) in enumerate(chunks):
+                    if stop.is_set():
+                        return
+                    t0 = time.perf_counter()
+                    gt, pos = self._source.slice_region_gpu(
+                left, right, gds_store=self._gds_store)
+                    t_read = time.perf_counter() - t0
+                    if stop.is_set():
+                        return
+                    q.put((ci, left, right, gt, pos, t_read))
+            except BaseException as e:
+                q.put(("ERR", e))
+                return
+            q.put(_END)
+
+        t = threading.Thread(target=producer, daemon=True,
+                             name="kvikio-prefetch")
+        t.start()
+        try:
+            while True:
+                item = q.get()
+                if item is _END:
+                    break
+                if isinstance(item, tuple) and item and item[0] == "ERR":
+                    raise item[1]
+                yield item
+        finally:
+            stop.set()
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+            t.join(timeout=5)
+
+    def __del__(self):
+        self._reset_gpu_buffer()
 
 
 class StreamingHaplotypeMatrix:
