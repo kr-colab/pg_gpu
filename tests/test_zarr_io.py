@@ -9,7 +9,8 @@ import cupy as cp
 
 from pg_gpu import HaplotypeMatrix, GenotypeMatrix
 from pg_gpu.zarr_io import (
-    detect_zarr_layout, read_genotypes, write_vcz, write_allel, vcf_to_zarr,
+    allel_zarr_to_vcz, detect_zarr_layout, read_genotypes,
+    vcf_to_zarr, write_allel, write_vcz,
 )
 
 
@@ -441,3 +442,136 @@ class TestEdgeCases:
         hm = HaplotypeMatrix.from_zarr(path)
         assert hm.num_variants == 5
         assert np.all(hm.haplotypes == -1)
+
+
+# ── scikit-allel -> vcz conversion ──────────────────────────────────────
+
+
+class TestAllelZarrToVcz:
+
+    def _read_vcz_gt(self, path):
+        """Return (gt, positions, samples, contig_id) from a vcz store."""
+        store = zarr.open(path, mode='r')
+        gt = np.asarray(store['call_genotype'][:])
+        pos = np.asarray(store['variant_position'][:])
+        samples = (np.asarray(store['sample_id'][:])
+                   if 'sample_id' in store else None)
+        contig = np.asarray(store['contig_id'][:])[0]
+        return gt, pos, samples, contig
+
+    def _named_allel_store(self, tmp_path, name="named.allel.zarr"):
+        # Build a small allel store with explicit sample names so the
+        # round-trip test can verify they survive the conversion. The
+        # shared ``allel_store`` fixture is built from a bare msprime
+        # HaplotypeMatrix that has no ``.samples`` attribute set.
+        hm = _simulate_hm()
+        n_dip = hm.num_haplotypes // 2
+        gt = HaplotypeMatrix._haplotypes_to_gt(hm.haplotypes)
+        pos = np.asarray(hm.positions)
+        samples = [f"s{i}" for i in range(n_dip)]
+        path = str(tmp_path / name)
+        write_allel(path, gt, pos, samples=samples)
+        return path, gt, pos, samples
+
+    def test_flat_layout_roundtrip(self, tmp_path):
+        # Convert an allel store with samples set, then re-read the vcz
+        # output and check GT / positions / samples round-trip
+        # byte-for-byte (modulo dtype: vcz keeps int8 / int32).
+        src_path, src_gt, src_pos, src_samples = self._named_allel_store(
+            tmp_path
+        )
+        out = str(tmp_path / "out.vcz")
+        allel_zarr_to_vcz(src_path, out, contig='chr1')
+
+        gt, pos, samples, contig = self._read_vcz_gt(out)
+        np.testing.assert_array_equal(gt, src_gt.astype(np.int8))
+        np.testing.assert_array_equal(pos, src_pos.astype(np.int32))
+        np.testing.assert_array_equal(samples, src_samples)
+        assert contig == 'chr1'
+
+    def test_grouped_layout_one_contig(self, tmp_path, grouped_store):
+        src = zarr.open(grouped_store, mode='r')
+        src_gt = np.asarray(src['chr2/calldata/GT'][:])
+        src_pos = np.asarray(src['chr2/variants/POS'][:])
+
+        out = str(tmp_path / "g.vcz")
+        allel_zarr_to_vcz(grouped_store, out, contig='chr2')
+
+        gt, pos, _, contig = self._read_vcz_gt(out)
+        np.testing.assert_array_equal(gt, src_gt.astype(np.int8))
+        np.testing.assert_array_equal(pos, src_pos.astype(np.int32))
+        assert contig == 'chr2'
+
+    def test_grouped_requires_contig(self, tmp_path, grouped_store):
+        with pytest.raises(ValueError, match="requires contig"):
+            allel_zarr_to_vcz(grouped_store, str(tmp_path / "x.vcz"))
+
+    def test_region_filter(self, tmp_path, allel_store):
+        # Take an interior region by position and check it matches the
+        # equivalent positional slice of the source.
+        src = zarr.open(allel_store, mode='r')
+        src_pos = np.asarray(src['variants/POS'][:])
+        # Pick the middle 50% of the position range.
+        lo = int(np.quantile(src_pos, 0.25))
+        hi = int(np.quantile(src_pos, 0.75))
+        keep = (src_pos >= lo) & (src_pos < hi)
+
+        out = str(tmp_path / "region.vcz")
+        allel_zarr_to_vcz(allel_store, out, contig='chr1',
+                          region=f"chr1:{lo}-{hi}")
+
+        gt, pos, _, _ = self._read_vcz_gt(out)
+        np.testing.assert_array_equal(pos, src_pos[keep].astype(np.int32))
+        expected = np.asarray(src['calldata/GT'][:])[keep]
+        np.testing.assert_array_equal(gt, expected.astype(np.int8))
+
+    def test_call_genotype_uses_sample_axis_chunks(self, tmp_path,
+                                                    allel_store):
+        # The pg_gpu streaming reader's kvikio backend reads call_genotype
+        # one (variant_chunk, sample_chunk, 2) block at a time. Verify the
+        # output store carries that chunking rather than zarr's
+        # whole-array-as-one-chunk default.
+        out = str(tmp_path / "chunks.vcz")
+        allel_zarr_to_vcz(allel_store, out, contig='chr1',
+                          variant_chunk=4, sample_chunk=2)
+        store = zarr.open(out, mode='r')
+        cg = store['call_genotype']
+        assert cg.chunks[0] == 4
+        assert cg.chunks[1] == 2
+        assert cg.chunks[2] == 2
+
+    def test_call_genotype_mask_matches(self, tmp_path):
+        # Build a small allel store that has an explicit missing cell and
+        # check the converter's call_genotype_mask is True there only.
+        path = str(tmp_path / "with_miss.allel.zarr")
+        gt = np.array([
+            [[0, 1], [-1, 0], [1, 1]],
+            [[0, 0], [1, 1], [0, -1]],
+        ], dtype=np.int8)
+        pos = np.array([100, 200], dtype=np.int32)
+        write_allel(path, gt, pos, samples=['a', 'b', 'c'])
+        out = str(tmp_path / "with_miss.vcz")
+        allel_zarr_to_vcz(path, out, contig='chr9')
+        store = zarr.open(out, mode='r')
+        mask = np.asarray(store['call_genotype_mask'][:])
+        expected = (gt < 0)
+        np.testing.assert_array_equal(mask, expected)
+
+    def test_round_trip_through_from_zarr(self, tmp_path, allel_store):
+        # The whole point of the converter: the vcz output should be
+        # consumable by HaplotypeMatrix.from_zarr -- including the
+        # streaming path that only accepts vcz layout.
+        out = str(tmp_path / "rt.vcz")
+        allel_zarr_to_vcz(allel_store, out, contig='chr1')
+        hm = HaplotypeMatrix.from_zarr(out, streaming='never')
+        # Equivalent eager load from the original allel store as the
+        # baseline; both go through the same haplotype-layout build.
+        hm_src = HaplotypeMatrix.from_zarr(allel_store)
+        np.testing.assert_array_equal(_host(hm.haplotypes),
+                                      _host(hm_src.haplotypes))
+        np.testing.assert_array_equal(_host(hm.positions),
+                                      _host(hm_src.positions))
+
+    def test_rejects_vcz_input(self, tmp_path, vcz_store):
+        with pytest.raises(ValueError, match="already vcz"):
+            allel_zarr_to_vcz(vcz_store, str(tmp_path / "x.vcz"))

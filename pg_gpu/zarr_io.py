@@ -232,6 +232,143 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
                            data=np.zeros(len(positions), dtype=np.int8))
 
 
+def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,
+                      variant_chunk=10_000, sample_chunk=1_000,
+                      progress=False):
+    """Convert a scikit-allel zarr store to vcz (bio2zarr) layout.
+
+    Streams ``calldata/GT`` in variant blocks so chromosome-scale allel
+    stores -- which the eager ``read_genotypes_allel`` would OOM on --
+    can be converted without materializing the full genotype matrix.
+    Writes ``call_genotype`` with bio2zarr-style sample-axis chunking so
+    the pg_gpu streaming reader's kvikio backend can decode chunks on
+    the GPU.
+
+    Parameters
+    ----------
+    allel_path : str
+        Source allel store. Either a flat layout with ``calldata/GT`` at
+        the root, or a chromosome-grouped layout where each
+        ``<contig>/calldata/GT`` is one chromosome. Both are accepted.
+    vcz_path : str
+        Destination vcz store path. Overwritten if it exists.
+    contig : str, optional
+        For grouped stores, the chromosome key to read. Required when
+        the source is grouped and ``region`` does not name a contig.
+        For flat stores, used as the ``contig_id`` label in the output.
+    region : str, optional
+        ``"chrom:start-end"`` (or ``"start-end"`` on a flat store)
+        restricting the conversion to a position range.
+    variant_chunk : int
+        Source variants read per streaming pass. Larger amortizes zarr
+        read overhead; smaller bounds host RAM at biobank sample counts.
+    sample_chunk : int
+        Sample-axis chunk size in the output ``call_genotype``. Smaller
+        chunks let the streaming reader's kvikio + nvCOMP decode overlap
+        with compute on biobank-scale stores.
+    progress : bool
+        Print a one-line status per variant chunk to stderr.
+
+    Notes
+    -----
+    Only the fields pg_gpu's streaming reader requires are written:
+    ``call_genotype``, ``call_genotype_mask``, ``variant_position``,
+    ``sample_id``, ``contig_id``, ``variant_contig``. Other allel
+    columns (REF, ALT, FILTER, etc.) are not preserved.
+    """
+    import sys
+    import zarr
+
+    src = zarr.open_group(allel_path, mode='r')
+    layout = detect_zarr_layout(src)
+    if layout == 'vcz':
+        raise ValueError(
+            f"{allel_path} is already vcz; nothing to convert"
+        )
+    if layout not in ('scikit-allel', 'scikit-allel-grouped'):
+        raise ValueError(
+            f"Expected scikit-allel layout at {allel_path}, got {layout}"
+        )
+
+    # Resolve which chromosome group to read (grouped) or use the root
+    # (flat); derive the contig label that goes into the output.
+    if layout == 'scikit-allel-grouped':
+        chrom_from_region = (region.split(':', 1)[0]
+                              if region and ':' in region else None)
+        contig = contig or chrom_from_region
+        if contig is None:
+            available = [k for k in src if hasattr(src[k], 'keys')]
+            raise ValueError(
+                f"Grouped allel store requires contig=... "
+                f"Available: {available}"
+            )
+        src_grp = src[contig]
+    else:
+        src_grp = src
+        if contig is None:
+            contig = 'unknown'
+
+    gt_arr = src_grp['calldata/GT']
+    pos_arr = src_grp['variants/POS']
+    n_var, n_samp, ploidy = gt_arr.shape
+
+    if region:
+        span = region.split(':', 1)[-1] if ':' in region else region
+        lo, hi = (int(x) for x in span.split('-'))
+        # Loading positions in full is fine -- they're int32, so even a
+        # human-genome-scale chromosome (~10 M sites) is ~40 MB.
+        pos_host = np.asarray(pos_arr[:])
+        lo_idx = int(np.searchsorted(pos_host, lo, side='left'))
+        hi_idx = int(np.searchsorted(pos_host, hi, side='left'))
+        if lo_idx == hi_idx:
+            raise ValueError(f"No variants in region {region}")
+        pos_out = pos_host[lo_idx:hi_idx]
+    else:
+        lo_idx, hi_idx = 0, n_var
+        pos_out = np.asarray(pos_arr[:])
+
+    n_out = hi_idx - lo_idx
+    samples = (np.asarray(src_grp['samples'][:])
+               if 'samples' in src_grp else None)
+
+    dst = zarr.open_group(vcz_path, mode='w')
+    cg = dst.create_array(
+        'call_genotype',
+        shape=(n_out, n_samp, ploidy),
+        chunks=(variant_chunk, sample_chunk, ploidy),
+        dtype='int8',
+    )
+    cm = dst.create_array(
+        'call_genotype_mask',
+        shape=(n_out, n_samp, ploidy),
+        chunks=(variant_chunk, sample_chunk, ploidy),
+        dtype='bool',
+    )
+    for s in range(lo_idx, hi_idx, variant_chunk):
+        e = min(s + variant_chunk, hi_idx)
+        block = np.asarray(gt_arr[s:e])
+        dst_s, dst_e = s - lo_idx, e - lo_idx
+        cg[dst_s:dst_e] = block.astype(np.int8)
+        cm[dst_s:dst_e] = (block < 0)
+        if progress:
+            done = dst_e
+            print(f"[allel_zarr_to_vcz] {done}/{n_out} variants",
+                  file=sys.stderr, flush=True)
+
+    dst.create_array('variant_position', data=pos_out.astype(np.int32))
+    if samples is not None:
+        # Route through plain Python strings: zarr-backed sample arrays
+        # arrive as numpy.StringDType (variable-length) which can't be
+        # cast to fixed-width 'U<n>' without specifying the size; the
+        # list detour lets numpy pick the width itself.
+        dst.create_array(
+            'sample_id',
+            data=np.array([str(s) for s in samples], dtype='U'),
+        )
+    dst.create_array('contig_id', data=np.array([contig], dtype='U'))
+    dst.create_array('variant_contig', data=np.zeros(n_out, dtype=np.int8))
+
+
 def write_allel(zarr_path, gt, positions, samples=None):
     """Write genotype data in scikit-allel format.
 
