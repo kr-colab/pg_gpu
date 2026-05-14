@@ -10,21 +10,6 @@ import cupy as cp
 from typing import Optional, Union
 
 
-def _raise_on_streaming_matrix(matrix, fn_name):
-    """``grm`` needs chromosome-wide allele frequencies in scope before
-    it can standardize per-variant outer products, which the current
-    eager kernel does in one pass. Raise with the ``.materialize`` hint
-    rather than letting ``.haplotypes`` / ``.genotypes`` blow up later."""
-    from .streaming_matrix import _StreamingMatrixBase
-    if isinstance(matrix, _StreamingMatrixBase):
-        raise NotImplementedError(
-            f"{fn_name}() needs the full variant axis in scope at once "
-            f"and is not streamable chunk-by-chunk. Pull a sub-region "
-            f"eagerly via matrix.materialize(region=(lo, hi)) and call "
-            f"{fn_name}() on that."
-        )
-
-
 def grm(genotype_matrix_or_haplotype_matrix,
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include') -> np.ndarray:
@@ -57,7 +42,11 @@ def grm(genotype_matrix_or_haplotype_matrix,
         coefficients + 1. Off-diagonal entries are pairwise relatedness.
     """
     from ._memutil import estimate_variant_chunk_size
-    _raise_on_streaming_matrix(genotype_matrix_or_haplotype_matrix, "grm")
+    from .streaming_matrix import _StreamingMatrixBase
+    if isinstance(genotype_matrix_or_haplotype_matrix, _StreamingMatrixBase):
+        return _stream_grm(genotype_matrix_or_haplotype_matrix,
+                            population=population,
+                            missing_data=missing_data)
 
     geno, n_ind = _get_genotype_data(genotype_matrix_or_haplotype_matrix,
                                       population)
@@ -420,3 +409,106 @@ def _stream_n_ind(streaming_matrix, population):
                 else streaming_matrix.num_individuals)
     pop_set = streaming_matrix.sample_sets[population]
     return len(pop_set) // 2 if is_hap else len(pop_set)
+
+
+# ---------------------------------------------------------------------------
+# Streaming GRM: two-pass + indiv-axis row-block tile
+# ---------------------------------------------------------------------------
+#
+# GRM standardizes each variant by its allele frequency before forming the
+# (n_ind, n_ind) outer product, so the eager kernel computes p over the
+# whole chromosome up front. Two-pass form for the streaming path:
+# pass 1 walks chunks to accumulate per-variant DAC + n_valid into
+# chromosome-wide host arrays; pass 2 walks the same chunks, slicing the
+# precomputed p into chunk-local pieces, standardizing on GPU, and
+# accumulating A = g @ g.T on host with row-block tiling on the
+# individual axis (same scheme as the IBS streaming path).
+
+def _stream_grm(streaming_matrix, *, population, missing_data,
+                block_size=None):
+    from ._memutil import estimate_indiv_block_size
+
+    # Pass 1: per-variant DAC / n_valid into per-chunk host arrays.
+    dac_parts = []
+    nvalid_parts = []
+    n_ind = None
+    for _, _, chunk in streaming_matrix.iter_gpu_chunks():
+        geno, n_ind = _get_genotype_data(chunk, population)
+        valid = (geno >= 0)
+        nvalid_parts.append(
+            cp.sum(valid, axis=0, dtype=cp.int32).get()
+        )
+        dac_parts.append(
+            cp.sum(cp.where(valid, geno, 0), axis=0, dtype=cp.int32).get()
+        )
+        del geno, valid
+
+    if n_ind is None:
+        # No chunks at all.
+        n_ind = _stream_n_ind(streaming_matrix, population)
+        return np.zeros((n_ind, n_ind), dtype=np.float64)
+
+    chunk_var_counts = [p.size for p in dac_parts]
+    chunk_offsets = np.cumsum([0] + chunk_var_counts)
+    dac_chrom = np.concatenate(dac_parts) if dac_parts else np.zeros(0, np.int32)
+    nvalid_chrom = (np.concatenate(nvalid_parts)
+                    if nvalid_parts else np.zeros(0, np.int32))
+
+    p_chrom = np.where(
+        nvalid_chrom > 0,
+        dac_chrom.astype(np.float64) / (2.0 * nvalid_chrom.astype(np.float64)),
+        0.0,
+    )
+    if missing_data == 'exclude':
+        poly_mask = (nvalid_chrom == n_ind) & (p_chrom > 0) & (p_chrom < 1)
+    else:
+        poly_mask = (p_chrom > 0) & (p_chrom < 1)
+    n_snps_used = int(poly_mask.sum())
+    if n_snps_used == 0:
+        return np.zeros((n_ind, n_ind), dtype=np.float64)
+
+    if block_size is None:
+        # standardized g + matmul output + slack.
+        block_size = estimate_indiv_block_size(n_ind, n_intermediates=3)
+
+    A_host = np.zeros((n_ind, n_ind), dtype=np.float64)
+
+    # Pass 2: standardize each chunk and accumulate the outer product.
+    # Chunk iteration order must match pass 1 so the chunk-local slice
+    # of p_chrom lines up with the chunk's variants.
+    for chunk_i, (_, _, chunk) in enumerate(
+            streaming_matrix.iter_gpu_chunks()):
+        c_lo, c_hi = chunk_offsets[chunk_i], chunk_offsets[chunk_i + 1]
+        chunk_poly = poly_mask[c_lo:c_hi]
+        if not chunk_poly.any():
+            continue
+        chunk_p_full = p_chrom[c_lo:c_hi]
+
+        geno, _ = _get_genotype_data(chunk, population)
+        if chunk_poly.all():
+            # At biobank-scale MAF distributions essentially every site
+            # is polymorphic; bypass the fancy index in that case so
+            # the matmul sees a contiguous column block.
+            chunk_p_gpu = cp.asarray(chunk_p_full)
+            g = geno
+        else:
+            chunk_p_gpu = cp.asarray(chunk_p_full[chunk_poly])
+            chunk_idx_gpu = cp.asarray(np.where(chunk_poly)[0],
+                                        dtype=cp.int32)
+            g = geno[:, chunk_idx_gpu]
+        valid = (g >= 0)
+        g_std = cp.where(valid, g, 0).astype(cp.float64)
+        del g
+        scale = cp.sqrt(2.0 * chunk_p_gpu * (1.0 - chunk_p_gpu))
+        g_std -= 2.0 * chunk_p_gpu
+        g_std *= valid
+        g_std /= scale
+        del valid, scale
+
+        for r0 in range(0, n_ind, block_size):
+            r1 = min(r0 + block_size, n_ind)
+            A_host[r0:r1] += (g_std[r0:r1] @ g_std.T).get()
+        del g_std, geno
+
+    A_host /= n_snps_used
+    return A_host

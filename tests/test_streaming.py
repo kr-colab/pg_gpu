@@ -330,14 +330,18 @@ class TestStreamingGenotypeMatrix:
         # genotypes are (n_indiv, n_var) dosage int8
         assert eager.genotypes.shape[0] == gm_stream.num_individuals
 
-    def test_grm_raises_on_streaming(self, vcz_store):
+    def test_grm_streams(self, vcz_store):
         from pg_gpu import GenotypeMatrix
         from pg_gpu.relatedness import grm
         path, _ = vcz_store
+        gm_eager = GenotypeMatrix.from_zarr(path, streaming="never")
         gm_stream = GenotypeMatrix.from_zarr(path, streaming="always",
                                               chunk_bp=5_000)
-        with pytest.raises(NotImplementedError, match="materialize"):
-            grm(gm_stream)
+        # grm uses a two-pass streaming form (per-variant frequencies on
+        # the first pass, standardized outer product on the second) and
+        # tiles the individual axis the same way ibs does.
+        np.testing.assert_allclose(grm(gm_stream), grm(gm_eager),
+                                    rtol=1e-7, atol=1e-10)
 
     def test_ibs_streams(self, vcz_store):
         from pg_gpu import GenotypeMatrix
