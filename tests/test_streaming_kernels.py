@@ -206,6 +206,22 @@ class TestAccessibleBedDispatch:
         _assert_frames_equivalent(df_e, df_s)
 
 
+class TestGarudGuardrail:
+    """Garud is rejected on the streaming path until the fused kernel's
+    rounding sensitivity is addressed. Position-deterministic weights
+    make the hash basis stable, but second-order rounding still drifts
+    the distinct-haplotype count by a few ULP under different prefix
+    trajectories."""
+
+    @pytest.mark.parametrize("stat", ["garud_h1", "garud_h12",
+                                       "garud_h123", "garud_h2h1"])
+    def test_each_stat_rejected(self, vcz_store, stat):
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                            chunk_bp=10_000)
+        with pytest.raises(NotImplementedError, match="Garud"):
+            windowed_analysis(stream, window_size=5_000, statistics=[stat])
+
+
 class TestSFSDispatch:
 
     def test_sfs_equivalent(self, vcz_store):
@@ -260,15 +276,3 @@ class TestStreamingGuardrails:
             windowed_analysis(stream, window_size=5_000,
                               statistics=["local_pca"])
 
-    @pytest.mark.parametrize("stat", ["garud_h1", "garud_h12",
-                                       "garud_h123", "garud_h2h1"])
-    def test_garud_rejected(self, vcz_store, stat):
-        # Garud H's hash basis is sized to the full matrix's n_variants,
-        # so a per-chunk dispatch gets a different basis per chunk and
-        # the H values disagree with the eager result. Reject explicitly
-        # rather than silently returning wrong numbers; once Garud's
-        # hash becomes position-deterministic this guardrail can drop.
-        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
-                                            chunk_bp=10_000)
-        with pytest.raises(NotImplementedError, match="Garud"):
-            windowed_analysis(stream, window_size=5_000, statistics=[stat])
