@@ -176,11 +176,29 @@ class StreamingHaplotypeMatrix:
 
     @property
     def chrom_start(self):
-        return self._source.mappable_lo
+        """Leading edge of the analyzed region.
+
+        Returns the chunk grid origin (typically ``0``) rather than the
+        first variant position -- streaming's per-chunk windows are
+        anchored to that grid, so reporting the variant-based origin
+        would be misleading for callers building a comparable eager
+        matrix.
+        """
+        return self._chunks[0][0] if self._chunks else 0
 
     @property
     def chrom_end(self):
-        return max(0, self._source.mappable_hi - 1)
+        """Trailing edge of the analyzed region (chunk-grid right edge).
+
+        Reported as the chunk grid's exclusive upper bound rather than
+        the last-variant-position-inclusive form HaplotypeMatrix uses
+        elsewhere. The streaming path runs windowed_analysis once per
+        chunk and concatenates; using the chunk grid's right edge for
+        each per-chunk chrom_end keeps all interior windows at uniform
+        width. A caller building a comparable eager matrix should set
+        ``eager.chrom_end = stream.chrom_end`` for the same effect.
+        """
+        return self._chunks[-1][1] if self._chunks else 0
 
     @property
     def sample_sets(self):
@@ -218,7 +236,10 @@ class StreamingHaplotypeMatrix:
                 continue
             hm = build_haplotype_matrix(
                 gt, pos,
-                chrom_start=int(left), chrom_end=int(right) - 1,
+                # chrom_end is the chunk's exclusive right edge so the
+                # last window in each chunk does not get clipped to the
+                # last variant position the way an eager matrix would.
+                chrom_start=int(left), chrom_end=int(right),
                 sample_sets=self._sample_sets,
             )
             yield int(left), int(right), hm

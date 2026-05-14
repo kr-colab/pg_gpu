@@ -1061,6 +1061,73 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
 
 
 # Convenience function for simple usage
+def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
+                              statistics, populations, missing_data,
+                              span_normalize, accessible_bed, chrom,
+                              **kwargs) -> pd.DataFrame:
+    """Run windowed_analysis chunk-by-chunk over a StreamingHaplotypeMatrix.
+
+    The per-chunk DataFrames are concatenated row-wise. Each chunk's windows
+    are computed in isolation and the chunk boundaries are aligned so a
+    window never straddles two chunks; the StreamingHaplotypeMatrix
+    constructor picked an ``align_bp`` for this reason, so the only
+    contract we have to enforce here is ``window_size`` divides it.
+
+    Sliding windows (``step_size`` != ``window_size``) and the local-PCA
+    dispatch both need cross-chunk state and are not yet supported on the
+    streaming path; both raise rather than silently returning wrong
+    results.
+    """
+    if step_size is None:
+        step_size = window_size
+    if step_size != window_size:
+        raise NotImplementedError(
+            "sliding windows (step_size != window_size) over a "
+            "StreamingHaplotypeMatrix would straddle chunk boundaries; "
+            "supply non-overlapping windows or materialize the region "
+            "eagerly first."
+        )
+    align_bp = streaming_hm._align_bp
+    if window_size > align_bp or align_bp % window_size != 0:
+        raise ValueError(
+            f"window_size={window_size} must divide the streaming matrix's "
+            f"chunk alignment ({align_bp}); pass a smaller window_size or "
+            f"re-open the store with a matching chunk_bp."
+        )
+    if any(s in ("local_pca", "local_pca_jackknife") for s in statistics):
+        raise NotImplementedError(
+            "local_pca requires a chromosome-wide reference and is not "
+            "available on the StreamingHaplotypeMatrix path; materialize "
+            "the region eagerly to run it."
+        )
+
+    parts = []
+    for left, right, chunk_hm in streaming_hm.iter_gpu_chunks():
+        df = windowed_analysis(
+            chunk_hm,
+            window_size=window_size, step_size=step_size,
+            statistics=statistics, populations=populations,
+            missing_data=missing_data, span_normalize=span_normalize,
+            accessible_bed=accessible_bed, chrom=chrom,
+            **kwargs,
+        )
+        if df is not None and len(df):
+            parts.append(df)
+
+    if not parts:
+        # Empty source (e.g. mappable region contains no variants). Return
+        # an empty frame; the eager path would have raised, but for
+        # streaming this is a legitimate "no data in any chunk" outcome.
+        return pd.DataFrame()
+    out = pd.concat(parts, ignore_index=True)
+    # Per-chunk window_id columns restart at 0 inside each chunk; re-number
+    # so concatenated results carry a globally-unique window_id matching
+    # what the eager path produces.
+    if "window_id" in out.columns:
+        out["window_id"] = np.arange(len(out), dtype=out["window_id"].dtype)
+    return out
+
+
 def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      window_size: int = 50000,
                      step_size: Optional[int] = None,
@@ -1103,6 +1170,17 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     pd.DataFrame
         Windowed statistics results
     """
+    from .streaming_matrix import StreamingHaplotypeMatrix
+    if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
+        return _stream_windowed_analysis(
+            haplotype_matrix,
+            window_size=window_size, step_size=step_size,
+            statistics=statistics, populations=populations,
+            missing_data=missing_data, span_normalize=span_normalize,
+            accessible_bed=accessible_bed, chrom=chrom,
+            **kwargs,
+        )
+
     if accessible_bed is not None and not haplotype_matrix.has_accessible_mask:
         haplotype_matrix.set_accessible_mask(accessible_bed, chrom=chrom)
     if step_size is None:
