@@ -7,6 +7,67 @@ from collections import Counter, OrderedDict
 from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask
 
 
+#: Fraction of free GPU memory the eager matrix is allowed to consume
+#: before ``streaming='auto'`` falls back to streaming. 0.5 leaves room
+#: for the haplotype matrix plus the working memory each statistic kernel
+#: needs (windowed scatter buffers, pairwise outputs, etc.).
+STREAMING_AUTO_EAGER_FRACTION = 0.5
+
+
+def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
+                           free_gpu_bytes=None,
+                           fraction=STREAMING_AUTO_EAGER_FRACTION):
+    """Pick 'eager' vs 'streaming' based on the projected matrix size.
+
+    A VCZ-layout store gets a quick metadata probe through
+    ``ZarrGenotypeSource`` to read ``num_variants`` and
+    ``num_haplotypes`` without materializing any genotypes. The
+    projected eager footprint (``num_variants * num_haplotypes`` int8
+    bytes) is compared against the free GPU memory pool: above
+    ``fraction`` of it, ``'auto'`` returns ``'streaming'`` and
+    ``'never'`` raises ``MemoryError``.
+
+    Scikit-allel layout stores always return ``'eager'``: the
+    streaming source is VCZ-only, so the size check would refuse a
+    large allel store that has no streaming path available. The
+    caller's eager path will then run through the existing
+    ``read_genotypes`` and either succeed or hit a real OOM.
+
+    ``free_gpu_bytes`` is exposed for tests; production callers
+    leave it None to let ``cp.cuda.Device().mem_info`` provide it.
+    """
+    import zarr
+    from .zarr_io import detect_zarr_layout
+    try:
+        store = zarr.open_group(zarr_path, mode="r")
+        layout = detect_zarr_layout(store)
+    except Exception:
+        layout = None
+    if layout != "vcz":
+        return "eager"  # scikit-allel: streaming unsupported, defer to eager
+
+    from .zarr_source import ZarrGenotypeSource
+    source = ZarrGenotypeSource(zarr_path, region=region,
+                                pop_file=False)  # cheap header probe
+    eager_bytes = int(source.num_variants) * int(source.num_haplotypes)
+
+    if free_gpu_bytes is None:
+        import cupy as _cp
+        free_gpu_bytes = int(_cp.cuda.Device().mem_info[0])
+
+    if eager_bytes <= fraction * free_gpu_bytes:
+        return "eager"
+    if streaming == "never":
+        raise MemoryError(
+            f"streaming='never' but the eager matrix would be "
+            f"{eager_bytes / 1e9:.1f} GB on a device with "
+            f"{free_gpu_bytes / 1e9:.1f} GB free (limit: "
+            f"{fraction:.0%}). Use streaming='auto' or 'always' to "
+            f"return a StreamingHaplotypeMatrix instead."
+        )
+    return "streaming"
+
+
 def _resolve_companion_pop_file(zarr_path, pop_file):
     """Resolve ``from_zarr``'s ``pop_file`` argument to a path or None.
 
@@ -412,9 +473,13 @@ class HaplotypeMatrix:
             iterates the store chunk-by-chunk through the GPU
             (suitable for biobank-scale stores that do not fit
             eagerly on the device). ``'always'`` forces streaming;
-            ``'never'`` forces eager. The ``'auto'`` default
-            currently routes to eager and is reserved for the
-            device-memory heuristic added in a follow-up.
+            ``'never'`` forces eager (and raises ``MemoryError`` if
+            the matrix would not fit in free GPU memory). ``'auto'``
+            (default) checks the projected eager footprint against
+            free GPU memory and picks streaming when the eager
+            matrix would consume more than half the device.
+            Scikit-allel layouts always route to eager because the
+            streaming source is VCZ-only.
         chunk_bp : int, optional
             Genomic chunk size in bp for the streaming path. Ignored
             on the eager path.
@@ -438,8 +503,20 @@ class HaplotypeMatrix:
                 chunk_bp=chunk_bp, prefetch=prefetch,
             )
 
-        # 'auto' and 'never' both eager today; 'auto' will pick up the
-        # device-memory check in a follow-up.
+        # 'auto' and 'never' both want eager when the matrix fits; 'auto'
+        # falls back to streaming when it doesn't, 'never' raises. The
+        # decision needs the matrix's projected size, which is only
+        # available via ZarrGenotypeSource (VCZ-only). For scikit-allel
+        # stores the layout doesn't support streaming yet, so the answer
+        # is always eager regardless of size.
+        choice = _decide_streaming_mode(path, region=region,
+                                        streaming=streaming,
+                                        pop_file=pop_file)
+        if choice == "streaming":
+            return cls._build_streaming(
+                path, region=region, pop_file=pop_file,
+                chunk_bp=chunk_bp, prefetch=prefetch,
+            )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
                                 pop_file=pop_file)

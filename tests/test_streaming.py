@@ -52,7 +52,8 @@ class TestStreamingFromZarr:
         hm = HaplotypeMatrix.from_zarr(path, streaming="never")
         assert isinstance(hm, HaplotypeMatrix)
 
-    def test_auto_defaults_to_eager_today(self, vcz_store):
+    def test_auto_picks_eager_on_small_store(self, vcz_store):
+        # small msprime store, plenty of free GPU memory -> auto goes eager.
         path, _ = vcz_store
         hm = HaplotypeMatrix.from_zarr(path, streaming="auto")
         assert isinstance(hm, HaplotypeMatrix)
@@ -161,6 +162,53 @@ class TestProducerThreadErrorPropagation:
         with pytest.raises(RuntimeError, match="synthetic producer error"):
             for _ in smatrix.iter_gpu_chunks():
                 pass
+
+
+class TestAutoDetection:
+    """``streaming='auto'`` should pick eager for stores that fit on the
+    device and streaming for stores that don't. The size threshold is
+    parameterized so tests can simulate "too big" with a tiny
+    ``free_gpu_bytes`` rather than needing a biobank-scale fixture."""
+
+    def test_auto_picks_eager_when_it_fits(self, vcz_store):
+        # default free GPU memory, tiny msprime store -> eager
+        path, _ = vcz_store
+        hm = HaplotypeMatrix.from_zarr(path, streaming="auto")
+        assert isinstance(hm, HaplotypeMatrix)
+        assert not isinstance(hm, StreamingHaplotypeMatrix)
+
+    def test_auto_picks_streaming_when_oversized(self, vcz_store):
+        # Force the "fits in free GPU memory" check to fail by passing a
+        # free_gpu_bytes too small for the eager footprint. This exercises
+        # the heuristic without needing a multi-GB fixture.
+        from pg_gpu.haplotype_matrix import _decide_streaming_mode
+        path, hm = vcz_store
+        eager_bytes = hm.haplotypes.size
+        # Make the eager footprint look like it doesn't fit by claiming
+        # less free GPU memory than the projected size requires.
+        choice = _decide_streaming_mode(
+            path, region=None, streaming="auto", pop_file=False,
+            free_gpu_bytes=int(eager_bytes / 0.5 - 1),  # just below threshold
+        )
+        assert choice == "streaming"
+
+    def test_never_raises_when_oversized(self, vcz_store):
+        from pg_gpu.haplotype_matrix import _decide_streaming_mode
+        path, hm = vcz_store
+        eager_bytes = hm.haplotypes.size
+        with pytest.raises(MemoryError, match="streaming='never'"):
+            _decide_streaming_mode(
+                path, region=None, streaming="never", pop_file=False,
+                free_gpu_bytes=int(eager_bytes / 0.5 - 1),
+            )
+
+    def test_never_passes_when_it_fits(self, vcz_store):
+        # opposite case: free memory is much larger than the matrix, so
+        # streaming='never' returns eager without raising.
+        path, _ = vcz_store
+        hm = HaplotypeMatrix.from_zarr(path, streaming="never")
+        assert isinstance(hm, HaplotypeMatrix)
+        assert not isinstance(hm, StreamingHaplotypeMatrix)
 
 
 class TestMaterialize:

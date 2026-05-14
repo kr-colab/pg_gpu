@@ -85,7 +85,8 @@ class ZarrGenotypeSource:
             chrom, start, end = _parse_region(region)
             if chrom not in contig_ids:
                 raise ValueError(
-                    f"Contig {chrom!r} not in store. Available: {contig_ids}"
+                    f"Contig {chrom!r} not found in store. "
+                    f"Available: {contig_ids}"
                 )
             contig_idx = contig_ids.index(chrom)
             mask = (all_contigs == contig_idx) & (all_pos >= start) & (all_pos < end)
@@ -94,13 +95,15 @@ class ZarrGenotypeSource:
             if len(unique_contigs) > 1 and contig_id is None:
                 names = [contig_ids[i] for i in unique_contigs]
                 raise ValueError(
-                    f"Store contains multiple contigs {names}. Pass "
-                    f"region='chrom:start-end' or contig_id=... to pick one."
+                    f"Store contains {len(unique_contigs)} contigs: "
+                    f"{names}. Pass region='chrom:start-end' or "
+                    f"contig_id=... to pick one."
                 )
             if contig_id is not None:
                 if contig_id not in contig_ids:
                     raise ValueError(
-                        f"Contig {contig_id!r} not in store. Available: {contig_ids}"
+                        f"Contig {contig_id!r} not found in store. "
+                        f"Available: {contig_ids}"
                     )
                 contig_idx = contig_ids.index(contig_id)
             else:

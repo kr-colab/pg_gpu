@@ -92,7 +92,7 @@ class TestConstruction:
 
     def test_multi_contig_requires_pick(self, multi_contig_store):
         path, _, _ = multi_contig_store
-        with pytest.raises(ValueError, match="multiple contigs"):
+        with pytest.raises(ValueError, match="contigs"):
             ZarrGenotypeSource(path)
 
     def test_multi_contig_with_contig_id(self, multi_contig_store):
