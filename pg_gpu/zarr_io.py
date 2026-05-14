@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import sys
 
 import numpy as np
 
@@ -11,6 +12,27 @@ def _parse_region(region):
     chrom, coords = region.split(':')
     start, end = [int(x) for x in coords.split('-')]
     return chrom, start, end
+
+
+def resolve_pop_file_path(zarr_path, pop_file, *, announce_prefix):
+    """Map a ``pop_file`` kwarg to a filesystem path or None.
+
+    ``pop_file=False`` disables the auto-load and returns None.
+    ``pop_file=<str>`` returns the path as-is. ``pop_file=None`` looks
+    for ``<zarr_path>.pops.tsv`` next to the store; if it exists,
+    announces the auto-load to stderr via ``announce_prefix`` and
+    returns the companion path.
+    """
+    if pop_file is False:
+        return None
+    if pop_file is not None:
+        return pop_file
+    companion = str(zarr_path).rstrip("/") + ".pops.tsv"
+    if not os.path.exists(companion):
+        return None
+    print(f"{announce_prefix}: auto-loaded pop file {companion}",
+          file=sys.stderr, flush=True)
+    return companion
 
 
 def detect_zarr_layout(store):

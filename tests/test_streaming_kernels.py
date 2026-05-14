@@ -5,7 +5,6 @@ twice on the same data: once with the eager HaplotypeMatrix and once
 with the StreamingHaplotypeMatrix. Results must agree row-for-row.
 """
 
-import msprime
 import numpy as np
 import pandas as pd
 import pytest
@@ -13,14 +12,11 @@ import pytest
 from pg_gpu import HaplotypeMatrix, windowed_analysis
 from pg_gpu import sfs as sfs_module
 
+from .conftest import simulate_hm
+
 
 def _simulate_hm(n_samples=20, seq_length=100_000, seed=42):
-    ts = msprime.sim_ancestry(
-        samples=n_samples, sequence_length=seq_length,
-        recombination_rate=1e-4, random_seed=seed, ploidy=2,
-    )
-    ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=seed)
-    return HaplotypeMatrix.from_ts(ts)
+    return simulate_hm(n_samples=n_samples, seq_length=seq_length, seed=seed)
 
 
 @pytest.fixture

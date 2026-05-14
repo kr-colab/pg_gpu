@@ -1,6 +1,5 @@
 """Tests for StreamingHaplotypeMatrix + HostChunkFetcher."""
 
-import msprime
 import numpy as np
 import pytest
 import cupy as cp
@@ -11,14 +10,11 @@ from pg_gpu.streaming_matrix import (
 )
 from pg_gpu.zarr_source import ZarrGenotypeSource
 
+from .conftest import simulate_hm
+
 
 def _simulate_hm(n_samples=20, seq_length=50_000, seed=42):
-    ts = msprime.sim_ancestry(
-        samples=n_samples, sequence_length=seq_length,
-        recombination_rate=1e-4, random_seed=seed, ploidy=2,
-    )
-    ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=seed)
-    return HaplotypeMatrix.from_ts(ts)
+    return simulate_hm(n_samples=n_samples, seq_length=seq_length, seed=seed)
 
 
 @pytest.fixture
@@ -97,9 +93,8 @@ class TestStreamingEquivalence:
 
     def test_stream_concat_matches_eager(self, vcz_store):
         # walking every chunk in streaming mode and concatenating the
-        # per-chunk haplotype matrices should reproduce the eager matrix
-        # bit-for-bit. This is the contract kernel dispatch in the follow-up
-        # PR relies on.
+        # per-chunk haplotype matrices reproduces the eager matrix
+        # bit-for-bit -- the invariant streaming-aware kernels rely on.
         path, _ = vcz_store
         eager = HaplotypeMatrix.from_zarr(path, streaming="never")
         smatrix = HaplotypeMatrix.from_zarr(path, streaming="always",
@@ -186,11 +181,14 @@ class TestAutoDetection:
         eager_bytes = hm.haplotypes.size
         # Make the eager footprint look like it doesn't fit by claiming
         # less free GPU memory than the projected size requires.
-        choice = _decide_streaming_mode(
+        choice, source = _decide_streaming_mode(
             path, region=None, streaming="auto", pop_file=False,
-            free_gpu_bytes=int(eager_bytes / 0.5 - 1),  # just below threshold
+            free_gpu_bytes=int(eager_bytes / 0.5 - 1),
         )
         assert choice == "streaming"
+        # source is returned so _build_streaming can reuse it instead of
+        # re-opening the zarr store.
+        assert source is not None
 
     def test_never_raises_when_oversized(self, vcz_store):
         from pg_gpu.haplotype_matrix import _decide_streaming_mode

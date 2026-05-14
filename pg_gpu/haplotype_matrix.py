@@ -17,38 +17,38 @@ STREAMING_AUTO_EAGER_FRACTION = 0.5
 def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
                            free_gpu_bytes=None,
                            fraction=STREAMING_AUTO_EAGER_FRACTION):
-    """Pick 'eager' vs 'streaming' based on the projected matrix size.
+    """Pick ``'eager'`` vs ``'streaming'`` based on the projected matrix size.
 
-    A VCZ-layout store gets a quick metadata probe through
-    ``ZarrGenotypeSource`` to read ``num_variants`` and
-    ``num_haplotypes`` without materializing any genotypes. The
-    projected eager footprint (``num_variants * num_haplotypes`` int8
-    bytes) is compared against the free GPU memory pool: above
-    ``fraction`` of it, ``'auto'`` returns ``'streaming'`` and
-    ``'never'`` raises ``MemoryError``.
+    Returns ``(mode, source)`` where ``source`` is the
+    ``ZarrGenotypeSource`` opened for the size probe and reused
+    downstream (when ``mode == 'streaming'``), or ``None`` when no
+    source was opened (scikit-allel layout, missing store, or the
+    eager-fits branch where the caller's eager path opens its own
+    store via ``read_genotypes``).
 
-    Scikit-allel layout stores always return ``'eager'``: the
+    Scikit-allel layouts always return ``('eager', None)``: the
     streaming source is VCZ-only, so the size check would refuse a
-    large allel store that has no streaming path available. The
-    caller's eager path will then run through the existing
-    ``read_genotypes`` and either succeed or hit a real OOM.
+    large allel store with nowhere to fall back to.
 
-    ``free_gpu_bytes`` is exposed for tests; production callers
-    leave it None to let ``cp.cuda.Device().mem_info`` provide it.
+    ``free_gpu_bytes`` is exposed for tests; production callers leave
+    it None to let ``cp.cuda.Device().mem_info`` provide it.
     """
     import zarr
     from .zarr_io import detect_zarr_layout
     try:
         store = zarr.open_group(zarr_path, mode="r")
         layout = detect_zarr_layout(store)
-    except Exception:
-        layout = None
+    except (FileNotFoundError, KeyError, ValueError):
+        # Store path is missing, missing required arrays, or has an
+        # unrecognized layout. Defer to the eager path so its richer
+        # error messages (read_genotypes, layout-specific) surface.
+        return "eager", None
     if layout != "vcz":
-        return "eager"  # scikit-allel: streaming unsupported, defer to eager
+        return "eager", None
 
     from .zarr_source import ZarrGenotypeSource
     source = ZarrGenotypeSource(zarr_path, region=region,
-                                pop_file=False)  # cheap header probe
+                                pop_file=False)
     eager_bytes = int(source.num_variants) * int(source.num_haplotypes)
 
     if free_gpu_bytes is None:
@@ -56,7 +56,7 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
         free_gpu_bytes = int(_cp.cuda.Device().mem_info[0])
 
     if eager_bytes <= fraction * free_gpu_bytes:
-        return "eager"
+        return "eager", None
     if streaming == "never":
         raise MemoryError(
             f"streaming='never' but the eager matrix would be "
@@ -65,29 +65,15 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
             f"{fraction:.0%}). Use streaming='auto' or 'always' to "
             f"return a StreamingHaplotypeMatrix instead."
         )
-    return "streaming"
+    return "streaming", source
 
 
 def _resolve_companion_pop_file(zarr_path, pop_file):
-    """Resolve ``from_zarr``'s ``pop_file`` argument to a path or None.
-
-    The user can pass an explicit path, ``False`` to disable the
-    auto-load, or ``None`` (default) to look for ``<zarr_path>.pops.tsv``
-    next to the store. The auto-load announces to stderr so the choice
-    is visible to the caller.
-    """
-    import os
-    import sys
-    if pop_file is False:
-        return None
-    if pop_file is not None:
-        return pop_file
-    companion = str(zarr_path).rstrip("/") + ".pops.tsv"
-    if not os.path.exists(companion):
-        return None
-    print(f"HaplotypeMatrix.from_zarr: auto-loaded pop file {companion}",
-          file=sys.stderr, flush=True)
-    return companion
+    """Wrapper around ``zarr_io.resolve_pop_file_path`` tagged for the
+    ``HaplotypeMatrix.from_zarr`` auto-load announce message."""
+    from .zarr_io import resolve_pop_file_path
+    return resolve_pop_file_path(zarr_path, pop_file,
+                                 announce_prefix="HaplotypeMatrix.from_zarr")
 
 
 class HaplotypeMatrix:
@@ -506,16 +492,17 @@ class HaplotypeMatrix:
         # 'auto' and 'never' both want eager when the matrix fits; 'auto'
         # falls back to streaming when it doesn't, 'never' raises. The
         # decision needs the matrix's projected size, which is only
-        # available via ZarrGenotypeSource (VCZ-only). For scikit-allel
-        # stores the layout doesn't support streaming yet, so the answer
-        # is always eager regardless of size.
-        choice = _decide_streaming_mode(path, region=region,
-                                        streaming=streaming,
-                                        pop_file=pop_file)
+        # available via ZarrGenotypeSource (VCZ-only). Scikit-allel
+        # stores always route to eager because there is no streaming
+        # source for that layout.
+        choice, source = _decide_streaming_mode(path, region=region,
+                                                streaming=streaming,
+                                                pop_file=pop_file)
         if choice == "streaming":
             return cls._build_streaming(
                 path, region=region, pop_file=pop_file,
                 chunk_bp=chunk_bp, prefetch=prefetch,
+                source=source,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
@@ -552,11 +539,18 @@ class HaplotypeMatrix:
         return hm
 
     @classmethod
-    def _build_streaming(cls, path, *, region, pop_file, chunk_bp, prefetch):
+    def _build_streaming(cls, path, *, region, pop_file, chunk_bp, prefetch,
+                         source=None):
         from .streaming_matrix import HostChunkFetcher, StreamingHaplotypeMatrix
         from .zarr_source import ZarrGenotypeSource
 
-        source = ZarrGenotypeSource(path, region=region, pop_file=pop_file)
+        if source is None:
+            source = ZarrGenotypeSource(path, region=region, pop_file=pop_file)
+        else:
+            # _decide_streaming_mode opens the source with pop_file=False
+            # to keep its size probe cheap; resolve the caller's pop_file
+            # now without re-opening the zarr store.
+            source.pop_cols = source._resolve_pop_file(pop_file)
         fetcher = HostChunkFetcher(source)
         return StreamingHaplotypeMatrix(
             source, fetcher,

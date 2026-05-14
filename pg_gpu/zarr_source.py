@@ -14,8 +14,6 @@ that want streaming on those layouts should re-encode via
 ``HaplotypeMatrix.vcf_to_zarr`` or ``HaplotypeMatrix.to_zarr(format='vcz')``.
 """
 
-import os
-import sys
 import warnings
 
 import numpy as np
@@ -223,15 +221,13 @@ class ZarrGenotypeSource:
         return lo, hi
 
     def _resolve_pop_file(self, pop_file):
-        if pop_file is False:
-            return None
+        from .zarr_io import resolve_pop_file_path
+        pop_file = resolve_pop_file_path(
+            self.path, pop_file,
+            announce_prefix="ZarrGenotypeSource",
+        )
         if pop_file is None:
-            companion = self.path.rstrip("/") + ".pops.tsv"
-            if not os.path.exists(companion):
-                return None
-            pop_file = companion
-            print(f"ZarrGenotypeSource: auto-loaded pop file {companion}",
-                  file=sys.stderr, flush=True)
+            return None
 
         # Resolve sample names to diploid indices via the store's sample_id.
         sample_ids = list(np.array(self._store["sample_id"]))

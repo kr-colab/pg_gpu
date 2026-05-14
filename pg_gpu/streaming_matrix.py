@@ -10,9 +10,12 @@ producer thread that calls ``ZarrGenotypeSource.slice_region`` while the
 GPU is working on the current chunk, with one chunk of read-ahead by
 default.
 
-Kernels accept this class via dispatch in a follow-up; until then,
-calling a kernel directly raises a clear error. Use ``iter_gpu_chunks``
-to walk chunks manually if you need to.
+Streaming-aware kernels (``windowed_analysis``, ``sfs.sfs``,
+``sfs.joint_sfs``) dispatch on ``isinstance(hm, StreamingHaplotypeMatrix)``
+at the top of the call and run themselves chunk-by-chunk. Kernels
+that have not been adapted yet (Garud, pairwise statistics) raise on
+this class; ``.materialize(region=...)`` returns an eager
+``HaplotypeMatrix`` over a sub-region for those.
 """
 
 import queue
@@ -37,11 +40,11 @@ def _stream_sum(streaming_hm, kernel_fn):
 
     Used by SFS-style kernels whose chunk results compose by addition --
     each chunk contributes its own bincount or joint-bincount, and the
-    chromosome-wide answer is their sum. The padding step covers the
-    edge case where two chunks produce arrays of different shapes (e.g.
-    when one chunk has a population with strictly more valid samples
-    after masking than another, giving it one more bin along that
-    axis).
+    chromosome-wide answer is their sum. Same-shape chunk results take a
+    fast path (in-place add); the slow path only fires on the edge case
+    where two chunks have different shapes (e.g. one chunk's population
+    has strictly more valid samples after masking than another, giving
+    it an extra bin along that axis).
     """
     total = None
     for _, _, chunk in streaming_hm.iter_gpu_chunks():
@@ -49,11 +52,12 @@ def _stream_sum(streaming_hm, kernel_fn):
         if total is None:
             total = s.copy()
             continue
-        if s.shape != total.shape:
-            shape = tuple(max(a, b) for a, b in zip(total.shape, s.shape))
-            total = _pad_to(total, shape)
-            s = _pad_to(s, shape)
-        total += s
+        if s.shape == total.shape:
+            total += s
+            continue
+        shape = tuple(max(a, b) for a, b in zip(total.shape, s.shape))
+        total = _pad_to(total, shape)
+        total += _pad_to(s, shape)
     return total
 
 
@@ -86,9 +90,9 @@ class HostChunkFetcher(ChunkFetcher):
 
     ``prefetch >= 1`` spawns a daemon producer thread that fills a
     bounded queue with the next chunk while the consumer is computing
-    on the current chunk. This is the right baseline for any local
-    zarr store; the kvikio fetcher in a follow-up swaps the same
-    interface for GPU-side codec decode.
+    on the current chunk. A GPU-codec-decode fetcher (kvikio +
+    nvidia-nvcomp) is a drop-in replacement for the same ABC when
+    the store's codec is GPU-decodable.
     """
 
     def __init__(self, source):
@@ -207,6 +211,17 @@ class StreamingHaplotypeMatrix:
     @property
     def chrom(self):
         return self._source.chrom
+
+    @property
+    def align_bp(self):
+        """Chunk-boundary alignment in bp.
+
+        Every chunk has a width that is a multiple of this, so a window
+        whose size also divides ``align_bp`` is guaranteed to fit inside
+        a single chunk. Streaming-aware kernels read this property to
+        validate that the caller's ``window_size`` divides it.
+        """
+        return self._align_bp
 
     @property
     def chrom_start(self):

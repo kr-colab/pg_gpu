@@ -12,12 +12,13 @@ eager-vs-streaming check would miss because eager and streaming share
 a bug in the underlying kernel.
 """
 
-import msprime
 import numpy as np
 import allel
 import pytest
 
 from pg_gpu import HaplotypeMatrix, windowed_analysis
+
+from .conftest import simulate_hm
 
 
 @pytest.fixture
@@ -25,21 +26,12 @@ def vcz_store(tmp_path):
     """A small msprime-derived VCZ store with samples named.
 
     Uses msprime's binary mutation model: pg_gpu's pi formula treats
-    every site as biallelic (counts the sum of int8 values as the
-    derived allele count), so on a triallelic site with hap values in
-    {0, 1, 2} the count is off and pg_gpu disagrees with allel by ~1%
-    per window. That disagreement is a pre-existing pg_gpu vs allel
-    issue on multiallelic data, not anything streaming-specific; the
-    binary model sidesteps it so this test isolates the streaming
+    every site as biallelic and disagrees with allel by ~1% per
+    window on triallelic data (kr-colab/pg_gpu#100). Binary
+    mutations sidestep that gap so this test isolates the streaming
     dispatch.
     """
-    ts = msprime.sim_ancestry(
-        samples=20, sequence_length=100_000,
-        recombination_rate=1e-4, random_seed=42, ploidy=2,
-    )
-    ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=42,
-                               model="binary")
-    hm = HaplotypeMatrix.from_ts(ts)
+    hm = simulate_hm(seq_length=100_000, mutation_model="binary")
     hm.samples = [f"s{i}" for i in range(hm.num_haplotypes // 2)]
     path = str(tmp_path / "trio.vcz")
     hm.to_zarr(path, format="vcz", contig_name="1")

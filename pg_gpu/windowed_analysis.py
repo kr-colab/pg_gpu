@@ -1087,7 +1087,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             "supply non-overlapping windows or materialize the region "
             "eagerly first."
         )
-    align_bp = streaming_hm._align_bp
+    align_bp = streaming_hm.align_bp
     if window_size > align_bp or align_bp % window_size != 0:
         raise ValueError(
             f"window_size={window_size} must divide the streaming matrix's "
@@ -1115,14 +1115,28 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             "eagerly to run Garud at biobank scale until it lands."
         )
 
+    # Parse the BED mask once up front and inject the resolved
+    # AccessibleMask into each chunk -- otherwise windowed_analysis would
+    # re-open and re-parse the BED for every chunk via
+    # haplotype_matrix.set_accessible_mask.
+    shared_mask = None
+    if accessible_bed is not None:
+        from .accessible import resolve_accessible_mask
+        shared_mask = resolve_accessible_mask(
+            accessible_bed, streaming_hm.chrom_start, streaming_hm.chrom_end,
+            chrom=chrom,
+        )
+
     parts = []
     for left, right, chunk_hm in streaming_hm.iter_gpu_chunks():
+        if shared_mask is not None:
+            chunk_hm.accessible_mask = shared_mask
         df = windowed_analysis(
             chunk_hm,
             window_size=window_size, step_size=step_size,
             statistics=statistics, populations=populations,
             missing_data=missing_data, span_normalize=span_normalize,
-            accessible_bed=accessible_bed, chrom=chrom,
+            accessible_bed=None, chrom=chrom,
             **kwargs,
         )
         if df is not None and len(df):
