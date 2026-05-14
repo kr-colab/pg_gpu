@@ -383,16 +383,15 @@ class HaplotypeMatrix:
     @classmethod
     def from_zarr(cls, path: str, region: str = None,
                   accessible_bed: str = None,
-                  pop_file=None):
+                  pop_file=None,
+                  streaming: str = "auto",
+                  chunk_bp: int = 1_500_000,
+                  prefetch: int = 1):
         """Construct a HaplotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
         Layout is auto-detected. For multi-chromosome stores, region
         must be specified.
-
-        Multiallelic / missing rows (genotype = -1) are dropped from
-        the returned matrix -- pg_gpu's haplotype kernels are
-        calibrated for biallelic sites.
 
         Parameters
         ----------
@@ -408,11 +407,45 @@ class HaplotypeMatrix:
             (``None``) looks for ``<path>.pops.tsv`` next to the
             store and loads it if present, announcing the auto-load
             to stderr. Pass ``False`` to disable the auto-load.
+        streaming : {'auto', 'always', 'never'}, optional
+            Whether to return a ``StreamingHaplotypeMatrix`` that
+            iterates the store chunk-by-chunk through the GPU
+            (suitable for biobank-scale stores that do not fit
+            eagerly on the device). ``'always'`` forces streaming;
+            ``'never'`` forces eager. The ``'auto'`` default
+            currently routes to eager and is reserved for the
+            device-memory heuristic added in a follow-up.
+        chunk_bp : int, optional
+            Genomic chunk size in bp for the streaming path. Ignored
+            on the eager path.
+        prefetch : int, optional
+            Read-ahead depth for the streaming path. Ignored on the
+            eager path.
 
         Returns
         -------
-        HaplotypeMatrix
+        HaplotypeMatrix or StreamingHaplotypeMatrix
         """
+        if streaming not in ("auto", "always", "never"):
+            raise ValueError(
+                f"streaming must be 'auto', 'always', or 'never'; "
+                f"got {streaming!r}"
+            )
+
+        if streaming == "always":
+            return cls._build_streaming(
+                path, region=region, pop_file=pop_file,
+                chunk_bp=chunk_bp, prefetch=prefetch,
+            )
+
+        # 'auto' and 'never' both eager today; 'auto' will pick up the
+        # device-memory check in a follow-up.
+        return cls._build_eager(path, region=region,
+                                accessible_bed=accessible_bed,
+                                pop_file=pop_file)
+
+    @classmethod
+    def _build_eager(cls, path, *, region, accessible_bed, pop_file):
         from .zarr_io import read_genotypes
         from ._gpu_genotype_prep import build_haplotype_matrix
 
@@ -440,6 +473,18 @@ class HaplotypeMatrix:
             hm.load_pop_file(resolved_pop)
 
         return hm
+
+    @classmethod
+    def _build_streaming(cls, path, *, region, pop_file, chunk_bp, prefetch):
+        from .streaming_matrix import HostChunkFetcher, StreamingHaplotypeMatrix
+        from .zarr_source import ZarrGenotypeSource
+
+        source = ZarrGenotypeSource(path, region=region, pop_file=pop_file)
+        fetcher = HostChunkFetcher(source)
+        return StreamingHaplotypeMatrix(
+            source, fetcher,
+            chunk_bp=chunk_bp, prefetch=prefetch,
+        )
 
     def to_zarr(self, zarr_path: str, format: str = 'vcz',
                 contig_name: str = None):

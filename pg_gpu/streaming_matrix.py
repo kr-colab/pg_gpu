@@ -1,0 +1,232 @@
+"""Chunk-streamed view over a VCZ store, used by HaplotypeMatrix.from_zarr
+at biobank scale.
+
+A ``StreamingHaplotypeMatrix`` does not materialize the full genotype
+matrix; it iterates the store in genomic chunks via ``iter_gpu_chunks()``.
+Each chunk arrives as an eager ``HaplotypeMatrix`` on the GPU covering
+one slice of the chromosome. Compute-side overlap with the next chunk's
+read happens through a ``ChunkFetcher`` -- ``HostChunkFetcher`` runs a
+producer thread that calls ``ZarrGenotypeSource.slice_region`` while the
+GPU is working on the current chunk, with one chunk of read-ahead by
+default.
+
+Kernels accept this class via dispatch in a follow-up; until then,
+calling a kernel directly raises a clear error. Use ``iter_gpu_chunks``
+to walk chunks manually if you need to.
+"""
+
+import queue
+import threading
+import time
+from abc import ABC, abstractmethod
+
+from ._gpu_genotype_prep import build_haplotype_matrix
+
+
+class ChunkFetcher(ABC):
+    """Pluggable producer that yields per-chunk genotype blocks.
+
+    Implementations are responsible for whatever async / parallelism
+    strategy they want; the consumer (``StreamingHaplotypeMatrix``)
+    only consumes the yielded tuples. Errors raised inside the
+    producer must be forwarded to the consumer with their traceback
+    preserved.
+    """
+
+    @abstractmethod
+    def iter_chunks(self, chunks, prefetch):
+        """Yield ``(ci, left, right, gt, pos, t_read_s)`` per chunk.
+
+        Parameters
+        ----------
+        chunks : list of (int, int)
+            Half-open ``(left, right)`` bp intervals.
+        prefetch : int
+            Read-ahead depth. ``0`` means serial; >=1 means a worker
+            thread reads ahead of the consumer.
+        """
+
+
+class HostChunkFetcher(ChunkFetcher):
+    """Read chunks through the source's host-buffer ``slice_region``.
+
+    ``prefetch >= 1`` spawns a daemon producer thread that fills a
+    bounded queue with the next chunk while the consumer is computing
+    on the current chunk. This is the right baseline for any local
+    zarr store; the kvikio fetcher in a follow-up swaps the same
+    interface for GPU-side codec decode.
+    """
+
+    def __init__(self, source):
+        self._source = source
+
+    def iter_chunks(self, chunks, prefetch):
+        if prefetch <= 0:
+            yield from self._iter_serial(chunks)
+            return
+        yield from self._iter_with_producer(chunks, prefetch)
+
+    def _iter_serial(self, chunks):
+        for ci, (left, right) in enumerate(chunks):
+            t0 = time.perf_counter()
+            gt, pos = self._source.slice_region(left, right)
+            yield ci, left, right, gt, pos, time.perf_counter() - t0
+
+    def _iter_with_producer(self, chunks, prefetch):
+        # Use a bounded queue so the producer blocks once it is `prefetch`
+        # chunks ahead, preventing unbounded host RAM growth on slow
+        # consumers. _END is a private sentinel; ("ERR", exc) forwards
+        # producer-side exceptions to the consumer's call stack.
+        q = queue.Queue(maxsize=prefetch)
+        stop = threading.Event()
+        _END = object()
+
+        def producer():
+            try:
+                for ci, (left, right) in enumerate(chunks):
+                    if stop.is_set():
+                        return
+                    t0 = time.perf_counter()
+                    gt, pos = self._source.slice_region(left, right)
+                    t_read = time.perf_counter() - t0
+                    if stop.is_set():
+                        return
+                    q.put((ci, left, right, gt, pos, t_read))
+            except BaseException as e:
+                q.put(("ERR", e))
+                return
+            q.put(_END)
+
+        t = threading.Thread(target=producer, daemon=True,
+                             name="zarr-prefetch")
+        t.start()
+        try:
+            while True:
+                item = q.get()
+                if item is _END:
+                    break
+                if isinstance(item, tuple) and item and item[0] == "ERR":
+                    raise item[1]
+                yield item
+        finally:
+            stop.set()
+            # drain so the producer's last put doesn't block forever
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+            t.join(timeout=5)
+
+
+class StreamingHaplotypeMatrix:
+    """Chunked view over a ``ZarrGenotypeSource``.
+
+    Used by ``HaplotypeMatrix.from_zarr`` when the requested matrix
+    does not fit eagerly on the GPU. Kernels that consume this class
+    do so by iterating ``iter_gpu_chunks``; each yielded
+    ``HaplotypeMatrix`` is an eager device-resident chunk covering a
+    single genomic interval.
+
+    Direct array access (``.haplotypes``, ``.positions``) is not
+    supported -- the whole point of this class is that the matrix is
+    too big to materialize. The dispatch in the kernels uses the
+    iterator instead.
+
+    Parameters
+    ----------
+    source : ZarrGenotypeSource
+    fetcher : ChunkFetcher
+    chunk_bp : int
+        Genomic span per chunk, in bp.
+    prefetch : int
+        Read-ahead depth handed to the fetcher.
+    align_bp : int, optional
+        Chunk boundaries are snapped to multiples of this so a windowed
+        kernel can guarantee windows never straddle a chunk boundary.
+        Defaults to ``chunk_bp`` (single window per chunk).
+    """
+
+    def __init__(self, source, fetcher, chunk_bp, prefetch, *,
+                 align_bp=None):
+        self._source = source
+        self._fetcher = fetcher
+        self._chunk_bp = int(chunk_bp)
+        self._prefetch = int(prefetch)
+        self._align_bp = int(align_bp) if align_bp is not None else self._chunk_bp
+        self._chunks = list(
+            source.iter_chunks(self._chunk_bp, self._align_bp)
+        )
+        # _sample_sets follows the same idiom as HaplotypeMatrix: store the
+        # explicit value (or None) and let the property fall back to a
+        # default 'all' set when no pop file resolved at source construction.
+        self._sample_sets = source.pop_cols
+
+    @property
+    def num_variants(self):
+        return self._source.num_variants
+
+    @property
+    def num_haplotypes(self):
+        return self._source.num_haplotypes
+
+    @property
+    def chrom(self):
+        return self._source.chrom
+
+    @property
+    def chrom_start(self):
+        return self._source.mappable_lo
+
+    @property
+    def chrom_end(self):
+        return max(0, self._source.mappable_hi - 1)
+
+    @property
+    def sample_sets(self):
+        """Population -> hap-axis indices. Falls back to a single 'all' set
+        when no pop file was resolved."""
+        if self._sample_sets is None:
+            return {"all": list(range(self.num_haplotypes))}
+        return self._sample_sets
+
+    @sample_sets.setter
+    def sample_sets(self, value):
+        self._sample_sets = value
+
+    @property
+    def haplotypes(self):
+        raise NotImplementedError(
+            "StreamingHaplotypeMatrix has no materialized .haplotypes "
+            "array; the matrix is too big to fit eagerly, which is why "
+            "from_zarr returned this class instead of HaplotypeMatrix. "
+            "Iterate chunks via .iter_gpu_chunks(), or pass this object "
+            "to a streaming-aware kernel."
+        )
+
+    def iter_gpu_chunks(self):
+        """Yield ``(left, right, HaplotypeMatrix)`` tuples covering the source.
+
+        Each yielded HaplotypeMatrix lives on the GPU and represents one
+        genomic chunk's variants on the full haplotype axis. Empty
+        chunks (regions with no variants, e.g. an acrocentric arm) are
+        skipped -- callers see only chunks with at least one variant.
+        """
+        for ci, left, right, gt, pos, t_read in self._fetcher.iter_chunks(
+                self._chunks, self._prefetch):
+            if gt.shape[0] == 0:
+                continue
+            hm = build_haplotype_matrix(
+                gt, pos,
+                chrom_start=int(left), chrom_end=int(right) - 1,
+                sample_sets=self._sample_sets,
+            )
+            yield int(left), int(right), hm
+
+    def __repr__(self):
+        return (
+            f"StreamingHaplotypeMatrix(num_variants={self.num_variants}, "
+            f"num_haplotypes={self.num_haplotypes}, "
+            f"chrom={self.chrom!r}, n_chunks={len(self._chunks)}, "
+            f"chunk_bp={self._chunk_bp}, prefetch={self._prefetch})"
+        )
