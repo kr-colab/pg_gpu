@@ -516,15 +516,19 @@ class _StreamingMatrixBase:
         if sample_subset is None:
             gt, pos = self._source.slice_region(left, right)
         else:
-            # slice_subsample's ploidy gather already lives on the GPU
-            # at biobank-scale sample counts; keep the result there
-            # and assemble the ``(n_var, n_dip', 2)`` layout in cupy so
-            # we don't round-trip through a multi-GB host buffer. The
-            # subsample ploidy ordering matches the source's convention:
-            # haps 0..n_dip-1 = ploidy 0, n_dip..2*n_dip-1 = ploidy 1.
-            gm_gpu, pos = self._source.slice_subsample(
-                left, right, sample_subset, to_gpu=True
-            )
+            # If the fetcher uses kvikio, decompress through it: at
+            # biobank-scale sample subsets the host-side oindex codec
+            # pipeline that ``slice_subsample`` would use is minutes per
+            # probe; the kvikio + nvCOMP path is seconds. Otherwise
+            # fall back to the host stage with the gather on GPU.
+            if isinstance(self._fetcher, KvikioChunkFetcher):
+                gm_gpu, pos = self._read_subsample_via_kvikio(
+                    left, right, sample_subset
+                )
+            else:
+                gm_gpu, pos = self._source.slice_subsample(
+                    left, right, sample_subset, to_gpu=True
+                )
             n_var, n_hap = gm_gpu.shape
             if n_hap % 2 != 0:
                 raise ValueError(
@@ -533,6 +537,10 @@ class _StreamingMatrixBase:
                     f"got {n_hap}."
                 )
             n_dip_sub = n_hap // 2
+            # The subsample ploidy ordering matches the source's
+            # convention: haps 0..n_dip-1 = ploidy 0, n_dip..2*n_dip-1
+            # = ploidy 1. Assemble the (n_var, n_dip', 2) layout in
+            # cupy so we don't round-trip through a multi-GB host buffer.
             gt = cp.empty((n_var, n_dip_sub, 2), dtype=gm_gpu.dtype)
             gt[:, :, 0] = gm_gpu[:, :n_dip_sub]
             gt[:, :, 1] = gm_gpu[:, n_dip_sub:]
@@ -543,6 +551,23 @@ class _StreamingMatrixBase:
             chrom_start=left, chrom_end=right,
             sample_sets=self._sample_sets,
         )
+
+    def _read_subsample_via_kvikio(self, left, right, sample_subset):
+        """Open the fetcher's GDSStore-backed ``call_genotype`` array
+        with the GPU buffer prototype active and route
+        ``slice_subsample_gpu`` through it. The buffer prototype is
+        reset on every exit path so subsequent eager work gets numpy
+        buffers back."""
+        self._fetcher._enable_gpu_buffer()
+        try:
+            cg = zarr.open_group(
+                self._fetcher._gds_store, mode="r"
+            )["call_genotype"]
+            return self._source.slice_subsample_gpu(
+                left, right, sample_subset, cg=cg,
+            )
+        finally:
+            self._fetcher._reset_gpu_buffer()
 
     def _sample_axis_size(self):  # pragma: no cover -- abstract
         raise NotImplementedError

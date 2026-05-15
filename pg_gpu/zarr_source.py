@@ -23,6 +23,13 @@ import zarr
 from .zarr_io import _parse_region, detect_zarr_layout
 
 
+#: Maximum contiguous-run count before ``slice_subsample_gpu`` falls
+#: back to the host-staged path. Each run reads one zarr slab, so a
+#: subset scattered across many runs spends more time on kvikio
+#: dispatch than the host oindex path would.
+_SLICE_SUBSAMPLE_GPU_MAX_RUNS = 64
+
+
 class ZarrGenotypeSource:
     """Open a VCZ store and expose chunked + subset read primitives.
 
@@ -181,6 +188,77 @@ class ZarrGenotypeSource:
         zlo = int(self._zarr_var_indices[lo])
         zhi = int(self._zarr_var_indices[hi - 1]) + 1
         return zlo, zhi
+
+    def slice_subsample_gpu(self, left, right, hap_cols, *, cg):
+        """Like ``slice_subsample(to_gpu=True)`` but reads chunks
+        through the caller-provided ``cg`` -- a ``call_genotype``
+        zarr array on a group opened from a ``kvikio.zarr.GDSStore``
+        with the GPU buffer prototype active. Decompression happens
+        on the GPU (nvCOMP) rather than via the synchronous host-side
+        ``oindex`` codec pipeline, which at biobank-scale sample
+        subsets is minutes per call.
+
+        Sample-axis subsetting works by grouping the requested
+        diploids into contiguous runs (typically one or two for a
+        population-subset read), reading each run as a contiguous
+        ``cg[zlo:zhi, rlo:rhi, :]`` slab that kvikio decompresses
+        directly to GPU memory, then doing one GPU fancy-index to
+        assemble the ``(n_var, len(hap_cols))`` result. Pathologically
+        scattered subsets (every dip its own run) fall back to
+        ``slice_subsample(to_gpu=True)``.
+
+        Returns
+        -------
+        gm : cupy.ndarray, shape (n_var, len(hap_cols)), dtype int8
+        pos : ndarray, shape (n_var,), dtype int64
+        """
+        lo, hi = self._site_index_range(left, right)
+        hap_cols = np.asarray(hap_cols, dtype=np.int64)
+        if hi <= lo:
+            return (cp.empty((0, len(hap_cols)), cp.int8),
+                    np.empty(0, np.int64))
+        zlo, zhi = self._zarr_row_range(lo, hi)
+
+        is_p1 = hap_cols >= self.num_diploids
+        dip_idx = np.where(is_p1, hap_cols - self.num_diploids, hap_cols)
+        ploidy = is_p1.astype(np.int64)
+        unique_dips, inv = np.unique(dip_idx, return_inverse=True)
+
+        # Group sorted unique_dips into contiguous diploid-axis runs.
+        # Two for a typical two-population subset, one for single-pop.
+        breaks = np.where(np.diff(unique_dips) != 1)[0]
+        run_lo = np.concatenate([unique_dips[:1], unique_dips[breaks + 1]])
+        run_hi = np.concatenate([unique_dips[breaks] + 1, unique_dips[-1:] + 1])
+
+        # Fall back if the subset is so scattered that per-run slab
+        # reads would no longer amortize. The pair of contiguous runs
+        # typical of LD probes has len(run_lo) == 2.
+        if len(run_lo) > _SLICE_SUBSAMPLE_GPU_MAX_RUNS:
+            return self.slice_subsample(left, right, hap_cols, to_gpu=True)
+
+        # One contiguous slab per run via kvikio's GPU-buffer codec
+        # pipeline, then concatenate. ``slab_offset`` maps each entry
+        # in ``unique_dips`` to its position in the concatenated block.
+        slabs = []
+        slab_offset = np.zeros(unique_dips.size, dtype=np.int64)
+        cum = 0
+        for rlo, rhi in zip(run_lo, run_hi):
+            slabs.append(cg[zlo:zhi, int(rlo):int(rhi), :])
+            in_run = (unique_dips >= rlo) & (unique_dips < rhi)
+            slab_offset[in_run] = unique_dips[in_run] - rlo + cum
+            cum += int(rhi - rlo)
+        block_gpu = (slabs[0] if len(slabs) == 1
+                     else cp.concatenate(slabs, axis=1))
+        del slabs
+
+        # Final GPU fancy-index: for each requested hap_col, pick the
+        # right (dip, ploidy) cell.
+        gm_gpu = block_gpu[:,
+                            cp.asarray(slab_offset[inv], dtype=cp.int64),
+                            cp.asarray(ploidy, dtype=cp.int64)]
+        del block_gpu
+        pos = self.site_pos[lo:hi].copy()
+        return gm_gpu, pos
 
     def slice_subsample(self, left, right, hap_cols, *, to_gpu=False):
         """Read variants in ``[left, right)`` restricted to ``hap_cols``.

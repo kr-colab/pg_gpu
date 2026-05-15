@@ -170,6 +170,79 @@ class TestKvikioFetcherReads:
             np.testing.assert_array_equal(ph, pk)
 
 
+class TestSliceSubsampleGpu:
+    """``slice_subsample_gpu`` reads sample-axis slabs via kvikio.
+    The bytes it returns must match the host ``slice_subsample`` on
+    the same store + same hap_cols."""
+
+    def _open_cg(self, path):
+        from kvikio.zarr import GDSStore
+        # Match KvikioChunkFetcher: enable_gpu, then open the cg on
+        # a GDSStore-backed group so its codec pipeline writes into
+        # GPU buffers.
+        zarr.config.enable_gpu()
+        gds = GDSStore(path)
+        return gds, zarr.open_group(store=gds, mode="r")["call_genotype"]
+
+    def _close_gpu_buffer(self):
+        zarr.config.set({
+            "buffer": "zarr.core.buffer.cpu.Buffer",
+            "ndbuffer": "zarr.core.buffer.cpu.NDBuffer",
+        })
+
+    def test_single_pop_subset_matches_host(self, bio2zarr_store):
+        source = ZarrGenotypeSource(bio2zarr_store)
+        n_dip = source.num_diploids
+        # Contiguous diploid range -> single run.
+        cols = np.array([0, 1, 2, n_dip, n_dip + 1, n_dip + 2],
+                         dtype=np.int64)
+        gm_host, _ = source.slice_subsample(0, source.mappable_hi, cols)
+        gds, cg = self._open_cg(bio2zarr_store)
+        try:
+            gm_gpu, _ = source.slice_subsample_gpu(
+                0, source.mappable_hi, cols, cg=cg,
+            )
+        finally:
+            self._close_gpu_buffer()
+        assert isinstance(gm_gpu, cp.ndarray)
+        np.testing.assert_array_equal(cp.asnumpy(gm_gpu), gm_host)
+
+    def test_two_pop_subset_matches_host(self, bio2zarr_store):
+        # The non-contiguous case: pop1 = first 3 dips, pop2 = last
+        # 3 dips. Two runs along the diploid axis.
+        source = ZarrGenotypeSource(bio2zarr_store)
+        n_dip = source.num_diploids
+        cols = np.array(
+            [0, 1, 2, n_dip - 3, n_dip - 2, n_dip - 1,
+             n_dip, n_dip + 1, n_dip + 2,
+             2 * n_dip - 3, 2 * n_dip - 2, 2 * n_dip - 1],
+            dtype=np.int64,
+        )
+        gm_host, _ = source.slice_subsample(0, source.mappable_hi, cols)
+        gds, cg = self._open_cg(bio2zarr_store)
+        try:
+            gm_gpu, _ = source.slice_subsample_gpu(
+                0, source.mappable_hi, cols, cg=cg,
+            )
+        finally:
+            self._close_gpu_buffer()
+        np.testing.assert_array_equal(cp.asnumpy(gm_gpu), gm_host)
+
+    def test_empty_region(self, bio2zarr_store):
+        source = ZarrGenotypeSource(bio2zarr_store)
+        gds, cg = self._open_cg(bio2zarr_store)
+        try:
+            gm, pos = source.slice_subsample_gpu(
+                0, max(0, source.mappable_lo - 1),
+                np.array([0, 1]), cg=cg,
+            )
+        finally:
+            self._close_gpu_buffer()
+        assert isinstance(gm, cp.ndarray)
+        assert gm.shape == (0, 2)
+        assert pos.shape == (0,)
+
+
 class TestFromZarrBackendKwarg:
 
     def test_invalid_backend_raises(self, bio2zarr_store):
