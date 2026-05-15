@@ -411,6 +411,35 @@ Distance Distribution Statistics
      - Variance, skewness, and kurtosis in one call
      - Schrider et al. (2018)
 
+Biobank-Scale Streaming
+-----------------------
+
+VCZ stores too large for the GPU eagerly (tens to hundreds of
+thousands of haplotypes) open via ``HaplotypeMatrix.from_zarr`` /
+``GenotypeMatrix.from_zarr`` as a streaming view that walks the
+chromosome chunk by chunk. Every per-chunk-reducible kernel below
+dispatches transparently on the streaming object -- the calling code
+is identical to the eager path. See :doc:`tutorials/biobank_streaming`.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 65
+
+   * - Entry point
+     - Streaming behavior
+   * - ``windowed_analysis``
+     - Per-chunk dispatch + row-concat; window grids are aligned to the chunk grid.
+   * - ``sfs.sfs``, ``sfs.joint_sfs``, ``sfs.sfs_folded``, ``sfs.joint_sfs_folded``
+     - Per-chunk SFS bincount, summed across chunks.
+   * - ``HaplotypeMatrix.compute_ld_statistics_gpu_single_pop`` / ``_two_pops``
+     - Per-chunk pair-bin sums with a tail-buffer that captures pairs straddling chunk boundaries exactly once. Returns moments-LD DD, Dz, pi² (3 stats single-pop, 15 stats two-pop).
+   * - ``relatedness.ibs``, ``relatedness.grm``
+     - Variant-axis streamed; individual axis tiled into row blocks. ``(n_ind, n_ind)`` accumulators live on host so the output can exceed GPU memory. ``grm`` is two-pass (chromosome-wide allele frequencies, then per-chunk standardized outer product).
+   * - ``StreamingHaplotypeMatrix.materialize(region, sample_subset)``
+     - Sub-region eager build for kernels that need every variant simultaneously (``pairwise_r2``, Garud H, custom recipes). At biobank scale the sample-subset read decompresses directly to the GPU via kvikio + nvCOMP.
+   * - ``zarr_io.allel_zarr_to_vcz``
+     - Streaming converter from scikit-allel layout to VCZ for stores that pre-date bio2zarr.
+
 Fused Windowed Statistics
 -------------------------
 

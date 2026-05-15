@@ -17,6 +17,47 @@ GenotypeMatrix
    :undoc-members:
    :show-inheritance:
 
+Biobank-Scale Streaming
+-----------------------
+
+For VCZ stores that do not fit on the GPU eagerly,
+``HaplotypeMatrix.from_zarr`` / ``GenotypeMatrix.from_zarr`` can
+return a streaming view (``streaming='always'``, or
+``streaming='auto'`` with a too-large eager footprint). The streaming
+object iterates the chromosome chunk by chunk through every kernel
+that accepts an eager matrix; see :doc:`tutorials/biobank_streaming`
+for the end-to-end pattern.
+
+.. autoclass:: pg_gpu.streaming_matrix.StreamingHaplotypeMatrix
+   :members: iter_gpu_chunks, materialize, num_haplotypes, num_variants,
+             chrom, chrom_start, chrom_end, sample_sets, align_bp,
+             compute_ld_statistics_gpu_single_pop,
+             compute_ld_statistics_gpu_two_pops
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.streaming_matrix.StreamingGenotypeMatrix
+   :members: iter_gpu_chunks, materialize, num_individuals, num_variants,
+             chrom, chrom_start, chrom_end, sample_sets, align_bp
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.zarr_source.ZarrGenotypeSource
+   :members: slice_region, slice_region_gpu, slice_subsample,
+             slice_subsample_gpu, iter_chunks
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.streaming_matrix.KvikioChunkFetcher
+   :members: iter_chunks, close
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.streaming_matrix.HostChunkFetcher
+   :members: iter_chunks
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.BiobankScaleWarning
+   :show-inheritance:
+
+.. autofunction:: pg_gpu.zarr_io.allel_zarr_to_vcz
+
 LD Statistics
 -------------
 
