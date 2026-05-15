@@ -1,56 +1,75 @@
 Biobank-Scale Streaming from VCZ
 ================================
 
-For stores too large to fit on the GPU eagerly -- biobank-scale VCZ
-(bio2zarr) datasets with tens to hundreds of thousands of haplotypes
--- ``HaplotypeMatrix.from_zarr`` (and ``GenotypeMatrix.from_zarr``)
-returns a *streaming matrix* that walks the chromosome chunk by
-chunk. The streaming object plugs into every scalar / windowed /
-pair-bin / pairwise kernel that already accepts an eager matrix; GPU
-peak memory scales with one chunk, not the chromosome length.
+When a VCZ (bio2zarr) dataset has too many haplotypes to fit on the
+GPU all at once -- tens to hundreds of thousands --
+``HaplotypeMatrix.from_zarr`` (and ``GenotypeMatrix.from_zarr``)
+gives you a *streaming matrix* that reads the chromosome one chunk
+at a time. The streaming object works with every per-window, SFS,
+LD, and pairwise relatedness function in pg_gpu with no change to
+your code; GPU memory use scales with one chunk, not the whole
+chromosome.
 
 Background
 ----------
 
-The eager path materializes the full ``(n_haplotypes, n_variants)``
-haplotype matrix on the GPU before any statistic runs. At biobank
-sample counts the matrix alone is dozens of gigabytes per chromosome
--- before any working memory for the kernel itself -- and on a 100k-
-diploid store an A100 80 GB will OOM at the load step. Streaming
-solves this by:
+Normally pg_gpu loads the entire ``(n_haplotypes, n_variants)``
+genotype matrix onto the GPU before any statistic runs. At biobank
+sample sizes that matrix is dozens of gigabytes per chromosome --
+and that is before pg_gpu allocates any working memory for the
+statistic itself. On a store with 100,000 diploids an A100 80 GB
+will run out of memory just trying to load the data.
 
-* Opening the zarr store as a ``ZarrGenotypeSource`` and probing the
-  on-disk chunking + codec.
-* Returning a ``StreamingHaplotypeMatrix`` (or
-  ``StreamingGenotypeMatrix``) instead of an eager
-  ``HaplotypeMatrix``.
-* Iterating that object yields per-chunk *eager* matrices on the
-  GPU; the next chunk's host read overlaps the current chunk's
-  compute through a producer thread.
-* Per-chunk reducible statistics (windowed diversity / divergence /
-  Garud H, SFS, joint SFS, moments-LD pair bins) are *dispatched
-  through the existing function names* -- you do not write a chunk
-  loop yourself.
-* Cross-window or pairwise kernels (``pairwise_r2``,
-  per-individual-pair distance, custom recipes that need every
-  variant simultaneously) get a sub-region eager matrix via
-  ``streaming_matrix.materialize(region=..., sample_subset=...)``
-  and run on that.
+Streaming avoids that by reading the chromosome in genomic chunks
+(e.g. 500 kb at a time). Each chunk is decompressed onto the GPU,
+the statistic is computed for that chunk, the result is added to a
+running total, and the chunk is freed before the next one is read.
+The next chunk is read on a background thread while the current
+chunk is being processed, so disk I/O and GPU compute overlap.
 
-The store layout that gets the on-GPU codec decode path is
-*bio2zarr-style sample chunking* (small enough chunks on the sample
-axis that each chunk fits in a kvikio + nvCOMP decompression buffer).
-A store whose sample axis is one chunk falls back to the host fetcher
-with a one-time ``BadlyChunkedWarning``; everything else still works.
+Statistics that combine naturally across chunks --
 
-When ``HaplotypeMatrix.from_zarr`` returns a streaming object
---------------------------------------------------------------
+* per-window diversity and divergence,
+* the site frequency spectrum,
+* the joint SFS,
+* Garud's H,
+* moments-LD pair bins (``DD``, ``Dz``, ``pi2``, derived
+  :math:`\sigma_D^2`),
+* identity by state (``ibs``) and the genetic relationship matrix
+  (``grm``)
 
-``streaming='auto'`` (the default) picks based on whether the eager
-matrix fits in roughly half the free GPU memory. ``streaming='always'``
-forces it; ``streaming='never'`` forces eager. The streaming object
-is a drop-in for the eager class for every kernel below -- the
-calling code is the same.
+-- are handled automatically: you call the same function as on a
+small in-memory matrix and pg_gpu takes care of the chunk-by-chunk
+accumulation.
+
+For statistics that need every variant in scope at the same time
+(a pairwise-:math:`r^2` heatmap, a Garud's H hash table, a per-
+individual-pair distance matrix), call
+``streaming_matrix.materialize(region=..., sample_subset=...)`` to
+read a smaller piece -- a sub-region of the chromosome, restricted
+to a subset of haplotypes -- into a regular in-memory
+``HaplotypeMatrix`` and run the statistic on that.
+
+The streaming reader needs a VCZ store with bio2zarr-style chunking
+on the sample axis (the standard layout produced by
+``bio2zarr explode``). A store that puts the entire sample axis in
+a single chunk still works, but falls back to a slower read path
+with a one-time ``BadlyChunkedWarning``.
+
+When you get a streaming object back
+------------------------------------
+
+``HaplotypeMatrix.from_zarr`` chooses between in-memory and
+streaming based on the ``streaming`` argument:
+
+* ``streaming='auto'`` (default): in-memory if the data fits in
+  roughly half of the free GPU memory; streaming otherwise.
+* ``streaming='always'``: always streaming.
+* ``streaming='never'``: always in-memory (raises if the data does
+  not fit).
+
+Either way, the object you get back accepts the same pg_gpu
+functions:
 
 .. code-block:: python
 
@@ -65,118 +84,126 @@ calling code is the same.
        pop_file="biobank/chr15.pops.tsv",   # optional sample -> pop TSV
    )
 
-   # Per-window diversity + divergence: one streaming pass per call.
+   # Per-window diversity + divergence, one streaming pass per call.
    df = windowed_analysis(stream, window_size=100_000, step_size=100_000,
                           statistics=["pi", "theta_w", "tajimas_d",
                                        "fst", "dxy"],
                           populations=["AFR", "EUR"])
 
-   # Marginal + joint SFS: per-chunk reduction.
+   # Marginal and joint SFS.
    sfs_afr = sfs.sfs(stream, population="AFR")
    joint   = sfs.joint_sfs(stream, pop1=list(stream.sample_sets["AFR"][:200]),
                                    pop2=list(stream.sample_sets["EUR"][:200]))
 
-   # moments-LD bin sums with tail-buffer cross-chunk pair handling.
+   # moments-LD pair-bin statistics. Pairs that fall on opposite
+   # sides of a chunk boundary are handled correctly via a tail
+   # buffer that carries the last max(bp_bins) of variants forward.
    ld = stream.compute_ld_statistics_gpu_two_pops(
        bp_bins=[0, 1_000, 10_000, 100_000], pop1="AFR", pop2="EUR",
    )
 
-   # Pairwise relatedness: variant axis streamed, (n_ind, n_ind)
-   # accumulators on host so the output can exceed GPU memory.
+   # Pairwise relatedness. The variant axis is streamed; the
+   # (n_indiv, n_indiv) output lives in CPU memory so the result
+   # itself can be larger than the GPU can hold.
    ibs_mat = ibs(stream)
    grm_mat = grm(stream)
 
-The same code on an eager ``HaplotypeMatrix`` (small store) runs
-unchanged -- the only difference is which class ``from_zarr`` returns.
+The same code on a small in-memory ``HaplotypeMatrix`` runs
+unchanged -- the only difference is which kind of object
+``from_zarr`` returns.
 
-Sub-region eager builds for pairwise kernels
---------------------------------------------
+Pulling a sub-region into memory for pairwise statistics
+--------------------------------------------------------
 
-A pairwise-r² heatmap, a Garud's H hash table, or a per-individual-pair
-distance over an entire chromosome would not fit eagerly at biobank
-scale, but a single 1 Mb sub-region with a haplotype subsample does:
+Some statistics -- a pairwise-:math:`r^2` heatmap, Garud's H, per-
+individual distance matrices -- need every variant present at the
+same time. The full chromosome at biobank scale will not fit in
+GPU memory for those, but a single 1 Mb sub-region with a
+haplotype subsample easily will:
 
 .. code-block:: python
 
    # Pull a 1 Mb region restricted to 5,000 haplotypes from one pop.
    region = (50_000_000, 51_000_000)
    subsample = list(stream.sample_sets["AFR"][:5_000])
-   eager = stream.materialize(region=region, sample_subset=subsample)
+   region_hm = stream.materialize(region=region, sample_subset=subsample)
 
-   # Run any pairwise kernel on the eager view.
-   r2 = eager.pairwise_r2()
+   # Run any pairwise statistic on the regular in-memory matrix.
+   r2 = region_hm.pairwise_r2()
 
-``materialize(sample_subset=...)`` routes the read through
-``slice_subsample_gpu`` when the streaming source uses the kvikio
-backend -- the (variants × subsample × 2) call_genotype block is
-decompressed directly on the GPU rather than going through zarr's
-sync host-side ``oindex``. At biobank scale this drops a 5 Mb / 10 k-
-haplotype probe from ~170 s to ~3 s.
+``materialize(sample_subset=...)`` reads the (variants × subsample)
+genotype block directly onto the GPU when the store is set up for
+it (zstd / blosc / lz4 / deflate compressed bio2zarr chunks decoded
+through kvikio + nvCOMP). At biobank scale this is roughly 60×
+faster than the equivalent CPU-side path: a 5 Mb / 10,000-haplotype
+block drops from ~170 seconds to ~3 seconds.
 
 Converting a scikit-allel store
 -------------------------------
 
-Empirical biobank data often arrives in scikit-allel zarr layout
-(``calldata/GT``, ``variants/POS``, ``samples``) -- e.g. the
-Ag1000G ``AgamP3.phased.zarr`` release. ``pg_gpu.zarr_io.allel_zarr_to_vcz``
-streams the source in variant blocks (so the conversion does not
-materialize the full matrix) and writes a VCZ store with
-bio2zarr-style sample chunking the streaming reader can consume:
+Older biobank releases (e.g. the Ag1000G ``AgamP3.phased.zarr``)
+ship in scikit-allel zarr layout (``calldata/GT``, ``variants/POS``,
+``samples``) rather than VCZ. ``pg_gpu.zarr_io.allel_zarr_to_vcz``
+reads the source in variant blocks -- so the conversion itself
+does not need to hold the full matrix in memory -- and writes a
+VCZ store the streaming reader can consume:
 
 .. code-block:: python
 
    from pg_gpu.zarr_io import allel_zarr_to_vcz
 
    allel_zarr_to_vcz(
-       "AgamP3.phased.zarr",          # scikit-allel layout
-       "AgamP3.phased.3R.vcz",        # output VCZ
-       contig="3R",                    # required for grouped allel stores
-       region="3R:1_000_000-2_000_000",  # optional sub-range
+       "AgamP3.phased.zarr",                    # scikit-allel layout
+       "AgamP3.phased.3R.vcz",                  # output VCZ
+       contig="3R",                              # required for grouped allel stores
+       region="3R:1_000_000-2_000_000",          # optional sub-range
        variant_chunk=10_000, sample_chunk=1_000,
    )
 
-The resulting store is what ``HaplotypeMatrix.from_zarr`` opens for
-streaming.
+The resulting store is then opened the normal way through
+``HaplotypeMatrix.from_zarr``.
 
-Storage and host RAM footprints
--------------------------------
+Disk, CPU memory, and GPU memory
+--------------------------------
 
-* A 100 k-diploid / 11.6 M-variant chr15 store at zstd-compressed
-  bio2zarr chunking lives on disk at ~8 GB; the same chromosome
-  uncompressed is ~2.3 TB. Streaming reads the compressed bytes from
-  disk and decompresses one chunk at a time into ~12 GB GPU memory.
-* The producer thread holds one extra decompressed chunk in host RAM
-  (~12 GB for the parameters above), so peak host = ``(prefetch + 1)
-  * chunk_bytes``. ``prefetch=0`` disables the read-ahead and reads
-  serially.
-* The ``(n_ind, n_ind)`` outputs of ``ibs`` and ``grm`` live on host
-  as numpy arrays. At 50 k diploids that is ~20 GB of host RAM for
-  ``grm``; ``ibs`` carries three such accumulators (~60 GB). The
-  ``block_size=`` kwarg controls how many rows of the output are
-  resident on the GPU at a time.
+* A 100,000-diploid / 11.6 M-variant chr15 store at zstd-compressed
+  bio2zarr chunking takes about 8 GB on disk; the same chromosome
+  uncompressed would be about 2.3 TB. Streaming reads the
+  compressed bytes from disk and decompresses one chunk at a time
+  into roughly 12 GB of GPU memory.
+* The background read-ahead holds one extra decompressed chunk in
+  CPU memory (~12 GB for the parameters above), so peak CPU memory
+  use is ``(prefetch + 1) × chunk_size``. Set ``prefetch=0`` to
+  read each chunk only when it is needed.
+* The ``(n_indiv, n_indiv)`` output of ``ibs`` and ``grm`` lives in
+  CPU memory as a numpy array. At 50,000 diploids that is about
+  20 GB for ``grm``; ``ibs`` keeps three such matrices and needs
+  ~60 GB. The ``block_size`` argument controls how many rows of
+  the output sit on the GPU at any one time.
 
-End-to-end paper example
-------------------------
+Worked example
+--------------
 
-A complete biobank-scale scan -- per-window diversity + divergence
-at three scales, marginal + joint SFS, Garud's H per pop, moments-LD
-decay across probe regions, and a pairwise-r² heatmap of a 1 Mb
+A complete biobank-scale scan -- per-window diversity and
+divergence at three window sizes (10 kb, 100 kb, 1 Mb), marginal
+and joint SFS, Garud's H per population, moments-LD decay across
+probe regions, and a pairwise-:math:`r^2` heatmap of a 1 Mb
 sub-region -- ships as
 ``06_simulated_genome_scan/scripts/genome_scan_ooa.py`` in the
-companion paper-analysis repository. On chr15 from ``stdpopsim``
-``OutOfAfrica_2T12`` simulated at 50 k diploids per population (200 k
-haplotypes, 11.6 M variants, 7.9 GB on disk) the script completes
-in ~16 minutes on a single A100 80 GB.
+companion paper-analysis repository. On chr15 from ``stdpopsim``'s
+``OutOfAfrica_2T12`` simulated at 50,000 diploids per population
+(200,000 haplotypes, 11.6 M variants, 7.9 GB on disk) the script
+completes in about 16 minutes on a single A100 80 GB.
 
-When streaming is not what you want
------------------------------------
+When streaming is not the right choice
+--------------------------------------
 
-* The data already fits on the GPU eagerly. ``streaming='auto'``
-  picks eager automatically; the eager path is faster per call
-  because there is no per-chunk dispatch overhead.
-* The kernel needs every variant simultaneously and the chromosome
-  cannot be partitioned (e.g. a chromosome-wide pairwise r² heatmap
-  on the full sample axis). Use ``materialize(region=...)`` to scope
-  it to a tractable sub-region.
-* The store is in scikit-allel layout, not VCZ. Convert it first
-  with ``allel_zarr_to_vcz``; the streaming reader is VCZ-only.
+* Your data already fits on the GPU in one piece. ``streaming='auto'``
+  will pick the in-memory path automatically; that path is faster
+  per call because there is no per-chunk overhead.
+* Your statistic needs every variant at once and the whole
+  chromosome is too big to load. Use ``materialize(region=...)`` to
+  read a smaller sub-region instead.
+* Your store is in scikit-allel layout rather than VCZ. Convert it
+  first with ``allel_zarr_to_vcz``; the streaming reader only
+  accepts VCZ.
