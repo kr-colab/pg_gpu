@@ -182,7 +182,7 @@ class ZarrGenotypeSource:
         zhi = int(self._zarr_var_indices[hi - 1]) + 1
         return zlo, zhi
 
-    def slice_subsample(self, left, right, hap_cols):
+    def slice_subsample(self, left, right, hap_cols, *, to_gpu=False):
         """Read variants in ``[left, right)`` restricted to ``hap_cols``.
 
         ``hap_cols`` is an iterable of haplotype-axis indices in
@@ -190,9 +190,20 @@ class ZarrGenotypeSource:
         sample-axis subset; with bio2zarr-style sample chunking only
         the chunks containing the requested diploids are decompressed.
 
+        Parameters
+        ----------
+        to_gpu : bool
+            When ``True`` the returned ``gm`` is a cupy array on the
+            GPU. The ploidy gather is done on the GPU regardless --
+            this kwarg only controls whether ``gm`` gets downloaded
+            back to host before returning. Callers that immediately
+            upload the result (e.g. ``materialize``) should pass
+            ``to_gpu=True`` to avoid the round-trip.
+
         Returns
         -------
-        gm : ndarray, shape (n_var, len(hap_cols)), dtype int8
+        gm : ndarray (host) or cupy.ndarray (device), shape
+             ``(n_var, len(hap_cols))``, dtype ``int8``
             ``-1`` for multiallelic rows.
         pos : ndarray, shape (n_var,), dtype int64
             Variant positions.
@@ -200,8 +211,9 @@ class ZarrGenotypeSource:
         lo, hi = self._site_index_range(left, right)
         hap_cols = np.asarray(hap_cols, dtype=np.int64)
         if hi <= lo:
-            return (np.empty((0, len(hap_cols)), np.int8),
-                    np.empty(0, np.int64))
+            empty = (cp.empty((0, len(hap_cols)), cp.int8) if to_gpu
+                     else np.empty((0, len(hap_cols)), np.int8))
+            return empty, np.empty(0, np.int64)
         zlo, zhi = self._zarr_row_range(lo, hi)
 
         # The haplotype axis indexes a flat (n_dip * 2) layout where hap j
@@ -215,12 +227,24 @@ class ZarrGenotypeSource:
         ploidy = is_p1.astype(np.int64)
         unique_dips, inv = np.unique(dip_idx, return_inverse=True)
 
-        block = np.asarray(
+        block_host = np.asarray(
             self._store["call_genotype"].oindex[zlo:zhi, unique_dips, :]
         )
-        gm = block[:, inv, ploidy]
+        # Ploidy gather on the GPU: at biobank-scale sample subsets
+        # (~10 k samples in ``inv`` over hundreds of thousands of
+        # variants) the equivalent ``block[:, inv, ploidy]`` host
+        # fancy-index is single-threaded numpy and takes tens of
+        # seconds per Mb of variants; the parallel cupy gather is
+        # sub-second.
+        block_gpu = cp.asarray(block_host)
+        del block_host
+        gm_gpu = block_gpu[:, cp.asarray(inv, dtype=cp.int64),
+                            cp.asarray(ploidy, dtype=cp.int64)]
+        del block_gpu
         pos = self.site_pos[lo:hi].copy()
-        return gm, pos
+        if to_gpu:
+            return gm_gpu, pos
+        return cp.asnumpy(gm_gpu), pos
 
     def iter_chunks(self, chunk_bp, align_bp=None, start=None):
         """Yield ``(left, right)`` genomic intervals tiling the source.

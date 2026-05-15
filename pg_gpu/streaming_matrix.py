@@ -516,14 +516,16 @@ class _StreamingMatrixBase:
         if sample_subset is None:
             gt, pos = self._source.slice_region(left, right)
         else:
-            # slice_subsample returns ``(n_var, n_hap_subset)`` int8;
-            # promote back to ``(n_var, n_dip', 2)`` so the eager
-            # build helpers' uniform input shape holds. The subsample
-            # ploidy ordering matches the source's convention: haps
-            # ``0..n_dip-1`` = ploidy 0, ``n_dip..2*n_dip-1`` = ploidy 1.
-            import numpy as _np
-            gm, pos = self._source.slice_subsample(left, right, sample_subset)
-            n_var, n_hap = gm.shape
+            # slice_subsample's ploidy gather already lives on the GPU
+            # at biobank-scale sample counts; keep the result there
+            # and assemble the ``(n_var, n_dip', 2)`` layout in cupy so
+            # we don't round-trip through a multi-GB host buffer. The
+            # subsample ploidy ordering matches the source's convention:
+            # haps 0..n_dip-1 = ploidy 0, n_dip..2*n_dip-1 = ploidy 1.
+            gm_gpu, pos = self._source.slice_subsample(
+                left, right, sample_subset, to_gpu=True
+            )
+            n_var, n_hap = gm_gpu.shape
             if n_hap % 2 != 0:
                 raise ValueError(
                     f"materialize(sample_subset=...) requires an even "
@@ -531,9 +533,10 @@ class _StreamingMatrixBase:
                     f"got {n_hap}."
                 )
             n_dip_sub = n_hap // 2
-            gt = _np.empty((n_var, n_dip_sub, 2), dtype=gm.dtype)
-            gt[:, :, 0] = gm[:, :n_dip_sub]
-            gt[:, :, 1] = gm[:, n_dip_sub:]
+            gt = cp.empty((n_var, n_dip_sub, 2), dtype=gm_gpu.dtype)
+            gt[:, :, 0] = gm_gpu[:, :n_dip_sub]
+            gt[:, :, 1] = gm_gpu[:, n_dip_sub:]
+            del gm_gpu
 
         return self._build_chunk(
             gt, pos,

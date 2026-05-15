@@ -174,6 +174,33 @@ class TestSliceSubsample:
         assert gm.shape == (0, 2)
         assert pos.shape == (0,)
 
+    def test_to_gpu_matches_host(self, vcz_store):
+        import cupy as cp
+        path, _ = vcz_store
+        src = ZarrGenotypeSource(path)
+        n_dip = src.num_diploids
+        cols = np.array([0, 1, 2, n_dip, n_dip + 1], dtype=np.int64)
+        gm_host, pos_host = src.slice_subsample(
+            0, src.mappable_hi, cols, to_gpu=False
+        )
+        gm_gpu, pos_gpu = src.slice_subsample(
+            0, src.mappable_hi, cols, to_gpu=True
+        )
+        assert isinstance(gm_gpu, cp.ndarray)
+        np.testing.assert_array_equal(cp.asnumpy(gm_gpu), gm_host)
+        np.testing.assert_array_equal(pos_gpu, pos_host)
+
+    def test_to_gpu_empty_region(self, vcz_store):
+        import cupy as cp
+        path, _ = vcz_store
+        src = ZarrGenotypeSource(path)
+        gm, pos = src.slice_subsample(
+            0, max(0, src.mappable_lo - 1), np.array([0, 1]), to_gpu=True,
+        )
+        assert isinstance(gm, cp.ndarray)
+        assert gm.shape == (0, 2)
+        assert pos.shape == (0,)
+
 
 class TestIterChunks:
 
