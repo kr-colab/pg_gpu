@@ -206,6 +206,7 @@ Joint (Two-Population)
 .. autofunction:: pg_gpu.sfs.joint_sfs_folded
 .. autofunction:: pg_gpu.sfs.joint_sfs_scaled
 .. autofunction:: pg_gpu.sfs.joint_sfs_folded_scaled
+.. autofunction:: pg_gpu.sfs.project_joint_sfs
 
 Scaling and Folding Utilities
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

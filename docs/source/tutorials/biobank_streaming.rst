@@ -90,10 +90,18 @@ functions:
                                        "fst", "dxy"],
                           populations=["AFR", "EUR"])
 
-   # Marginal and joint SFS.
+   # Marginal SFS uses the full panel (1D output, fits anywhere).
    sfs_afr = sfs.sfs(stream, population="AFR")
-   joint   = sfs.joint_sfs(stream, pop1=list(stream.sample_sets["AFR"][:200]),
-                                   pop2=list(stream.sample_sets["EUR"][:200]))
+
+   # Joint SFS at biobank scale: the full (n1+1, n2+1) histogram is
+   # 80 GB at 100k haps per population, so use project_joint_sfs
+   # instead. It applies a hypergeometric projection per variant and
+   # accumulates straight into the small target grid -- every variant
+   # from every haplotype contributes, no subsampling.
+   joint_projected = sfs.project_joint_sfs(
+       stream, pop1="AFR", pop2="EUR",
+       target_n1=200, target_n2=200,
+   )
 
    # moments-LD pair-bin statistics. Pairs that fall on opposite
    # sides of a chunk boundary are handled correctly via a tail
