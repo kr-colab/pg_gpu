@@ -93,11 +93,11 @@ functions:
    # Marginal SFS uses the full panel (1D output, fits anywhere).
    sfs_afr = sfs.sfs(stream, population="AFR")
 
-   # Joint SFS at biobank scale: the full (n1+1, n2+1) histogram is
-   # 80 GB at 100k haps per population, so use project_joint_sfs
-   # instead. It applies a hypergeometric projection per variant and
-   # accumulates straight into the small target grid -- every variant
-   # from every haplotype contributes, no subsampling.
+   # Joint SFS: the full (n1+1, n2+1) histogram is 80 GB at 100k haps
+   # per population, so use project_joint_sfs instead. It applies a
+   # hypergeometric projection per variant and accumulates straight
+   # into the small target grid -- every variant from every haplotype
+   # contributes, no subsampling.
    joint_projected = sfs.project_joint_sfs(
        stream, pop1="AFR", pop2="EUR",
        target_n1=200, target_n2=200,
