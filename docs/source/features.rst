@@ -414,29 +414,44 @@ Distance Distribution Statistics
 Biobank-Scale Streaming
 -----------------------
 
-VCZ stores too large for the GPU eagerly (tens to hundreds of
-thousands of haplotypes) open via ``HaplotypeMatrix.from_zarr`` /
+A *VCZ store* is a Zarr-on-disk encoding of a VCF: the genotype
+matrix is split into compressed chunks, each chunk a small array of
+samples by variants. ``pg_gpu`` reads VCZ stores; if your data
+is in VCF you can convert it with the bio2zarr tools
+(``vcf2zarr explode`` then ``vcf2zarr encode``). The streaming
+codepath needs that VCZ layout because it relies on per-chunk
+decode -- a VCF row-text dump can't be sliced or decompressed
+chunk-wise the way zarr can. See
+:doc:`tutorials/biobank_streaming` for the VCF→VCZ conversion
+and a worked end-to-end example.
+
+A VCZ store too large for the GPU (tens to hundreds of thousands
+of haplotypes) opens via ``HaplotypeMatrix.from_zarr`` /
 ``GenotypeMatrix.from_zarr`` as a streaming view that walks the
-chromosome chunk by chunk. Every per-chunk-reducible kernel below
-dispatches transparently on the streaming object -- the calling code
-is identical to the eager path. See :doc:`tutorials/biobank_streaming`.
+chromosome chunk by chunk; every kernel listed below dispatches
+on the streaming object the same way it would on a fully loaded
+matrix -- the calling code is identical to the in-memory path.
+
+What runs on a streaming matrix:
 
 .. list-table::
    :header-rows: 1
    :widths: 35 65
 
    * - Entry point
-     - Streaming behavior
+     - How it streams
    * - ``windowed_analysis``
-     - Per-chunk dispatch + row-concat; window grids are aligned to the chunk grid.
+     - Each chunk's windows are computed on the GPU as the chunk arrives, then rows are concatenated; window grids are aligned to the chunk grid so no window straddles a chunk boundary.
    * - ``sfs.sfs``, ``sfs.joint_sfs``, ``sfs.sfs_folded``, ``sfs.joint_sfs_folded``
-     - Per-chunk SFS bincount, summed across chunks.
+     - Each chunk contributes its own per-site frequency-spectrum counts; the chromosome-wide answer is the sum across chunks.
+   * - ``sfs.project_joint_sfs``
+     - Same per-chunk accumulation, but the joint SFS is projected (via hypergeometric sampling) to a small target grid as it is built, so the full ``(n1+1, n2+1)`` histogram is never materialized.
    * - ``HaplotypeMatrix.compute_ld_statistics_gpu_single_pop`` / ``_two_pops``
-     - Per-chunk pair-bin sums with a tail-buffer that captures pairs straddling chunk boundaries exactly once. Returns moments-LD DD, Dz, pi² (3 stats single-pop, 15 stats two-pop).
+     - Variant-pair statistics within ``max_bp_dist`` are summed per chunk into the bp bins. Pairs that fall on opposite sides of a chunk boundary would be missed by naive per-chunk sums, so the last ``max_bp_dist`` of one chunk is carried forward and paired with the start of the next, counted exactly once. Returns moments-LD ``DD``, ``Dz``, ``pi²`` (3 stats single-pop, 15 stats two-pop).
    * - ``relatedness.ibs``, ``relatedness.grm``
-     - Variant-axis streamed; individual axis tiled into row blocks. ``(n_ind, n_ind)`` accumulators live on host so the output can exceed GPU memory. ``grm`` is two-pass (chromosome-wide allele frequencies, then per-chunk standardized outer product).
+     - Streamed along the variant axis; the individual axis is tiled into row blocks. ``(n_ind, n_ind)`` accumulators live on host so the output can exceed GPU memory. ``grm`` is a two-pass operation (first to calculate chromosome-wide allele frequencies, second to accumulate a per-chunk outer product).
    * - ``StreamingHaplotypeMatrix.materialize(region, sample_subset)``
-     - Sub-region eager build for kernels that need every variant simultaneously (``pairwise_r2``, Garud H, custom recipes). At biobank scale the sample-subset read decompresses directly to the GPU via kvikio + nvCOMP.
+     - Pulls one sub-region (and optionally a subset of haplotypes) of the chromosome into a fully-loaded matrix on the GPU for kernels that need every variant simultaneously -- ``pairwise_r2``, Garud's H, or any custom recipe. At hundreds of thousands of haplotypes the kvikio + nvCOMP path lets the subset read decompress directly into GPU memory rather than round-tripping the full sample axis through the host.
    * - ``zarr_io.allel_zarr_to_vcz``
      - Streaming converter from scikit-allel layout to VCZ for stores that pre-date bio2zarr.
 
