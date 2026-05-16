@@ -248,6 +248,47 @@ class TestSFSDispatch:
         j_s = sfs_module.joint_sfs(stream, pop1="pop1", pop2="pop2")
         np.testing.assert_array_equal(j_e, j_s)
 
+    def test_project_joint_sfs_equivalent(self, vcz_store, tmp_path):
+        # Eager projection (built from full joint_sfs) must match
+        # streaming projection (which never materializes the full
+        # histogram) for both an identity target (target == source,
+        # recovers float-cast joint_sfs) and a strict downsample.
+        n_dip = HaplotypeMatrix.from_zarr(vcz_store).num_haplotypes // 2
+        half = n_dip // 2
+        popfile = str(tmp_path / "pops.tsv")
+        with open(popfile, "w") as f:
+            f.write("sample\tpop\n")
+            for i in range(half):
+                f.write(f"s{i}\tpop1\n")
+            for i in range(half, n_dip):
+                f.write(f"s{i}\tpop2\n")
+
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                          pop_file=popfile)
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                            pop_file=popfile,
+                                            chunk_bp=10_000)
+        # Each pop has 2 * half haplotypes; pick a strict downsample.
+        n1 = 2 * half
+        n2 = 2 * (n_dip - half)
+        target1 = max(1, n1 - 2)
+        target2 = max(1, n2 - 2)
+        e = sfs_module.project_joint_sfs(eager, pop1="pop1", pop2="pop2",
+                                          target_n1=target1,
+                                          target_n2=target2)
+        s = sfs_module.project_joint_sfs(stream, pop1="pop1", pop2="pop2",
+                                          target_n1=target1,
+                                          target_n2=target2)
+        np.testing.assert_allclose(e, s, rtol=1e-9, atol=1e-9)
+
+        # Identity-target projection of an int joint SFS just casts to
+        # float; pmf collapses to the indicator.
+        full = sfs_module.joint_sfs(eager, pop1="pop1", pop2="pop2")
+        e_id = sfs_module.project_joint_sfs(eager, pop1="pop1", pop2="pop2",
+                                             target_n1=n1, target_n2=n2)
+        np.testing.assert_allclose(e_id, full.astype(np.float64),
+                                    rtol=1e-9, atol=1e-9)
+
 
 class TestStreamingGuardrails:
 
