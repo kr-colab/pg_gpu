@@ -1,6 +1,6 @@
-"""Tests for ``BiobankScaleWarning`` and ``_maybe_biobank_warn``.
+"""Tests for ``MemoryLimitedWarning`` and ``_maybe_memory_warn``.
 
-The size thresholds are kwargs on ``_maybe_biobank_warn`` so tests can
+The size thresholds are kwargs on ``_maybe_memory_warn`` so tests can
 trip them on tiny on-disk fixtures rather than building genuine 10 GiB
 VCFs.
 """
@@ -10,9 +10,9 @@ import warnings
 
 import pytest
 
-from pg_gpu import BiobankScaleWarning
-from pg_gpu._biobank_warning import (
-    _maybe_biobank_warn, _region_span_bp, _vcf_header_sample_count,
+from pg_gpu import MemoryLimitedWarning
+from pg_gpu._memory_warning import (
+    _maybe_memory_warn, _region_span_bp, _vcf_header_sample_count,
     _warned_paths,
 )
 
@@ -83,16 +83,16 @@ class TestMaybeBiobankWarn:
         path = str(tmp_path / "small.vcf")
         _write_minimal_vcf(path, n_samples=10)
         with warnings.catch_warnings():
-            warnings.simplefilter("error", BiobankScaleWarning)
-            _maybe_biobank_warn(path)  # default thresholds; ~few hundred bytes
+            warnings.simplefilter("error", MemoryLimitedWarning)
+            _maybe_memory_warn(path)  # default thresholds; ~few hundred bytes
 
     def test_big_file_no_region_warns(self, tmp_path):
         path = str(tmp_path / "big.vcf")
         _write_minimal_vcf(path, n_samples=10)
         # tiny file; spoof the byte threshold low so the size check trips
         size = os.path.getsize(path)
-        with pytest.warns(BiobankScaleWarning, match="will be slow"):
-            _maybe_biobank_warn(path, warn_bytes=size - 1)
+        with pytest.warns(MemoryLimitedWarning, match="will be slow"):
+            _maybe_memory_warn(path, warn_bytes=size - 1)
 
     def test_big_file_small_region_does_not_warn(self, tmp_path):
         # The "right tool" case: huge VCF, but we asked for a small
@@ -101,8 +101,8 @@ class TestMaybeBiobankWarn:
         _write_minimal_vcf(path, n_samples=10)
         size = os.path.getsize(path)
         with warnings.catch_warnings():
-            warnings.simplefilter("error", BiobankScaleWarning)
-            _maybe_biobank_warn(path, region="1:0-1000",
+            warnings.simplefilter("error", MemoryLimitedWarning)
+            _maybe_memory_warn(path, region="1:0-1000",
                                 warn_bytes=size - 1,
                                 warn_region_bp=10_000)
 
@@ -111,25 +111,25 @@ class TestMaybeBiobankWarn:
         # 10k-sample VCFs are slow to parse regardless.
         path = str(tmp_path / "many-samples.vcf")
         _write_minimal_vcf(path, n_samples=20)
-        with pytest.warns(BiobankScaleWarning, match="20 samples"):
-            _maybe_biobank_warn(path, warn_samples=10)
+        with pytest.warns(MemoryLimitedWarning, match="20 samples"):
+            _maybe_memory_warn(path, warn_samples=10)
 
     def test_cached_per_path(self, tmp_path):
         path = str(tmp_path / "twice.vcf")
         _write_minimal_vcf(path, n_samples=20)
-        with pytest.warns(BiobankScaleWarning):
-            _maybe_biobank_warn(path, warn_samples=10)
+        with pytest.warns(MemoryLimitedWarning):
+            _maybe_memory_warn(path, warn_samples=10)
         # Same path again should not re-warn within the process.
         with warnings.catch_warnings():
-            warnings.simplefilter("error", BiobankScaleWarning)
-            _maybe_biobank_warn(path, warn_samples=10)
+            warnings.simplefilter("error", MemoryLimitedWarning)
+            _maybe_memory_warn(path, warn_samples=10)
 
     def test_silenced_by_filter(self, tmp_path):
         path = str(tmp_path / "silenced.vcf")
         _write_minimal_vcf(path, n_samples=20)
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore", BiobankScaleWarning)
-            _maybe_biobank_warn(path, warn_samples=10)
+            warnings.simplefilter("ignore", MemoryLimitedWarning)
+            _maybe_memory_warn(path, warn_samples=10)
 
     def test_relative_and_absolute_paths_dedupe(self, tmp_path, monkeypatch):
         # The cache canonicalizes via os.path.realpath, so a relative
@@ -139,11 +139,11 @@ class TestMaybeBiobankWarn:
         path = tmp_path / "alias.vcf"
         _write_minimal_vcf(str(path), n_samples=20)
         monkeypatch.chdir(tmp_path)
-        with pytest.warns(BiobankScaleWarning):
-            _maybe_biobank_warn("alias.vcf", warn_samples=10)
+        with pytest.warns(MemoryLimitedWarning):
+            _maybe_memory_warn("alias.vcf", warn_samples=10)
         with warnings.catch_warnings():
-            warnings.simplefilter("error", BiobankScaleWarning)
-            _maybe_biobank_warn(str(path.resolve()), warn_samples=10)
+            warnings.simplefilter("error", MemoryLimitedWarning)
+            _maybe_memory_warn(str(path.resolve()), warn_samples=10)
 
 
 class TestFromVcfIntegration:
@@ -153,18 +153,18 @@ class TestFromVcfIntegration:
         # warning before parsing. Uses the existing simple_vcf_file
         # shape but with enough samples to clear the test threshold.
         from pg_gpu import HaplotypeMatrix
-        from pg_gpu._biobank_warning import BIOBANK_VCF_WARN_SAMPLES
+        from pg_gpu._memory_warning import VCF_WARN_SAMPLES
         path = str(tmp_path / "hm.vcf")
-        _write_minimal_vcf(path, n_samples=BIOBANK_VCF_WARN_SAMPLES + 10)
-        with pytest.warns(BiobankScaleWarning):
+        _write_minimal_vcf(path, n_samples=VCF_WARN_SAMPLES + 10)
+        with pytest.warns(MemoryLimitedWarning):
             HaplotypeMatrix.from_vcf(path)
 
     def test_genotype_matrix_from_vcf_warns(self, tmp_path):
         from pg_gpu import GenotypeMatrix
-        from pg_gpu._biobank_warning import BIOBANK_VCF_WARN_SAMPLES
+        from pg_gpu._memory_warning import VCF_WARN_SAMPLES
         path = str(tmp_path / "gm.vcf")
-        _write_minimal_vcf(path, n_samples=BIOBANK_VCF_WARN_SAMPLES + 10)
-        with pytest.warns(BiobankScaleWarning):
+        _write_minimal_vcf(path, n_samples=VCF_WARN_SAMPLES + 10)
+        with pytest.warns(MemoryLimitedWarning):
             GenotypeMatrix.from_vcf(path)
 
     def test_haplotype_matrix_from_vcf_small_does_not_warn(self, tmp_path):
@@ -172,5 +172,5 @@ class TestFromVcfIntegration:
         path = str(tmp_path / "small.vcf")
         _write_minimal_vcf(path, n_samples=4)
         with warnings.catch_warnings():
-            warnings.simplefilter("error", BiobankScaleWarning)
+            warnings.simplefilter("error", MemoryLimitedWarning)
             HaplotypeMatrix.from_vcf(path)

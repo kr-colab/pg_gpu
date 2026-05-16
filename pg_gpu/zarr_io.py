@@ -15,13 +15,17 @@ def _parse_region(region):
 
 
 def resolve_pop_file_path(zarr_path, pop_file, *, announce_prefix):
-    """Map a ``pop_file`` kwarg to a filesystem path or None.
+    """Map a ``pop_file`` kwarg that is *only ever a path or auto-load*
+    to a filesystem path or ``None``.
 
-    ``pop_file=False`` disables the auto-load and returns None.
+    ``pop_file=False`` disables the auto-load and returns ``None``.
     ``pop_file=<str>`` returns the path as-is. ``pop_file=None`` looks
     for ``<zarr_path>.pops.tsv`` next to the store; if it exists,
     announces the auto-load to stderr via ``announce_prefix`` and
     returns the companion path.
+
+    For the richer ``pop_file`` accepted by ``HaplotypeMatrix.from_zarr``
+    (numpy arrays, dicts, zarr key names) see ``normalize_pop_input``.
     """
     if pop_file is False:
         return None
@@ -33,6 +37,99 @@ def resolve_pop_file_path(zarr_path, pop_file, *, announce_prefix):
     print(f"{announce_prefix}: auto-loaded pop file {companion}",
           file=sys.stderr, flush=True)
     return companion
+
+
+def normalize_pop_input(pop_file, *, zarr_path, sample_names,
+                         zarr_store=None, announce_prefix=""):
+    """Normalize the flexible ``pop_file`` kwarg into a ``{sample_id ->
+    pop_label}`` dict (or ``None`` to mean "no assignments").
+
+    Accepted forms:
+
+    * ``False`` -- disable both the companion ``.pops.tsv`` auto-load
+      and any other source. Returns ``None``.
+    * ``None`` -- auto-load ``<zarr_path>.pops.tsv`` if it exists.
+      Returns the parsed mapping (or ``None`` if no companion is
+      present). Announces the auto-load to stderr.
+    * ``dict`` -- returned as-is.
+    * ``numpy.ndarray`` / ``list`` of length ``len(sample_names)`` --
+      one population label per sample, in the same order as
+      ``sample_names``. Empty / ``""`` / ``None`` entries are skipped.
+    * ``str`` -- first checked against ``zarr_store`` if provided: a
+      key that resolves to a 1-D string array of the right length is
+      read out of the store. Otherwise interpreted as a filesystem
+      path to a tab-delimited ``sample\\tpop`` file with a header
+      row.
+
+    ``sample_names`` must be the store's sample axis (used both for
+    array-shaped inputs and for path-shaped inputs to filter sample
+    membership). ``zarr_store`` is optional; pass it when the caller
+    has the open store handy so a zarr-key string is preferred over
+    a same-named file on disk.
+    """
+    import numpy as np
+
+    if pop_file is False:
+        return None
+
+    if pop_file is None:
+        companion = str(zarr_path).rstrip("/") + ".pops.tsv"
+        if not os.path.exists(companion):
+            return None
+        print(f"{announce_prefix}: auto-loaded pop file {companion}",
+              file=sys.stderr, flush=True)
+        pop_file = companion
+
+    if isinstance(pop_file, dict):
+        return {str(k): str(v) for k, v in pop_file.items() if v}
+
+    if isinstance(pop_file, (list, tuple, np.ndarray)):
+        labels = np.asarray(pop_file)
+        if labels.ndim != 1:
+            raise ValueError(
+                f"pop_file array must be 1-D; got shape {labels.shape}")
+        if len(labels) != len(sample_names):
+            raise ValueError(
+                f"pop_file array length {len(labels)} does not match "
+                f"sample axis length {len(sample_names)}")
+        return _pop_array_to_map(labels, sample_names)
+
+    if isinstance(pop_file, str):
+        if zarr_store is not None and pop_file in zarr_store:
+            labels = np.asarray(zarr_store[pop_file][:])
+            if labels.ndim != 1 or len(labels) != len(sample_names):
+                raise ValueError(
+                    f"zarr key {pop_file!r} has shape {labels.shape}; "
+                    f"expected 1-D of length {len(sample_names)} to "
+                    f"line up with the sample axis")
+            return _pop_array_to_map(labels, sample_names)
+        return _read_pop_tsv(pop_file)
+
+    raise TypeError(
+        f"pop_file must be a path, dict, array, zarr key, False, or "
+        f"None; got {type(pop_file).__name__}")
+
+
+def _pop_array_to_map(labels, sample_names):
+    out = {}
+    for sample, label in zip(sample_names, labels):
+        if label is None:
+            continue
+        label = str(label)
+        if not label or label.lower() == "nan":
+            continue
+        out[str(sample)] = label
+    return out
+
+
+def _read_pop_tsv(path):
+    out = {}
+    with open(path) as f:
+        for line in f:
+            parts = line.strip().split()
+            if len(parts) >= 2 and parts[0] != "sample":
+                out[parts[0]] = parts[1]
+    return out
 
 
 def detect_zarr_layout(store):

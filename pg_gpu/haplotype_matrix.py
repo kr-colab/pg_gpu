@@ -22,15 +22,16 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
     Returns ``(mode, source)`` where ``source`` is the
     ``ZarrGenotypeSource`` opened for the size probe and reused
     downstream (when ``mode == 'streaming'``), or ``None`` when no
-    source was opened (scikit-allel layout, missing store, or the
-    eager-fits branch where the caller's eager path opens its own
-    store via ``read_genotypes``).
+    source was opened: scikit-allel layout, missing store, or the
+    branch that picked ``'eager'`` because the matrix fits (in which
+    case the caller's eager path opens its own store via
+    ``read_genotypes``).
 
     Scikit-allel layouts always return ``('eager', None)``: the
-    streaming source is VCZ-only, so the size check would refuse a
+    streaming format is VCZ-only, so the size check would refuse a
     large allel store with nowhere to fall back to.
 
-    ``free_gpu_bytes`` is exposed for tests; production callers leave
+    ``free_gpu_bytes`` is exposed for tests; typical invocation will leave
     it None to let ``cp.cuda.Device().mem_info`` provide it.
     """
     import zarr
@@ -40,8 +41,9 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
         layout = detect_zarr_layout(store)
     except (FileNotFoundError, KeyError, ValueError):
         # Store path is missing, missing required arrays, or has an
-        # unrecognized layout. Defer to the eager path so its richer
-        # error messages (read_genotypes, layout-specific) surface.
+        # unrecognized layout. Don't raise here -- return 'eager' so the
+        # caller proceeds into ``read_genotypes`` and its layout-specific
+        # checks emit a more actionable error for the user.
         return "eager", None
     if layout != "vcz":
         return "eager", None
@@ -59,21 +61,13 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
         return "eager", None
     if streaming == "never":
         raise MemoryError(
-            f"streaming='never' but the eager matrix would be "
+            f"streaming='never' but the full matrix would be "
             f"{eager_bytes / 1e9:.1f} GB on a device with "
             f"{free_gpu_bytes / 1e9:.1f} GB free (limit: "
             f"{fraction:.0%}). Use streaming='auto' or 'always' to "
             f"return a StreamingHaplotypeMatrix instead."
         )
     return "streaming", source
-
-
-def _resolve_companion_pop_file(zarr_path, pop_file):
-    """Wrapper around ``zarr_io.resolve_pop_file_path`` tagged for the
-    ``HaplotypeMatrix.from_zarr`` auto-load announce message."""
-    from .zarr_io import resolve_pop_file_path
-    return resolve_pop_file_path(zarr_path, pop_file,
-                                 announce_prefix="HaplotypeMatrix.from_zarr")
 
 
 class HaplotypeMatrix:
@@ -383,8 +377,8 @@ class HaplotypeMatrix:
         HaplotypeMatrix
             Phased haplotype data with sample names stored.
         """
-        from ._biobank_warning import _maybe_biobank_warn
-        _maybe_biobank_warn(path, region=region)
+        from ._memory_warning import _maybe_memory_warn
+        _maybe_memory_warn(path, region=region)
         vcf = allel.read_vcf(path, region=region, samples=samples)
         if vcf is None:
             raise ValueError(f"No variants found in {path}"
@@ -451,30 +445,44 @@ class HaplotypeMatrix:
             Genomic region 'chrom:start-end' to load a subset.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
-        pop_file : str or False, optional
-            Tab-delimited file mapping ``sample`` -> ``pop`` in the
-            format ``HaplotypeMatrix.load_pop_file`` expects. Default
-            (``None``) looks for ``<path>.pops.tsv`` next to the
-            store and loads it if present, announcing the auto-load
-            to stderr. Pass ``False`` to disable the auto-load.
+        pop_file : str, numpy.ndarray, list, dict, or False, optional
+            Sample-to-population assignments. Accepted forms:
+
+            * ``str`` -- path to a tab-delimited file with a header
+              row and ``sample\tpop`` columns, in the format that
+              ``HaplotypeMatrix.load_pop_file`` expects.
+            * ``numpy.ndarray`` or ``list`` of length ``n_samples``
+              -- one population label per sample, in the same order
+              as the store's sample axis.
+            * ``dict`` mapping sample id to population label. Any
+              sample not in the dict is left unassigned.
+            * ``False`` -- skip the auto-load.
+
+            Default (``None``) looks for ``<path>.pops.tsv`` next to
+            the store and loads it if present, announcing the
+            auto-load to stderr.
         streaming : {'auto', 'always', 'never'}, optional
             Whether to return a ``StreamingHaplotypeMatrix`` that
             iterates the store chunk-by-chunk through the GPU
-            (suitable for biobank-scale stores that do not fit
-            eagerly on the device). ``'always'`` forces streaming;
-            ``'never'`` forces eager (and raises ``MemoryError`` if
-            the matrix would not fit in free GPU memory). ``'auto'``
-            (default) checks the projected eager footprint against
-            free GPU memory and picks streaming when the eager
-            matrix would consume more than half the device.
-            Scikit-allel layouts always route to eager because the
-            streaming source is VCZ-only.
+            (suitable for large-scale stores that do not fit
+            entirely in GPU memory). ``'always'`` forces streaming;
+            ``'never'`` forces a single-shot load (and raises
+            ``MemoryError`` if the matrix would not fit in free GPU
+            memory). ``'auto'`` (default) checks the projected
+            footprint of the haplotype matrix against free GPU
+            memory and picks streaming when the full matrix would
+            consume more than half the device. Scikit-allel-formatted
+            zarr always routes to the single-shot path because the
+            only allowed format for ``'streaming'`` is VCZ.
         chunk_bp : int, optional
             Genomic chunk size in bp for the streaming path. Ignored
-            on the eager path.
+            when the data are loaded into GPU memory in one shot.
         prefetch : int, optional
-            Read-ahead depth for the streaming path. Ignored on the
-            eager path.
+            Number of chunks to read ahead on a background thread
+            while the current chunk is being processed -- 0 disables
+            read-ahead; 1 (default) overlaps one chunk's disk read
+            with the previous chunk's GPU work. Ignored when the
+            data are loaded into GPU memory in one shot.
         backend : {'auto', 'host', 'kvikio'}, optional
             Streaming chunk-fetch backend. ``'kvikio'`` decodes the
             store's codec on the GPU via ``kvikio + nvCOMP``; only
@@ -539,7 +547,13 @@ class HaplotypeMatrix:
         sample_names = data['samples']
 
         if gt.shape[2] != 2:
-            raise ValueError(f"expected ploidy 2; got {gt.shape[2]}")
+            # The eager and streaming readers, the kvikio sample-subset
+            # gather, and the (n_dip, 2) -> 2 * n_dip haplotype layout all
+            # assume diploid. Haploid / polyploid stores need a different
+            # gather path and are not currently supported.
+            raise ValueError(
+                f"HaplotypeMatrix.from_zarr requires diploid (ploidy 2) "
+                f"genotypes; got ploidy {gt.shape[2]}.")
 
         hm = build_haplotype_matrix(
             gt, positions,
@@ -552,9 +566,20 @@ class HaplotypeMatrix:
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
 
-        resolved_pop = _resolve_companion_pop_file(path, pop_file)
-        if resolved_pop is not None:
-            hm.load_pop_file(resolved_pop)
+        from .zarr_io import normalize_pop_input
+        try:
+            import zarr
+            store = zarr.open_group(path, mode="r")
+        except Exception:
+            store = None
+        pop_map = normalize_pop_input(
+            pop_file, zarr_path=path,
+            sample_names=hm.samples or [],
+            zarr_store=store,
+            announce_prefix="HaplotypeMatrix.from_zarr",
+        )
+        if pop_map is not None:
+            hm.load_pop_file(pop_map)
 
         return hm
 
@@ -650,17 +675,21 @@ class HaplotypeMatrix:
         gt[:, :, 1] = hap[n_samples:, :].T
         return gt
 
-    def load_pop_file(self, pop_file: str, pops: list = None):
-        """Load population assignments from a tab-delimited file.
+    def load_pop_file(self, pop_file, pops: list = None):
+        """Load population assignments from a tab-delimited file or
+        an already-resolved sample->population mapping.
 
-        Sets sample_sets from a file mapping sample names to populations.
-        Requires that sample names were stored during from_vcf().
+        Sets sample_sets from a file (or dict) mapping sample names to
+        populations. Requires that sample names were stored during
+        ``from_vcf`` / ``from_zarr``.
 
         Parameters
         ----------
-        pop_file : str
-            Tab-delimited file with columns: sample, pop.
-            Header line starting with 'sample' is skipped.
+        pop_file : str or dict
+            Either a path to a tab-delimited file with columns
+            ``sample\tpop`` (header line starting with ``sample`` is
+            skipped), or a dict mapping sample names to population
+            labels.
         pops : list of str, optional
             Populations to include. If None, includes all found populations.
         """
@@ -668,12 +697,15 @@ class HaplotypeMatrix:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
 
         n_samples = len(self.samples)
-        pop_map = {}
-        with open(pop_file) as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 2 and parts[0] != 'sample':
-                    pop_map[parts[0]] = parts[1]
+        if isinstance(pop_file, dict):
+            pop_map = {str(k): str(v) for k, v in pop_file.items() if v}
+        else:
+            pop_map = {}
+            with open(pop_file) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[0] != 'sample':
+                        pop_map[parts[0]] = parts[1]
 
         # Build sample_sets
         found_pops = set(pop_map.values())

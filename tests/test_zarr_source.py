@@ -264,3 +264,44 @@ class TestPopFileResolution:
             src = ZarrGenotypeSource(path, pop_file=bad_pop)
         assert "pop1" in src.pop_cols
         assert "pop2" not in src.pop_cols
+
+    def test_pop_file_accepts_dict(self, vcz_store):
+        path, _ = vcz_store
+        src = ZarrGenotypeSource(
+            path, pop_file={f"s{i}": "pop1" if i < 5 else "pop2"
+                            for i in range(20)},
+        )
+        assert set(src.pop_cols.keys()) == {"pop1", "pop2"}
+        # pop1 = first 5 diploids -> haps [0..5) plus [n_dip..n_dip+5)
+        n_dip = src.num_diploids
+        expected1 = np.concatenate([np.arange(5), np.arange(5) + n_dip])
+        np.testing.assert_array_equal(np.sort(src.pop_cols["pop1"]),
+                                       expected1)
+
+    def test_pop_file_accepts_array(self, vcz_store):
+        path, _ = vcz_store
+        # 20 diploids in the fixture; first 12 are pop1, rest pop2.
+        labels = np.array(["pop1"] * 12 + ["pop2"] * 8)
+        src = ZarrGenotypeSource(path, pop_file=labels)
+        assert set(src.pop_cols.keys()) == {"pop1", "pop2"}
+        n_dip = src.num_diploids
+        expected1 = np.concatenate([np.arange(12), np.arange(12) + n_dip])
+        np.testing.assert_array_equal(np.sort(src.pop_cols["pop1"]),
+                                       expected1)
+
+    def test_pop_file_rejects_mismatched_array_length(self, vcz_store):
+        path, _ = vcz_store
+        with pytest.raises(ValueError, match="does not match sample"):
+            ZarrGenotypeSource(path, pop_file=np.array(["pop1", "pop2"]))
+
+    def test_pop_file_accepts_zarr_key(self, vcz_store):
+        path, _ = vcz_store
+        # Stamp a 1-D population array onto the store under a non-VCZ
+        # key, then look it up by name. Mirrors the case where bio2zarr
+        # was extended with a sample-axis population field.
+        store = zarr.open_group(path, mode="r+")
+        labels = np.array(["pop1"] * 12 + ["pop2"] * 8)
+        store.create_array("sample_population", shape=labels.shape,
+                            dtype="<U8")[:] = labels
+        src = ZarrGenotypeSource(path, pop_file="sample_population")
+        assert set(src.pop_cols.keys()) == {"pop1", "pop2"}

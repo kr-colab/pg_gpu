@@ -1,12 +1,14 @@
-"""``BiobankScaleWarning`` and the size check ``from_vcf`` uses to fire it.
+"""``MemoryLimitedWarning`` and the size check ``from_vcf`` uses to fire it.
 
-VCF text parsing is single-threaded in htslib and dominates loading
-wall time at biobank scale. ``HaplotypeMatrix.from_vcf`` and
-``GenotypeMatrix.from_vcf`` call ``_maybe_biobank_warn`` before
-parsing so users with very large VCFs get pointed at the
-one-time-conversion path -- ``HaplotypeMatrix.vcf_to_zarr`` builds a
-VCZ store, and subsequent reads via ``from_zarr`` are seconds to
-minutes instead of hours.
+VCF text parsing is single-threaded in htslib and the whole genotype
+matrix gets pulled into host memory at once, so a very large VCF
+either takes hours to load or exhausts RAM outright.
+``HaplotypeMatrix.from_vcf`` and ``GenotypeMatrix.from_vcf`` call
+``_maybe_memory_warn`` before parsing so users with too-large VCFs
+get pointed at the one-time-conversion path --
+``HaplotypeMatrix.vcf_to_zarr`` builds a VCZ store, and subsequent
+reads via ``from_zarr`` are seconds to minutes instead of hours and
+can stream a chromosome that doesn't fit in memory.
 """
 
 import collections
@@ -15,27 +17,30 @@ import os
 import warnings
 
 
-class BiobankScaleWarning(UserWarning):
-    """A VCF load that will be slow because of its size or sample count.
+class MemoryLimitedWarning(UserWarning):
+    """A load that is at risk of exhausting memory or taking far longer
+    than the VCZ path would.
 
     Emitted before parsing by ``HaplotypeMatrix.from_vcf`` and
-    ``GenotypeMatrix.from_vcf``. The text includes a copy-pastable
-    recipe for converting the VCF to VCZ via
+    ``GenotypeMatrix.from_vcf`` when the VCF on disk is large enough,
+    or has enough samples, that VCF text parsing will be slow and the
+    full-matrix host load may not even fit. The warning text includes
+    a copy-pastable recipe for converting the VCF to VCZ via
     ``HaplotypeMatrix.vcf_to_zarr``. Silence with::
 
         import warnings
-        from pg_gpu import BiobankScaleWarning
-        warnings.filterwarnings("ignore", category=BiobankScaleWarning)
+        from pg_gpu import MemoryLimitedWarning
+        warnings.filterwarnings("ignore", category=MemoryLimitedWarning)
     """
 
 
 #: Trigger thresholds. Above these sizes / sample counts a VCF load is
 #: slow enough that converting to VCZ once pays for itself within a
-#: single re-read. The constants are kwargs on ``_maybe_biobank_warn``
+#: single re-read. The constants are kwargs on ``_maybe_memory_warn``
 #: so tests can lower them without a global monkeypatch.
-BIOBANK_VCF_WARN_BYTES = 10 * 1024 ** 3      # 10 GiB on disk
-BIOBANK_VCF_WARN_SAMPLES = 5_000
-BIOBANK_VCF_WARN_REGION_BP = 5_000_000       # 5 Mb
+VCF_WARN_BYTES = 10 * 1024 ** 3      # 10 GiB on disk
+VCF_WARN_SAMPLES = 5_000
+VCF_WARN_REGION_BP = 5_000_000       # 5 Mb
 
 
 #: Maximum number of distinct VCF paths the in-process warn cache will
@@ -54,7 +59,7 @@ def _vcf_header_sample_count(path):
     or ``None`` if the file cannot be opened or has no header.
 
     Reads the header only -- stops at the first non-``##`` line. On a
-    biobank-scale VCF that finishes in milliseconds even when the file
+    very large VCF this finishes in milliseconds even when the file
     is hundreds of GB."""
     opener = (gzip.open if path.endswith(".gz") or path.endswith(".bgz")
               else open)
@@ -92,11 +97,11 @@ def _format_warning_text(path, size_bytes, n_samples):
         f"{path} is {size_bytes / 1e9:.1f} GB"
         f"{f' with {n_samples:,} samples' if n_samples is not None else ''}. "
         "Loading this VCF will be slow because VCF text parsing is "
-        "single-threaded in htslib. For biobank-scale repeated "
-        "analysis, convert once to VCZ and use "
+        "single-threaded in htslib, and the full genotype matrix "
+        "must fit in host memory. Convert once to VCZ and use "
         "HaplotypeMatrix.from_zarr() instead -- subsequent reads finish "
-        "in seconds rather than hours, and the kvikio backend can "
-        "speed up sample-subset reads by 100x+.\n\n"
+        "in seconds rather than hours, and the streaming path can "
+        "walk a chromosome larger than memory chunk by chunk.\n\n"
         "One-time conversion:\n"
         "    from pg_gpu import HaplotypeMatrix\n"
         f"    HaplotypeMatrix.vcf_to_zarr({path!r},\n"
@@ -105,17 +110,17 @@ def _format_warning_text(path, size_bytes, n_samples):
         f"    hm = HaplotypeMatrix.from_zarr({(path.rsplit('.', 1)[0] + '.vcz')!r})\n\n"
         "To silence:\n"
         "    import warnings\n"
-        "    from pg_gpu import BiobankScaleWarning\n"
-        "    warnings.filterwarnings('ignore', category=BiobankScaleWarning)\n"
+        "    from pg_gpu import MemoryLimitedWarning\n"
+        "    warnings.filterwarnings('ignore', category=MemoryLimitedWarning)\n"
     )
 
 
-def _maybe_biobank_warn(path, *, region=None,
-                       warn_bytes=BIOBANK_VCF_WARN_BYTES,
-                       warn_samples=BIOBANK_VCF_WARN_SAMPLES,
-                       warn_region_bp=BIOBANK_VCF_WARN_REGION_BP,
+def _maybe_memory_warn(path, *, region=None,
+                       warn_bytes=VCF_WARN_BYTES,
+                       warn_samples=VCF_WARN_SAMPLES,
+                       warn_region_bp=VCF_WARN_REGION_BP,
                        stacklevel=3):
-    """Emit ``BiobankScaleWarning`` if loading ``path`` will be slow.
+    """Emit ``MemoryLimitedWarning`` if loading ``path`` will be slow.
 
     Triggers when either:
 
@@ -148,7 +153,7 @@ def _maybe_biobank_warn(path, *, region=None,
                   or _region_span_bp(region) > warn_region_bp)
 
     # The sample-count check requires opening the VCF header, which on a
-    # gzipped biobank-scale file decompresses several KB of metadata
+    # gzipped multi-GB file decompresses several KB of metadata
     # lines. Skip it when the size check already cannot trigger -- a
     # below-threshold file with a too-small region cannot warn on
     # sample count alone either, so the read is pure waste.
@@ -161,7 +166,7 @@ def _maybe_biobank_warn(path, *, region=None,
     if (big_file and region_big) or too_many_samples:
         warnings.warn(
             _format_warning_text(canonical, size, n_samples),
-            BiobankScaleWarning,
+            MemoryLimitedWarning,
             stacklevel=stacklevel,
         )
         _warned_paths[canonical] = None

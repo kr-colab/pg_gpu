@@ -353,33 +353,35 @@ class ZarrGenotypeSource:
         return lo, hi
 
     def _resolve_pop_file(self, pop_file):
-        from .zarr_io import resolve_pop_file_path
-        pop_file = resolve_pop_file_path(
-            self.path, pop_file,
+        from .zarr_io import normalize_pop_input
+
+        # Defer the sample_id lookup until we actually need it -- some
+        # test fixtures write minimal VCZ stores without a sample_id
+        # array, and a missing companion .pops.tsv should not need it.
+        if "sample_id" in self._store:
+            sample_ids = list(np.array(self._store["sample_id"]))
+        else:
+            sample_ids = []
+        pop_map = normalize_pop_input(
+            pop_file, zarr_path=self.path,
+            sample_names=sample_ids,
+            zarr_store=self._store,
             announce_prefix="ZarrGenotypeSource",
         )
-        if pop_file is None:
+        if pop_map is None:
             return None
 
-        # Resolve sample names to diploid indices via the store's sample_id.
-        sample_ids = list(np.array(self._store["sample_id"]))
         idx_by_name = {str(s): i for i, s in enumerate(sample_ids)}
-
         pop_to_dips = {}
-        with open(pop_file) as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) < 2 or parts[0] in ("sample", "sample_id"):
-                    continue
-                sample, pop = parts[0], parts[1]
-                i = idx_by_name.get(sample)
-                if i is None:
-                    warnings.warn(
-                        f"pop_file sample {sample!r} not in store; skipping",
-                        stacklevel=2,
-                    )
-                    continue
-                pop_to_dips.setdefault(pop, []).append(i)
+        for sample, pop in pop_map.items():
+            i = idx_by_name.get(str(sample))
+            if i is None:
+                warnings.warn(
+                    f"pop_file sample {sample!r} not in store; skipping",
+                    stacklevel=2,
+                )
+                continue
+            pop_to_dips.setdefault(pop, []).append(i)
 
         # Map diploid indices to haplotype-axis indices: dip i lives at
         # haps i (ploidy 0) and i + num_diploids (ploidy 1). Matches the

@@ -1103,17 +1103,16 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
     _garud_stats = {"garud_h1", "garud_h12", "garud_h123", "garud_h2h1",
                     "garud_n_distinct", "haplotype_count"}
     if any(s in _garud_stats for s in statistics):
+        # The fused Garud kernel has a known ULP-scale rounding drift
+        # in the distinct-haplotype count under different chunk
+        # prefix-sum orders, so streaming dispatch is currently
+        # disabled for it. Materialize a region to run Garud H at
+        # biobank scale until the rounding is tracked down.
         raise NotImplementedError(
-            "Garud H per-chunk dispatch is correctly basis-stable now "
-            "(weights come from _position_weights and the hashes for a "
-            "given window are byte-equal across chunkings), but the "
-            "fused Garud kernel exhibits second-order rounding "
-            "sensitivity that still causes a few ULP-scale drifts in "
-            "the distinct-haplotype count under different prefix-sum "
-            "trajectories. Tracking this down is a separate concern "
-            "from the streaming infrastructure; materialize the region "
-            "eagerly to run Garud at biobank scale until it lands."
-        )
+            "Garud H statistics are not available on the streaming path; "
+            "materialize the region first via "
+            "StreamingHaplotypeMatrix.materialize(...) and run Garud on "
+            "that.")
 
     # Parse the BED mask once up front and inject the resolved
     # AccessibleMask into each chunk -- otherwise windowed_analysis would
@@ -2499,14 +2498,13 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 def _position_weights(positions, salt):
     """Position-deterministic float64 weights for the Garud H hash basis.
 
-    Replaces the seed=42 RNG draw of length n_var. That draw produced a
-    different weight per variant per call, depending on the matrix's
-    n_variants, so a per-chunk windowed Garud got a different hash basis
-    on every chunk and disagreed with the eager result for the same
-    window. Splitmix64-scrambling the absolute variant position gives a
-    weight that is purely a function of the position and the salt, so two
-    chunks (or two completely different matrices) covering the same
-    variants get the same hash on those variants.
+    Splitmix64-scrambles each absolute variant position to a weight in
+    ``[-1, 1)``. The weight is a pure function of the position and the
+    salt, which is what lets the Garud H kernel produce the same per-
+    window hash whether the surrounding window was computed in one
+    eager pass or split across two streaming chunks; an n_variants-
+    seeded RNG would assign a different weight to the same variant
+    every time the matrix shape changed.
 
     Two salts produce two independent weight columns w1, w2; together
     they make collisions between distinct haplotype patterns vanishingly

@@ -43,6 +43,11 @@ def estimate_indiv_block_size(n_ind, bytes_per_element=8,
 
     Returns at least 1 and at most ``n_ind`` (a single block covers
     every individual, equivalent to no tiling).
+
+    The ``cp.cuda.Device().mem_info`` read is single-shot per call;
+    pg_gpu's streaming pipelines run on the default CUDA stream from
+    one Python thread so no other code is touching the memory pool
+    concurrently while this estimate is being computed.
     """
     free = cp.cuda.Device().mem_info[0]
     budget = int(free * memory_fraction)

@@ -357,8 +357,8 @@ class GenotypeMatrix:
         GenotypeMatrix
         """
         import allel
-        from ._biobank_warning import _maybe_biobank_warn
-        _maybe_biobank_warn(path)
+        from ._memory_warning import _maybe_memory_warn
+        _maybe_memory_warn(path)
         callset = allel.read_vcf(path)
         gt = callset['calldata/GT']  # (n_variants, n_samples, 2)
         pos = callset['variants/POS']
@@ -401,36 +401,24 @@ class GenotypeMatrix:
                   backend: str = "auto"):
         """Construct a GenotypeMatrix from a Zarr store.
 
-        Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
+        Identical interface to ``HaplotypeMatrix.from_zarr``;
+        see that method's docstring for the meaning of every kwarg
+        (``streaming``, ``pop_file`` flexibility, ``chunk_bp``,
+        ``prefetch``, ``backend``). The only difference is the
+        returned type: this returns ``GenotypeMatrix`` (or
+        ``StreamingGenotypeMatrix`` on the streaming path) where
+        each row is a (n_indiv, ploidy) genotype call, versus
+        ``HaplotypeMatrix`` which presents the same data as a
+        (n_haplotypes, n_variants) phased matrix.
 
         Parameters
         ----------
-        path : str
-            Path to Zarr store directory.
-        region : str, optional
-            Genomic region 'chrom:start-end'.
-        accessible_bed : str, optional
-            Path to a BED file defining accessible/callable regions.
         include_invariant : bool
-            If True, set n_total_sites from loaded variant count.
-        pop_file : str or False, optional
-            Tab-delimited file mapping ``sample`` -> ``pop`` in the
-            format ``GenotypeMatrix.load_pop_file`` expects. Default
-            (``None``) looks for ``<path>.pops.tsv`` next to the
-            store and loads it if present. Pass ``False`` to disable
-            the auto-load.
-        streaming : {'auto', 'always', 'never'}, optional
-            Whether to return a ``StreamingGenotypeMatrix`` that
-            iterates the store chunk-by-chunk through the GPU
-            (suitable for biobank-scale stores that do not fit
-            eagerly on the device). ``'auto'`` (default) checks the
-            projected eager footprint against free GPU memory and
-            picks streaming when the eager matrix would consume more
-            than half the device. Scikit-allel layouts always route
-            to eager because the streaming source is VCZ-only.
-        chunk_bp, prefetch, backend
-            See ``HaplotypeMatrix.from_zarr``; ignored on the eager
-            path.
+            If True, set ``n_total_sites`` from the loaded variant
+            count. Unique to this entry point (the haplotype matrix
+            does not need it).
+        path, region, accessible_bed, pop_file, streaming, chunk_bp, prefetch, backend
+            See ``HaplotypeMatrix.from_zarr``.
 
         Returns
         -------
@@ -477,9 +465,8 @@ class GenotypeMatrix:
     @classmethod
     def _build_eager(cls, path, *, region, accessible_bed,
                      include_invariant, pop_file):
-        from .zarr_io import read_genotypes
+        from .zarr_io import read_genotypes, normalize_pop_input
         from ._gpu_genotype_prep import build_genotype_matrix
-        from .haplotype_matrix import _resolve_companion_pop_file
 
         data = read_genotypes(path, region)
         gt = data['gt']  # (n_variants, n_samples, ploidy)
@@ -499,9 +486,19 @@ class GenotypeMatrix:
         if accessible_bed is not None:
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
 
-        resolved_pop = _resolve_companion_pop_file(path, pop_file)
-        if resolved_pop is not None:
-            gm.load_pop_file(resolved_pop)
+        try:
+            import zarr
+            store = zarr.open_group(path, mode="r")
+        except Exception:
+            store = None
+        pop_map = normalize_pop_input(
+            pop_file, zarr_path=path,
+            sample_names=gm.samples or [],
+            zarr_store=store,
+            announce_prefix="GenotypeMatrix.from_zarr",
+        )
+        if pop_map is not None:
+            gm.load_pop_file(pop_map)
 
         return gm
 
@@ -562,24 +559,30 @@ class GenotypeMatrix:
             )
 
     def load_pop_file(self, pop_file, pops=None):
-        """Load population assignments from a tab-delimited file.
+        """Load population assignments from a tab-delimited file or
+        an already-resolved sample->population mapping.
 
         Parameters
         ----------
-        pop_file : str
-            Tab-delimited file with columns: sample, pop.
+        pop_file : str or dict
+            Either a path to a tab-delimited file with columns
+            ``sample\tpop``, or a dict mapping sample names to
+            population labels.
         pops : list of str, optional
             Populations to include. If None, includes all found.
         """
         if self.samples is None:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
 
-        pop_map = {}
-        with open(pop_file) as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 2 and parts[0] != 'sample':
-                    pop_map[parts[0]] = parts[1]
+        if isinstance(pop_file, dict):
+            pop_map = {str(k): str(v) for k, v in pop_file.items() if v}
+        else:
+            pop_map = {}
+            with open(pop_file) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[0] != 'sample':
+                        pop_map[parts[0]] = parts[1]
 
         if pops is None:
             pops = sorted(set(pop_map.values()))
