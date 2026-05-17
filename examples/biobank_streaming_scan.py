@@ -124,9 +124,9 @@ def main():
     elif "all" in sample_set_names and len(sample_set_names) == 1:
         raise SystemExit(
             "No pop file found alongside the store and --pops not given; "
-            f"the streaming reader fell back to a single 'all' pop and "
-            f"this example needs two named populations. Either provide "
-            f"--pop-file or --pops.")
+            "the streaming reader fell back to a single 'all' pop and "
+            "this example needs two named populations. Either provide "
+            "--pop-file or --pops.")
     else:
         pops = tuple(sample_set_names[:2])
     print(f"populations: {pops}")
