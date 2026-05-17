@@ -184,10 +184,9 @@ biobank scale will not fit in GPU memory for those, but a single
 
 ``materialize(sample_subset=...)`` reads the (variants × subsample)
 genotype block directly onto the GPU when the store is set up for
-it (zstd / blosc / lz4 / deflate compressed bio2zarr chunks decoded
-through kvikio + nvCOMP). At biobank-scale sample sizes this is
-roughly 60× faster than the CPU-side path: a 5 Mb / 10,000-haplotype
-block drops from ~170 seconds to ~3 seconds.
+it. At biobank-scale sample sizes this is roughly 60× faster than
+the CPU-side path: a 5 Mb / 10,000-haplotype block drops from
+~170 seconds to ~3 seconds.
 
 Required Zarr format
 --------------------
