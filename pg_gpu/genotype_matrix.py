@@ -514,7 +514,7 @@ class GenotypeMatrix:
             source = ZarrGenotypeSource(path, region=region,
                                         pop_assignment=pop_assignment)
         else:
-            source.pop_cols = source._resolve_pop_file(pop_assignment)
+            source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
         return StreamingGenotypeMatrix(
             source, fetcher,

@@ -14,31 +14,6 @@ def _parse_region(region):
     return chrom, start, end
 
 
-def resolve_pop_file_path(zarr_path, pop_file, *, announce_prefix):
-    """Map a ``pop_file`` kwarg that is *only ever a path or auto-load*
-    to a filesystem path or ``None``.
-
-    ``pop_file=False`` disables the auto-load and returns ``None``.
-    ``pop_file=<str>`` returns the path as-is. ``pop_file=None`` looks
-    for ``<zarr_path>.pops.tsv`` next to the store; if it exists,
-    announces the auto-load to stderr via ``announce_prefix`` and
-    returns the companion path.
-
-    For the richer ``pop_file`` accepted by ``HaplotypeMatrix.from_zarr``
-    (numpy arrays, dicts, zarr key names) see ``normalize_pop_input``.
-    """
-    if pop_file is False:
-        return None
-    if pop_file is not None:
-        return pop_file
-    companion = str(zarr_path).rstrip("/") + ".pops.tsv"
-    if not os.path.exists(companion):
-        return None
-    print(f"{announce_prefix}: auto-loaded pop file {companion}",
-          file=sys.stderr, flush=True)
-    return companion
-
-
 def normalize_pop_input(pop_assignment, *, zarr_path, sample_names,
                          zarr_store=None, announce_prefix=""):
     """Normalize the flexible ``pop_assignment`` kwarg into a

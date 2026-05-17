@@ -601,7 +601,7 @@ class HaplotypeMatrix:
             # pop_assignment=False to keep its size probe cheap; resolve
             # the caller's pop_assignment now without re-opening the
             # zarr store.
-            source.pop_cols = source._resolve_pop_file(pop_assignment)
+            source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
         return StreamingHaplotypeMatrix(
             source, fetcher,

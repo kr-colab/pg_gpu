@@ -78,20 +78,14 @@ def compute_ld_statistics(
         Path to VCF file. Not needed if haplotype_matrix/genotype_matrix provided.
     rec_map_file : str, optional
         Recombination map (tab-delimited: pos, Map(cM)). Required with r_bins.
-    pop_file : str, optional
-        Population file (tab-delimited: sample, pop). Mirrors the
-        kwarg name from ``moments.LD.Parsing.compute_ld_statistics``
-        so existing moments scripts can switch by changing only the
-        import. The rest of pg_gpu spells this kwarg
-        ``pop_assignment``; both names are accepted here and behave
-        identically -- passing both at once is an error.
-    pop_assignment : str, dict, numpy.ndarray, list, or False, optional
-        Same as ``pop_file`` but accepts every form
-        ``HaplotypeMatrix.from_zarr`` accepts (path / sample-to-pop
-        dict / labels array / zarr key name / False to disable).
-        Kept as an alias to ``pop_file`` so callers that move
-        between pg_gpu's primary API and this moments-shaped wrapper
-        don't have to keep switching kwarg names.
+    pop_file, pop_assignment : str, dict, numpy.ndarray, list, or False, optional
+        Sample-to-population assignment in any form
+        ``normalize_pop_input`` accepts (path / sample-to-pop dict /
+        labels array / zarr key name / ``False`` to disable). The
+        two kwargs are aliases; ``pop_file`` is the
+        moments-compatible spelling, ``pop_assignment`` is the
+        spelling the rest of pg_gpu uses. Passing both at once is
+        an error.
     pops : list of str
         Population names (1-4). Defaults to ['pop0', 'pop1'].
     r_bins : array-like, optional
@@ -117,11 +111,6 @@ def compute_ld_statistics(
     -------
     dict with keys 'bins', 'sums', 'stats', 'pops' (moments format).
     """
-    # ``pop_file`` and ``pop_assignment`` are aliases: the first
-    # mirrors moments.LD.Parsing.compute_ld_statistics so existing
-    # moments pipelines drop in unchanged, the second matches the
-    # rest of pg_gpu. Refuse both at once to avoid silent priority
-    # confusion.
     if pop_file is not None and pop_assignment is not None:
         raise TypeError(
             "pass only one of pop_file or pop_assignment; they are "

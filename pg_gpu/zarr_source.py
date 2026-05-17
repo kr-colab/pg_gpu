@@ -128,7 +128,7 @@ class ZarrGenotypeSource:
         self.num_haplotypes = 2 * self.num_diploids
         self.num_variants = int(self.site_pos.size)
 
-        self.pop_cols = self._resolve_pop_file(pop_assignment)
+        self.pop_cols = self._resolve_pop_assignment(pop_assignment)
 
     @property
     def mappable_lo(self):
@@ -353,7 +353,7 @@ class ZarrGenotypeSource:
         hi = int(np.searchsorted(self.site_pos, right, side="left"))
         return lo, hi
 
-    def _resolve_pop_file(self, pop_assignment):
+    def _resolve_pop_assignment(self, pop_assignment):
         from .zarr_io import normalize_pop_input
 
         # Defer the sample_id lookup until we actually need it -- some
