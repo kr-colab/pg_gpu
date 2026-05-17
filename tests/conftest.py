@@ -104,3 +104,28 @@ def sample_haplotype_counts():
         'pop1': pop1_counts,
         'pop2': pop2_counts
     }
+
+
+def simulate_hm(n_samples=20, seq_length=100_000, seed=42,
+                mutation_model=None):
+    """Build a small msprime-derived HaplotypeMatrix for tests.
+
+    Centralizes what would otherwise be repeated per-test simulation
+    boilerplate. ``mutation_model=None`` lets msprime pick its default
+    (Jukes-Cantor, which can produce triallelic sites);
+    ``mutation_model='binary'`` forces biallelic, which is what the
+    pg_gpu-vs-allel parity tests want because pg_gpu's pi formula has
+    a known multi-allelic gap (kr-colab/pg_gpu#100).
+    """
+    import msprime
+    from pg_gpu import HaplotypeMatrix
+
+    ts = msprime.sim_ancestry(
+        samples=n_samples, sequence_length=seq_length,
+        recombination_rate=1e-4, random_seed=seed, ploidy=2,
+    )
+    kw = {}
+    if mutation_model is not None:
+        kw["model"] = mutation_model
+    ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=seed, **kw)
+    return HaplotypeMatrix.from_ts(ts)

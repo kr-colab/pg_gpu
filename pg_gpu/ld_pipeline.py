@@ -127,7 +127,8 @@ def iter_pairs_within_distance(positions, max_dist, chunk_size):
 # ---------------------------------------------------------------------------
 
 
-def compute_counts_for_pairs(haplotypes, idx_i, idx_j, pop_indices=None):
+def compute_counts_for_pairs(haplotypes, idx_i, idx_j, pop_indices=None,
+                             has_missing=None):
     """
     Compute haplotype counts [n11, n10, n01, n00] for specific pairs.
 
@@ -139,6 +140,12 @@ def compute_counts_for_pairs(haplotypes, idx_i, idx_j, pop_indices=None):
         Pair indices, shape (n_pairs,)
     pop_indices : list or cp.ndarray, optional
         Indices of samples to include (for population-specific counts)
+    has_missing : bool, optional
+        Pre-computed missing-data flag for the (already pop-sliced)
+        haplotype matrix. Callers that iterate many pair batches over
+        the same matrix should compute this once and pass it in -- the
+        default ``None`` reduces over the whole matrix on every call,
+        which is the dominant cost for many small batches.
 
     Returns
     -------
@@ -155,7 +162,8 @@ def compute_counts_for_pairs(haplotypes, idx_i, idx_j, pop_indices=None):
     hap_i = haplotypes[:, idx_i]
     hap_j = haplotypes[:, idx_j]
 
-    has_missing = cp.any(haplotypes == -1)
+    if has_missing is None:
+        has_missing = cp.any(haplotypes == -1)
 
     if has_missing:
         valid_mask = (hap_i >= 0) & (hap_j >= 0)

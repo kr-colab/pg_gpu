@@ -411,6 +411,49 @@ Distance Distribution Statistics
      - Variance, skewness, and kurtosis in one call
      - Schrider et al. (2018)
 
+Biobank-Scale Streaming
+-----------------------
+
+A *VCZ store* is a Zarr encoding of a VCF stored on disk: the genotype
+matrix is split into compressed chunks, each chunk a small array of
+samples by variants. ``pg_gpu`` reads VCZ stores; if your data
+is in VCF you can convert it with the bio2zarr tools
+(``vcf2zarr explode`` then ``vcf2zarr encode``). The streaming
+codepath needs that VCZ layout because it relies ona fast per-chunk
+decode, an opperation that can't be done on a VCF. See
+:doc:`tutorials/biobank_streaming` for the VCF→VCZ conversion
+and a worked end-to-end example.
+
+A VCZ store too large for the GPU (tens to hundreds of thousands
+of haplotypes) opens via ``HaplotypeMatrix.from_zarr`` /
+``GenotypeMatrix.from_zarr`` as a streaming view that walks the
+chromosome chunk by chunk; every kernel listed below dispatches
+on the streaming object the same way it would on a fully loaded
+matrix -- the calling code is identical to the in-memory path.
+
+What runs on a streaming matrix:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 35 65
+
+   * - Entry point
+     - How it streams
+   * - ``windowed_analysis``
+     - Each chunk's windows are computed on the GPU as the chunk arrives, then rows are concatenated; window grids are aligned to the chunk grid so no window straddles a chunk boundary.
+   * - ``sfs.sfs``, ``sfs.joint_sfs``, ``sfs.sfs_folded``, ``sfs.joint_sfs_folded``
+     - Each chunk contributes its own per-site frequency-spectrum counts; the chromosome-wide answer is the sum across chunks.
+   * - ``sfs.project_joint_sfs``
+     - Same per-chunk accumulation, but the joint SFS is projected (via hypergeometric sampling) to a small target grid as it is built, so the full ``(n1+1, n2+1)`` histogram is never materialized.
+   * - ``HaplotypeMatrix.compute_ld_statistics_gpu_single_pop`` / ``_two_pops``
+     - Variant-pair statistics within ``max_bp_dist`` are summed per chunk into the bp bins. Pairs that fall on opposite sides of a chunk boundary would be missed by naive per-chunk sums, so the last ``max_bp_dist`` of one chunk is carried forward and paired with the start of the next, counted exactly once. Returns moments-LD ``DD``, ``Dz``, ``pi²`` (3 stats single-pop, 15 stats two-pop).
+   * - ``relatedness.ibs``, ``relatedness.grm``
+     - Streamed along the variant axis; the individual axis is tiled into row blocks. ``(n_ind, n_ind)`` accumulators live on host so the output can exceed GPU memory. ``grm`` is a two-pass operation (first to calculate chromosome-wide allele frequencies, second to accumulate a per-chunk outer product).
+   * - ``StreamingHaplotypeMatrix.materialize(region, sample_subset)``
+     - Pulls one sub-region (and optionally a subset of haplotypes) of the chromosome into GPU memory for kernels that need every variant simultaneously -- ``pairwise_r2``, Garud's H, or any custom recipe. 
+   * - ``zarr_io.allel_zarr_to_vcz``
+     - Streaming converter from scikit-allel layout to VCZ for stores that pre-date bio2zarr.
+
 Fused Windowed Statistics
 -------------------------
 

@@ -17,6 +17,50 @@ GenotypeMatrix
    :undoc-members:
    :show-inheritance:
 
+Biobank-Scale Streaming
+-----------------------
+
+A *VCZ store* is bio2zarr's Zarr-on-disk encoding of a VCF: the
+genotype matrix is split into compressed chunks, each chunk a small
+array of samples by variants. For VCZ stores that do not fit
+entirely in GPU memory, ``HaplotypeMatrix.from_zarr`` /
+``GenotypeMatrix.from_zarr`` can return a streaming view
+(``streaming='always'``, or ``streaming='auto'`` with a too-large
+projected footprint). The streaming object iterates the chromosome
+chunk by chunk through every kernel that accepts a fully loaded
+matrix; see :doc:`tutorials/biobank_streaming` for the end-to-end
+pattern and the VCF-to-VCZ conversion step.
+
+.. autoclass:: pg_gpu.streaming_matrix.StreamingHaplotypeMatrix
+   :members: iter_gpu_chunks, materialize, num_haplotypes, num_variants,
+             chrom, chrom_start, chrom_end, sample_sets, align_bp,
+             compute_ld_statistics_gpu_single_pop,
+             compute_ld_statistics_gpu_two_pops
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.streaming_matrix.StreamingGenotypeMatrix
+   :members: iter_gpu_chunks, materialize, num_individuals, num_variants,
+             chrom, chrom_start, chrom_end, sample_sets, align_bp
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.zarr_source.ZarrGenotypeSource
+   :members: slice_region, slice_region_gpu, slice_subsample,
+             slice_subsample_gpu, iter_chunks
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.streaming_matrix.KvikioChunkFetcher
+   :members: iter_chunks, close
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.streaming_matrix.HostChunkFetcher
+   :members: iter_chunks
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.MemoryLimitedWarning
+   :show-inheritance:
+
+.. autofunction:: pg_gpu.zarr_io.allel_zarr_to_vcz
+
 LD Statistics
 -------------
 
@@ -165,6 +209,7 @@ Joint (Two-Population)
 .. autofunction:: pg_gpu.sfs.joint_sfs_folded
 .. autofunction:: pg_gpu.sfs.joint_sfs_scaled
 .. autofunction:: pg_gpu.sfs.joint_sfs_folded_scaled
+.. autofunction:: pg_gpu.sfs.project_joint_sfs
 
 Scaling and Folding Utilities
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

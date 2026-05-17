@@ -7,6 +7,69 @@ from collections import Counter, OrderedDict
 from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask
 
 
+#: Fraction of free GPU memory the eager matrix is allowed to consume
+#: before ``streaming='auto'`` falls back to streaming. 0.5 leaves room
+#: for the haplotype matrix plus the working memory each statistic kernel
+#: needs (windowed scatter buffers, pairwise outputs, etc.).
+STREAMING_AUTO_EAGER_FRACTION = 0.5
+
+
+def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
+                           free_gpu_bytes=None,
+                           fraction=STREAMING_AUTO_EAGER_FRACTION):
+    """Pick ``'eager'`` vs ``'streaming'`` based on the projected matrix size.
+
+    Returns ``(mode, source)`` where ``source`` is the
+    ``ZarrGenotypeSource`` opened for the size probe and reused
+    downstream (when ``mode == 'streaming'``), or ``None`` when no
+    source was opened: scikit-allel layout, missing store, or the
+    branch that picked ``'eager'`` because the matrix fits (in which
+    case the caller's eager path opens its own store via
+    ``read_genotypes``).
+
+    Scikit-allel layouts always return ``('eager', None)``: the
+    streaming format is VCZ-only, so the size check would refuse a
+    large allel store with nowhere to fall back to.
+
+    ``free_gpu_bytes`` is exposed for tests; typical invocation will leave
+    it None to let ``cp.cuda.Device().mem_info`` provide it.
+    """
+    import zarr
+    from .zarr_io import detect_zarr_layout
+    try:
+        store = zarr.open_group(zarr_path, mode="r")
+        layout = detect_zarr_layout(store)
+    except (FileNotFoundError, KeyError, ValueError):
+        # Store path is missing, missing required arrays, or has an
+        # unrecognized layout. Don't raise here -- return 'eager' so the
+        # caller proceeds into ``read_genotypes`` and its layout-specific
+        # checks emit a more actionable error for the user.
+        return "eager", None
+    if layout != "vcz":
+        return "eager", None
+
+    from .zarr_source import ZarrGenotypeSource
+    source = ZarrGenotypeSource(zarr_path, region=region,
+                                pop_file=False)
+    eager_bytes = int(source.num_variants) * int(source.num_haplotypes)
+
+    if free_gpu_bytes is None:
+        import cupy as _cp
+        free_gpu_bytes = int(_cp.cuda.Device().mem_info[0])
+
+    if eager_bytes <= fraction * free_gpu_bytes:
+        return "eager", None
+    if streaming == "never":
+        raise MemoryError(
+            f"streaming='never' but the full matrix would be "
+            f"{eager_bytes / 1e9:.1f} GB on a device with "
+            f"{free_gpu_bytes / 1e9:.1f} GB free (limit: "
+            f"{fraction:.0%}). Use streaming='auto' or 'always' to "
+            f"return a StreamingHaplotypeMatrix instead."
+        )
+    return "streaming", source
+
+
 class HaplotypeMatrix:
     """Haplotype matrix for population genetics analysis.
 
@@ -314,6 +377,8 @@ class HaplotypeMatrix:
         HaplotypeMatrix
             Phased haplotype data with sample names stored.
         """
+        from ._memory_warning import _maybe_memory_warn
+        _maybe_memory_warn(path, region=region)
         vcf = allel.read_vcf(path, region=region, samples=samples)
         if vcf is None:
             raise ValueError(f"No variants found in {path}"
@@ -360,7 +425,12 @@ class HaplotypeMatrix:
 
     @classmethod
     def from_zarr(cls, path: str, region: str = None,
-                  accessible_bed: str = None):
+                  accessible_bed: str = None,
+                  pop_file=None,
+                  streaming: str = "auto",
+                  chunk_bp: int = 1_500_000,
+                  prefetch: int = 1,
+                  backend: str = "auto"):
         """Construct a HaplotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
@@ -375,32 +445,165 @@ class HaplotypeMatrix:
             Genomic region 'chrom:start-end' to load a subset.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
+        pop_file : str, numpy.ndarray, list, dict, or False, optional
+            Sample-to-population assignments. Accepted forms:
+
+            * ``str`` -- path to a tab-delimited file with a header
+              row and ``sample\tpop`` columns, in the format that
+              ``HaplotypeMatrix.load_pop_file`` expects.
+            * ``numpy.ndarray`` or ``list`` of length ``n_samples``
+              -- one population label per sample, in the same order
+              as the store's sample axis.
+            * ``dict`` mapping sample id to population label. Any
+              sample not in the dict is left unassigned.
+            * ``False`` -- skip the auto-load.
+
+            Default (``None``) looks for ``<path>.pops.tsv`` next to
+            the store and loads it if present, announcing the
+            auto-load to stderr.
+        streaming : {'auto', 'always', 'never'}, optional
+            Whether to return a ``StreamingHaplotypeMatrix`` that
+            iterates the store chunk-by-chunk through the GPU
+            (suitable for large-scale stores that do not fit
+            entirely in GPU memory). ``'always'`` forces streaming;
+            ``'never'`` forces a single-shot load (and raises
+            ``MemoryError`` if the matrix would not fit in free GPU
+            memory). ``'auto'`` (default) checks the projected
+            footprint of the haplotype matrix against free GPU
+            memory and picks streaming when the full matrix would
+            consume more than half the device. Scikit-allel-formatted
+            zarr always routes to the single-shot path because the
+            only allowed format for ``'streaming'`` is VCZ.
+        chunk_bp : int, optional
+            Genomic chunk size in bp for the streaming path. Ignored
+            when the data are loaded into GPU memory in one shot.
+        prefetch : int, optional
+            Number of chunks to read ahead on a background thread
+            while the current chunk is being processed -- 0 disables
+            read-ahead; 1 (default) overlaps one chunk's disk read
+            with the previous chunk's GPU work. Ignored when the
+            data are loaded into GPU memory in one shot.
+        backend : {'auto', 'host', 'kvikio'}, optional
+            Streaming chunk-fetch backend. ``'kvikio'`` decodes the
+            store's codec on the GPU via ``kvikio + nvCOMP``; only
+            works when ``call_genotype``'s codec is in the
+            nvCOMP-supported list (zstd, blosc, lz4, deflate) and
+            the sample-axis chunking is bio2zarr-shaped (sample chunk
+            smaller than the full sample axis). ``'host'`` is the
+            host-buffer fallback. ``'auto'`` (default) picks
+            ``'kvikio'`` when both conditions hold and warns +
+            ``'host'`` when chunks are whole-sample-axis (the kvikio
+            path gives no speedup at that chunking).
 
         Returns
         -------
-        HaplotypeMatrix
+        HaplotypeMatrix or StreamingHaplotypeMatrix
         """
+        if streaming not in ("auto", "always", "never"):
+            raise ValueError(
+                f"streaming must be 'auto', 'always', or 'never'; "
+                f"got {streaming!r}"
+            )
+        if backend not in ("auto", "host", "kvikio"):
+            raise ValueError(
+                f"backend must be 'auto', 'host', or 'kvikio'; "
+                f"got {backend!r}"
+            )
+
+        if streaming == "always":
+            return cls._build_streaming(
+                path, region=region, pop_file=pop_file,
+                chunk_bp=chunk_bp, prefetch=prefetch,
+                backend=backend,
+            )
+
+        # 'auto' and 'never' both want eager when the matrix fits; 'auto'
+        # falls back to streaming when it doesn't, 'never' raises. The
+        # decision needs the matrix's projected size, which is only
+        # available via ZarrGenotypeSource (VCZ-only). Scikit-allel
+        # stores always route to eager because there is no streaming
+        # source for that layout.
+        choice, source = _decide_streaming_mode(path, region=region,
+                                                streaming=streaming,
+                                                pop_file=pop_file)
+        if choice == "streaming":
+            return cls._build_streaming(
+                path, region=region, pop_file=pop_file,
+                chunk_bp=chunk_bp, prefetch=prefetch,
+                source=source, backend=backend,
+            )
+        return cls._build_eager(path, region=region,
+                                accessible_bed=accessible_bed,
+                                pop_file=pop_file)
+
+    @classmethod
+    def _build_eager(cls, path, *, region, accessible_bed, pop_file):
         from .zarr_io import read_genotypes
+        from ._gpu_genotype_prep import build_haplotype_matrix
 
         data = read_genotypes(path, region)
         gt = data['gt']
         positions = data['positions']
         sample_names = data['samples']
 
-        num_variants, num_samples, ploidy = gt.shape
-        assert ploidy == 2
+        if gt.shape[2] != 2:
+            # The eager and streaming readers, the kvikio sample-subset
+            # gather, and the (n_dip, 2) -> 2 * n_dip haplotype layout all
+            # assume diploid. Haploid / polyploid stores need a different
+            # gather path and are not currently supported.
+            raise ValueError(
+                f"HaplotypeMatrix.from_zarr requires diploid (ploidy 2) "
+                f"genotypes; got ploidy {gt.shape[2]}.")
 
-        haplotypes = np.empty((num_variants, 2 * num_samples), dtype=gt.dtype)
-        haplotypes[:, :num_samples] = gt[:, :, 0]
-        haplotypes[:, num_samples:] = gt[:, :, 1]
-        haplotypes = haplotypes.T
+        hm = build_haplotype_matrix(
+            gt, positions,
+            chrom_start=int(positions[0]),
+            chrom_end=int(positions[-1]),
+            samples=list(sample_names) if sample_names is not None else None,
+        )
 
         chrom = region.split(':')[0] if region else None
-        hm = cls(haplotypes, positions, int(positions[0]), int(positions[-1]),
-                 samples=sample_names)
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
+
+        from .zarr_io import normalize_pop_input
+        try:
+            import zarr
+            store = zarr.open_group(path, mode="r")
+        except Exception:
+            store = None
+        pop_map = normalize_pop_input(
+            pop_file, zarr_path=path,
+            sample_names=hm.samples or [],
+            zarr_store=store,
+            announce_prefix="HaplotypeMatrix.from_zarr",
+        )
+        if pop_map is not None:
+            hm.load_pop_file(pop_map)
+
         return hm
+
+    @classmethod
+    def _build_streaming(cls, path, *, region, pop_file, chunk_bp, prefetch,
+                         source=None, backend="auto"):
+        from .streaming_matrix import (
+            HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
+            _pick_chunk_fetcher,
+        )
+        from .zarr_source import ZarrGenotypeSource
+
+        if source is None:
+            source = ZarrGenotypeSource(path, region=region, pop_file=pop_file)
+        else:
+            # _decide_streaming_mode opens the source with pop_file=False
+            # to keep its size probe cheap; resolve the caller's pop_file
+            # now without re-opening the zarr store.
+            source.pop_cols = source._resolve_pop_file(pop_file)
+        fetcher = _pick_chunk_fetcher(source, backend=backend)
+        return StreamingHaplotypeMatrix(
+            source, fetcher,
+            chunk_bp=chunk_bp, prefetch=prefetch,
+        )
 
     def to_zarr(self, zarr_path: str, format: str = 'vcz',
                 contig_name: str = None):
@@ -472,17 +675,21 @@ class HaplotypeMatrix:
         gt[:, :, 1] = hap[n_samples:, :].T
         return gt
 
-    def load_pop_file(self, pop_file: str, pops: list = None):
-        """Load population assignments from a tab-delimited file.
+    def load_pop_file(self, pop_file, pops: list = None):
+        """Load population assignments from a tab-delimited file or
+        an already-resolved sample->population mapping.
 
-        Sets sample_sets from a file mapping sample names to populations.
-        Requires that sample names were stored during from_vcf().
+        Sets sample_sets from a file (or dict) mapping sample names to
+        populations. Requires that sample names were stored during
+        ``from_vcf`` / ``from_zarr``.
 
         Parameters
         ----------
-        pop_file : str
-            Tab-delimited file with columns: sample, pop.
-            Header line starting with 'sample' is skipped.
+        pop_file : str or dict
+            Either a path to a tab-delimited file with columns
+            ``sample\tpop`` (header line starting with ``sample`` is
+            skipped), or a dict mapping sample names to population
+            labels.
         pops : list of str, optional
             Populations to include. If None, includes all found populations.
         """
@@ -490,24 +697,36 @@ class HaplotypeMatrix:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
 
         n_samples = len(self.samples)
-        pop_map = {}
-        with open(pop_file) as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 2 and parts[0] != 'sample':
-                    pop_map[parts[0]] = parts[1]
+        if isinstance(pop_file, dict):
+            pop_map = {str(k): str(v) for k, v in pop_file.items() if v}
+        else:
+            pop_map = {}
+            with open(pop_file) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[0] != 'sample':
+                        pop_map[parts[0]] = parts[1]
 
         # Build sample_sets
         found_pops = set(pop_map.values())
         if pops is None:
             pops = sorted(found_pops)
 
-        pop_sets = {p: [] for p in pops}
+        # Block ordering: ploidy-0 indices first, then ploidy-1 indices.
+        # _get_genotype_data and _get_diploid_genotypes split the
+        # haplotype axis at hap.shape[0] // 2 to recover diploid pairs,
+        # which only gives correct pairing under this layout. Matches
+        # what ZarrGenotypeSource produces from a pop file too, so the
+        # streaming and eager paths agree.
+        pop_dips = {p: [] for p in pops}
         for i, name in enumerate(self.samples):
             pop = pop_map.get(name)
-            if pop in pop_sets:
-                pop_sets[pop].append(i)
-                pop_sets[pop].append(i + n_samples)
+            if pop in pop_dips:
+                pop_dips[pop].append(i)
+        pop_sets = {
+            p: dips + [d + n_samples for d in dips]
+            for p, dips in pop_dips.items()
+        }
 
         self.sample_sets = pop_sets
 
@@ -1629,91 +1848,33 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_single_pop(bp_bins)
         >>> stats[(0.0, 10000.0)]  # (DD, Dz, pi2) for first bin
         """
-        # Apply biallelic filter if requested
         if ac_filter:
             filtered_self = self.apply_biallelic_filter()
             return filtered_self.compute_ld_statistics_gpu_single_pop(
                 bp_bins=bp_bins, raw=raw, ac_filter=False, chunk_size=chunk_size
             )
-
-        # Ensure GPU setup
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
-        from pg_gpu import ld_statistics
+        bp_bins_arr = np.array(bp_bins)
+        max_dist = float(bp_bins_arr[-1])
+        n_bins = len(bp_bins_arr) - 1
+        bp_bins_cp = cp.array(bp_bins_arr)
+        if chunk_size == 'auto':
+            chunk_size = _estimate_ld_chunk_size(self.num_haplotypes)
 
-        # Get positions and compute max distance
         pos = self.positions
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
-
-        bp_bins = np.array(bp_bins)
-        max_dist = float(bp_bins[-1])
-        n_bins = len(bp_bins) - 1
-
-        # Handle chunk_size='auto'
-        if chunk_size == 'auto':
-            n_haps = self.num_haplotypes
-            chunk_size = _estimate_ld_chunk_size(n_haps)
-
-        # Bin assignment constants
-        bp_bins_cp = cp.array(bp_bins)
-
-        # Initialize accumulators: sums and counts per bin
-        # 3 statistics: DD, Dz, pi2
         bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
-
-        # Stream distance-filtered pair chunks
-        for chunk_idx_i, chunk_idx_j in _iter_pairs_within_distance(
-                pos, max_dist, chunk_size):
-            distances = pos[chunk_idx_j] - pos[chunk_idx_i]
-            chunk_bin_inds = cp.digitize(distances, bp_bins_cp) - 1
-            del distances
-
-            counts, n_valid = _compute_counts_for_pairs(
-                self.haplotypes, chunk_idx_i, chunk_idx_j, pop_indices=None
-            )
-
-            chunk_stats = _compute_single_pop_statistics_batch(
-                counts, n_valid, ld_statistics
-            )
-
-            valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
-            valid_bin_inds = chunk_bin_inds[valid_mask]
-            valid_stats = chunk_stats[valid_mask]
-
-            for stat_idx in range(3):
-                cp.add.at(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
-
-            cp.add.at(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
-
-            del counts, n_valid, chunk_stats, chunk_bin_inds, valid_stats
-
-        # Build output dictionary
-        out = {}
-        for i in range(n_bins):
-            bin_start = float(bp_bins[i])
-            bin_end = float(bp_bins[i + 1])
-            count = int(bin_counts[i].get())
-
-            if raw:
-                out[(bin_start, bin_end)] = (
-                    float(bin_sums[i, 0].get()),
-                    float(bin_sums[i, 1].get()),
-                    float(bin_sums[i, 2].get())
-                )
-            else:
-                if count > 0:
-                    out[(bin_start, bin_end)] = (
-                        float((bin_sums[i, 0] / bin_counts[i]).get()),
-                        float((bin_sums[i, 1] / bin_counts[i]).get()),
-                        float((bin_sums[i, 2] / bin_counts[i]).get())
-                    )
-                else:
-                    out[(bin_start, bin_end)] = (0.0, 0.0, 0.0)
-
-        return out
+        _accumulate_pair_bins(
+            self.haplotypes, pos, bp_bins_cp, n_bins,
+            max_dist, int(chunk_size), n_tail=0,
+            bin_sums=bin_sums, bin_counts=bin_counts,
+            pop1_indices=None, pop2_indices=None,
+        )
+        return _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw)
 
 
     def compute_ld_statistics_gpu_two_pops(
@@ -1765,105 +1926,263 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_two_pops(bp_bins, 'pop1', 'pop2')
         >>> stats[(0.0, 10000.0)]['DD_0_0']  # D^2 for pop1 in first bin
         """
-        # Apply biallelic filter if requested
         if ac_filter:
             filtered_self = self.apply_biallelic_filter()
             return filtered_self.compute_ld_statistics_gpu_two_pops(
                 bp_bins=bp_bins, pop1=pop1, pop2=pop2, raw=raw,
                 ac_filter=False, chunk_size=chunk_size
             )
-
-        # Ensure GPU setup
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
-        from pg_gpu import ld_statistics
+        bp_bins_arr = np.array(bp_bins)
+        max_dist = float(bp_bins_arr[-1])
+        n_bins = len(bp_bins_arr) - 1
+        bp_bins_cp = cp.array(bp_bins_arr)
+        pop1_indices = self._sample_sets[pop1]
+        pop2_indices = self._sample_sets[pop2]
+        if chunk_size == 'auto':
+            chunk_size = _estimate_ld_chunk_size(
+                max(len(pop1_indices), len(pop2_indices))
+            )
 
-        # Get positions and compute max distance
         pos = self.positions
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
-
-        bp_bins = np.array(bp_bins)
-        max_dist = float(bp_bins[-1])
-        n_bins = len(bp_bins) - 1
-
-        # Get population indices
-        pop1_indices = self._sample_sets[pop1]
-        pop2_indices = self._sample_sets[pop2]
-
-        # Handle chunk_size='auto'
-        if chunk_size == 'auto':
-            n_haps = max(len(pop1_indices), len(pop2_indices))
-            chunk_size = _estimate_ld_chunk_size(n_haps)
-
-        # Bin assignment constants
-        bp_bins_cp = cp.array(bp_bins)
-
-        stat_names = [
-            'DD_0_0', 'DD_0_1', 'DD_1_1',
-            'Dz_0_0_0', 'Dz_0_0_1', 'Dz_0_1_1', 'Dz_1_0_0', 'Dz_1_0_1', 'Dz_1_1_1',
-            'pi2_0_0_0_0', 'pi2_0_0_0_1', 'pi2_0_0_1_1', 'pi2_0_1_0_1', 'pi2_0_1_1_1', 'pi2_1_1_1_1'
-        ]
         bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
+        _accumulate_pair_bins(
+            self.haplotypes, pos, bp_bins_cp, n_bins,
+            max_dist, int(chunk_size), n_tail=0,
+            bin_sums=bin_sums, bin_counts=bin_counts,
+            pop1_indices=pop1_indices, pop2_indices=pop2_indices,
+        )
+        return _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw)
 
-        # Stream distance-filtered pair chunks
-        for chunk_idx_i, chunk_idx_j in _iter_pairs_within_distance(
-                pos, max_dist, chunk_size):
-            distances = pos[chunk_idx_j] - pos[chunk_idx_i]
-            chunk_bin_inds = cp.digitize(distances, bp_bins_cp) - 1
-            del distances
 
-            counts_pop1, n_valid1 = _compute_counts_for_pairs(
-                self.haplotypes, chunk_idx_i, chunk_idx_j, pop1_indices
+# =============================================================================
+# LD pair-bin accumulator: shared by eager and streaming paths
+# =============================================================================
+#
+# Per-chunk bin sums are sum-reducible: pair counts (n11/n10/n01/n00) at
+# a variant pair are independent of every other pair, and the per-bin
+# DD / Dz / pi2 numerators are polynomials in those counts, so totals
+# decompose by pair set. The streaming path takes advantage of this by
+# carrying a tail of the last ``max_bp_dist`` of variants from the
+# previous chunk; pairs whose both endpoints fall inside that tail are
+# masked out, since they were summed on the previous chunk's pass.
+
+def _new_tail(stitched_haps, stitched_pos, max_bp_dist):
+    """Carry forward variants within ``max_bp_dist`` of the right edge
+    for the next chunk's stitch. Tail size is bounded by
+    ``max_bp_dist`` worth of variants regardless of chunk width."""
+    if stitched_pos.size == 0:
+        return None, None
+    cutoff = stitched_pos[-1] - max_bp_dist
+    keep = stitched_pos > cutoff
+    return stitched_haps[:, keep], stitched_pos[keep]
+
+
+def _stitch_with_tail(chunk_haps, chunk_pos, tail_haps, tail_pos):
+    """Return ``(stitched_haps, stitched_pos, n_tail)`` for the pair
+    iteration. ``n_tail`` is the number of leading variants drawn from
+    the previous chunk's tail; the pair mask keys off this offset."""
+    if tail_haps is None or tail_haps.shape[1] == 0:
+        return chunk_haps, chunk_pos, 0
+    stitched_haps = cp.concatenate([tail_haps, chunk_haps], axis=1)
+    stitched_pos = cp.concatenate([tail_pos, chunk_pos])
+    return stitched_haps, stitched_pos, tail_haps.shape[1]
+
+
+def _missing_flag(haps, pop_indices):
+    """Whether the (optionally pop-subset) haplotype matrix contains any
+    missing data. Cached once per chunk so ``compute_counts_for_pairs``
+    can skip its per-batch full-matrix reduction."""
+    if pop_indices is None:
+        return bool(cp.any(haps == -1))
+    if isinstance(pop_indices, list):
+        pop_indices = cp.array(pop_indices, dtype=cp.int32)
+    return bool(cp.any(haps[pop_indices] == -1))
+
+
+def _accumulate_pair_bins(
+    haps, pos, bp_bins_cp, n_bins, max_dist, chunk_size, n_tail,
+    bin_sums, bin_counts, *, pop1_indices, pop2_indices,
+):
+    """Walk pair batches on ``haps`` / ``pos``, drop already-counted
+    (tail, tail) pairs, and scatter-add per-pair statistics into
+    ``bin_sums`` / ``bin_counts``. ``pop2_indices=None`` selects the
+    single-population path; otherwise both pops feed the two-population
+    batch kernel."""
+    from pg_gpu import ld_statistics
+    two_pop = pop2_indices is not None
+    has_miss_p1 = _missing_flag(haps, pop1_indices)
+    has_miss_p2 = _missing_flag(haps, pop2_indices) if two_pop else False
+    for chunk_idx_i, chunk_idx_j in _iter_pairs_within_distance(
+            pos, max_dist, chunk_size):
+        if n_tail > 0:
+            keep = ~((chunk_idx_i < n_tail) & (chunk_idx_j < n_tail))
+            chunk_idx_i = chunk_idx_i[keep]
+            chunk_idx_j = chunk_idx_j[keep]
+            if chunk_idx_i.size == 0:
+                continue
+        distances = pos[chunk_idx_j] - pos[chunk_idx_i]
+        chunk_bin_inds = cp.digitize(distances, bp_bins_cp) - 1
+        del distances
+
+        if two_pop:
+            counts1, n_valid1 = _compute_counts_for_pairs(
+                haps, chunk_idx_i, chunk_idx_j, pop1_indices,
+                has_missing=has_miss_p1,
             )
-            counts_pop2, n_valid2 = _compute_counts_for_pairs(
-                self.haplotypes, chunk_idx_i, chunk_idx_j, pop2_indices
+            counts2, n_valid2 = _compute_counts_for_pairs(
+                haps, chunk_idx_i, chunk_idx_j, pop2_indices,
+                has_missing=has_miss_p2,
             )
-
             chunk_stats = _compute_two_pop_statistics_batch(
-                counts_pop1, counts_pop2, n_valid1, n_valid2, ld_statistics
+                counts1, counts2, n_valid1, n_valid2, ld_statistics
+            )
+        else:
+            counts, n_valid = _compute_counts_for_pairs(
+                haps, chunk_idx_i, chunk_idx_j, pop1_indices,
+                has_missing=has_miss_p1,
+            )
+            chunk_stats = _compute_single_pop_statistics_batch(
+                counts, n_valid, ld_statistics
             )
 
-            valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
-            valid_bin_inds = chunk_bin_inds[valid_mask]
-            valid_stats = chunk_stats[valid_mask]
+        valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
+        valid_bin_inds = chunk_bin_inds[valid_mask]
+        valid_stats = chunk_stats[valid_mask]
+        for s in range(chunk_stats.shape[1]):
+            cp.add.at(bin_sums[:, s], valid_bin_inds, valid_stats[:, s])
+        cp.add.at(
+            bin_counts, valid_bin_inds,
+            cp.ones(len(valid_bin_inds), dtype=cp.float64),
+        )
 
-            for stat_idx in range(15):
-                cp.add.at(bin_sums[:, stat_idx], valid_bin_inds, valid_stats[:, stat_idx])
 
-            cp.add.at(bin_counts, valid_bin_inds, cp.ones(len(valid_bin_inds), dtype=cp.float64))
+def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
+                          chunk_size):
+    """Chunk-streamed dispatch for ``compute_ld_statistics_gpu_single_pop``."""
+    bp_bins_arr = np.array(bp_bins)
+    max_dist = float(bp_bins_arr[-1])
+    n_bins = len(bp_bins_arr) - 1
+    bp_bins_cp = cp.array(bp_bins_arr)
+    if chunk_size == 'auto':
+        chunk_size_int = _estimate_ld_chunk_size(streaming_hm.num_haplotypes)
+    else:
+        chunk_size_int = int(chunk_size)
+    bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
+    bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
-            del counts_pop1, counts_pop2, n_valid1, n_valid2, chunk_stats
-            del chunk_bin_inds, valid_stats
+    tail_haps, tail_pos = None, None
+    for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
+        if ac_filter:
+            chunk_hm = chunk_hm.apply_biallelic_filter()
+        chunk_haps = chunk_hm.haplotypes
+        chunk_pos = chunk_hm.positions
+        if not isinstance(chunk_pos, cp.ndarray):
+            chunk_pos = cp.array(chunk_pos)
+        if chunk_haps.shape[1] == 0:
+            continue
+        stitched_haps, stitched_pos, n_tail = _stitch_with_tail(
+            chunk_haps, chunk_pos, tail_haps, tail_pos
+        )
+        _accumulate_pair_bins(
+            stitched_haps, stitched_pos, bp_bins_cp, n_bins,
+            max_dist, chunk_size_int, n_tail,
+            bin_sums=bin_sums, bin_counts=bin_counts,
+            pop1_indices=None, pop2_indices=None,
+        )
+        tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
+        del stitched_haps, stitched_pos, chunk_haps, chunk_pos
 
-        # Build output dictionary
-        out = {}
-        for i in range(n_bins):
-            bin_start = float(bp_bins[i])
-            bin_end = float(bp_bins[i + 1])
-            count = int(bin_counts[i].get())
+    return _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw)
 
-            if raw:
-                stats_dict = OrderedDict([
-                    (name, float(bin_sums[i, j].get()))
-                    for j, name in enumerate(stat_names)
-                ])
-            else:
-                if count > 0:
-                    stats_dict = OrderedDict([
-                        (name, float((bin_sums[i, j] / bin_counts[i]).get()))
-                        for j, name in enumerate(stat_names)
-                    ])
-                else:
-                    stats_dict = OrderedDict([
-                        (name, 0.0) for name in stat_names
-                    ])
 
-            out[(bin_start, bin_end)] = stats_dict
+def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
+                        ac_filter, chunk_size):
+    """Chunk-streamed dispatch for ``compute_ld_statistics_gpu_two_pops``."""
+    bp_bins_arr = np.array(bp_bins)
+    max_dist = float(bp_bins_arr[-1])
+    n_bins = len(bp_bins_arr) - 1
+    bp_bins_cp = cp.array(bp_bins_arr)
+    pop1_indices = streaming_hm.sample_sets[pop1]
+    pop2_indices = streaming_hm.sample_sets[pop2]
+    if chunk_size == 'auto':
+        chunk_size_int = _estimate_ld_chunk_size(
+            max(len(pop1_indices), len(pop2_indices))
+        )
+    else:
+        chunk_size_int = int(chunk_size)
+    bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
+    bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
-        return out
+    tail_haps, tail_pos = None, None
+    for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
+        if ac_filter:
+            chunk_hm = chunk_hm.apply_biallelic_filter()
+        chunk_haps = chunk_hm.haplotypes
+        chunk_pos = chunk_hm.positions
+        if not isinstance(chunk_pos, cp.ndarray):
+            chunk_pos = cp.array(chunk_pos)
+        if chunk_haps.shape[1] == 0:
+            continue
+        stitched_haps, stitched_pos, n_tail = _stitch_with_tail(
+            chunk_haps, chunk_pos, tail_haps, tail_pos
+        )
+        _accumulate_pair_bins(
+            stitched_haps, stitched_pos, bp_bins_cp, n_bins,
+            max_dist, chunk_size_int, n_tail,
+            bin_sums=bin_sums, bin_counts=bin_counts,
+            pop1_indices=pop1_indices, pop2_indices=pop2_indices,
+        )
+        tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
+        del stitched_haps, stitched_pos, chunk_haps, chunk_pos
+
+    return _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw)
+
+
+def _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw):
+    # One device->host transfer for each accumulator; per-bin format
+    # then reads from host memory rather than syncing per element.
+    sums = cp.asnumpy(bin_sums)
+    counts = cp.asnumpy(bin_counts)
+    out = {}
+    for i in range(len(bp_bins_arr) - 1):
+        key = (float(bp_bins_arr[i]), float(bp_bins_arr[i + 1]))
+        if raw:
+            out[key] = (float(sums[i, 0]), float(sums[i, 1]), float(sums[i, 2]))
+        elif counts[i] > 0:
+            inv = 1.0 / float(counts[i])
+            out[key] = (
+                float(sums[i, 0]) * inv,
+                float(sums[i, 1]) * inv,
+                float(sums[i, 2]) * inv,
+            )
+        else:
+            out[key] = (0.0, 0.0, 0.0)
+    return out
+
+
+def _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw):
+    sums = cp.asnumpy(bin_sums)
+    counts = cp.asnumpy(bin_counts)
+    names = _ld_names(2)
+    out = {}
+    for i in range(len(bp_bins_arr) - 1):
+        key = (float(bp_bins_arr[i]), float(bp_bins_arr[i + 1]))
+        if raw:
+            row = sums[i]
+        elif counts[i] > 0:
+            row = sums[i] / float(counts[i])
+        else:
+            row = np.zeros(len(names))
+        out[key] = OrderedDict(
+            (name, float(row[j])) for j, name in enumerate(names)
+        )
+    return out
 
 
 # =============================================================================

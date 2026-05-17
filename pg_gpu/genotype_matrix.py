@@ -357,6 +357,8 @@ class GenotypeMatrix:
         GenotypeMatrix
         """
         import allel
+        from ._memory_warning import _maybe_memory_warn
+        _maybe_memory_warn(path)
         callset = allel.read_vcf(path)
         gt = callset['calldata/GT']  # (n_variants, n_samples, 2)
         pos = callset['variants/POS']
@@ -391,48 +393,132 @@ class GenotypeMatrix:
 
     @classmethod
     def from_zarr(cls, path, region=None, accessible_bed=None,
-                  include_invariant=False):
+                  include_invariant=False,
+                  pop_file=None,
+                  streaming: str = "auto",
+                  chunk_bp: int = 1_500_000,
+                  prefetch: int = 1,
+                  backend: str = "auto"):
         """Construct a GenotypeMatrix from a Zarr store.
 
-        Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
+        Identical interface to ``HaplotypeMatrix.from_zarr``;
+        see that method's docstring for the meaning of every kwarg
+        (``streaming``, ``pop_file`` flexibility, ``chunk_bp``,
+        ``prefetch``, ``backend``). The only difference is the
+        returned type: this returns ``GenotypeMatrix`` (or
+        ``StreamingGenotypeMatrix`` on the streaming path) where
+        each row is a (n_indiv, ploidy) genotype call, versus
+        ``HaplotypeMatrix`` which presents the same data as a
+        (n_haplotypes, n_variants) phased matrix.
 
         Parameters
         ----------
-        path : str
-            Path to Zarr store directory.
-        region : str, optional
-            Genomic region 'chrom:start-end'.
-        accessible_bed : str, optional
-            Path to a BED file defining accessible/callable regions.
         include_invariant : bool
-            If True, set n_total_sites from loaded variant count.
+            If True, set ``n_total_sites`` from the loaded variant
+            count. Unique to this entry point (the haplotype matrix
+            does not need it).
+        path, region, accessible_bed, pop_file, streaming, chunk_bp, prefetch, backend
+            See ``HaplotypeMatrix.from_zarr``.
 
         Returns
         -------
-        GenotypeMatrix
+        GenotypeMatrix or StreamingGenotypeMatrix
         """
-        from .zarr_io import read_genotypes
+        if streaming not in ("auto", "always", "never"):
+            raise ValueError(
+                f"streaming must be 'auto', 'always', or 'never'; "
+                f"got {streaming!r}"
+            )
+        if backend not in ("auto", "host", "kvikio"):
+            raise ValueError(
+                f"backend must be 'auto', 'host', or 'kvikio'; "
+                f"got {backend!r}"
+            )
+
+        if streaming == "always":
+            return cls._build_streaming(
+                path, region=region, pop_file=pop_file,
+                chunk_bp=chunk_bp, prefetch=prefetch,
+                backend=backend,
+            )
+
+        # 'auto' and 'never' both want eager when the matrix fits;
+        # 'auto' falls back to streaming when it doesn't, 'never'
+        # raises. The decision needs the matrix's projected size,
+        # which is only available via ZarrGenotypeSource (VCZ-only).
+        # Scikit-allel stores always route to eager.
+        from .haplotype_matrix import _decide_streaming_mode
+        choice, source = _decide_streaming_mode(path, region=region,
+                                                streaming=streaming,
+                                                pop_file=pop_file)
+        if choice == "streaming":
+            return cls._build_streaming(
+                path, region=region, pop_file=pop_file,
+                chunk_bp=chunk_bp, prefetch=prefetch,
+                backend=backend, source=source,
+            )
+        return cls._build_eager(path, region=region,
+                                accessible_bed=accessible_bed,
+                                include_invariant=include_invariant,
+                                pop_file=pop_file)
+
+    @classmethod
+    def _build_eager(cls, path, *, region, accessible_bed,
+                     include_invariant, pop_file):
+        from .zarr_io import read_genotypes, normalize_pop_input
+        from ._gpu_genotype_prep import build_genotype_matrix
 
         data = read_genotypes(path, region)
         gt = data['gt']  # (n_variants, n_samples, ploidy)
         positions = data['positions']
         samples = data['samples']
 
-        missing = np.any(gt < 0, axis=2)
-        geno = np.sum(np.maximum(gt, 0), axis=2).astype(np.int8)
-        geno[missing] = -1
-        geno = geno.T  # (n_individuals, n_variants)
-
-        n_total_sites = geno.shape[1] if include_invariant else None
+        n_total_sites = gt.shape[0] if include_invariant else None
         chrom = region.split(':')[0] if region else None
 
-        gm = cls(geno, positions, chrom_start=int(positions[0]),
-                 chrom_end=int(positions[-1]),
-                 n_total_sites=n_total_sites,
-                 samples=list(samples) if samples else None)
+        gm = build_genotype_matrix(
+            gt, positions,
+            chrom_start=int(positions[0]),
+            chrom_end=int(positions[-1]),
+            n_total_sites=n_total_sites,
+            samples=list(samples) if samples else None,
+        )
         if accessible_bed is not None:
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
+
+        try:
+            import zarr
+            store = zarr.open_group(path, mode="r")
+        except Exception:
+            store = None
+        pop_map = normalize_pop_input(
+            pop_file, zarr_path=path,
+            sample_names=gm.samples or [],
+            zarr_store=store,
+            announce_prefix="GenotypeMatrix.from_zarr",
+        )
+        if pop_map is not None:
+            gm.load_pop_file(pop_map)
+
         return gm
+
+    @classmethod
+    def _build_streaming(cls, path, *, region, pop_file, chunk_bp, prefetch,
+                         backend="auto", source=None):
+        from .streaming_matrix import (
+            StreamingGenotypeMatrix, _pick_chunk_fetcher,
+        )
+        from .zarr_source import ZarrGenotypeSource
+
+        if source is None:
+            source = ZarrGenotypeSource(path, region=region, pop_file=pop_file)
+        else:
+            source.pop_cols = source._resolve_pop_file(pop_file)
+        fetcher = _pick_chunk_fetcher(source, backend=backend)
+        return StreamingGenotypeMatrix(
+            source, fetcher,
+            chunk_bp=chunk_bp, prefetch=prefetch,
+        )
 
     def to_zarr(self, zarr_path, format='vcz', contig_name=None):
         """Save genotype data to Zarr format.
@@ -473,24 +559,30 @@ class GenotypeMatrix:
             )
 
     def load_pop_file(self, pop_file, pops=None):
-        """Load population assignments from a tab-delimited file.
+        """Load population assignments from a tab-delimited file or
+        an already-resolved sample->population mapping.
 
         Parameters
         ----------
-        pop_file : str
-            Tab-delimited file with columns: sample, pop.
+        pop_file : str or dict
+            Either a path to a tab-delimited file with columns
+            ``sample\tpop``, or a dict mapping sample names to
+            population labels.
         pops : list of str, optional
             Populations to include. If None, includes all found.
         """
         if self.samples is None:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
 
-        pop_map = {}
-        with open(pop_file) as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) >= 2 and parts[0] != 'sample':
-                    pop_map[parts[0]] = parts[1]
+        if isinstance(pop_file, dict):
+            pop_map = {str(k): str(v) for k, v in pop_file.items() if v}
+        else:
+            pop_map = {}
+            with open(pop_file) as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and parts[0] != 'sample':
+                        pop_map[parts[0]] = parts[1]
 
         if pops is None:
             pops = sorted(set(pop_map.values()))

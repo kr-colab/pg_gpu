@@ -20,6 +20,17 @@ zarr = ">=2.16"
 pg_gpu = { path = ".", editable = true }
 bio2zarr = { version = ">=0.1", extras = ["vcf"] }
 
+# Streaming-from-zarr uses kvikio + nvCOMP to decode store chunks on the
+# GPU when the codec is GPU-decodable (zstd / blosc / lz4 / deflate).
+# Hard dependency: pg_gpu is GPU-first and the streaming dispatch always
+# imports these unconditionally. Conda-forge's kvikio is cuda13/cp311
+# only at the moment, so we go through NVIDIA's PyPI index.
+"kvikio-cu12" = ">=25.0"
+"nvidia-nvcomp-cu12" = ">=4.0"
+
+[pypi-options]
+extra-index-urls = ["https://pypi.nvidia.com"]
+
 [feature.gpu.dependencies]
 cupy = ">=13.0"
 cuda-version = "12.*"

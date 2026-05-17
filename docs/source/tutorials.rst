@@ -21,6 +21,7 @@ time, see :doc:`examples` instead.
    tutorials/ld_blocks
    tutorials/scikit_allel_comparison
    tutorials/moments_integration
+   tutorials/biobank_streaming
 
 Each tutorial follows the same structure:
 
