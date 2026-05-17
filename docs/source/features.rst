@@ -414,14 +414,13 @@ Distance Distribution Statistics
 Biobank-Scale Streaming
 -----------------------
 
-A *VCZ store* is a Zarr-on-disk encoding of a VCF: the genotype
+A *VCZ store* is a Zarr encoding of a VCF stored on disk: the genotype
 matrix is split into compressed chunks, each chunk a small array of
 samples by variants. ``pg_gpu`` reads VCZ stores; if your data
 is in VCF you can convert it with the bio2zarr tools
 (``vcf2zarr explode`` then ``vcf2zarr encode``). The streaming
-codepath needs that VCZ layout because it relies on per-chunk
-decode -- a VCF row-text dump can't be sliced or decompressed
-chunk-wise the way zarr can. See
+codepath needs that VCZ layout because it relies ona fast per-chunk
+decode, an opperation that can't be done on a VCF. See
 :doc:`tutorials/biobank_streaming` for the VCF→VCZ conversion
 and a worked end-to-end example.
 
@@ -451,7 +450,7 @@ What runs on a streaming matrix:
    * - ``relatedness.ibs``, ``relatedness.grm``
      - Streamed along the variant axis; the individual axis is tiled into row blocks. ``(n_ind, n_ind)`` accumulators live on host so the output can exceed GPU memory. ``grm`` is a two-pass operation (first to calculate chromosome-wide allele frequencies, second to accumulate a per-chunk outer product).
    * - ``StreamingHaplotypeMatrix.materialize(region, sample_subset)``
-     - Pulls one sub-region (and optionally a subset of haplotypes) of the chromosome into a fully-loaded matrix on the GPU for kernels that need every variant simultaneously -- ``pairwise_r2``, Garud's H, or any custom recipe. At hundreds of thousands of haplotypes the kvikio + nvCOMP path lets the subset read decompress directly into GPU memory rather than round-tripping the full sample axis through the host.
+     - Pulls one sub-region (and optionally a subset of haplotypes) of the chromosome into GPU memory for kernels that need every variant simultaneously -- ``pairwise_r2``, Garud's H, or any custom recipe. 
    * - ``zarr_io.allel_zarr_to_vcz``
      - Streaming converter from scikit-allel layout to VCZ for stores that pre-date bio2zarr.
 
