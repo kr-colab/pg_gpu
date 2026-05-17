@@ -419,8 +419,8 @@ matrix is split into compressed chunks, each chunk a small array of
 samples by variants. ``pg_gpu`` reads VCZ stores; if your data
 is in VCF you can convert it with the bio2zarr tools
 (``vcf2zarr explode`` then ``vcf2zarr encode``). The streaming
-codepath needs that VCZ layout because it relies ona fast per-chunk
-decode, an opperation that can't be done on a VCF. See
+codepath needs that VCZ layout because it relies on a fast
+per-chunk decode, an operation that can't be done on a VCF. See
 :doc:`tutorials/biobank_streaming` for the VCF→VCZ conversion
 and a worked end-to-end example.
 

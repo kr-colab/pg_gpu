@@ -19,17 +19,18 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
                            fraction=STREAMING_AUTO_EAGER_FRACTION):
     """Pick ``'eager'`` vs ``'streaming'`` based on the projected matrix size.
 
-    Returns ``(mode, source)`` where ``source`` is the
-    ``ZarrGenotypeSource`` opened for the size probe and reused
-    downstream (when ``mode == 'streaming'``), or ``None`` when no
-    source was opened: scikit-allel layout, missing store, or the
-    branch that picked ``'eager'`` because the matrix fits (in which
-    case the caller's eager path opens its own store via
-    ``read_genotypes``).
+    Returns ``(mode, source)``. ``source`` is a
+    ``ZarrGenotypeSource`` already opened for the size probe and
+    handed off to the streaming reader; ``None`` means the caller
+    should open its own store. Three cases produce
+    ``(mode='eager', source=None)``:
 
-    Scikit-allel layouts always return ``('eager', None)``: the
-    streaming format is VCZ-only, so the size check would refuse a
-    large allel store with nowhere to fall back to.
+    * the matrix fits in free GPU memory at the requested
+      ``fraction`` budget,
+    * the store is a scikit-allel layout (the streaming reader is
+      VCZ-only, so there's no source to hand off),
+    * the store path / layout couldn't be opened at all and the
+      caller's eager path will surface a more actionable error.
 
     ``free_gpu_bytes`` is exposed for tests; typical invocation will leave
     it None to let ``cp.cuda.Device().mem_info`` provide it.

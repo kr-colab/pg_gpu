@@ -294,31 +294,27 @@ class KvikioChunkFetcher(ChunkFetcher):
       still readable but gets no kvikio speedup, so ``backend='auto'``
       warns and falls back to the host path.
 
-    No special filesystem support is needed: kvikio's compat mode
-    routes reads through posix bounce buffers, so the speedup comes
-    from on-GPU codec decode, not GPU Direct Storage. See
-    ``compat_mode`` below for the exact storage knob.
+    No special filesystem support is needed. The fetcher opens the
+    store through ``kvikio.zarr.GDSStore`` and switches zarr 3 to its
+    GPU buffer prototype so nvCOMP decodes the codec directly on the
+    device -- ``build_haplotype_matrix`` then skips the
+    host-to-device copy in ``cp.asarray(gt)`` because ``gt`` is
+    already a cupy array. The win is in that on-GPU decode, not in
+    GPU Direct Storage.
 
-    Reads the store through ``kvikio.zarr.GDSStore`` and enables
-    zarr 3's GPU buffer prototype so nvCOMP decodes the codec on the
-    GPU. The chunk array therefore lands directly on the device --
-    ``build_haplotype_matrix`` skips the host-to-device copy in
-    ``cp.asarray(gt)`` because ``gt`` is already a cupy array.
-
-    The crucial performance gain is in the GPU-accelerated codec decode, not in GPU Direct Storage.
     By default this fetcher sets ``kvikio.defaults.compat_mode=ON``
-    so kvikio reads bytes through posix into bounce buffers, skipping
-    the GPU-Direct-Storage init path entirely (that path is slower on
-    hosts without ``/etc/cufile.json`` configured because it has to
-    probe the kernel + filesystem for cufile support and fall back
-    when it isn't found); pass ``compat_mode=AUTO`` if the storage
-    path is known to be GDS-capable.
+    so kvikio reads bytes through posix into bounce buffers rather
+    than trying to use GPU Direct Storage (which would be slower
+    on hosts without ``/etc/cufile.json`` configured because of
+    repeated failed cufile probes). Pass ``compat_mode=AUTO`` if
+    the storage path is known to be GDS-capable.
 
-    Construction probes the store's call_genotype codec and raises
-    ``ValueError`` if it's not in the nvCOMP-supported list, rather
-    than silently returning incorrect data through a CPU fallback.
-    On close the zarr buffer prototype is reset so subsequent eager
-    calls in the same process get numpy buffers back.
+    Construction probes the store's ``call_genotype`` codec and
+    raises ``ValueError`` if it's not in the nvCOMP-supported list,
+    rather than silently returning incorrect data through a CPU
+    fallback. On close the zarr buffer prototype is reset so
+    subsequent eager calls in the same process get numpy buffers
+    back.
     """
 
     def __init__(self, source, *, compat_mode="ON", num_threads=8):
