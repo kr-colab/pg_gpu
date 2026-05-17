@@ -89,11 +89,10 @@ Statistics that combine across chunks naturally:
 * identity by state (``relatedness.ibs``) and the genetic
   relationship matrix (``relatedness.grm``).
 
-Statistics that need every variant present at the same time --
-pairwise :math:`r^2` heatmaps, Garud's H hash tables -- cannot be
-streamed end to end. The *Pulling a sub-region into memory*
-section below shows how to pull a smaller piece into a regular
-fully loaded matrix and run those.
+Statistics that need every variant present at the same time
+cannot be streamed end to end. The *Pulling a sub-region into
+memory* section below shows how to pull a smaller piece into a
+regular fully loaded matrix and run those.
 
 streaming='auto' vs 'always' vs 'never'
 ---------------------------------------
