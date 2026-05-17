@@ -46,6 +46,12 @@ Both steps are parallelized; the encode step is what produces the
 sample-by-variant chunking the streaming reader needs (see
 *Required Zarr format* below).
 
+The store must hold **diploid** genotypes. The eager and streaming
+readers, the kvikio sample-subset gather, and the
+``(n_dip, 2) -> 2 * n_dip`` haplotype layout all assume ploidy 2;
+haploid and polyploid stores are rejected with a ``ValueError``
+at construction time.
+
 How chunk-by-chunk accumulation works
 -------------------------------------
 
