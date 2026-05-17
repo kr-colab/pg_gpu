@@ -228,7 +228,7 @@ class TestPopFileResolution:
 
     def test_explicit_pop_file(self, vcz_store, pop_file):
         path, _ = vcz_store
-        src = ZarrGenotypeSource(path, pop_file=pop_file)
+        src = ZarrGenotypeSource(path, pop_assignment=pop_file)
         assert set(src.pop_cols.keys()) == {"pop1", "pop2"}
         n_dip = src.num_diploids
         # pop1 = first 10 diploids -> haps [0..10) plus [n_dip..n_dip+10)
@@ -252,7 +252,7 @@ class TestPopFileResolution:
         companion = path + ".pops.tsv"
         with open(pop_file) as src_f, open(companion, "w") as dst:
             dst.write(src_f.read())
-        src = ZarrGenotypeSource(path, pop_file=False)
+        src = ZarrGenotypeSource(path, pop_assignment=False)
         assert src.pop_cols is None
 
     def test_unknown_sample_in_pop_file_warns(self, vcz_store, tmp_path):
@@ -261,15 +261,15 @@ class TestPopFileResolution:
         with open(bad_pop, "w") as f:
             f.write("sample\tpop\ns0\tpop1\nnobody\tpop2\n")
         with pytest.warns(UserWarning, match="not in store"):
-            src = ZarrGenotypeSource(path, pop_file=bad_pop)
+            src = ZarrGenotypeSource(path, pop_assignment=bad_pop)
         assert "pop1" in src.pop_cols
         assert "pop2" not in src.pop_cols
 
     def test_pop_file_accepts_dict(self, vcz_store):
         path, _ = vcz_store
         src = ZarrGenotypeSource(
-            path, pop_file={f"s{i}": "pop1" if i < 5 else "pop2"
-                            for i in range(20)},
+            path, pop_assignment={f"s{i}": "pop1" if i < 5 else "pop2"
+                                  for i in range(20)},
         )
         assert set(src.pop_cols.keys()) == {"pop1", "pop2"}
         # pop1 = first 5 diploids -> haps [0..5) plus [n_dip..n_dip+5)
@@ -282,7 +282,7 @@ class TestPopFileResolution:
         path, _ = vcz_store
         # 20 diploids in the fixture; first 12 are pop1, rest pop2.
         labels = np.array(["pop1"] * 12 + ["pop2"] * 8)
-        src = ZarrGenotypeSource(path, pop_file=labels)
+        src = ZarrGenotypeSource(path, pop_assignment=labels)
         assert set(src.pop_cols.keys()) == {"pop1", "pop2"}
         n_dip = src.num_diploids
         expected1 = np.concatenate([np.arange(12), np.arange(12) + n_dip])
@@ -292,7 +292,7 @@ class TestPopFileResolution:
     def test_pop_file_rejects_mismatched_array_length(self, vcz_store):
         path, _ = vcz_store
         with pytest.raises(ValueError, match="does not match sample"):
-            ZarrGenotypeSource(path, pop_file=np.array(["pop1", "pop2"]))
+            ZarrGenotypeSource(path, pop_assignment=np.array(["pop1", "pop2"]))
 
     def test_pop_file_accepts_zarr_key(self, vcz_store):
         path, _ = vcz_store
@@ -303,5 +303,5 @@ class TestPopFileResolution:
         labels = np.array(["pop1"] * 12 + ["pop2"] * 8)
         store.create_array("sample_population", shape=labels.shape,
                             dtype="<U8")[:] = labels
-        src = ZarrGenotypeSource(path, pop_file="sample_population")
+        src = ZarrGenotypeSource(path, pop_assignment="sample_population")
         assert set(src.pop_cols.keys()) == {"pop1", "pop2"}

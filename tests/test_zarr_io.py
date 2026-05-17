@@ -170,7 +170,7 @@ class TestPopFileKwarg:
         path, n_dip = self._hm_with_samples(tmp_path, "explicit.vcz")
         popfile = str(tmp_path / "pops.tsv")
         self._write_pops_tsv(popfile, n_dip)
-        hm = HaplotypeMatrix.from_zarr(path, pop_file=popfile)
+        hm = HaplotypeMatrix.from_zarr(path, pop_assignment=popfile)
         assert set(hm.sample_sets.keys()) == {"pop1", "pop2"}
 
     def test_companion_auto_load(self, tmp_path, capsys):
@@ -183,7 +183,7 @@ class TestPopFileKwarg:
     def test_pop_file_false_disables_companion(self, tmp_path):
         path, n_dip = self._hm_with_samples(tmp_path, "disabled.vcz")
         self._write_pops_tsv(path + ".pops.tsv", n_dip)
-        hm = HaplotypeMatrix.from_zarr(path, pop_file=False)
+        hm = HaplotypeMatrix.from_zarr(path, pop_assignment=False)
         # _sample_sets stays None; the .sample_sets property then returns
         # the default {"all": [...]} fallback rather than custom pops.
         assert hm._sample_sets is None

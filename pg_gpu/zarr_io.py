@@ -39,10 +39,11 @@ def resolve_pop_file_path(zarr_path, pop_file, *, announce_prefix):
     return companion
 
 
-def normalize_pop_input(pop_file, *, zarr_path, sample_names,
+def normalize_pop_input(pop_assignment, *, zarr_path, sample_names,
                          zarr_store=None, announce_prefix=""):
-    """Normalize the flexible ``pop_file`` kwarg into a ``{sample_id ->
-    pop_label}`` dict (or ``None`` to mean "no assignments").
+    """Normalize the flexible ``pop_assignment`` kwarg into a
+    ``{sample_id -> pop_label}`` dict (or ``None`` to mean "no
+    assignments").
 
     Accepted forms:
 
@@ -69,45 +70,45 @@ def normalize_pop_input(pop_file, *, zarr_path, sample_names,
     """
     import numpy as np
 
-    if pop_file is False:
+    if pop_assignment is False:
         return None
 
-    if pop_file is None:
+    if pop_assignment is None:
         companion = str(zarr_path).rstrip("/") + ".pops.tsv"
         if not os.path.exists(companion):
             return None
         print(f"{announce_prefix}: auto-loaded pop file {companion}",
               file=sys.stderr, flush=True)
-        pop_file = companion
+        pop_assignment = companion
 
-    if isinstance(pop_file, dict):
-        return {str(k): str(v) for k, v in pop_file.items() if v}
+    if isinstance(pop_assignment, dict):
+        return {str(k): str(v) for k, v in pop_assignment.items() if v}
 
-    if isinstance(pop_file, (list, tuple, np.ndarray)):
-        labels = np.asarray(pop_file)
+    if isinstance(pop_assignment, (list, tuple, np.ndarray)):
+        labels = np.asarray(pop_assignment)
         if labels.ndim != 1:
             raise ValueError(
-                f"pop_file array must be 1-D; got shape {labels.shape}")
+                f"pop_assignment array must be 1-D; got shape {labels.shape}")
         if len(labels) != len(sample_names):
             raise ValueError(
-                f"pop_file array length {len(labels)} does not match "
-                f"sample axis length {len(sample_names)}")
+                f"pop_assignment array length {len(labels)} does not "
+                f"match sample axis length {len(sample_names)}")
         return _pop_array_to_map(labels, sample_names)
 
-    if isinstance(pop_file, str):
-        if zarr_store is not None and pop_file in zarr_store:
-            labels = np.asarray(zarr_store[pop_file][:])
+    if isinstance(pop_assignment, str):
+        if zarr_store is not None and pop_assignment in zarr_store:
+            labels = np.asarray(zarr_store[pop_assignment][:])
             if labels.ndim != 1 or len(labels) != len(sample_names):
                 raise ValueError(
-                    f"zarr key {pop_file!r} has shape {labels.shape}; "
+                    f"zarr key {pop_assignment!r} has shape {labels.shape}; "
                     f"expected 1-D of length {len(sample_names)} to "
                     f"line up with the sample axis")
             return _pop_array_to_map(labels, sample_names)
-        return _read_pop_tsv(pop_file)
+        return _read_pop_tsv(pop_assignment)
 
     raise TypeError(
-        f"pop_file must be a path, dict, array, zarr key, False, or "
-        f"None; got {type(pop_file).__name__}")
+        f"pop_assignment must be a path, dict, array, zarr key, False, "
+        f"or None; got {type(pop_assignment).__name__}")
 
 
 def _pop_array_to_map(labels, sample_names):

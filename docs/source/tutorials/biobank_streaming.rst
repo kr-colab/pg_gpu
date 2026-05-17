@@ -125,7 +125,7 @@ functions:
        "biobank/chr15.vcz",
        streaming="always",
        chunk_bp=500_000,                   # genomic chunk size
-       pop_file="biobank/chr15.pops.tsv",  # optional sample -> pop
+       pop_assignment="biobank/chr15.pops.tsv",  # optional sample -> pop
    )
 
    # Per-window diversity + divergence in a single streaming pass.
@@ -165,7 +165,7 @@ The same code run on a fully loaded ``HaplotypeMatrix`` is
 unchanged -- the only difference is which kind of object
 ``from_zarr`` returns.
 
-The ``pop_file`` kwarg accepts a path to a TSV, a dict mapping
+The ``pop_assignment`` kwarg accepts a path to a TSV, a dict mapping
 sample to population, a numpy array of labels (one per sample), or
 the name of a zarr key in the store that holds a 1-D population
 array. See ``HaplotypeMatrix.from_zarr`` for the full list.

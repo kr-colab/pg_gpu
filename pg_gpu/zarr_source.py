@@ -41,12 +41,12 @@ class ZarrGenotypeSource:
         ``'chrom:start-end'`` to restrict the source to a single
         sub-region. The source is single-contig regardless: a
         multi-contig store without ``region`` raises.
-    pop_file : str, optional
+    pop_assignment : str, optional
         Tab-delimited file mapping ``sample`` -> ``pop`` (same format as
         ``HaplotypeMatrix.load_pop_file``). Default ``None`` looks for
         ``<path>.pops.tsv`` next to the store and uses it if present;
         emits a one-line stderr note so the auto-load isn't invisible.
-        Pass ``pop_file=False`` to disable the auto-load entirely.
+        Pass ``pop_assignment=False`` to disable the auto-load entirely.
     contig_id : str, optional
         Pick a contig by name when ``region`` is not given and the store
         has multiple contigs. Ignored otherwise.
@@ -71,7 +71,8 @@ class ZarrGenotypeSource:
         resolved, else None.
     """
 
-    def __init__(self, path, *, region=None, pop_file=None, contig_id=None):
+    def __init__(self, path, *, region=None, pop_assignment=None,
+                 contig_id=None):
         self.path = str(path)
         self._store = zarr.open_group(self.path, mode="r")
 
@@ -127,7 +128,7 @@ class ZarrGenotypeSource:
         self.num_haplotypes = 2 * self.num_diploids
         self.num_variants = int(self.site_pos.size)
 
-        self.pop_cols = self._resolve_pop_file(pop_file)
+        self.pop_cols = self._resolve_pop_file(pop_assignment)
 
     @property
     def mappable_lo(self):
@@ -352,7 +353,7 @@ class ZarrGenotypeSource:
         hi = int(np.searchsorted(self.site_pos, right, side="left"))
         return lo, hi
 
-    def _resolve_pop_file(self, pop_file):
+    def _resolve_pop_file(self, pop_assignment):
         from .zarr_io import normalize_pop_input
 
         # Defer the sample_id lookup until we actually need it -- some
@@ -363,7 +364,7 @@ class ZarrGenotypeSource:
         else:
             sample_ids = []
         pop_map = normalize_pop_input(
-            pop_file, zarr_path=self.path,
+            pop_assignment, zarr_path=self.path,
             sample_names=sample_ids,
             zarr_store=self._store,
             announce_prefix="ZarrGenotypeSource",
@@ -377,7 +378,8 @@ class ZarrGenotypeSource:
             i = idx_by_name.get(str(sample))
             if i is None:
                 warnings.warn(
-                    f"pop_file sample {sample!r} not in store; skipping",
+                    f"pop_assignment sample {sample!r} not in store; "
+                    f"skipping",
                     stacklevel=2,
                 )
                 continue
