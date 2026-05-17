@@ -62,19 +62,41 @@ def _aligned_pair(vcz_store, **stream_kwargs):
     return eager, stream
 
 
+# (chunk_bp, window_size) combos that exercise the streaming dispatch:
+# * one window per chunk (chunk == window)
+# * a couple of windows per chunk (the typical case)
+# * many windows per chunk (chunk >> window)
+# * the whole-fixture single-chunk case (chunk >= seq_length)
+# Streaming forbids chunk_bp < window_size and chunk_bp % window_size
+# != 0; those are covered by TestStreamingGuardrails below.
+CHUNK_WINDOW_COMBOS = [
+    (5_000, 5_000),     # one window per chunk
+    (10_000, 5_000),    # two windows per chunk
+    (25_000, 5_000),    # five windows per chunk
+    (50_000, 10_000),   # five-window chunk at a larger window
+    (200_000, 5_000),   # everything in one chunk
+]
+
+
 class TestWindowedAnalysisDispatch:
 
-    def test_pi_equivalent(self, vcz_store):
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
-        df_e = windowed_analysis(eager, window_size=5_000, statistics=["pi"])
-        df_s = windowed_analysis(stream, window_size=5_000, statistics=["pi"])
+    @pytest.mark.parametrize("chunk_bp,window_size", CHUNK_WINDOW_COMBOS)
+    def test_pi_equivalent(self, vcz_store, chunk_bp, window_size):
+        eager, stream = _aligned_pair(vcz_store, chunk_bp=chunk_bp)
+        df_e = windowed_analysis(eager, window_size=window_size,
+                                  statistics=["pi"])
+        df_s = windowed_analysis(stream, window_size=window_size,
+                                  statistics=["pi"])
         _assert_frames_equivalent(df_e, df_s)
 
-    def test_multiple_stats_equivalent(self, vcz_store):
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+    @pytest.mark.parametrize("chunk_bp,window_size", CHUNK_WINDOW_COMBOS)
+    def test_multiple_stats_equivalent(self, vcz_store, chunk_bp, window_size):
+        eager, stream = _aligned_pair(vcz_store, chunk_bp=chunk_bp)
         stats = ["pi", "theta_w", "tajimas_d", "segregating_sites"]
-        df_e = windowed_analysis(eager, window_size=5_000, statistics=stats)
-        df_s = windowed_analysis(stream, window_size=5_000, statistics=stats)
+        df_e = windowed_analysis(eager, window_size=window_size,
+                                  statistics=stats)
+        df_s = windowed_analysis(stream, window_size=window_size,
+                                  statistics=stats)
         _assert_frames_equivalent(df_e, df_s)
 
     def test_two_pop_divergence_equivalent(self, vcz_store, tmp_path):
@@ -350,6 +372,17 @@ class TestStreamingGuardrails:
         with pytest.raises(ValueError, match="must divide"):
             # 7000 does not divide 10000
             windowed_analysis(stream, window_size=7_000, statistics=["pi"])
+
+    def test_window_larger_than_chunk_rejected(self, vcz_store):
+        # A window that is bigger than the chunk would have to straddle
+        # chunk boundaries; the streaming guardrail rejects it with the
+        # same 'must divide' error path (window > chunk is equivalent
+        # to a non-divisor since chunk_bp % window_size is window_size's
+        # own value, which is greater than zero).
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                            chunk_bp=5_000)
+        with pytest.raises(ValueError, match="must divide"):
+            windowed_analysis(stream, window_size=20_000, statistics=["pi"])
 
     def test_sliding_windows_not_supported(self, vcz_store):
         stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",

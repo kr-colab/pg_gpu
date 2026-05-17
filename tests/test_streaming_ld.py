@@ -202,3 +202,17 @@ class TestTwoPopParity:
             bp_bins, "pop1", "pop2", ac_filter=True,
         )
         _assert_two_pop_equivalent(e, s)
+
+    def test_chunk_bp_smaller_than_max_dist(self, two_pop_vcz_store):
+        # max_bp_dist exceeds chunk_bp, so a chunk's tail buffer must
+        # span more than one earlier chunk to keep every cross-chunk
+        # pair counted exactly once. The single-pop class has the same
+        # test at TestSinglePopParity.test_chunk_bp_smaller_than_max_dist;
+        # this is its two-pop twin so the tail-buffer logic is checked
+        # under the 15-stat batch path too.
+        path, popfile = two_pop_vcz_store
+        eager, stream = _aligned_two_pop_pair(path, popfile, chunk_bp=5_000)
+        bp_bins = [0, 5_000, 15_000]
+        e = eager.compute_ld_statistics_gpu_two_pops(bp_bins, "pop1", "pop2")
+        s = stream.compute_ld_statistics_gpu_two_pops(bp_bins, "pop1", "pop2")
+        _assert_two_pop_equivalent(e, s)

@@ -91,24 +91,33 @@ class TestStreamingMatrixSurface:
 
 class TestStreamingEquivalence:
 
-    def test_stream_concat_matches_eager(self, vcz_store):
+    @pytest.mark.parametrize("chunk_bp", [1_000, 5_000, 25_000, 200_000])
+    @pytest.mark.parametrize("prefetch", [0, 1, 4])
+    def test_stream_concat_matches_eager(self, vcz_store, chunk_bp, prefetch):
         # walking every chunk in streaming mode and concatenating the
         # per-chunk haplotype matrices reproduces the eager matrix
         # bit-for-bit -- the invariant streaming-aware kernels rely on.
+        # Sweep chunk_bp from one-chunk-per-variant (1 kb) up through
+        # chunks that span the whole fixture (200 kb >> 100 kb store
+        # length) so the chunk-count edge cases are all exercised, and
+        # sweep prefetch off / on / deeper so the producer thread's
+        # ordering is checked under different queue depths.
         path, _ = vcz_store
         eager = HaplotypeMatrix.from_zarr(path, streaming="never")
         smatrix = HaplotypeMatrix.from_zarr(path, streaming="always",
-                                            chunk_bp=5_000, prefetch=1)
+                                            chunk_bp=chunk_bp,
+                                            prefetch=prefetch)
         haps, pos = _stream_concat(smatrix)
         np.testing.assert_array_equal(haps, cp.asnumpy(eager.haplotypes))
         np.testing.assert_array_equal(pos, cp.asnumpy(eager.positions))
 
-    def test_prefetch_off_matches_prefetch_on(self, vcz_store):
+    @pytest.mark.parametrize("chunk_bp", [1_000, 5_000, 25_000])
+    def test_prefetch_off_matches_prefetch_on(self, vcz_store, chunk_bp):
         path, _ = vcz_store
         s0 = HaplotypeMatrix.from_zarr(path, streaming="always",
-                                       chunk_bp=5_000, prefetch=0)
+                                       chunk_bp=chunk_bp, prefetch=0)
         s1 = HaplotypeMatrix.from_zarr(path, streaming="always",
-                                       chunk_bp=5_000, prefetch=1)
+                                       chunk_bp=chunk_bp, prefetch=1)
         h0, p0 = _stream_concat(s0)
         h1, p1 = _stream_concat(s1)
         np.testing.assert_array_equal(h0, h1)
