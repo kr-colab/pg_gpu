@@ -147,7 +147,7 @@ class TestHaplotypeMatrixRoundTrip:
             hm.to_zarr(str(tmp_path / "bad.zarr"), format='hdf5')
 
 
-class TestPopFileKwarg:
+class TestPopAssignmentKwarg:
 
     def _write_pops_tsv(self, path, n_dip):
         with open(path, "w") as f:
@@ -166,11 +166,11 @@ class TestPopFileKwarg:
         hm.to_zarr(path, format='vcz', contig_name='chr1')
         return path, n_dip
 
-    def test_explicit_pop_file(self, tmp_path):
+    def test_explicit_pop_assignment(self, tmp_path):
         path, n_dip = self._hm_with_samples(tmp_path, "explicit.vcz")
         popfile = str(tmp_path / "pops.tsv")
         self._write_pops_tsv(popfile, n_dip)
-        hm = HaplotypeMatrix.from_zarr(path, pop_file=popfile)
+        hm = HaplotypeMatrix.from_zarr(path, pop_assignment=popfile)
         assert set(hm.sample_sets.keys()) == {"pop1", "pop2"}
 
     def test_companion_auto_load(self, tmp_path, capsys):
@@ -180,15 +180,15 @@ class TestPopFileKwarg:
         assert hm.sample_sets is not None
         assert "auto-loaded" in capsys.readouterr().err
 
-    def test_pop_file_false_disables_companion(self, tmp_path):
+    def test_pop_assignment_false_disables_companion(self, tmp_path):
         path, n_dip = self._hm_with_samples(tmp_path, "disabled.vcz")
         self._write_pops_tsv(path + ".pops.tsv", n_dip)
-        hm = HaplotypeMatrix.from_zarr(path, pop_file=False)
+        hm = HaplotypeMatrix.from_zarr(path, pop_assignment=False)
         # _sample_sets stays None; the .sample_sets property then returns
         # the default {"all": [...]} fallback rather than custom pops.
         assert hm._sample_sets is None
 
-    def test_no_companion_no_pop_file(self, tmp_path):
+    def test_no_companion_no_pop_assignment(self, tmp_path):
         path, _ = self._hm_with_samples(tmp_path, "none.vcz")
         hm = HaplotypeMatrix.from_zarr(path)
         assert hm._sample_sets is None

@@ -70,9 +70,9 @@ def _aligned_single_pop_pair(vcz_store, **stream_kwargs):
 
 def _aligned_two_pop_pair(path, popfile, **stream_kwargs):
     eager = HaplotypeMatrix.from_zarr(path, streaming="never",
-                                       pop_file=popfile)
+                                       pop_assignment=popfile)
     stream = HaplotypeMatrix.from_zarr(path, streaming="always",
-                                        pop_file=popfile, **stream_kwargs)
+                                        pop_assignment=popfile, **stream_kwargs)
     return eager, stream
 
 

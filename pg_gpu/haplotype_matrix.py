@@ -14,7 +14,7 @@ from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask
 STREAMING_AUTO_EAGER_FRACTION = 0.5
 
 
-def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
+def _decide_streaming_mode(zarr_path, region, streaming, pop_assignment,
                            free_gpu_bytes=None,
                            fraction=STREAMING_AUTO_EAGER_FRACTION):
     """Pick ``'eager'`` vs ``'streaming'`` based on the projected matrix size.
@@ -51,7 +51,7 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_file,
 
     from .zarr_source import ZarrGenotypeSource
     source = ZarrGenotypeSource(zarr_path, region=region,
-                                pop_file=False)
+                                pop_assignment=False)
     eager_bytes = int(source.num_variants) * int(source.num_haplotypes)
 
     if free_gpu_bytes is None:
@@ -427,7 +427,7 @@ class HaplotypeMatrix:
     @classmethod
     def from_zarr(cls, path: str, region: str = None,
                   accessible_bed: str = None,
-                  pop_file=None,
+                  pop_assignment=None,
                   streaming: str = "auto",
                   chunk_bp: int = 1_500_000,
                   prefetch: int = 1,
@@ -446,7 +446,7 @@ class HaplotypeMatrix:
             Genomic region 'chrom:start-end' to load a subset.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
-        pop_file : str, numpy.ndarray, list, dict, or False, optional
+        pop_assignment : str, numpy.ndarray, list, dict, or False, optional
             Sample-to-population assignments. Accepted forms:
 
             * ``str`` -- path to a tab-delimited file with a header
@@ -513,7 +513,7 @@ class HaplotypeMatrix:
 
         if streaming == "always":
             return cls._build_streaming(
-                path, region=region, pop_file=pop_file,
+                path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 backend=backend,
             )
@@ -526,19 +526,19 @@ class HaplotypeMatrix:
         # source for that layout.
         choice, source = _decide_streaming_mode(path, region=region,
                                                 streaming=streaming,
-                                                pop_file=pop_file)
+                                                pop_assignment=pop_assignment)
         if choice == "streaming":
             return cls._build_streaming(
-                path, region=region, pop_file=pop_file,
+                path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 source=source, backend=backend,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
-                                pop_file=pop_file)
+                                pop_assignment=pop_assignment)
 
     @classmethod
-    def _build_eager(cls, path, *, region, accessible_bed, pop_file):
+    def _build_eager(cls, path, *, region, accessible_bed, pop_assignment):
         from .zarr_io import read_genotypes
         from ._gpu_genotype_prep import build_haplotype_matrix
 
@@ -574,7 +574,7 @@ class HaplotypeMatrix:
         except Exception:
             store = None
         pop_map = normalize_pop_input(
-            pop_file, zarr_path=path,
+            pop_assignment, zarr_path=path,
             sample_names=hm.samples or [],
             zarr_store=store,
             announce_prefix="HaplotypeMatrix.from_zarr",
@@ -585,8 +585,8 @@ class HaplotypeMatrix:
         return hm
 
     @classmethod
-    def _build_streaming(cls, path, *, region, pop_file, chunk_bp, prefetch,
-                         source=None, backend="auto"):
+    def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
+                         prefetch, source=None, backend="auto"):
         from .streaming_matrix import (
             HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
             _pick_chunk_fetcher,
@@ -594,12 +594,14 @@ class HaplotypeMatrix:
         from .zarr_source import ZarrGenotypeSource
 
         if source is None:
-            source = ZarrGenotypeSource(path, region=region, pop_file=pop_file)
+            source = ZarrGenotypeSource(path, region=region,
+                                        pop_assignment=pop_assignment)
         else:
-            # _decide_streaming_mode opens the source with pop_file=False
-            # to keep its size probe cheap; resolve the caller's pop_file
-            # now without re-opening the zarr store.
-            source.pop_cols = source._resolve_pop_file(pop_file)
+            # _decide_streaming_mode opens the source with
+            # pop_assignment=False to keep its size probe cheap; resolve
+            # the caller's pop_assignment now without re-opening the
+            # zarr store.
+            source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
         return StreamingHaplotypeMatrix(
             source, fetcher,
@@ -676,7 +678,7 @@ class HaplotypeMatrix:
         gt[:, :, 1] = hap[n_samples:, :].T
         return gt
 
-    def load_pop_file(self, pop_file, pops: list = None):
+    def load_pop_file(self, pop_assignment, pops: list = None):
         """Load population assignments from a tab-delimited file or
         an already-resolved sample->population mapping.
 
@@ -686,7 +688,7 @@ class HaplotypeMatrix:
 
         Parameters
         ----------
-        pop_file : str or dict
+        pop_assignment : str or dict
             Either a path to a tab-delimited file with columns
             ``sample\tpop`` (header line starting with ``sample`` is
             skipped), or a dict mapping sample names to population
@@ -698,11 +700,11 @@ class HaplotypeMatrix:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
 
         n_samples = len(self.samples)
-        if isinstance(pop_file, dict):
-            pop_map = {str(k): str(v) for k, v in pop_file.items() if v}
+        if isinstance(pop_assignment, dict):
+            pop_map = {str(k): str(v) for k, v in pop_assignment.items() if v}
         else:
             pop_map = {}
-            with open(pop_file) as f:
+            with open(pop_assignment) as f:
                 for line in f:
                     parts = line.strip().split()
                     if len(parts) >= 2 and parts[0] != 'sample':

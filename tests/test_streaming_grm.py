@@ -79,9 +79,9 @@ class TestGrmStreaming:
     def test_population_subset(self, two_pop_vcz_store):
         path, popfile = two_pop_vcz_store
         eager = HaplotypeMatrix.from_zarr(path, streaming="never",
-                                            pop_file=popfile)
+                                            pop_assignment=popfile)
         stream = HaplotypeMatrix.from_zarr(path, streaming="always",
-                                             pop_file=popfile,
+                                             pop_assignment=popfile,
                                              chunk_bp=10_000)
         np.testing.assert_allclose(
             grm(stream, population='pop1'),

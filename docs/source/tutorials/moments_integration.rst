@@ -55,7 +55,10 @@ The core swap looks like:
    r_bins = [0, 1e-6, 2e-6, 5e-6, 1e-5, 2e-5, 5e-5, 1e-4]
 
    # Step 1: GPU-accelerated LD parsing (the only line that changes
-   # vs. a pure-moments workflow).
+   # vs. a pure-moments workflow). ``pop_file`` is the same kwarg
+   # name moments.LD.Parsing.compute_ld_statistics uses; pg_gpu
+   # also accepts ``pop_assignment=`` as an alias if you are coming
+   # in from ``HaplotypeMatrix.from_zarr`` and prefer that spelling.
    ld_stats = {}
    for i, vcf in enumerate(vcf_files):
        ld_stats[i] = compute_ld_statistics(

@@ -42,6 +42,7 @@ def compute_ld_statistics(
     r_bins=None, bp_bins=None, use_genotypes=False,
     report=True, ac_filter=True, haplotype_matrix=None,
     genotype_matrix=None, accessible_bed=None,
+    pop_assignment=None,
 ):
     """GPU-accelerated drop-in replacement for moments.LD.Parsing.compute_ld_statistics.
 
@@ -77,8 +78,14 @@ def compute_ld_statistics(
         Path to VCF file. Not needed if haplotype_matrix/genotype_matrix provided.
     rec_map_file : str, optional
         Recombination map (tab-delimited: pos, Map(cM)). Required with r_bins.
-    pop_file : str, optional
-        Population file (tab-delimited: sample, pop).
+    pop_file, pop_assignment : str, dict, numpy.ndarray, list, or False, optional
+        Sample-to-population assignment in any form
+        ``normalize_pop_input`` accepts (path / sample-to-pop dict /
+        labels array / zarr key name / ``False`` to disable). The
+        two kwargs are aliases; ``pop_file`` is the
+        moments-compatible spelling, ``pop_assignment`` is the
+        spelling the rest of pg_gpu uses. Passing both at once is
+        an error.
     pops : list of str
         Population names (1-4). Defaults to ['pop0', 'pop1'].
     r_bins : array-like, optional
@@ -104,6 +111,14 @@ def compute_ld_statistics(
     -------
     dict with keys 'bins', 'sums', 'stats', 'pops' (moments format).
     """
+    if pop_file is not None and pop_assignment is not None:
+        raise TypeError(
+            "pass only one of pop_file or pop_assignment; they are "
+            "aliases for the same argument."
+        )
+    if pop_assignment is not None:
+        pop_file = pop_assignment
+
     if pops is None:
         pops = ['pop0', 'pop1']
     num_pops = len(pops)

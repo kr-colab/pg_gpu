@@ -114,9 +114,9 @@ class TestWindowedAnalysisDispatch:
                 f.write(f"s{i}\tpop2\n")
 
         eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
-                                          pop_file=popfile)
+                                          pop_assignment=popfile)
         stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
-                                            pop_file=popfile,
+                                            pop_assignment=popfile,
                                             chunk_bp=10_000)
         eager.chrom_start = stream.chrom_start
         eager.chrom_end = stream.chrom_end
@@ -148,9 +148,9 @@ def _two_pop_pair(vcz_store, tmp_path, **stream_kwargs):
         for i in range(half, n_dip):
             f.write(f"s{i}\tpop2\n")
     eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
-                                      pop_file=popfile)
+                                      pop_assignment=popfile)
     stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
-                                       pop_file=popfile,
+                                       pop_assignment=popfile,
                                        **stream_kwargs)
     eager.chrom_start = stream.chrom_start
     eager.chrom_end = stream.chrom_end
@@ -314,9 +314,9 @@ class TestSFSDispatch:
                 f.write(f"s{i}\tpop2\n")
 
         eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
-                                          pop_file=popfile)
+                                          pop_assignment=popfile)
         stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
-                                            pop_file=popfile,
+                                            pop_assignment=popfile,
                                             chunk_bp=10_000)
         j_e = sfs_module.joint_sfs(eager, pop1="pop1", pop2="pop2")
         j_s = sfs_module.joint_sfs(stream, pop1="pop1", pop2="pop2")
@@ -338,9 +338,9 @@ class TestSFSDispatch:
                 f.write(f"s{i}\tpop2\n")
 
         eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
-                                          pop_file=popfile)
+                                          pop_assignment=popfile)
         stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
-                                            pop_file=popfile,
+                                            pop_assignment=popfile,
                                             chunk_bp=10_000)
         # Each pop has 2 * half haplotypes; pick a strict downsample.
         n1 = 2 * half

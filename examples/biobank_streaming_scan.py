@@ -66,7 +66,7 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--vcz", required=True, help="path to a chr*.vcz store")
-    p.add_argument("--pop-file", default=None,
+    p.add_argument("--pop-assignment", default=None,
                    help="optional path/dict/zarr-key for sample -> pop "
                         "assignments. Default: auto-load <vcz>.pops.tsv")
     p.add_argument("--pops", nargs=2, metavar=("POP1", "POP2"), default=None,
@@ -101,7 +101,7 @@ def main():
     stream = HaplotypeMatrix.from_zarr(
         args.vcz, streaming="always",
         chunk_bp=args.chunk_bp,
-        pop_file=args.pop_file,  # None -> autoload <vcz>.pops.tsv
+        pop_assignment=args.pop_assignment,  # None -> autoload <vcz>.pops.tsv
     )
     chrom = stream.chrom
     chrom_len = stream.chrom_end - stream.chrom_start
@@ -126,7 +126,7 @@ def main():
             "No pop file found alongside the store and --pops not given; "
             "the streaming reader fell back to a single 'all' pop and "
             "this example needs two named populations. Either provide "
-            "--pop-file or --pops.")
+            "--pop-assignment or --pops.")
     else:
         pops = tuple(sample_set_names[:2])
     print(f"populations: {pops}")

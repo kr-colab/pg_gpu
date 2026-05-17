@@ -191,7 +191,7 @@ class TestAutoDetection:
         # Make the eager footprint look like it doesn't fit by claiming
         # less free GPU memory than the projected size requires.
         choice, source = _decide_streaming_mode(
-            path, region=None, streaming="auto", pop_file=False,
+            path, region=None, streaming="auto", pop_assignment=False,
             free_gpu_bytes=int(eager_bytes / 0.5 - 1),
         )
         assert choice == "streaming"
@@ -205,7 +205,7 @@ class TestAutoDetection:
         eager_bytes = hm.haplotypes.size
         with pytest.raises(MemoryError, match="streaming='never'"):
             _decide_streaming_mode(
-                path, region=None, streaming="never", pop_file=False,
+                path, region=None, streaming="never", pop_assignment=False,
                 free_gpu_bytes=int(eager_bytes / 0.5 - 1),
             )
 

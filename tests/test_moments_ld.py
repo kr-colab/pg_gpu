@@ -121,6 +121,34 @@ class TestHeterozygosity:
         assert H_0_1 >= min(H_0_0, H_1_1)
 
 
+class TestPopAssignmentAlias:
+    """``pop_file`` mirrors the moments kwarg name; ``pop_assignment``
+    matches the rest of pg_gpu. The wrapper accepts both and routes
+    them through the same code path."""
+
+    def test_pop_assignment_matches_pop_file(self, gpu_stats):
+        alias = compute_ld_statistics(
+            VCF, pop_assignment=POP_FILE, pops=POPS,
+            bp_bins=BP_BINS, report=False,
+        )
+        # Same VCF + same pop file -> identical structure (bins,
+        # stats, pops) and per-bin sums equal to machine precision.
+        # CUDA reductions reorder additions across runs so two
+        # otherwise-identical invocations can differ by a few ULPs.
+        assert alias["bins"] == gpu_stats["bins"]
+        assert alias["pops"] == gpu_stats["pops"]
+        assert alias["stats"] == gpu_stats["stats"]
+        for a, b in zip(alias["sums"], gpu_stats["sums"]):
+            np.testing.assert_allclose(a, b, rtol=1e-12, atol=0.0)
+
+    def test_both_aliases_rejected(self):
+        with pytest.raises(TypeError, match="pop_file or pop_assignment"):
+            compute_ld_statistics(
+                VCF, pop_file=POP_FILE, pop_assignment=POP_FILE,
+                pops=POPS, bp_bins=BP_BINS, report=False,
+            )
+
+
 class TestMomentsCompatibility:
     """Verify output can be fed into moments downstream functions."""
 

@@ -394,7 +394,7 @@ class GenotypeMatrix:
     @classmethod
     def from_zarr(cls, path, region=None, accessible_bed=None,
                   include_invariant=False,
-                  pop_file=None,
+                  pop_assignment=None,
                   streaming: str = "auto",
                   chunk_bp: int = 1_500_000,
                   prefetch: int = 1,
@@ -403,7 +403,7 @@ class GenotypeMatrix:
 
         Identical interface to ``HaplotypeMatrix.from_zarr``;
         see that method's docstring for the meaning of every kwarg
-        (``streaming``, ``pop_file`` flexibility, ``chunk_bp``,
+        (``streaming``, ``pop_assignment`` flexibility, ``chunk_bp``,
         ``prefetch``, ``backend``). The only difference is the
         returned type: this returns ``GenotypeMatrix`` (or
         ``StreamingGenotypeMatrix`` on the streaming path) where
@@ -417,7 +417,7 @@ class GenotypeMatrix:
             If True, set ``n_total_sites`` from the loaded variant
             count. Unique to this entry point (the haplotype matrix
             does not need it).
-        path, region, accessible_bed, pop_file, streaming, chunk_bp, prefetch, backend
+        path, region, accessible_bed, pop_assignment, streaming, chunk_bp, prefetch, backend
             See ``HaplotypeMatrix.from_zarr``.
 
         Returns
@@ -437,7 +437,7 @@ class GenotypeMatrix:
 
         if streaming == "always":
             return cls._build_streaming(
-                path, region=region, pop_file=pop_file,
+                path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 backend=backend,
             )
@@ -450,21 +450,21 @@ class GenotypeMatrix:
         from .haplotype_matrix import _decide_streaming_mode
         choice, source = _decide_streaming_mode(path, region=region,
                                                 streaming=streaming,
-                                                pop_file=pop_file)
+                                                pop_assignment=pop_assignment)
         if choice == "streaming":
             return cls._build_streaming(
-                path, region=region, pop_file=pop_file,
+                path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 backend=backend, source=source,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
                                 include_invariant=include_invariant,
-                                pop_file=pop_file)
+                                pop_assignment=pop_assignment)
 
     @classmethod
     def _build_eager(cls, path, *, region, accessible_bed,
-                     include_invariant, pop_file):
+                     include_invariant, pop_assignment):
         from .zarr_io import read_genotypes, normalize_pop_input
         from ._gpu_genotype_prep import build_genotype_matrix
 
@@ -492,7 +492,7 @@ class GenotypeMatrix:
         except Exception:
             store = None
         pop_map = normalize_pop_input(
-            pop_file, zarr_path=path,
+            pop_assignment, zarr_path=path,
             sample_names=gm.samples or [],
             zarr_store=store,
             announce_prefix="GenotypeMatrix.from_zarr",
@@ -503,17 +503,18 @@ class GenotypeMatrix:
         return gm
 
     @classmethod
-    def _build_streaming(cls, path, *, region, pop_file, chunk_bp, prefetch,
-                         backend="auto", source=None):
+    def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
+                         prefetch, backend="auto", source=None):
         from .streaming_matrix import (
             StreamingGenotypeMatrix, _pick_chunk_fetcher,
         )
         from .zarr_source import ZarrGenotypeSource
 
         if source is None:
-            source = ZarrGenotypeSource(path, region=region, pop_file=pop_file)
+            source = ZarrGenotypeSource(path, region=region,
+                                        pop_assignment=pop_assignment)
         else:
-            source.pop_cols = source._resolve_pop_file(pop_file)
+            source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
         return StreamingGenotypeMatrix(
             source, fetcher,
@@ -558,13 +559,13 @@ class GenotypeMatrix:
                 f"Unknown format: {format!r}. Use 'vcz' or 'scikit-allel'."
             )
 
-    def load_pop_file(self, pop_file, pops=None):
+    def load_pop_file(self, pop_assignment, pops=None):
         """Load population assignments from a tab-delimited file or
         an already-resolved sample->population mapping.
 
         Parameters
         ----------
-        pop_file : str or dict
+        pop_assignment : str or dict
             Either a path to a tab-delimited file with columns
             ``sample\tpop``, or a dict mapping sample names to
             population labels.
@@ -574,11 +575,11 @@ class GenotypeMatrix:
         if self.samples is None:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
 
-        if isinstance(pop_file, dict):
-            pop_map = {str(k): str(v) for k, v in pop_file.items() if v}
+        if isinstance(pop_assignment, dict):
+            pop_map = {str(k): str(v) for k, v in pop_assignment.items() if v}
         else:
             pop_map = {}
-            with open(pop_file) as f:
+            with open(pop_assignment) as f:
                 for line in f:
                     parts = line.strip().split()
                     if len(parts) >= 2 and parts[0] != 'sample':
