@@ -202,20 +202,72 @@ class TestAccessibleBedDispatch:
         _assert_frames_equivalent(df_e, df_s)
 
 
-class TestGarudGuardrail:
-    """Garud is rejected on the streaming path until the fused kernel's
-    rounding sensitivity is addressed. Position-deterministic weights
-    make the hash basis stable, but second-order rounding still drifts
-    the distinct-haplotype count by a few ULP under different prefix
-    trajectories."""
+class TestGarudStreamingDispatch:
+    """Per-window scatter-reduce assembles each window's hash from the
+    same set of variants regardless of chunking, so eager and streaming
+    Garud H must agree bit-for-bit (no prefix-sum reorder drift to
+    absorb)."""
 
     @pytest.mark.parametrize("stat", ["garud_h1", "garud_h12",
                                        "garud_h123", "garud_h2h1"])
-    def test_each_stat_rejected(self, vcz_store, stat):
-        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
-                                            chunk_bp=10_000)
-        with pytest.raises(NotImplementedError, match="Garud"):
-            windowed_analysis(stream, window_size=5_000, statistics=[stat])
+    def test_each_stat_matches_eager(self, vcz_store, stat):
+        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        df_e = windowed_analysis(eager, window_size=5_000, statistics=[stat])
+        df_s = windowed_analysis(stream, window_size=5_000, statistics=[stat])
+        # Sort by window start; demand exact-precision parity on the
+        # numeric column. The whole point of the rewrite is that the
+        # streaming path's per-window hash is identical to the eager
+        # one's, so float jitter is no longer a thing.
+        df_e = df_e.sort_values("start").reset_index(drop=True)
+        df_s = df_s.sort_values("start").reset_index(drop=True)
+        assert list(df_e.columns) == list(df_s.columns)
+        np.testing.assert_array_equal(df_e[stat].to_numpy(),
+                                       df_s[stat].to_numpy())
+
+    def test_garud_with_pi_in_one_call(self, vcz_store):
+        # Mixed stat set -- the streaming dispatch should run pi and
+        # Garud H side by side on the same chunks without either
+        # disturbing the other.
+        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        stats = ["pi", "garud_h12"]
+        df_e = windowed_analysis(eager, window_size=5_000, statistics=stats)
+        df_s = windowed_analysis(stream, window_size=5_000, statistics=stats)
+        df_e = df_e.sort_values("start").reset_index(drop=True)
+        df_s = df_s.sort_values("start").reset_index(drop=True)
+        np.testing.assert_array_equal(df_e["garud_h12"].to_numpy(),
+                                       df_s["garud_h12"].to_numpy())
+        np.testing.assert_allclose(df_e["pi"].to_numpy(),
+                                    df_s["pi"].to_numpy(),
+                                    rtol=1e-9, atol=1e-12)
+
+    def test_chunk_boundary_invariance(self, vcz_store):
+        # The most direct stress test for prefix-sum drift used to be
+        # exactly this: change the chunk_bp and the per-window hash
+        # gets accumulated in a different order. After the per-window
+        # scatter-reduce rewrite the two chunkings produce identical
+        # results.
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        s_a = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=10_000)
+        s_b = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=20_000)
+        eager.chrom_start = s_a.chrom_start
+        eager.chrom_end = s_a.chrom_end
+        df_e = windowed_analysis(eager, window_size=5_000,
+                                  statistics=["garud_h12"])
+        df_a = windowed_analysis(s_a, window_size=5_000,
+                                  statistics=["garud_h12"])
+        df_b = windowed_analysis(s_b, window_size=5_000,
+                                  statistics=["garud_h12"])
+        for df in (df_a, df_b):
+            df.sort_values("start", inplace=True)
+            df.reset_index(drop=True, inplace=True)
+        df_e.sort_values("start", inplace=True)
+        df_e.reset_index(drop=True, inplace=True)
+        np.testing.assert_array_equal(df_e["garud_h12"].to_numpy(),
+                                       df_a["garud_h12"].to_numpy())
+        np.testing.assert_array_equal(df_a["garud_h12"].to_numpy(),
+                                       df_b["garud_h12"].to_numpy())
 
 
 class TestSFSDispatch:

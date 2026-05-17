@@ -1100,19 +1100,6 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             "available on the StreamingHaplotypeMatrix path; materialize "
             "the region eagerly to run it."
         )
-    _garud_stats = {"garud_h1", "garud_h12", "garud_h123", "garud_h2h1",
-                    "garud_n_distinct", "haplotype_count"}
-    if any(s in _garud_stats for s in statistics):
-        # The fused Garud kernel has a known ULP-scale rounding drift
-        # in the distinct-haplotype count under different chunk
-        # prefix-sum orders, so streaming dispatch is currently
-        # disabled for it. Materialize a region to run Garud H at
-        # biobank scale until the rounding is tracked down.
-        raise NotImplementedError(
-            "Garud H statistics are not available on the streaming path; "
-            "materialize the region first via "
-            "StreamingHaplotypeMatrix.materialize(...) and run Garud on "
-            "that.")
 
     # Parse the BED mask once up front and inject the resolved
     # AccessibleMask into each chunk -- otherwise windowed_analysis would
@@ -1662,7 +1649,7 @@ _fused_garud_h_kernel = cp.RawKernel(r'''
 extern "C" __global__
 void fused_garud_h(const double* hash1,   // (n_windows, n_hap)
                    const double* hash2,   // (n_windows, n_hap)
-                   int n_hap, int n_windows,
+                   int n_hap, int n_windows, double tol,
                    double* out_h1, double* out_h12,
                    double* out_h123, double* out_h2h1,
                    double* out_n_distinct) {
@@ -1670,16 +1657,18 @@ void fused_garud_h(const double* hash1,   // (n_windows, n_hap)
     if (wid >= n_windows) return;
     int tid = threadIdx.x;
 
-    // Load hashes into shared memory for sorting
-    // Max 1024 haplotypes supported (shared memory limit)
+    // Load hashes into shared memory for sorting. The launcher picks
+    // blockDim.x = ceil(n_hap / 2) rounded up to a power of two so the
+    // odd-even sort has enough threads for every compare-and-swap, but
+    // that leaves blockDim.x < n_hap for many n_hap values -- a strided
+    // load is needed to cover all elements.
     extern __shared__ double shm[];
     double* s_h1 = shm;            // n_hap doubles
     double* s_h2 = shm + n_hap;    // n_hap doubles
 
-    // Each thread loads its element
-    if (tid < n_hap) {
-        s_h1[tid] = hash1[wid * n_hap + tid];
-        s_h2[tid] = hash2[wid * n_hap + tid];
+    for (int i = tid; i < n_hap; i += blockDim.x) {
+        s_h1[i] = hash1[wid * n_hap + i];
+        s_h2[i] = hash2[wid * n_hap + i];
     }
     __syncthreads();
 
@@ -1707,7 +1696,6 @@ void fused_garud_h(const double* hash1,   // (n_windows, n_hap)
     if (tid == 0) {
         // Count distinct haplotypes and collect top-3 frequencies
         double inv_n = 1.0 / (double)n_hap;
-        double tol = 1e-3;
 
         // Walk sorted array, count runs
         // We need: sum(f_i^2), and the top 3 frequencies
@@ -2542,13 +2530,20 @@ def _windowed_mean(values, bin_idx, valid_mask, n_bins):
 def _compute_fused_garud_h(haplotype_matrix, population,
                             win_start, win_stop, n_windows, statistics,
                             results):
-    """Compute windowed Garud's H using prefix-sum hashing + fused GPU kernel.
+    """Compute windowed Garud's H + fused GPU kernel.
 
-    For large data, processes windows in groups to avoid allocating
-    full-size prefix-sum arrays (which would be n_hap * n_var * 8 bytes).
+    Two assembly paths build the per-window haplotype hashes:
+
+    * Tile windows (``win_stop[k] == win_start[k+1]`` for all k) use
+      a per-window scatter-reduce via ``cp.add.reduceat``. Each
+      window's hash is summed from its own variants in index order,
+      so eager and streaming produce bit-identical results and the
+      kernel can use an exact-equality tolerance to bucket haplotypes.
+    * Sliding windows (overlap > 0) still use the prefix-sum trick,
+      which carries the well-known ULP-scale drift the kernel's
+      legacy ``tol=1e-3`` absorbs.
     """
     from ._utils import get_population_matrix
-    from ._memutil import free_gpu_pool
 
     if population is not None:
         matrix = get_population_matrix(haplotype_matrix, population)
@@ -2563,23 +2558,85 @@ def _compute_fused_garud_h(haplotype_matrix, population,
     if not isinstance(pos, cp.ndarray):
         pos = cp.asarray(pos)
 
-    # Memory check: prefix sums need 4 arrays of (n_hap, span+1) float64
-    # Use 30% of free memory as budget for prefix-sum arrays
+    # Tile detection. Both win_start and win_stop arrive as either
+    # numpy or cupy arrays; check on the host so the comparison is
+    # cheap and synchronous.
+    ws = win_start.get() if isinstance(win_start, cp.ndarray) else np.asarray(win_start)
+    we = win_stop.get() if isinstance(win_stop, cp.ndarray) else np.asarray(win_stop)
+    is_tile = (n_windows == 0) or bool(np.all(we[:-1] == ws[1:]))
+
+    if is_tile:
+        _garud_h_per_window_reduceat(hap, pos, win_start, win_stop,
+                                      n_hap, n_windows, statistics,
+                                      results)
+        return
+
+    # Sliding path: keep the existing prefix-sum implementation. Memory
+    # check sized for 4 (n_hap, span+1) float64 arrays (hw1, hw2,
+    # cs1, cs2); fall back to per-group chunking if a full single-pass
+    # buffer would not fit.
     free_mem = cp.cuda.Device().mem_info[0]
     prefix_budget = int(free_mem * 0.3)
-    # Each variant column costs n_hap * 8 * 4 bytes (hw1, hw2, cs1, cs2)
     cost_per_var = n_hap * 8 * 4
     max_span = max(1, prefix_budget // cost_per_var)
 
-    # Check if full prefix sums fit in memory
     if n_var <= max_span:
-        # Original single-pass path
         _garud_h_single_pass(hap, pos, n_hap, n_var, win_start, win_stop,
                              n_windows, statistics, results)
     else:
-        # Chunked path: process groups of windows
         _garud_h_chunked(hap, pos, n_hap, n_var, win_start, win_stop,
                          n_windows, max_span, statistics, results)
+
+
+def _garud_h_per_window_reduceat(hap, pos, win_start, win_stop, n_hap,
+                                   n_windows, statistics, results):
+    """Garud H assembling each window's hash by per-window scatter-reduce.
+
+    Cost is O(n_hap * n_var) -- the same as the prefix-sum approach --
+    but each window's hash is summed from its own variants in index
+    order, so two chunkings covering the same window produce
+    bit-identical results. With deterministic hashes the kernel can
+    bucket haplotypes by a much tighter tolerance (1e-12) than the
+    prefix-sum path's 1e-3, which means the count of distinct
+    haplotypes matches the hand-rolled reference exactly.
+
+    Requires non-overlapping tile windows so each variant is in at
+    most one window; the caller dispatches sliding windows to the
+    prefix-sum path.
+    """
+    if n_windows == 0:
+        return
+    w1 = _position_weights(pos, _GARUD_SALT1)
+    w2 = _position_weights(pos, _GARUD_SALT2)
+
+    # Slice to the variant range covered by any window. Anything left
+    # of win_start[0] and right of win_stop[-1] is not in any window
+    # and should not contribute.
+    if isinstance(win_start, cp.ndarray):
+        ws = win_start.get()
+        we = win_stop.get()
+    else:
+        ws = np.asarray(win_start)
+        we = np.asarray(win_stop)
+    v_lo = int(ws[0])
+    v_hi = int(we[-1])
+
+    hap_slice = hap[:, v_lo:v_hi].astype(cp.float64)
+    hw1 = hap_slice * w1[v_lo:v_hi][cp.newaxis, :]
+    hw2 = hap_slice * w2[v_lo:v_hi][cp.newaxis, :]
+
+    # cp.add.reduceat: bin k sums positions ws[k]-v_lo .. ws[k+1]-v_lo
+    # (exclusive), and the final bin runs to the end of the sliced
+    # array, which equals we[-1]-v_lo for tile windows.
+    rel = (ws - v_lo).astype(np.int64)
+    h1 = cp.add.reduceat(hw1, rel, axis=1)   # (n_hap, n_windows)
+    h2 = cp.add.reduceat(hw2, rel, axis=1)
+
+    all_h1 = cp.ascontiguousarray(h1.T)      # kernel wants (n_windows, n_hap)
+    all_h2 = cp.ascontiguousarray(h2.T)
+
+    _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics,
+                          results, tol=1e-12)
 
 
 def _garud_h_single_pass(hap, pos, n_hap, n_var, win_start, win_stop,
@@ -2601,7 +2658,8 @@ def _garud_h_single_pass(hap, pos, n_hap, n_var, win_start, win_stop,
     all_h1 = cp.ascontiguousarray(all_h1)
     all_h2 = cp.ascontiguousarray(all_h2)
 
-    _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics, results)
+    _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics,
+                          results, tol=1e-3)
 
 
 def _garud_h_chunked(hap, pos, n_hap, n_var, win_start, win_stop,
@@ -2664,7 +2722,7 @@ def _garud_h_chunked(hap, pos, n_hap, n_var, win_start, win_stop,
         # Launch kernel for this group
         grp_results = {}
         _launch_garud_kernel(all_h1, all_h2, n_hap, n_group,
-                             statistics, grp_results)
+                             statistics, grp_results, tol=1e-3)
 
         # Store group results
         for stat_name, out_arr in [('garud_h1', out_h1), ('garud_h12', out_h12),
@@ -2689,8 +2747,18 @@ def _garud_h_chunked(hap, pos, n_hap, n_var, win_start, win_stop,
         results['haplotype_count'] = out_n_distinct.astype(int)
 
 
-def _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics, results):
-    """Launch the Garud H GPU kernel and store results."""
+def _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics,
+                          results, *, tol):
+    """Launch the Garud H GPU kernel and store results.
+
+    ``tol`` is the float64 distance below which two sorted hashes are
+    treated as the same haplotype. The per-window scatter-reduce
+    hashing path passes a much tighter tolerance (1e-12) than the
+    prefix-sum path (1e-3) because its hashes are bit-identical for
+    equal haplotypes and far apart for distinct ones; the looser
+    legacy value still absorbs the ULP-scale drift the cumsum-then-
+    subtract trick introduces.
+    """
     out_h1 = cp.empty(n_windows, dtype=cp.float64)
     out_h12 = cp.empty(n_windows, dtype=cp.float64)
     out_h123 = cp.empty(n_windows, dtype=cp.float64)
@@ -2705,6 +2773,7 @@ def _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics, results):
     _fused_garud_h_kernel(
         (n_windows,), (block,),
         (all_h1, all_h2, np.int32(n_hap), np.int32(n_windows),
+         np.float64(tol),
          out_h1, out_h12, out_h123, out_h2h1, out_n_distinct),
         shared_mem=shm_size)
 
