@@ -74,6 +74,9 @@ def _simulate(n_diploids: int, s: float, seed: int):
     ts = msprime.sim_mutations(ts, rate=MU, random_seed=seed)
     hap = ts.genotype_matrix().T.astype(np.int8)
     positions = ts.tables.sites.position.astype(np.int64)
+    # Msprime can simulate multiple mutations at the same position, so here we are enforcing unique positions by shifting any non-ascending positions to the right.
+    # In real data, this would be a multi-allelic site, and the VCF format allows representing it as a single site with multiple alternate alleles.
+    # Though the HaplotypeMatrix can also represent multi-allelic sites, for simplicity we are treating them as separate biallelic sites here.
     for i in range(1, len(positions)):
         if positions[i] <= positions[i - 1]:
             positions[i] = positions[i - 1] + 1

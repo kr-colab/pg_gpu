@@ -52,7 +52,8 @@ What the script does
 
 The expected (and observed) outcome: the null scenario's CI brackets
 zero, while the admixed scenario's CI excludes zero with a clearly
-positive :math:`\hat D` consistent with :math:`C \to B` gene flow.
+negative :math:`\hat D` consistent with :math:`C \to B` gene flow.
+Also, you can see the per-block :math:`D` distribution is shifted to the left (more negative values) in the admixed scenario, showing the genome-wide signal of admixture.
 
 Why it's useful as a template
 -----------------------------
