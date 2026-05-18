@@ -22,6 +22,34 @@ def _host(arr):
     return cp.asnumpy(arr) if isinstance(arr, cp.ndarray) else arr
 
 
+def _assert_vcz_dtype_compatible(name, ours, theirs):
+    """Check that two dtypes for the same VCZ field are close enough.
+
+    Two dtypes count as compatible when:
+
+    * they are exactly equal, or
+    * both are some kind of string (the value round-trips as a
+      Python ``str`` either way), or
+    * both are signed integers and ours is at least as wide as
+      theirs (we never lose data by storing a value in a bigger
+      integer).
+
+    Anything else is treated as a real disagreement and raised.
+    """
+    if ours == theirs:
+        return
+    if ours.kind in ("U", "T", "O") and theirs.kind in ("U", "T", "O"):
+        return
+    if ours.kind == theirs.kind == "i" and ours.itemsize >= theirs.itemsize:
+        return
+    raise AssertionError(
+        f"{name}: dtype drift between allel_zarr_to_vcz output "
+        f"({ours}) and bio2zarr reference ({theirs}). Either update "
+        f"the converter to match the new canonical type or relax the "
+        f"compatibility helper in this test."
+    )
+
+
 # ── Fixtures ────────────────────────────────────────────────────────────
 
 
@@ -575,3 +603,56 @@ class TestAllelZarrToVcz:
     def test_rejects_vcz_input(self, tmp_path, vcz_store):
         with pytest.raises(ValueError, match="already vcz"):
             allel_zarr_to_vcz(vcz_store, str(tmp_path / "x.vcz"))
+
+    def test_field_set_matches_bio2zarr_reference(self, tmp_path):
+        """Make sure our converter writes the same VCZ field set as
+        bio2zarr.
+
+        Simulates a tiny tree sequence and writes it out two ways:
+
+        1. Through bio2zarr's own VCZ writer, which we treat as the
+           reference for what a valid VCZ store looks like.
+        2. Through a scikit-allel zarr and then our converter
+           (``allel_zarr_to_vcz``).
+
+        Every field our converter writes must also appear in bio2zarr's
+        output, with a dtype the helper above accepts as compatible.
+        The test fails if bio2zarr changes its layout in a way that
+        would make our output look wrong to other VCZ readers."""
+        from bio2zarr.tskit import convert as ts_to_vcz
+
+        # Tiny tree sequence + reference VCZ via bio2zarr.
+        ts = msprime.sim_ancestry(samples=5, sequence_length=10_000,
+                                   random_seed=42)
+        ts = msprime.sim_mutations(ts, rate=1e-4, random_seed=42)
+
+        ref_path = str(tmp_path / "ref.vcz")
+        ts_to_vcz(ts, ref_path)
+        ref = zarr.open_group(ref_path, mode="r")
+
+        # Same data routed through scikit-allel zarr -> allel_zarr_to_vcz
+        # so the test exercises the converter end-to-end.
+        hm = HaplotypeMatrix.from_ts(ts)
+        gt = HaplotypeMatrix._haplotypes_to_gt(hm.haplotypes)
+        samples = [f"tsk_{i}" for i in range(hm.num_haplotypes // 2)]
+        allel_path = str(tmp_path / "src.allel.zarr")
+        write_allel(allel_path, gt, np.asarray(hm.positions),
+                    samples=samples)
+
+        out_path = str(tmp_path / "out.vcz")
+        allel_zarr_to_vcz(allel_path, out_path, contig="chr1")
+        out = zarr.open_group(out_path, mode="r")
+
+        for name in out.array_keys():
+            assert name in ref.array_keys(), (
+                f"allel_zarr_to_vcz writes {name!r} but bio2zarr does "
+                f"not -- the VCZ layouts have drifted."
+            )
+            _assert_vcz_dtype_compatible(name, out[name].dtype,
+                                          ref[name].dtype)
+
+        # And the streaming reader must be able to consume bio2zarr's
+        # own output, so we know we're not over-restricting what we
+        # accept on the read side either.
+        hm_ref = HaplotypeMatrix.from_zarr(ref_path, streaming="never")
+        assert hm_ref.num_variants == ts.num_sites
