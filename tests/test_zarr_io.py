@@ -22,6 +22,28 @@ def _host(arr):
     return cp.asnumpy(arr) if isinstance(arr, cp.ndarray) else arr
 
 
+def _assert_vcz_dtype_compatible(name, ours, theirs):
+    """Compatibility rule for VCZ field dtypes between our converter
+    and bio2zarr. Exact match is fine. Integer fields can be wider on
+    our side -- bio2zarr picks the smallest int dtype that fits the
+    data, so for small fixtures it may write int8 / int16 while our
+    int32 still encodes the same values. String fields can disagree
+    on fixed-vs-variable-width (``U`` vs zarr ``StringDType``) since
+    both store Python ``str``."""
+    if ours == theirs:
+        return
+    if ours.kind in ("U", "T", "O") and theirs.kind in ("U", "T", "O"):
+        return
+    if ours.kind == theirs.kind == "i" and ours.itemsize >= theirs.itemsize:
+        return
+    raise AssertionError(
+        f"{name}: dtype drift between allel_zarr_to_vcz output "
+        f"({ours}) and bio2zarr reference ({theirs}). Either update "
+        f"the converter to match the new canonical type or relax the "
+        f"compatibility helper in this test."
+    )
+
+
 # ── Fixtures ────────────────────────────────────────────────────────────
 
 
@@ -575,3 +597,57 @@ class TestAllelZarrToVcz:
     def test_rejects_vcz_input(self, tmp_path, vcz_store):
         with pytest.raises(ValueError, match="already vcz"):
             allel_zarr_to_vcz(vcz_store, str(tmp_path / "x.vcz"))
+
+    def test_field_set_matches_bio2zarr_reference(self, tmp_path):
+        """Pin our hand-rolled VCZ layout against the canonical layout
+        bio2zarr produces. Catches upstream drift before it surfaces
+        as a silently-wrong VCZ that other readers reject. Issue #102.
+
+        For every field our converter writes, this asserts that
+        ``bio2zarr.tskit.convert`` writes a field with the same name
+        and that the dtype is compatible (exact match, integer
+        widening, or unicode fixed-vs-variable). If bio2zarr renames a
+        field, changes a dtype incompatibly, or starts requiring a
+        field we don't write, this test fails so the converter can
+        be updated."""
+        from bio2zarr.tskit import convert as ts_to_vcz
+
+        # Tiny tree sequence + reference VCZ via bio2zarr.
+        ts = msprime.sim_ancestry(samples=5, sequence_length=10_000,
+                                   random_seed=42)
+        ts = msprime.sim_mutations(ts, rate=1e-4, random_seed=42)
+        assert ts.num_sites > 0, "test fixture produced an empty TS"
+
+        ref_path = str(tmp_path / "ref.vcz")
+        ts_to_vcz(ts, ref_path)
+        ref = zarr.open_group(ref_path, mode="r")
+
+        # Same data routed through scikit-allel zarr -> allel_zarr_to_vcz
+        # so the test exercises the converter end-to-end.
+        n_dip = ts.num_individuals
+        gt = ts.genotype_matrix().reshape(ts.num_sites, n_dip, 2)
+        pos = np.array([s.position for s in ts.sites()], dtype=np.int32)
+        samples = [f"tsk_{i}" for i in range(n_dip)]
+
+        allel_path = str(tmp_path / "src.allel.zarr")
+        write_allel(allel_path, gt.astype(np.int8), pos, samples=samples)
+
+        out_path = str(tmp_path / "out.vcz")
+        allel_zarr_to_vcz(allel_path, out_path, contig="chr1")
+        out = zarr.open_group(out_path, mode="r")
+
+        for name in out.array_keys():
+            assert name in ref.array_keys(), (
+                f"allel_zarr_to_vcz writes {name!r} but the bio2zarr "
+                f"reference does not. The canonical VCZ layout no longer "
+                f"recognises this field -- update the converter."
+            )
+            ours = out[name]
+            theirs = ref[name]
+            _assert_vcz_dtype_compatible(name, ours.dtype, theirs.dtype)
+
+        # And the streaming reader must be able to consume bio2zarr's
+        # own output, so we know we're not over-restricting what we
+        # accept on the read side either.
+        hm_ref = HaplotypeMatrix.from_zarr(ref_path, streaming="never")
+        assert hm_ref.num_variants == ts.num_sites
