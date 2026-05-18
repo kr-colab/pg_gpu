@@ -36,6 +36,7 @@ Key Features
 * **Multi-population analyses** with flexible population specification
 * **8 theta estimators and 4 neutrality tests** (pi, theta_w, theta_h, theta_l, eta1, eta1_star, minus_eta1, minus_eta1_star, Tajima's D, Fay-Wu's H, Zeng's E, DH)
 * **Validated against scikit-allel** -- 29 statistics verified at machine precision using real Ag1000G data
+* **Biobank-scale streaming** -- VCZ stores too large to fit on the GPU open as a streaming view that walks the chromosome chunk by chunk; every per-window / SFS / moments-LD / pairwise relatedness kernel dispatches transparently. See :doc:`tutorials/biobank_streaming`.
 
 Installation
 ------------

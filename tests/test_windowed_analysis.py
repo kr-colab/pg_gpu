@@ -899,3 +899,47 @@ class TestCanonicalWindowSchema:
                                statistics=['garud_h12'])
         np.testing.assert_array_equal(
             df['window_id'].to_numpy(), np.arange(len(df)))
+
+
+class TestWindowedGarudCorrectness:
+    """Anchor windowed Garud H against scikit-allel's per-window
+    garud_h. ``pg_gpu`` runs the windowed pass on the GPU via a fused
+    kernel; this confirms each window's H1 / H12 / H123 / H2H1 lines
+    up with the canonical implementation."""
+
+    @pytest.mark.parametrize("seed", [1, 2, 3])
+    def test_matches_allel_per_window(self, seed):
+        import allel
+        rng = np.random.default_rng(seed)
+        n_hap = 32
+        n_var = 600
+        window_size_var = 50  # variants per window
+        # Use unit-stride positions so window_size_var-many variants
+        # land in each tile window.
+        positions = np.arange(n_var, dtype=np.int64)
+        chrom_len = int(positions[-1]) + 1
+        haps = rng.integers(0, 2, (n_hap, n_var), dtype=np.int8)
+
+        hm = HaplotypeMatrix(haps, positions, 0, chrom_len)
+        df = windowed_analysis(hm,
+                               window_size=window_size_var,
+                               step_size=window_size_var,
+                               window_type="snp",
+                               statistics=["garud_h1", "garud_h12",
+                                            "garud_h123", "garud_h2h1"])
+
+        # Each tile window is exactly window_size_var variants on the
+        # contiguous range; allel.garud_h expects (n_var, n_hap).
+        for w, row in df.iterrows():
+            v_lo = w * window_size_var
+            v_hi = v_lo + window_size_var
+            h_allel = haps[:, v_lo:v_hi].T.astype(np.int8)
+            h1_a, h12_a, h123_a, h2h1_a = allel.garud_h(h_allel)
+            np.testing.assert_allclose(row["garud_h1"], h1_a, rtol=1e-9,
+                                        err_msg=f"H1 window {w}")
+            np.testing.assert_allclose(row["garud_h12"], h12_a, rtol=1e-9,
+                                        err_msg=f"H12 window {w}")
+            np.testing.assert_allclose(row["garud_h123"], h123_a, rtol=1e-9,
+                                        err_msg=f"H123 window {w}")
+            np.testing.assert_allclose(row["garud_h2h1"], h2h1_a, rtol=1e-9,
+                                        err_msg=f"H2H1 window {w}")

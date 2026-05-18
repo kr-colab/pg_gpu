@@ -117,6 +117,39 @@ class TestJointSFSComparison:
         np.testing.assert_array_almost_equal(result, expected)
 
 
+class TestProjectionSandwich:
+    """Validate project_joint_sfs against the explicit P1 @ S @ P2.T."""
+
+    def test_eager_matches_sandwich(self, two_pop_data):
+        # Reference: build the full joint SFS with allel, then apply
+        # the exact-integer projection matrix on each axis. The new
+        # function uses a gammaln-based projection matrix instead, but
+        # both should agree to float64 round-off for small n.
+        from pg_gpu.diversity import _projection_matrix
+        matrix, hap, n1, n2 = two_pop_data
+        target1, target2 = 4, 5
+        dac1 = np.sum(hap[:n1], axis=0)
+        dac2 = np.sum(hap[n1:], axis=0)
+        ref_full = allel.joint_sfs(dac1, dac2, n1=n1, n2=n2)
+        P1 = _projection_matrix(n1, target1)
+        P2 = _projection_matrix(n2, target2)
+        expected = P1 @ ref_full @ P2.T
+        result = sfs.project_joint_sfs(matrix, "pop1", "pop2",
+                                        target_n1=target1,
+                                        target_n2=target2)
+        np.testing.assert_allclose(result, expected, rtol=1e-9, atol=1e-9)
+
+    def test_identity_target_recovers_full(self, two_pop_data):
+        # When target_n equals source n, hypergeometric pmf is the
+        # identity so projection collapses to a float cast of joint_sfs.
+        matrix, hap, n1, n2 = two_pop_data
+        result = sfs.project_joint_sfs(matrix, "pop1", "pop2",
+                                        target_n1=n1, target_n2=n2)
+        full = sfs.joint_sfs(matrix, "pop1", "pop2")
+        np.testing.assert_allclose(result, full.astype(np.float64),
+                                    rtol=1e-9, atol=1e-9)
+
+
 class TestScalingComparison:
     """Validate scaling and folding utilities."""
 
