@@ -47,8 +47,17 @@ ZARR_SMALL = DATA_DIR / "gamb.X.8-12Mb.n100.derived.zarr"
 
 # Plot palette: scikit-allel is warm grey, pg_gpu Rogers-Huff is blue,
 # pg_gpu unbiased sigma_D^2 (Ragsdale-Gravel) is orange.
-COL_ALLEL = "#9aa1ac"
-COL_PG = "#2980b9"
+# Color + style picks: where the two libraries agree numerically
+# (top three diversity panels and the LD-decay curve) the two lines
+# sit on top of each other. To keep both readable we draw the
+# scikit-allel reference as a wide translucent halo and the pg_gpu
+# overlay as a thin opaque red line (dashed in the diversity
+# panels; solid-with-markers in the LD-decay panel where dashes
+# would clash with the marker stride). Three distinct colours
+# overall: purple reference, red overlay, orange for the second
+# pg_gpu LD estimator.
+COL_ALLEL = "#8e44ad"
+COL_PG = "#c0392b"
 COL_PG_SIGMA = "#e67e22"
 
 # Distance bins for the LD-decay curve: 24 log-spaced bins from 100 bp
@@ -312,12 +321,15 @@ def _plot_comparison(centers_mb,
         (td_a, td_g, r"Tajima's $D$"),
     ]
     for ax, (a, g, ylabel) in zip(axes[:3], diversity_panels):
-        ax.plot(centers_mb, a, color=COL_ALLEL, linewidth=1.6, alpha=0.9)
-        ax.plot(centers_mb, g, color=COL_PG, linewidth=0.8, alpha=0.95)
+        ax.plot(centers_mb, a, color=COL_ALLEL, linewidth=2.8, alpha=0.35)
+        ax.plot(centers_mb, g, color=COL_PG, linewidth=0.9,
+                linestyle=(0, (3, 2)), alpha=1.0)
         ax.set_ylabel(ylabel)
     # One legend only, on the top panel.
-    axes[0].plot([], [], color=COL_ALLEL, linewidth=1.6, label="scikit-allel")
-    axes[0].plot([], [], color=COL_PG, linewidth=0.8, label="pg_gpu")
+    axes[0].plot([], [], color=COL_ALLEL, linewidth=2.8, alpha=0.35,
+                  label="scikit-allel")
+    axes[0].plot([], [], color=COL_PG, linewidth=0.9,
+                  linestyle=(0, (3, 2)), label="pg_gpu")
     axes[0].legend(fontsize=8, loc="upper right", frameon=False)
     axes[2].set_xlabel("Genomic position (Mb)")
 
@@ -329,14 +341,19 @@ def _plot_comparison(centers_mb,
     #     [a different LD estimator on the same SNPs]
     ax_ld = axes[3]
     bin_centers = np.sqrt(bp_bins[:-1] * bp_bins[1:])  # log-bin midpoints
-    ax_ld.plot(bin_centers, ld_a, color=COL_ALLEL, linewidth=1.6,
-               alpha=0.9, marker="o", markersize=3,
+    # Parity pair (scikit-allel R-H underneath pg_gpu R-H) uses the
+    # same halo + dashed-overlay scheme as the diversity panels.
+    ax_ld.plot(bin_centers, ld_a, color=COL_ALLEL, linewidth=2.8,
+               alpha=0.35,
                label=r"scikit-allel Rogers-Huff $r^2$")
-    ax_ld.plot(bin_centers, ld_g, color=COL_PG, linewidth=0.8,
-               alpha=0.95, marker="o", markersize=2,
+    ax_ld.plot(bin_centers, ld_g, color=COL_PG, linewidth=0.9,
+               linestyle=(0, (3, 2)), alpha=1.0,
                label=r"pg_gpu Rogers-Huff $r^2$")
-    ax_ld.plot(bin_centers, ld_sd2, color=COL_PG_SIGMA, linewidth=1.2,
-               alpha=0.95, marker="s", markersize=3, linestyle="--",
+    # sigma_D^2 is a different statistic, not a parity check; draw it
+    # solid + markers so it reads as its own curve rather than a third
+    # entry in the parity overlay.
+    ax_ld.plot(bin_centers, ld_sd2, color=COL_PG_SIGMA, linewidth=1.4,
+               alpha=0.95, marker="s", markersize=4,
                label=r"pg_gpu unbiased $\sigma_D^2$ (R-G)")
     ax_ld.set_xscale("log")
     ax_ld.set_ylabel("median LD")
@@ -476,8 +493,10 @@ def _parse_args():
     p.add_argument("--no-plot", action="store_true",
                    help="Skip the matplotlib figure")
     p.add_argument("-o", "--output", type=Path,
-                   default=Path("scikit_allel_comparison.png"),
-                   help="Output figure path")
+                   default=Path("scikit_allel_comparison.pdf"),
+                   help="Output figure path (extension picks the format; "
+                        "default is PDF for vector-friendly inclusion in "
+                        "publications)")
     return p.parse_args()
 
 
