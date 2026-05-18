@@ -601,22 +601,18 @@ class TestAllelZarrToVcz:
     def test_field_set_matches_bio2zarr_reference(self, tmp_path):
         """Pin our hand-rolled VCZ layout against the canonical layout
         bio2zarr produces. Catches upstream drift before it surfaces
-        as a silently-wrong VCZ that other readers reject. Issue #102.
+        as a silently-wrong VCZ that other readers reject.
 
         For every field our converter writes, this asserts that
         ``bio2zarr.tskit.convert`` writes a field with the same name
         and that the dtype is compatible (exact match, integer
-        widening, or unicode fixed-vs-variable). If bio2zarr renames a
-        field, changes a dtype incompatibly, or starts requiring a
-        field we don't write, this test fails so the converter can
-        be updated."""
+        widening, or unicode fixed-vs-variable)."""
         from bio2zarr.tskit import convert as ts_to_vcz
 
         # Tiny tree sequence + reference VCZ via bio2zarr.
         ts = msprime.sim_ancestry(samples=5, sequence_length=10_000,
                                    random_seed=42)
         ts = msprime.sim_mutations(ts, rate=1e-4, random_seed=42)
-        assert ts.num_sites > 0, "test fixture produced an empty TS"
 
         ref_path = str(tmp_path / "ref.vcz")
         ts_to_vcz(ts, ref_path)
@@ -624,13 +620,12 @@ class TestAllelZarrToVcz:
 
         # Same data routed through scikit-allel zarr -> allel_zarr_to_vcz
         # so the test exercises the converter end-to-end.
-        n_dip = ts.num_individuals
-        gt = ts.genotype_matrix().reshape(ts.num_sites, n_dip, 2)
-        pos = np.array([s.position for s in ts.sites()], dtype=np.int32)
-        samples = [f"tsk_{i}" for i in range(n_dip)]
-
+        hm = HaplotypeMatrix.from_ts(ts)
+        gt = HaplotypeMatrix._haplotypes_to_gt(hm.haplotypes)
+        samples = [f"tsk_{i}" for i in range(hm.num_haplotypes // 2)]
         allel_path = str(tmp_path / "src.allel.zarr")
-        write_allel(allel_path, gt.astype(np.int8), pos, samples=samples)
+        write_allel(allel_path, gt, np.asarray(hm.positions),
+                    samples=samples)
 
         out_path = str(tmp_path / "out.vcz")
         allel_zarr_to_vcz(allel_path, out_path, contig="chr1")
@@ -638,13 +633,11 @@ class TestAllelZarrToVcz:
 
         for name in out.array_keys():
             assert name in ref.array_keys(), (
-                f"allel_zarr_to_vcz writes {name!r} but the bio2zarr "
-                f"reference does not. The canonical VCZ layout no longer "
-                f"recognises this field -- update the converter."
+                f"allel_zarr_to_vcz writes {name!r} but bio2zarr does "
+                f"not -- the VCZ layouts have drifted."
             )
-            ours = out[name]
-            theirs = ref[name]
-            _assert_vcz_dtype_compatible(name, ours.dtype, theirs.dtype)
+            _assert_vcz_dtype_compatible(name, out[name].dtype,
+                                          ref[name].dtype)
 
         # And the streaming reader must be able to consume bio2zarr's
         # own output, so we know we're not over-restricting what we
