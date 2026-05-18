@@ -23,13 +23,19 @@ def _host(arr):
 
 
 def _assert_vcz_dtype_compatible(name, ours, theirs):
-    """Compatibility rule for VCZ field dtypes between our converter
-    and bio2zarr. Exact match is fine. Integer fields can be wider on
-    our side -- bio2zarr picks the smallest int dtype that fits the
-    data, so for small fixtures it may write int8 / int16 while our
-    int32 still encodes the same values. String fields can disagree
-    on fixed-vs-variable-width (``U`` vs zarr ``StringDType``) since
-    both store Python ``str``."""
+    """Check that two dtypes for the same VCZ field are close enough.
+
+    Two dtypes count as compatible when:
+
+    * they are exactly equal, or
+    * both are some kind of string (the value round-trips as a
+      Python ``str`` either way), or
+    * both are signed integers and ours is at least as wide as
+      theirs (we never lose data by storing a value in a bigger
+      integer).
+
+    Anything else is treated as a real disagreement and raised.
+    """
     if ours == theirs:
         return
     if ours.kind in ("U", "T", "O") and theirs.kind in ("U", "T", "O"):
@@ -599,14 +605,20 @@ class TestAllelZarrToVcz:
             allel_zarr_to_vcz(vcz_store, str(tmp_path / "x.vcz"))
 
     def test_field_set_matches_bio2zarr_reference(self, tmp_path):
-        """Pin our hand-rolled VCZ layout against the canonical layout
-        bio2zarr produces. Catches upstream drift before it surfaces
-        as a silently-wrong VCZ that other readers reject.
+        """Make sure our converter writes the same VCZ field set as
+        bio2zarr.
 
-        For every field our converter writes, this asserts that
-        ``bio2zarr.tskit.convert`` writes a field with the same name
-        and that the dtype is compatible (exact match, integer
-        widening, or unicode fixed-vs-variable)."""
+        Simulates a tiny tree sequence and writes it out two ways:
+
+        1. Through bio2zarr's own VCZ writer, which we treat as the
+           reference for what a valid VCZ store looks like.
+        2. Through a scikit-allel zarr and then our converter
+           (``allel_zarr_to_vcz``).
+
+        Every field our converter writes must also appear in bio2zarr's
+        output, with a dtype the helper above accepts as compatible.
+        The test fails if bio2zarr changes its layout in a way that
+        would make our output look wrong to other VCZ readers."""
         from bio2zarr.tskit import convert as ts_to_vcz
 
         # Tiny tree sequence + reference VCZ via bio2zarr.
