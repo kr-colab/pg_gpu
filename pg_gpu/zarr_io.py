@@ -353,7 +353,7 @@ def read_genotypes_allel_grouped(store, region):
 
 
 def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
-              chunks=None):
+              chunks=None, fields=None):
     """Write genotype data in VCZ format.
 
     Parameters
@@ -373,10 +373,22 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
         e.g. ``(10000, 1000, 2)`` to mirror bio2zarr's defaults. When
         ``None`` (default) zarr picks the chunking, which on a small
         array is the whole array as a single chunk.
+    fields : dict, optional
+        Optional VCF FORMAT/INFO arrays to round-trip alongside the
+        genotype matrix. Keys are bare VCF tags (``'GQ'``, ``'DP'``,
+        ``'MQ'``, ...); values are arrays whose first axis is the
+        variant axis. Shape disambiguates INFO vs FORMAT:
+
+        * ``(n_variants,)`` writes to ``variant_<tag>`` (INFO).
+        * ``(n_variants, n_samples)`` writes to ``call_<tag>`` (FORMAT).
+
+        Anything else raises ``ValueError``. The dtype written matches
+        the input array so the round-trip is byte-exact.
     """
     import zarr
+    n_var = len(positions)
+    n_samples = gt.shape[1]
     store = zarr.open(zarr_path, mode='w')
-    cg_kwargs = {} if chunks is None else {"chunks": chunks}
     if chunks is None:
         store.create_array('call_genotype', data=gt.astype(np.int8))
         store.create_array('call_genotype_mask', data=(gt < 0))
@@ -400,6 +412,25 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
                            data=np.array([contig_name], dtype='U'))
         store.create_array('variant_contig',
                            data=np.zeros(len(positions), dtype=np.int8))
+    if fields:
+        for tag, arr in fields.items():
+            arr = np.asarray(arr)
+            if arr.ndim == 1:
+                if arr.shape != (n_var,):
+                    raise ValueError(
+                        f"INFO-shaped field {tag!r} must be ({n_var},); "
+                        f"got {tuple(arr.shape)}")
+                store.create_array(f'variant_{tag}', data=arr)
+            elif arr.ndim == 2:
+                if arr.shape != (n_var, n_samples):
+                    raise ValueError(
+                        f"FORMAT-shaped field {tag!r} must be "
+                        f"({n_var}, {n_samples}); got {tuple(arr.shape)}")
+                store.create_array(f'call_{tag}', data=arr)
+            else:
+                raise ValueError(
+                    f"field {tag!r} must be 1-D (INFO) or 2-D (FORMAT); "
+                    f"got ndim={arr.ndim}")
 
 
 def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,

@@ -417,3 +417,73 @@ class TestGenotypeMatrixFilter:
             for v in range(filtered._genotypes.shape[1]):
                 if not gt_keep_kept[v, s]:
                     assert geno_host[s, v] == -1
+
+
+# ── round-trip (filter -> to_zarr -> from_zarr) ───────────────────────────
+
+
+class TestFilteredVczRoundTrip:
+
+    def test_roundtrip_keeps_fields(self, tmp_path):
+        hm = _simulate_hm()
+        src, mq, gq, dp = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(
+            src, fields=["MQ", "GQ", "DP"], streaming="never")
+
+        # Apply a real filter so the output is not a pass-through.
+        v_keep = loaded.fields["MQ"] >= 30.0
+        filtered = loaded.filter(variants=v_keep)
+        out = str(tmp_path / "clean.vcz")
+        filtered.to_zarr(out, format="vcz", contig_name="chr1")
+
+        reloaded = HaplotypeMatrix.from_zarr(
+            out, fields=["MQ", "GQ", "DP"], streaming="never")
+        assert set(reloaded.fields) == {"MQ", "GQ", "DP"}
+        np.testing.assert_array_equal(reloaded.fields["MQ"],
+                                       filtered.fields["MQ"])
+        np.testing.assert_array_equal(reloaded.fields["GQ"],
+                                       filtered.fields["GQ"])
+        np.testing.assert_array_equal(reloaded.fields["DP"],
+                                       filtered.fields["DP"])
+
+    def test_roundtrip_preserves_dtypes(self, tmp_path):
+        hm = _simulate_hm()
+        src, mq, gq, dp = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(
+            src, fields=["MQ", "GQ", "DP"], streaming="never")
+        out = str(tmp_path / "rt_dtype.vcz")
+        loaded.to_zarr(out, format="vcz", contig_name="chr1")
+        reloaded = HaplotypeMatrix.from_zarr(
+            out, fields=["MQ", "GQ", "DP"], streaming="never")
+        # MQ float32 INFO, GQ + DP int16 FORMAT.
+        assert reloaded.fields["MQ"].dtype == np.float32
+        assert reloaded.fields["GQ"].dtype == np.int16
+        assert reloaded.fields["DP"].dtype == np.int16
+        # And shape-disambiguation survives the round-trip too.
+        assert reloaded.fields["MQ"].ndim == 1
+        assert reloaded.fields["GQ"].ndim == 2
+
+    def test_roundtrip_shape_mismatch_raises(self, tmp_path):
+        """``write_vcz`` should refuse a fields dict whose array sizes
+        don't match the genotype matrix; otherwise round-trip is silently
+        corrupt."""
+        from pg_gpu.zarr_io import write_vcz
+        n_var, n_sam = 5, 3
+        gt = np.zeros((n_var, n_sam, 2), dtype=np.int8)
+        pos = np.arange(1, n_var + 1, dtype=np.int32)
+        bad = np.zeros(n_var + 1, dtype=np.float32)
+        with pytest.raises(ValueError, match="INFO-shaped"):
+            write_vcz(str(tmp_path / "bad.vcz"), gt, pos,
+                       contig_name="chr1", fields={"MQ": bad})
+
+    def test_to_zarr_allel_with_fields_raises(self, tmp_path):
+        """The scikit-allel writer hasn't been extended; combining the
+        two should fail loudly rather than silently dropping the
+        fields."""
+        hm = _simulate_hm()
+        src, _, _, _ = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(src, fields=["MQ"],
+                                            streaming="never")
+        with pytest.raises(NotImplementedError, match="scikit-allel"):
+            loaded.to_zarr(str(tmp_path / "rt.allel.zarr"),
+                            format="scikit-allel")

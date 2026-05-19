@@ -761,8 +761,13 @@ class HaplotypeMatrix:
 
         if format == 'vcz':
             write_vcz(zarr_path, gt, pos, self.samples,
-                      contig_name=contig_name)
+                      contig_name=contig_name, fields=self.fields)
         elif format == 'scikit-allel':
+            if self.fields:
+                raise NotImplementedError(
+                    "Writing fields= round-trip is only supported for "
+                    "format='vcz'; the scikit-allel writer has not been "
+                    "extended yet.")
             write_allel(zarr_path, gt, pos, self.samples)
         else:
             raise ValueError(
