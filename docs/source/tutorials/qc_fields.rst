@@ -16,12 +16,9 @@ Background
 
 Every routine call set comes with per-variant and per-genotype quality
 annotations -- ``INFO/MQ``, ``INFO/QD``, ``FMT/GQ``, ``FMT/DP``, ``FMT/AD``,
-and so on. Acting on them used to mean leaving pg_gpu, running
-``bcftools view -e 'FMT/GQ<20 || FMT/DP<10'`` on a multi-GB VCF, and
-re-encoding the result to VCZ. Every threshold sweep meant another
-bcftools pass.
+and so on. 
 
-bio2zarr already preserves all those FORMAT and INFO fields when it
+bio2zarr preserves all those FORMAT and INFO fields when it
 writes a VCZ; the arrays sit next to ``call_genotype`` on disk. The
 ``fields=`` kwarg on ``HaplotypeMatrix.from_vcf`` / ``from_zarr`` (and
 the same on ``GenotypeMatrix``) surfaces them to Python; ``filter()``
@@ -164,16 +161,12 @@ The returned matrix is a fresh allocation, not a view. ``samples``,
 variant axis changed; if you need span normalization on the result,
 re-attach an accessibility mask explicitly).
 
-Limits and follow-ups
+Current Limitations
 ---------------------
 
 * The streaming opener (``streaming='always'``) does not yet accept
-  ``fields=``; both raise ``NotImplementedError`` when combined. Filter
-  in chunks via the streaming kernels directly, or load eagerly when
-  the matrix fits.
+  ``fields=``; both raise ``NotImplementedError`` when combined. 
 * ``to_zarr(format='scikit-allel')`` does not round-trip ``hm.fields``
   yet; combining the two raises so values are not silently dropped.
   Stick to ``format='vcz'`` (the default) for the clean output.
-* Build-time filtering inside ``vcf_to_zarr`` (encoding fewer fields,
-  per-genotype masking during the VCZ build) is a separate piece of
-  work tracked at issue #108.
+
