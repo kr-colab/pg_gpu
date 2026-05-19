@@ -8,8 +8,8 @@ Run it from the repo root:
 .. code-block:: bash
 
    pixi run python examples/vcf_qc_filter.py
-   pixi run python examples/vcf_qc_filter.py --min-mq 40 --min-gq 25 --min-dp 12
-   pixi run python examples/vcf_qc_filter.py --out /tmp/clean.vcz
+   pixi run python examples/vcf_qc_filter.py --min-ac 8 --min-aa-prob 0.95
+   pixi run python examples/vcf_qc_filter.py --region X:8000000-12000000
 
 Background
 ----------
@@ -26,48 +26,55 @@ applies the masks; ``to_zarr`` round-trips the survivors so the
 resulting "clean" VCZ is self-describing and re-loadable with the same
 ``fields=`` set.
 
-This tutorial walks through that pipeline end to end on simulated data
-(so the script needs no external VCF or VCZ to run). At the end of the
-recipe section there's a code block showing the equivalent against a
-real VCF -- the only line that changes is the loader.
+This tutorial walks through that pipeline end to end on the real
+Anopheles X-chromosome VCZ that ships under ``examples/data/`` -- a
+5.3 M-variant, 100-diploid store that bio2zarr preserved with all its
+INFO and FORMAT arrays. The packaged script reads a 4 Mb window so a
+single GPU run takes a couple of seconds.
 
 What the script does
 --------------------
 
-1. Simulates a 1 Mb chromosome with msprime (30 diploid individuals).
-2. Writes the result as a VCZ store and stamps in synthetic
-   ``variant_MQ``, ``call_GQ``, and ``call_DP`` arrays. In a real
-   workflow these come straight from bio2zarr converting a VCF that
-   already carries those FORMAT / INFO fields; the injection here keeps
-   the example self-contained.
-3. Reopens the store with ``fields=['MQ', 'GQ', 'DP']`` so the arrays
-   land on ``hm.fields``.
-4. Summarizes each field with a single ``np.percentile`` call. The
-   arrays are plain numpy, so any matplotlib / seaborn snippet works
-   for plotting -- ``plt.hist(hm.fields['GQ'].ravel(), bins=50)`` and
-   you have a quality-score distribution.
-5. Builds a per-variant boolean mask from ``MQ`` and a per-genotype
-   boolean mask from ``GQ`` and ``DP``, then runs ``hm.filter`` to
-   produce a clean matrix. ``drop_all_missing=True`` (the default)
-   also drops any variant whose every call was set to ``-1`` by the
-   per-genotype mask.
-6. Writes the filtered matrix back out via ``to_zarr``. The surviving
-   QC arrays land in the new store under the same field names, so a
-   reload with ``fields=`` returns them unchanged.
+1. Opens a 4 Mb window of ``examples/data/gamb.X.phased.n100.vcz`` with
+   ``fields=['AC', 'AAProb', 'PQ']``. ``AC`` lands as per-variant
+   ``(n_var,)``; ``AAProb`` is per-variant ``(n_var, 1)`` (bio2zarr's
+   shape for INFO with ``Number=A``); ``PQ`` is per-genotype
+   ``(n_var, n_samples)``. The reader auto-resolves which kind each is.
+2. Summarizes each field with one ``np.percentile`` call. The arrays
+   are plain numpy, so any matplotlib / seaborn snippet works for
+   plotting -- e.g. ``plt.hist(hm.fields['AC'], bins=50)`` for the
+   allele-count distribution.
+3. Builds a per-variant mask from ``AC`` and ``AAProb`` -- drop
+   singletons / doubletons (``AC >= 4``) and keep only confidently
+   polarized sites (``AAProb >= 0.9``).
+4. Constructs a per-genotype mask placeholder (``PQ >= -1``). The gamb
+   fixture carries ``-1`` everywhere in ``call_PQ`` because the source
+   VCF didn't populate phasing quality, so this mask is True for every
+   call. On a VCZ derived from a VCF that DID carry ``FMT/GQ`` or
+   ``FMT/DP`` the same line would read
+   ``(hm.fields['GQ'] >= 20) & (hm.fields['DP'] >= 10)``.
+5. Runs ``hm.filter`` and writes the survivor to a fresh VCZ. The
+   surviving ``variant_*`` / ``call_*`` arrays are preserved in the
+   clean store; a reload with the same ``fields=`` set returns them
+   byte-exact.
 
 A typical run on the default settings looks like:
 
 .. code-block:: text
 
-   31 segregating sites
-   hm.fields keys: ['DP', 'GQ', 'MQ']
+   Opening examples/data/gamb.X.phased.n100.vcz
+     region: X:1000000-5000000
+     fields: ['AC', 'AAProb', 'PQ']
+     loaded 1,041,651 variants x 100 diploids
+
    Field summaries (5 / 25 / 50 / 75 / 95 percentiles):
-       MQ: shape=(31,),    5/25/50/75/95% = 18.14 / 28.67 / 41.00 / 49.88 / 60.11
-       GQ: shape=(31, 30), 5/25/50/75/95% = 4.00 / 25.00 / 49.00 / 75.00 / 94.00
-       DP: shape=(31, 30), 5/25/50/75/95% = 2.00 / 10.00 / 19.00 / 29.00 / 38.00
-   variants kept  (MQ >= 35.0):                       21 / 31   (67.7 %)
-   genotypes masked (GQ >= 20 & DP >= 10):           359 / 930  (38.6 %)
-   21 variants survive both filters
+           AC: shape=(1041651,),     5/25/50/75/95% = 0.000 / 0.000 / 0.000 / 1.000 / 4.000
+       AAProb: shape=(1041651, 1),   5/25/50/75/95% = 0.991 / 1.000 / 1.000 / 1.000 / 1.000
+           PQ: shape=(1041651, 100), 5/25/50/75/95% = -1.000 / -1.000 / -1.000 / -1.000 / -1.000
+
+   Filtering: variants kept where AC >= 4 and AAProb >= 0.9
+     variants kept: 52,826 / 1,041,651 (5.1 %)
+     after filter: 52,826 variants
    Round-trip OK -- reloaded fields match the filtered matrix.
 
 Recipe

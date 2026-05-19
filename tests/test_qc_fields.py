@@ -464,17 +464,35 @@ class TestFilteredVczRoundTrip:
         assert reloaded.fields["GQ"].ndim == 2
 
     def test_roundtrip_shape_mismatch_raises(self, tmp_path):
-        """``write_vcz`` should refuse a fields dict whose array sizes
-        don't match the genotype matrix; otherwise round-trip is silently
+        """``write_vcz`` should refuse a fields dict whose leading axis
+        doesn't match the variant axis; otherwise round-trip is silently
         corrupt."""
         from pg_gpu.zarr_io import write_vcz
         n_var, n_sam = 5, 3
         gt = np.zeros((n_var, n_sam, 2), dtype=np.int8)
         pos = np.arange(1, n_var + 1, dtype=np.int32)
         bad = np.zeros(n_var + 1, dtype=np.float32)
-        with pytest.raises(ValueError, match="INFO-shaped"):
+        with pytest.raises(ValueError, match="variant axis"):
             write_vcz(str(tmp_path / "bad.vcz"), gt, pos,
                        contig_name="chr1", fields={"MQ": bad})
+
+    def test_multidim_info_roundtrip(self, tmp_path):
+        """bio2zarr writes some INFO fields with shape (n_var, n_alt) --
+        e.g. ``variant_AF`` for biallelic sites lands as (n_var, 1).
+        Round-trip must preserve that extra trailing axis."""
+        from pg_gpu.zarr_io import write_vcz
+        n_var, n_sam = 6, 4
+        gt = np.zeros((n_var, n_sam, 2), dtype=np.int8)
+        pos = np.arange(1, n_var + 1, dtype=np.int32)
+        af = np.linspace(0.05, 0.5, n_var, dtype=np.float32).reshape(n_var, 1)
+        path = str(tmp_path / "multidim.vcz")
+        write_vcz(path, gt, pos, contig_name="chr1",
+                   fields={"AF": af, "AC": np.arange(n_var, dtype=np.int16)})
+        loaded = HaplotypeMatrix.from_zarr(path, fields=["AF", "AC"],
+                                            streaming="never")
+        assert loaded.fields["AF"].shape == (n_var, 1)
+        assert loaded.fields["AC"].shape == (n_var,)
+        np.testing.assert_array_equal(loaded.fields["AF"], af)
 
     def test_to_zarr_allel_with_fields_raises(self, tmp_path):
         """The scikit-allel writer hasn't been extended; combining the

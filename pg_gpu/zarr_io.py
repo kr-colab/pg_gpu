@@ -415,22 +415,20 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
     if fields:
         for tag, arr in fields.items():
             arr = np.asarray(arr)
-            if arr.ndim == 1:
-                if arr.shape != (n_var,):
-                    raise ValueError(
-                        f"INFO-shaped field {tag!r} must be ({n_var},); "
-                        f"got {tuple(arr.shape)}")
-                store.create_array(f'variant_{tag}', data=arr)
-            elif arr.ndim == 2:
-                if arr.shape != (n_var, n_samples):
-                    raise ValueError(
-                        f"FORMAT-shaped field {tag!r} must be "
-                        f"({n_var}, {n_samples}); got {tuple(arr.shape)}")
+            if arr.ndim == 0 or arr.shape[0] != n_var:
+                raise ValueError(
+                    f"field {tag!r} must have a leading axis of length "
+                    f"{n_var} (the variant axis); got shape "
+                    f"{tuple(arr.shape)}")
+            # FORMAT is exactly (n_var, n_samples); anything else with
+            # the right leading axis is treated as INFO. Multi-dim INFO
+            # (e.g. ``variant_AF`` arrives as ``(n_var, n_alt)`` from
+            # bio2zarr) round-trips into ``variant_<tag>`` with its
+            # full shape preserved.
+            if arr.ndim == 2 and arr.shape == (n_var, n_samples):
                 store.create_array(f'call_{tag}', data=arr)
             else:
-                raise ValueError(
-                    f"field {tag!r} must be 1-D (INFO) or 2-D (FORMAT); "
-                    f"got ndim={arr.ndim}")
+                store.create_array(f'variant_{tag}', data=arr)
 
 
 def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,

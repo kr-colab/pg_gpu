@@ -1,164 +1,145 @@
 #!/usr/bin/env python
 """
-Load VCF/VCZ FORMAT/INFO quality metrics, filter on them, write a clean VCZ.
+Quality-aware filtering on a real VCZ: load FORMAT / INFO arrays, mask,
+write a clean VCZ.
 
-Walks through the four pieces of the ``fields=`` / ``filter()`` /
-``to_zarr`` workflow that pg_gpu_paper#108 (the GQ / DP / MQ feature)
-added:
+Demonstrates the ``fields=`` / ``filter()`` / ``to_zarr`` workflow added
+to pg_gpu against the empirical Anopheles X-chromosome VCZ that ships
+under ``examples/data/``. The store carries every field bio2zarr
+preserved during VCF encoding -- ``variant_AC`` / ``variant_AF`` /
+``variant_AAProb`` / ``call_PQ`` / ... -- so a real "tune thresholds
+read-side" demo runs without external data.
 
-1. Build a VCZ store from a small msprime simulation and inject
-   synthetic ``variant_MQ`` and ``call_GQ`` / ``call_DP`` arrays. In a
-   real workflow these come straight from bio2zarr converting a VCF
-   that already has ``FMT/GQ``, ``FMT/DP``, and ``INFO/MQ``; the
-   injection here just keeps the example fully self-contained.
-2. Reopen the store with ``fields=['MQ', 'GQ', 'DP']`` so ``hm.fields``
-   is populated.
-3. Summarize each field with one ``np.percentile`` call -- the
-   matrices come back as plain numpy arrays so any matplotlib /
-   seaborn snippet works.
-4. Build per-variant and per-genotype boolean masks from those arrays
-   and feed them to ``hm.filter`` to get a clean matrix.
-5. Save the clean matrix back out as a VCZ. The output round-trips the
-   surviving QC arrays.
+The script:
+
+1. Opens a 4 Mb window of ``examples/data/gamb.X.phased.n100.vcz`` with
+   ``fields=['AC', 'AAProb', 'PQ']``. ``AC`` is per-variant
+   ``(n_var,)``, ``AAProb`` is per-variant ``(n_var, 1)`` (bio2zarr
+   shape for INFO with ``Number=A``), and ``PQ`` is per-genotype
+   ``(n_var, n_samples)``. pg_gpu auto-resolves which kind each is.
+2. Summarizes each loaded field so the chosen thresholds are visible.
+3. Builds a real variant filter -- ``AC >= 4`` to drop singletons and
+   doubletons, ``AAProb >= 0.9`` to keep variants with a confident
+   ancestral-allele call.
+4. Builds a per-genotype mask placeholder (``PQ >= 0``). The gamb
+   fixture carries ``-1`` everywhere in ``call_PQ`` because the source
+   VCF didn't populate phasing quality, so this mask is True for every
+   call. On a VCZ derived from a VCF that DID carry ``FMT/GQ`` or
+   ``FMT/DP`` the same line would read ``(hm.fields['GQ'] >= 20) &
+   (hm.fields['DP'] >= 10)``.
+5. Runs ``hm.filter`` and writes the survivor to a fresh VCZ. The
+   surviving ``variant_*`` / ``call_*`` arrays are preserved in the
+   clean store and reload with the same ``fields=`` set.
 
 Usage
 -----
     pixi run python examples/vcf_qc_filter.py
-    pixi run python examples/vcf_qc_filter.py --seed 7 --min-gq 25
-    pixi run python examples/vcf_qc_filter.py --out /tmp/clean.vcz
+    pixi run python examples/vcf_qc_filter.py --min-ac 8 --min-aa-prob 0.95
+    pixi run python examples/vcf_qc_filter.py --region X:8000000-12000000
 """
 
 import argparse
 import shutil
 from pathlib import Path
 
-import msprime
 import numpy as np
-import zarr
 
 from pg_gpu import HaplotypeMatrix
 
 
-def _simulate(n_samples: int, seq_len: int, seed: int) -> HaplotypeMatrix:
-    """Small msprime fixture so the script needs no external data."""
-    ts = msprime.sim_ancestry(
-        samples=n_samples,
-        sequence_length=seq_len,
-        recombination_rate=1e-7,
-        random_seed=seed,
-        ploidy=2,
-    )
-    ts = msprime.sim_mutations(ts, rate=1e-6, random_seed=seed)
-    return HaplotypeMatrix.from_ts(ts)
+DEFAULT_SRC = "examples/data/gamb.X.phased.n100.vcz"
 
 
-def _write_vcz_with_synthetic_qc(hm: HaplotypeMatrix, path: str, seed: int):
-    """Write a VCZ store and stamp in synthetic MQ / GQ / DP arrays.
-
-    The MQ values are correlated with variant position so the variant
-    filter has something interesting to remove; GQ and DP are random
-    so the per-genotype filter masks a realistic fraction of calls.
-    """
-    if Path(path).exists():
-        shutil.rmtree(path)
-    hm.to_zarr(path, format="vcz", contig_name="chr1")
-    store = zarr.open_group(path, mode="r+")
-    rng = np.random.default_rng(seed)
-    n_var = int(hm.haplotypes.shape[1])
-    n_sam = int(hm.haplotypes.shape[0] // 2)
-    # MQ trends from low (left) to high (right) plus a touch of noise
-    # so a threshold filter has a clear effect.
-    mq = np.linspace(20.0, 60.0, n_var, dtype=np.float32)
-    mq += rng.normal(0.0, 5.0, size=n_var).astype(np.float32)
-    gq = rng.integers(0, 99, size=(n_var, n_sam), dtype=np.int16)
-    dp = rng.integers(1, 40, size=(n_var, n_sam), dtype=np.int16)
-    store.create_array("variant_MQ", data=mq)
-    store.create_array("call_GQ", data=gq)
-    store.create_array("call_DP", data=dp)
-
-
-def _summarize_field(name: str, arr: np.ndarray):
-    """Print median + IQR for a field. Flat for INFO, flattened for FORMAT."""
-    values = arr.ravel()
-    q = np.percentile(values, [5, 25, 50, 75, 95])
-    print(f"  {name:>4}: shape={arr.shape}, "
-          f"5/25/50/75/95% = {q[0]:.2f} / {q[1]:.2f} / "
-          f"{q[2]:.2f} / {q[3]:.2f} / {q[4]:.2f}")
+def _summarize(name, arr):
+    """Median + IQR; works on 1D, 2D INFO (n_var, n_alt), or FORMAT."""
+    flat = arr.ravel()
+    q = np.percentile(flat, [5, 25, 50, 75, 95])
+    print(f"  {name:>8}: shape={arr.shape}, "
+          f"5/25/50/75/95% = {q[0]:.3f} / {q[1]:.3f} / "
+          f"{q[2]:.3f} / {q[3]:.3f} / {q[4]:.3f}")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[1])
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--n-samples", type=int, default=30,
-                   help="Number of diploid individuals (default: 30)")
-    p.add_argument("--seq-len", type=int, default=1_000_000,
-                   help="Simulated chromosome length in bp (default: 1 Mb)")
-    p.add_argument("--min-mq", type=float, default=35.0,
-                   help="Variant-level MQ threshold (default: 35.0)")
-    p.add_argument("--min-gq", type=int, default=20,
-                   help="Per-genotype GQ threshold (default: 20)")
-    p.add_argument("--min-dp", type=int, default=10,
-                   help="Per-genotype DP threshold (default: 10)")
-    p.add_argument("--src", type=str, default="/tmp/vcf_qc_filter.src.vcz",
-                   help="Where to write the source (pre-filter) VCZ.")
-    p.add_argument("--out", type=str, default="/tmp/vcf_qc_filter.clean.vcz",
-                   help="Where to write the filtered (clean) VCZ.")
+    p.add_argument("--src", type=str, default=DEFAULT_SRC,
+                   help=f"Source VCZ (default: {DEFAULT_SRC}). "
+                        "Any VCZ from bio2zarr will work.")
+    p.add_argument("--region", type=str, default="X:1000000-5000000",
+                   help="chrom:start-end window of the source to load. "
+                        "Keep it under ~5 Mb to fit comfortably in memory; "
+                        "the full chromosome is 25 Mb / 5.3M variants.")
+    p.add_argument("--min-ac", type=int, default=4,
+                   help="Drop variants whose allele count is below this. "
+                        "AC=1 are singletons, AC=2 doubletons; default 4 "
+                        "trims everything <0.02 MAF.")
+    p.add_argument("--min-aa-prob", type=float, default=0.9,
+                   help="Drop variants where the ancestral-allele "
+                        "probability is below this (only the most "
+                        "confident polarizations survive). Default 0.9.")
+    p.add_argument("--out", type=str, default="/tmp/gamb.X.clean.vcz",
+                   help="Where to write the filtered VCZ.")
     args = p.parse_args()
 
-    print(f"Simulating ({args.n_samples} diploids, {args.seq_len:,} bp) ...")
-    hm_src = _simulate(args.n_samples, args.seq_len, args.seed)
-    n_var = int(hm_src.haplotypes.shape[1])
-    print(f"  {n_var:,} segregating sites")
+    if not Path(args.src).exists():
+        raise SystemExit(
+            f"Source VCZ not found: {args.src}. The default ships with "
+            f"the repo under examples/data/; if you cloned without LFS "
+            f"you may need to fetch the data fixtures.")
 
-    print(f"Writing VCZ with synthetic MQ / GQ / DP to {args.src} ...")
-    _write_vcz_with_synthetic_qc(hm_src, args.src, args.seed)
-
-    print("Reopening with fields=['MQ', 'GQ', 'DP'] ...")
+    print(f"Opening {args.src}")
+    print(f"  region: {args.region}")
+    print("  fields: ['AC', 'AAProb', 'PQ']")
     hm = HaplotypeMatrix.from_zarr(
-        args.src, fields=["MQ", "GQ", "DP"], streaming="never",
+        args.src, region=args.region,
+        fields=["AC", "AAProb", "PQ"],
+        streaming="never",
     )
-    print(f"  hm.fields keys: {sorted(hm.fields)}")
+    n_var = int(hm.haplotypes.shape[1])
+    n_sam = int(hm.haplotypes.shape[0] // 2)
+    print(f"  loaded {n_var:,} variants x {n_sam} diploids")
+    print()
     print("Field summaries (5 / 25 / 50 / 75 / 95 percentiles):")
-    for name in ("MQ", "GQ", "DP"):
-        _summarize_field(name, hm.fields[name])
+    _summarize("AC", hm.fields["AC"])
+    _summarize("AAProb", hm.fields["AAProb"])
+    _summarize("PQ", hm.fields["PQ"])
+    print()
+    print(f"Filtering: variants kept where AC >= {args.min_ac} and "
+          f"AAProb >= {args.min_aa_prob}")
+    # variant_AAProb arrives as (n_var, 1); .ravel() peels off the
+    # trailing axis so the mask is the (n_var,) bool that filter()
+    # expects.
+    aa_prob = hm.fields["AAProb"].ravel()
+    variants = (hm.fields["AC"] >= args.min_ac) & (aa_prob >= args.min_aa_prob)
+    # In this store call_PQ wasn't populated by the source VCF (all -1);
+    # the per-genotype mask is universally True, so it has no effect
+    # here. On a store derived from a VCF that DID carry FMT/GQ + FMT/DP
+    # the natural line would be:
+    #     genotypes = (hm.fields['GQ'] >= 20) & (hm.fields['DP'] >= 10)
+    genotypes = hm.fields["PQ"] >= -1
+    print(f"  variants kept: {int(variants.sum()):,} / {n_var:,} "
+          f"({100.0 * float(variants.mean()):.1f} %)")
 
-    print("Building masks ...")
-    variants = hm.fields["MQ"] >= args.min_mq
-    genotypes = (hm.fields["GQ"] >= args.min_gq) & (hm.fields["DP"] >= args.min_dp)
-    n_var_keep = int(variants.sum())
-    n_gt_drop = int((~genotypes).sum())
-    n_gt_total = genotypes.size
-    print(f"  variants kept (MQ >= {args.min_mq}): "
-          f"{n_var_keep:,} / {n_var:,} "
-          f"({100.0 * n_var_keep / n_var:.1f} %)")
-    print(f"  genotypes masked (GQ >= {args.min_gq} & DP >= {args.min_dp}): "
-          f"{n_gt_drop:,} / {n_gt_total:,} "
-          f"({100.0 * n_gt_drop / n_gt_total:.1f} %)")
-
-    print("Filtering ...")
     hm_clean = hm.filter(
         variants=variants,
         genotypes=genotypes,
         drop_all_missing=True,
     )
     n_clean = int(hm_clean.haplotypes.shape[1])
-    print(f"  {n_clean:,} variants survive both filters "
-          f"(drop_all_missing rolled in)")
-
-    print(f"Writing clean VCZ to {args.out} ...")
+    print(f"  after filter: {n_clean:,} variants")
+    print()
+    print(f"Writing clean VCZ to {args.out}")
     if Path(args.out).exists():
         shutil.rmtree(args.out)
-    hm_clean.to_zarr(args.out, format="vcz", contig_name="chr1")
+    hm_clean.to_zarr(args.out, format="vcz", contig_name="X")
 
-    # Reload to confirm the round-trip; the surviving QC arrays
-    # are present on the new matrix, byte-equal to the in-memory
-    # filtered version.
+    # Reload and assert the round-trip is byte-exact.
     rt = HaplotypeMatrix.from_zarr(
-        args.out, fields=["MQ", "GQ", "DP"], streaming="never",
+        args.out, fields=["AC", "AAProb", "PQ"], streaming="never",
     )
-    np.testing.assert_array_equal(rt.fields["MQ"], hm_clean.fields["MQ"])
-    np.testing.assert_array_equal(rt.fields["GQ"], hm_clean.fields["GQ"])
-    np.testing.assert_array_equal(rt.fields["DP"], hm_clean.fields["DP"])
+    np.testing.assert_array_equal(rt.fields["AC"], hm_clean.fields["AC"])
+    np.testing.assert_array_equal(rt.fields["AAProb"],
+                                   hm_clean.fields["AAProb"])
+    np.testing.assert_array_equal(rt.fields["PQ"], hm_clean.fields["PQ"])
     print("Round-trip OK -- reloaded fields match the filtered matrix.")
 
 
