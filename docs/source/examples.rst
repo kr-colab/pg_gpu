@@ -239,6 +239,42 @@ Compute multiple statistics across thousands of windows without Python loops:
 For end-to-end command-line workflows (``vcf_to_zarr.py``,
 ``genome_scan.py``), see :doc:`workflows`.
 
+Quality-Aware Filtering
+-----------------------
+
+Load VCF / VCZ FORMAT and INFO arrays alongside the genotype matrix,
+build per-variant and per-genotype masks from them, and write the
+filtered survivors back as a clean VCZ that round-trips the same
+arrays. The full walk-through is in
+:doc:`tutorials/qc_fields`; the recipe in one block:
+
+.. code-block:: python
+
+   from pg_gpu import HaplotypeMatrix
+
+   # Bare VCF tags; pg_gpu auto-resolves INFO vs FORMAT from the source.
+   hm = HaplotypeMatrix.from_vcf("cohort.vcf.gz",
+                                  fields=["MQ", "QD", "GQ", "DP"])
+   # or, equivalently, from a bio2zarr-encoded VCZ:
+   # hm = HaplotypeMatrix.from_zarr("cohort.vcz",
+   #                                 fields=["MQ", "QD", "GQ", "DP"])
+
+   # Shape disambiguates per-variant from per-genotype.
+   hm.fields["MQ"]   # (n_var,)             — INFO
+   hm.fields["GQ"]   # (n_var, n_samples)   — FORMAT
+   # Plot directly: plt.hist(hm.fields["GQ"].ravel(), bins=50)
+
+   # Mask-based filter. ``variants`` drops rows; ``genotypes`` sets
+   # per-cell calls to -1 (both allele rows on the haplotype side).
+   hm_clean = hm.filter(
+       variants=(hm.fields["MQ"] >= 40.0) & (hm.fields["QD"] >= 2.0),
+       genotypes=(hm.fields["GQ"] >= 20) & (hm.fields["DP"] >= 10),
+       drop_all_missing=True,
+   )
+
+   # Persist. The surviving QC arrays round-trip into the new store.
+   hm_clean.to_zarr("cohort.clean.vcz", format="vcz", contig_name="chr1")
+
 Missing Data
 ------------
 
