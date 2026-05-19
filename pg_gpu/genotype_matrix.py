@@ -568,6 +568,106 @@ class GenotypeMatrix:
             chunk_bp=chunk_bp, prefetch=prefetch,
         )
 
+    def filter(self, variants=None, genotypes=None,
+               drop_all_missing: bool = True) -> "GenotypeMatrix":
+        """Return a new GenotypeMatrix with quality filters applied.
+
+        Parameters
+        ----------
+        variants : array-like of bool, shape (n_variants,), optional
+            Per-variant keep mask; variants where ``False`` are dropped
+            from every array on the returned matrix.
+        genotypes : array-like of bool, shape (n_variants, n_samples), optional
+            Per-genotype keep mask; genotypes where ``False`` are set to
+            ``-1`` (missing). ``fields`` entries keep their original
+            per-genotype QC values.
+        drop_all_missing : bool, default True
+            After applying both masks, drop variants where every
+            individual's call is ``-1``.
+
+        Returns
+        -------
+        GenotypeMatrix
+            Fresh matrix; underlying arrays are new allocations.
+            ``samples``, ``sample_sets``, ``chrom_start`` / ``chrom_end``
+            are preserved. See ``HaplotypeMatrix.filter`` for the
+            accessibility-mask interaction (this method behaves the
+            same way).
+        """
+        xp = cp if self._device == 'GPU' else np
+        geno_src = self._genotypes
+        pos_src = self._positions
+        n_indiv, n_var = geno_src.shape
+
+        if variants is not None:
+            variants_arr = xp.asarray(variants).astype(bool, copy=False)
+            if variants_arr.shape != (n_var,):
+                raise ValueError(
+                    f"variants mask shape mismatch: expected ({n_var},), "
+                    f"got {tuple(variants_arr.shape)}")
+        else:
+            variants_arr = None
+
+        if genotypes is not None:
+            genotypes_arr = xp.asarray(genotypes).astype(bool, copy=False)
+            if genotypes_arr.shape != (n_var, n_indiv):
+                raise ValueError(
+                    f"genotypes mask shape mismatch: expected "
+                    f"({n_var}, {n_indiv}), got "
+                    f"{tuple(genotypes_arr.shape)}")
+        else:
+            genotypes_arr = None
+
+        if genotypes_arr is not None:
+            # User mask is (n_var, n_samples); genotype matrix lays
+            # samples along axis 0, so transpose to broadcast.
+            geno = xp.where(genotypes_arr.T, geno_src, np.int8(-1))
+        else:
+            geno = geno_src
+
+        keep_v = xp.ones(n_var, dtype=bool)
+        if variants_arr is not None:
+            keep_v &= variants_arr
+        if drop_all_missing:
+            keep_v &= ~(geno == -1).all(axis=0)
+        keep_idx = xp.where(keep_v)[0]
+
+        if int(keep_idx.size) == 0:
+            if self._device == 'GPU':
+                empty_geno = cp.empty((n_indiv, 0), dtype=geno_src.dtype)
+                empty_pos = cp.array([], dtype=pos_src.dtype)
+            else:
+                empty_geno = np.empty((n_indiv, 0), dtype=geno_src.dtype)
+                empty_pos = np.array([], dtype=pos_src.dtype)
+            result = object.__new__(GenotypeMatrix)
+            result._genotypes = empty_geno
+            result._positions = empty_pos
+            result._accessible_idx = None
+            result._geno_filtered = None
+            result._pos_filtered = None
+            result._accessible_mask = None
+            result.chrom_start = self.chrom_start
+            result.chrom_end = self.chrom_end
+            result._sample_sets = self._sample_sets
+            result._device = self._device
+            result.n_total_sites = None
+            result.samples = self.samples
+            result.fields = {tag: arr[:0] for tag, arr in self.fields.items()}
+            return result
+
+        new_geno = geno[:, keep_idx]
+        new_pos = pos_src[keep_idx]
+        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
+        new_fields = {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
+
+        return GenotypeMatrix(
+            new_geno, new_pos,
+            chrom_start=self.chrom_start, chrom_end=self.chrom_end,
+            sample_sets=self._sample_sets,
+            samples=self.samples,
+            fields=new_fields,
+        )
+
     def to_zarr(self, zarr_path, format='vcz', contig_name=None):
         """Save genotype data to Zarr format.
 

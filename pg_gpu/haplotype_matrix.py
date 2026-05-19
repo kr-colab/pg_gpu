@@ -1361,6 +1361,133 @@ class HaplotypeMatrix:
             valid_indices = np.where(valid_mask)[0]
             return self.get_subset(valid_indices)
 
+    def filter(self, variants=None, genotypes=None,
+               drop_all_missing: bool = True) -> "HaplotypeMatrix":
+        """Return a new HaplotypeMatrix with quality filters applied.
+
+        Parameters
+        ----------
+        variants : array-like of bool, shape (n_variants,), optional
+            Per-variant keep mask. Variants where ``False`` are dropped
+            from every array on the returned matrix (haplotypes,
+            positions, all per-variant and per-genotype ``fields``).
+        genotypes : array-like of bool, shape (n_variants, n_samples), optional
+            Per-genotype keep mask. Genotypes where ``False`` are set to
+            ``-1`` (missing) on both haplotype rows of the affected
+            sample. ``fields`` arrays are not zeroed out -- the
+            per-genotype QC values remain available for downstream
+            inspection.
+        drop_all_missing : bool, default True
+            After applying both masks, drop variants whose every
+            haplotype call is ``-1``. Default keeps the output free of
+            rows where the genotype mask blanked every call.
+
+        Returns
+        -------
+        HaplotypeMatrix
+            Fresh matrix; the underlying haplotype + position arrays
+            are new allocations (not views of ``self``). Sample names,
+            ``sample_sets``, and ``chrom_start`` / ``chrom_end`` are
+            propagated. ``n_total_sites`` is dropped because the
+            variant axis has changed; if the caller wants span
+            normalization on the result they should re-attach an
+            accessibility mask explicitly. Any accessibility mask
+            previously attached to ``self`` is not inherited for the
+            same reason.
+
+        Notes
+        -----
+        ``filter`` operates on the underlying haplotype matrix
+        (``self._haplotypes``), not the view exposed when an
+        accessibility mask is attached. The QC ``fields`` arrays this
+        method reads from were loaded against the underlying axis, so
+        masks built from them stay aligned automatically.
+        """
+        xp = cp if self._device == 'GPU' else np
+        haps_src = self._haplotypes
+        pos_src = self._positions
+        n_haps, n_var = haps_src.shape
+        n_samples = n_haps // 2
+
+        if variants is not None:
+            variants_arr = xp.asarray(variants).astype(bool, copy=False)
+            if variants_arr.shape != (n_var,):
+                raise ValueError(
+                    f"variants mask shape mismatch: expected ({n_var},), "
+                    f"got {tuple(variants_arr.shape)}")
+        else:
+            variants_arr = None
+
+        if genotypes is not None:
+            genotypes_arr = xp.asarray(genotypes).astype(bool, copy=False)
+            if genotypes_arr.shape != (n_var, n_samples):
+                raise ValueError(
+                    f"genotypes mask shape mismatch: expected "
+                    f"({n_var}, {n_samples}), got "
+                    f"{tuple(genotypes_arr.shape)}")
+        else:
+            genotypes_arr = None
+
+        # Stamp genotype-level rejections into a working copy of the
+        # haplotype matrix so the original is untouched.
+        if genotypes_arr is not None:
+            # (n_var, n_samples) -> (2 * n_samples, n_var): both
+            # haplotype rows for a sample share its genotype mask.
+            per_sample_keep = genotypes_arr.T  # (n_samples, n_var)
+            hap_keep = xp.concatenate([per_sample_keep, per_sample_keep],
+                                      axis=0)
+            haps = xp.where(hap_keep, haps_src, np.int8(-1))
+        else:
+            haps = haps_src
+
+        keep_v = xp.ones(n_var, dtype=bool)
+        if variants_arr is not None:
+            keep_v &= variants_arr
+        if drop_all_missing:
+            keep_v &= ~(haps == -1).all(axis=0)
+        keep_idx = xp.where(keep_v)[0]
+
+        if int(keep_idx.size) == 0:
+            # Constructor rejects empty matrices; mirror the empty-subset
+            # workaround in ``get_subset`` so a too-aggressive filter
+            # returns a structured empty matrix rather than raising.
+            if self._device == 'GPU':
+                empty_haps = cp.empty((n_haps, 0), dtype=haps_src.dtype)
+                empty_pos = cp.array([], dtype=pos_src.dtype)
+            else:
+                empty_haps = np.empty((n_haps, 0), dtype=haps_src.dtype)
+                empty_pos = np.array([], dtype=pos_src.dtype)
+            result = object.__new__(HaplotypeMatrix)
+            result._haplotypes = empty_haps
+            result._positions = empty_pos
+            result._accessible_idx = None
+            result._hap_filtered = None
+            result._pos_filtered = None
+            result._accessible_mask = None
+            result.chrom_start = self.chrom_start
+            result.chrom_end = self.chrom_end
+            result._sample_sets = self._sample_sets
+            result._device = self._device
+            result.n_total_sites = None
+            result.samples = self.samples
+            result.fields = {tag: arr[:0] for tag, arr in self.fields.items()}
+            return result
+
+        new_haps = haps[:, keep_idx]
+        new_pos = pos_src[keep_idx]
+        # Fields are numpy arrays; slice with a host-side index regardless
+        # of where the haplotype matrix lives.
+        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
+        new_fields = {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
+
+        return HaplotypeMatrix(
+            new_haps, new_pos,
+            chrom_start=self.chrom_start, chrom_end=self.chrom_end,
+            sample_sets=self._sample_sets,
+            samples=self.samples,
+            fields=new_fields,
+        )
+
     def summarize_missing_data(self):
         """
         Get summary statistics about missing data patterns.

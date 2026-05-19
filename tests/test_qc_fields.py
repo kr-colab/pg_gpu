@@ -282,3 +282,138 @@ class TestFromVcfFields:
         with pytest.warns(UserWarning, match="NONEXISTENT"):
             hm = HaplotypeMatrix.from_vcf(vcf, fields=["MQ", "NONEXISTENT"])
         assert set(hm.fields) == {"MQ"}
+
+
+# ── HaplotypeMatrix.filter ────────────────────────────────────────────────
+
+
+class TestHaplotypeMatrixFilter:
+
+    def test_variants_only_drops_rows(self, tmp_path):
+        hm = _simulate_hm()
+        path, mq, gq, _ = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(path, fields=["MQ", "GQ"],
+                                           streaming="never")
+        keep = loaded.fields["MQ"] >= 40.0
+        n_keep = int(keep.sum())
+        filtered = loaded.filter(variants=keep)
+        assert filtered.haplotypes.shape[1] == n_keep
+        assert filtered.fields["MQ"].shape == (n_keep,)
+        assert filtered.fields["GQ"].shape == (n_keep, gq.shape[1])
+        np.testing.assert_array_equal(filtered.fields["MQ"], mq[keep])
+        np.testing.assert_array_equal(filtered.fields["GQ"], gq[keep])
+
+    def test_genotypes_only_sets_missing(self, tmp_path):
+        hm = _simulate_hm()
+        path, _, gq, _ = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(path, fields=["GQ"],
+                                           streaming="never")
+        gt_keep = loaded.fields["GQ"] >= 50
+        # Force at least one variant to keep all-missing so drop_all_missing
+        # can be tested in isolation; here disable the drop and assert.
+        filtered = loaded.filter(genotypes=gt_keep, drop_all_missing=False)
+        # The variant axis stays put when only genotypes= is applied
+        # without drop_all_missing.
+        assert filtered.haplotypes.shape == loaded.haplotypes.shape
+        # Sample s rejected at variant v means both haplotype rows (s, v)
+        # and (s + n_samples, v) are -1.
+        n_samples = loaded.haplotypes.shape[0] // 2
+        haps_host = _host(filtered._haplotypes)
+        gt_keep_host = np.asarray(gt_keep)
+        for v in range(haps_host.shape[1]):
+            for s in range(n_samples):
+                if not gt_keep_host[v, s]:
+                    assert haps_host[s, v] == -1
+                    assert haps_host[s + n_samples, v] == -1
+
+    def test_drop_all_missing_kicks_in(self, tmp_path):
+        hm = _simulate_hm()
+        path, _, gq, _ = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(path, fields=["GQ"],
+                                           streaming="never")
+        # Reject every genotype at variant 0 so the whole row goes
+        # missing; with drop_all_missing=True it should disappear.
+        gt_keep = np.ones(loaded.fields["GQ"].shape, dtype=bool)
+        gt_keep[0, :] = False
+        filtered_drop = loaded.filter(genotypes=gt_keep,
+                                      drop_all_missing=True)
+        filtered_keep = loaded.filter(genotypes=gt_keep,
+                                      drop_all_missing=False)
+        assert filtered_drop.haplotypes.shape[1] == \
+            filtered_keep.haplotypes.shape[1] - 1
+
+    def test_combined_filters(self, tmp_path):
+        hm = _simulate_hm()
+        path, mq, gq, dp = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(
+            path, fields=["MQ", "GQ", "DP"], streaming="never")
+        v_keep = loaded.fields["MQ"] >= 30.0
+        gt_keep = (loaded.fields["GQ"] >= 30) & (loaded.fields["DP"] >= 10)
+        filtered = loaded.filter(variants=v_keep, genotypes=gt_keep)
+        # Sanity: surviving variants are a subset of v_keep AND have at
+        # least one surviving genotype.
+        assert filtered.haplotypes.shape[1] <= int(v_keep.sum())
+        haps_host = _host(filtered._haplotypes)
+        assert not (haps_host == -1).all(axis=0).any()
+
+    def test_no_kwargs_is_a_copy(self, tmp_path):
+        hm = _simulate_hm()
+        path, _, _, _ = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(path, fields=["MQ"],
+                                           streaming="never")
+        copied = loaded.filter()
+        # New allocation, same content.
+        assert copied._haplotypes is not loaded._haplotypes
+        np.testing.assert_array_equal(_host(copied._haplotypes),
+                                       _host(loaded._haplotypes))
+        np.testing.assert_array_equal(_host(copied._positions),
+                                       _host(loaded._positions))
+        np.testing.assert_array_equal(copied.fields["MQ"],
+                                       loaded.fields["MQ"])
+
+    def test_filter_drops_everything_returns_empty_matrix(self, tmp_path):
+        hm = _simulate_hm()
+        path, _, _, _ = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(path, fields=["MQ"],
+                                           streaming="never")
+        # Impossible threshold drops every variant.
+        keep_none = loaded.fields["MQ"] > loaded.fields["MQ"].max()
+        empty = loaded.filter(variants=keep_none)
+        assert empty._haplotypes.shape[1] == 0
+        assert empty.fields["MQ"].shape == (0,)
+
+    def test_shape_mismatch_raises(self, tmp_path):
+        hm = _simulate_hm()
+        path, _, _, _ = _write_vcz_with_qc(tmp_path, hm)
+        loaded = HaplotypeMatrix.from_zarr(path, fields=["MQ"],
+                                           streaming="never")
+        bad = np.ones(loaded.fields["MQ"].shape[0] + 1, dtype=bool)
+        with pytest.raises(ValueError, match="variants mask"):
+            loaded.filter(variants=bad)
+
+
+# ── GenotypeMatrix.filter ─────────────────────────────────────────────────
+
+
+class TestGenotypeMatrixFilter:
+
+    def test_variants_and_genotypes(self, tmp_path):
+        hm = _simulate_hm()
+        path, mq, gq, _ = _write_vcz_with_qc(tmp_path, hm)
+        gm = GenotypeMatrix.from_zarr(path, fields=["MQ", "GQ"],
+                                       streaming="never")
+        v_keep = gm.fields["MQ"] >= 40.0
+        gt_keep = gm.fields["GQ"] >= 30
+        filtered = gm.filter(variants=v_keep, genotypes=gt_keep,
+                              drop_all_missing=False)
+        # The variant axis matches the v_keep mask exactly when
+        # drop_all_missing is off.
+        n_v_keep = int(v_keep.sum())
+        assert filtered._genotypes.shape[1] == n_v_keep
+        # Per-sample rejections lay down -1s in the genotype matrix.
+        geno_host = _host(filtered._genotypes)
+        gt_keep_kept = gt_keep[v_keep]
+        for s in range(filtered._genotypes.shape[0]):
+            for v in range(filtered._genotypes.shape[1]):
+                if not gt_keep_kept[v, s]:
+                    assert geno_host[s, v] == -1
