@@ -149,7 +149,12 @@ def read_genotypes_vcz(store, region=None):
     Returns
     -------
     dict
-        Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples'.
+        Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples',
+        and 'variant_indices' -- the index array used to slice the
+        store when ``region`` is given (``None`` for a whole-store
+        read). Auxiliary callers (e.g. QC field readers) can reuse the
+        same indices to keep their slices aligned with the genotype
+        matrix.
     """
     if region is not None:
         chrom, start, end = _parse_region(region)
@@ -167,6 +172,7 @@ def read_genotypes_vcz(store, region=None):
             raise ValueError(f"No variants in region {region}")
         gt = np.array(store['call_genotype'][indices])
         positions = pos_arr[indices]
+        variant_indices = indices
     else:
         contig_arr = np.array(store['variant_contig'])
         unique_contigs = np.unique(contig_arr)
@@ -179,9 +185,91 @@ def read_genotypes_vcz(store, region=None):
             )
         gt = np.array(store['call_genotype'])
         positions = np.array(store['variant_position'])
+        variant_indices = None
 
     samples = list(np.array(store['sample_id'])) if 'sample_id' in store else None
-    return {'gt': gt, 'positions': positions, 'samples': samples}
+    return {'gt': gt, 'positions': positions, 'samples': samples,
+            'variant_indices': variant_indices}
+
+
+def read_qc_fields(zarr_path, fields, variant_indices=None, region=None):
+    """Pull requested VCF FORMAT/INFO arrays from any supported zarr layout.
+
+    Dispatches on the store layout (VCZ vs scikit-allel flat vs scikit-allel
+    grouped). For each bare tag, look up the per-variant key first and fall
+    back to the per-genotype key; the lookup names depend on the layout:
+
+    * **VCZ** (``bio2zarr`` output): ``variant_<tag>`` (INFO) then
+      ``call_<tag>`` (FORMAT).
+    * **scikit-allel** (flat or grouped): ``variants/<tag>`` (INFO) then
+      ``calldata/<tag>`` (FORMAT). For a grouped layout (chromosome-keyed
+      subgroups), the chrom in ``region`` selects which subgroup to read
+      from.
+
+    Tags matching neither are warned and dropped silently. ``variant_indices``,
+    when provided, slices the variant axis to keep the returned arrays
+    aligned with a windowed genotype matrix.
+    """
+    import zarr
+    store = zarr.open_group(zarr_path, mode='r')
+    layout = detect_zarr_layout(store)
+    if layout == 'vcz':
+        return _read_qc_fields_vcz(store, fields, variant_indices)
+    if layout == 'scikit-allel-grouped':
+        if region is None:
+            # The genotype reader for this layout requires region= and would
+            # have already raised; return empty rather than introducing a
+            # second error message.
+            return {}
+        chrom = region.split(':')[0]
+        return _read_qc_fields_allel(store[chrom], fields, variant_indices)
+    return _read_qc_fields_allel(store, fields, variant_indices)
+
+
+def _read_qc_fields_vcz(store, fields, variant_indices):
+    """VCZ-style lookup: ``variant_<tag>`` / ``call_<tag>``."""
+    return _pull_qc_fields(
+        store, fields, variant_indices,
+        var_key=lambda tag: f'variant_{tag}',
+        call_key=lambda tag: f'call_{tag}',
+        layout_label='VCZ',
+    )
+
+
+def _read_qc_fields_allel(group, fields, variant_indices):
+    """scikit-allel-style lookup: ``variants/<tag>`` / ``calldata/<tag>``."""
+    return _pull_qc_fields(
+        group, fields, variant_indices,
+        var_key=lambda tag: f'variants/{tag}',
+        call_key=lambda tag: f'calldata/{tag}',
+        layout_label='scikit-allel',
+    )
+
+
+def _pull_qc_fields(group, fields, variant_indices, *, var_key, call_key,
+                     layout_label):
+    """Layout-agnostic core: probe ``var_key(tag)`` then ``call_key(tag)``."""
+    import warnings
+    out = {}
+    missing = []
+    for tag in fields:
+        vk = var_key(tag)
+        ck = call_key(tag)
+        if vk in group:
+            arr = group[vk]
+        elif ck in group:
+            arr = group[ck]
+        else:
+            missing.append(tag)
+            continue
+        out[tag] = (np.array(arr[variant_indices])
+                    if variant_indices is not None else np.array(arr))
+    if missing:
+        warnings.warn(
+            f"{layout_label} quality fields not found and dropped: {missing}",
+            stacklevel=4,
+        )
+    return out
 
 
 def read_genotypes_allel(store, region=None):
@@ -197,21 +285,28 @@ def read_genotypes_allel(store, region=None):
     Returns
     -------
     dict
-        Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples'.
+        Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples',
+        and 'variant_indices' -- the int index array used to slice the
+        store when ``region`` is given (``None`` for a whole-store
+        read). Auxiliary callers (e.g. QC field readers) reuse the same
+        indices to stay aligned with the genotype matrix.
     """
     positions = np.array(store['variants/POS'])
     gt = np.array(store['calldata/GT'])
     samples = list(np.array(store['samples'])) if 'samples' in store else None
+    variant_indices = None
 
     if region is not None:
         _, start, end = _parse_region(region)
         mask = (positions >= start) & (positions < end)
+        variant_indices = np.where(mask)[0]
         positions = positions[mask]
         gt = gt[mask]
         if len(positions) == 0:
             raise ValueError(f"No variants in region {region}")
 
-    return {'gt': gt, 'positions': positions, 'samples': samples}
+    return {'gt': gt, 'positions': positions, 'samples': samples,
+            'variant_indices': variant_indices}
 
 
 def read_genotypes_allel_grouped(store, region):
@@ -247,12 +342,14 @@ def read_genotypes_allel_grouped(store, region):
     samples = list(np.array(grp['samples'])) if 'samples' in grp else None
 
     mask = (positions >= start) & (positions < end)
+    variant_indices = np.where(mask)[0]
     positions = positions[mask]
     gt = gt[mask]
     if len(positions) == 0:
         raise ValueError(f"No variants in region {region}")
 
-    return {'gt': gt, 'positions': positions, 'samples': samples}
+    return {'gt': gt, 'positions': positions, 'samples': samples,
+            'variant_indices': variant_indices}
 
 
 def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,

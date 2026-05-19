@@ -2,9 +2,82 @@ import cupy as cp
 import numpy as np
 import allel
 import tskit
+import warnings
 from collections import Counter, OrderedDict
 
 from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask
+
+
+def _classify_vcf_qc_tags(path, tags):
+    """Decide INFO vs FORMAT for each bare tag using the VCF header.
+
+    ``allel.read_vcf`` will happily materialize a ``variants/<tag>``
+    placeholder of object dtype when no INFO declaration exists, which
+    silently shadows the real FORMAT array. Inspecting the header up
+    front lets us request the right path the first time.
+
+    Returns ``(known, unknown)`` where ``known`` maps tag ->
+    ``'variants/<tag>'`` or ``'calldata/<tag>'`` for tags declared in
+    the header, and ``unknown`` is the list of tags absent from both
+    INFO and FORMAT sections.
+    """
+    headers = allel.read_vcf_headers(path)
+    info_keys = set(getattr(headers, 'infos', {}) or {})
+    format_keys = set(getattr(headers, 'formats', {}) or {})
+    known = {}
+    unknown = []
+    for tag in tags:
+        if tag in info_keys:
+            known[tag] = f'variants/{tag}'
+        elif tag in format_keys:
+            known[tag] = f'calldata/{tag}'
+        else:
+            unknown.append(tag)
+    return known, unknown
+
+
+def _build_read_vcf_fields(known_paths):
+    """Build the explicit field list for ``allel.read_vcf``.
+
+    ``known_paths`` is the iterable of ``variants/<tag>`` /
+    ``calldata/<tag>`` strings returned by ``_classify_vcf_qc_tags``;
+    only paths actually declared in the VCF header are passed through
+    so we don't end up with ghost object-dtype arrays.
+    """
+    out = ['samples', 'variants/POS', 'variants/CHROM', 'calldata/GT']
+    out.extend(known_paths)
+    return out
+
+
+def _resolve_qc_fields_vcf(callset, tag_to_path, unknown):
+    """Pull QC fields out of a scikit-allel callset using known paths.
+
+    ``tag_to_path`` is the mapping from ``_classify_vcf_qc_tags``;
+    ``unknown`` is its sibling list of tags missing from both INFO and
+    FORMAT sections. Tags whose value array is empty (e.g. the read
+    skipped the FORMAT due to an unsupported dtype) are demoted to
+    ``unknown`` so the warning is honest about what was lost.
+    """
+    out = {}
+    missing = list(unknown)
+    for tag, path in tag_to_path.items():
+        if path not in callset:
+            missing.append(tag)
+            continue
+        arr = np.asarray(callset[path])
+        if arr.size == 0:
+            # scikit-allel sometimes emits an empty array when it
+            # decides the declared type isn't decodable; treat that
+            # the same as "field missing".
+            missing.append(tag)
+            continue
+        out[tag] = arr
+    if missing:
+        warnings.warn(
+            f"VCF quality fields not found and dropped: {missing}",
+            stacklevel=3,
+        )
+    return out
 
 
 #: Fraction of free GPU memory the eager matrix is allowed to consume
@@ -104,6 +177,7 @@ class HaplotypeMatrix:
                  n_total_sites: int = None,
                  samples: list = None,
                  accessible_mask=None,
+                 fields: dict = None,
                 ):
         if genotypes.size == 0:
             raise ValueError("genotypes cannot be empty")
@@ -134,6 +208,11 @@ class HaplotypeMatrix:
         self._sample_sets = sample_sets
         self.n_total_sites = n_total_sites
         self.samples = samples  # diploid sample names from VCF
+        # Optional per-variant (n_var,) and per-genotype (n_var, n_samples)
+        # VCF FORMAT/INFO arrays. Empty dict when no quality fields were
+        # requested at load time. Shape disambiguates per-variant vs
+        # per-genotype.
+        self.fields = dict(fields) if fields else {}
 
         if accessible_mask is not None and not isinstance(accessible_mask, AccessibleMask):
             accessible_mask = resolve_accessible_mask(
@@ -356,7 +435,7 @@ class HaplotypeMatrix:
     @classmethod
     def from_vcf(cls, path: str, region: str = None,
                  samples: list = None, include_invariant: bool = False,
-                 accessible_bed: str = None):
+                 accessible_bed: str = None, fields: list = None):
         """Construct a HaplotypeMatrix from a VCF file.
 
         Parameters
@@ -372,6 +451,12 @@ class HaplotypeMatrix:
             If True, set n_total_sites from the loaded variant count.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
+        fields : list of str, optional
+            VCF FORMAT/INFO tags to load alongside GT (e.g. ``['GQ', 'DP', 'MQ']``).
+            Each tag is auto-resolved: INFO matches land in
+            ``hm.fields[tag]`` as a ``(n_var,)`` array, FORMAT matches as a
+            ``(n_var, n_samples)`` array. Tags missing from the VCF are
+            warned and dropped silently.
 
         Returns
         -------
@@ -380,7 +465,14 @@ class HaplotypeMatrix:
         """
         from ._memory_warning import _maybe_memory_warn
         _maybe_memory_warn(path, region=region)
-        vcf = allel.read_vcf(path, region=region, samples=samples)
+        if fields:
+            tag_to_path, unknown_tags = _classify_vcf_qc_tags(path, fields)
+            read_fields = _build_read_vcf_fields(tag_to_path.values())
+        else:
+            tag_to_path, unknown_tags = {}, []
+            read_fields = None
+        vcf = allel.read_vcf(path, region=region, samples=samples,
+                             fields=read_fields)
         if vcf is None:
             raise ValueError(f"No variants found in {path}"
                              + (f" for region {region}" if region else ""))
@@ -417,9 +509,13 @@ class HaplotypeMatrix:
         elif 'variants/CHROM' in vcf:
             chrom = vcf['variants/CHROM'][0]
 
+        qc_fields = (_resolve_qc_fields_vcf(vcf, tag_to_path, unknown_tags)
+                     if fields else {})
+
         n_total_sites = num_variants if include_invariant else None
         hm = cls(haplotypes, positions, chrom_start, chrom_end,
-                 n_total_sites=n_total_sites, samples=sample_names)
+                 n_total_sites=n_total_sites, samples=sample_names,
+                 fields=qc_fields)
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
         return hm
@@ -431,7 +527,8 @@ class HaplotypeMatrix:
                   streaming: str = "auto",
                   chunk_bp: int = 1_500_000,
                   prefetch: int = 1,
-                  backend: str = "auto"):
+                  backend: str = "auto",
+                  fields: list = None):
         """Construct a HaplotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
@@ -495,6 +592,13 @@ class HaplotypeMatrix:
             ``'kvikio'`` when both conditions hold and warns +
             ``'host'`` when chunks are whole-sample-axis (the kvikio
             path gives no speedup at that chunking).
+        fields : list of str, optional
+            VCF FORMAT/INFO tags to load alongside genotypes (e.g.
+            ``['GQ', 'DP', 'MQ']``). Each tag is auto-resolved from the
+            store: ``variant_<tag>`` lands in ``hm.fields[tag]`` as a
+            ``(n_var,)`` array, ``call_<tag>`` as ``(n_var, n_samples)``.
+            Tags missing from the store are warned and dropped silently.
+            Not supported on the streaming path.
 
         Returns
         -------
@@ -512,6 +616,11 @@ class HaplotypeMatrix:
             )
 
         if streaming == "always":
+            if fields:
+                raise NotImplementedError(
+                    "fields= is not supported on the streaming "
+                    "(streaming='always') path yet. Load eagerly to "
+                    "access VCF FORMAT/INFO arrays.")
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
@@ -528,6 +637,13 @@ class HaplotypeMatrix:
                                                 streaming=streaming,
                                                 pop_assignment=pop_assignment)
         if choice == "streaming":
+            if fields:
+                raise NotImplementedError(
+                    "fields= is not supported on the streaming path; "
+                    "matrix would not fit at streaming='auto'. Pass "
+                    "streaming='never' to force eager (and fit-check), "
+                    "or load without fields= and apply filters via "
+                    "the streaming kernels directly.")
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
@@ -535,11 +651,13 @@ class HaplotypeMatrix:
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
-                                pop_assignment=pop_assignment)
+                                pop_assignment=pop_assignment,
+                                fields=fields)
 
     @classmethod
-    def _build_eager(cls, path, *, region, accessible_bed, pop_assignment):
-        from .zarr_io import read_genotypes
+    def _build_eager(cls, path, *, region, accessible_bed, pop_assignment,
+                     fields=None):
+        from .zarr_io import read_genotypes, read_qc_fields
         from ._gpu_genotype_prep import build_haplotype_matrix
 
         data = read_genotypes(path, region)
@@ -562,6 +680,17 @@ class HaplotypeMatrix:
             chrom_end=int(positions[-1]),
             samples=list(sample_names) if sample_names is not None else None,
         )
+
+        if fields:
+            # ``data['variant_indices']`` is the int index array each
+            # genotype reader used to slice its region; reusing it keeps
+            # QC arrays aligned with the haplotype matrix one-to-one.
+            # ``None`` means the read covered the whole store.
+            hm.fields = read_qc_fields(
+                path, fields,
+                variant_indices=data.get('variant_indices'),
+                region=region,
+            )
 
         chrom = region.split(':')[0] if region else None
         if accessible_bed is not None:

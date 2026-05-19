@@ -31,7 +31,7 @@ class GenotypeMatrix:
 
     def __init__(self, genotypes, positions, chrom_start=None, chrom_end=None,
                  sample_sets=None, n_total_sites=None, samples=None,
-                 accessible_mask=None):
+                 accessible_mask=None, fields=None):
         if genotypes.size == 0:
             raise ValueError("genotypes cannot be empty")
         if positions.size == 0:
@@ -57,6 +57,8 @@ class GenotypeMatrix:
         self._sample_sets = sample_sets
         self.n_total_sites = n_total_sites
         self.samples = samples
+        # See HaplotypeMatrix.fields for the shape contract.
+        self.fields = dict(fields) if fields else {}
 
         if accessible_mask is not None and not isinstance(accessible_mask, AccessibleMask):
             accessible_mask = resolve_accessible_mask(
@@ -340,7 +342,8 @@ class GenotypeMatrix:
                                accessible_mask=self.accessible_mask)
 
     @classmethod
-    def from_vcf(cls, path, include_invariant=False, accessible_bed=None):
+    def from_vcf(cls, path, include_invariant=False, accessible_bed=None,
+                 fields=None):
         """Construct from a VCF file.
 
         Parameters
@@ -351,15 +354,31 @@ class GenotypeMatrix:
             If True, include invariant sites and set n_total_sites.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
+        fields : list of str, optional
+            VCF FORMAT/INFO tags to load (e.g. ``['GQ', 'DP', 'MQ']``); see
+            ``HaplotypeMatrix.from_vcf`` for the shape contract. Arrays are
+            sliced down to the biallelic-only variant set this constructor
+            keeps, so per-variant fields end up shape ``(n_kept,)`` and
+            per-genotype fields ``(n_kept, n_samples)``.
 
         Returns
         -------
         GenotypeMatrix
         """
         import allel
+        from .haplotype_matrix import (
+            _build_read_vcf_fields, _classify_vcf_qc_tags,
+            _resolve_qc_fields_vcf,
+        )
         from ._memory_warning import _maybe_memory_warn
         _maybe_memory_warn(path)
-        callset = allel.read_vcf(path)
+        if fields:
+            tag_to_path, unknown_tags = _classify_vcf_qc_tags(path, fields)
+            read_fields = _build_read_vcf_fields(tag_to_path.values())
+        else:
+            tag_to_path, unknown_tags = {}, []
+            read_fields = None
+        callset = allel.read_vcf(path, fields=read_fields)
         gt = callset['calldata/GT']  # (n_variants, n_samples, 2)
         pos = callset['variants/POS']
         samples = list(callset['samples'])
@@ -372,6 +391,14 @@ class GenotypeMatrix:
         gt = gt[is_biallelic]
         pos = pos[is_biallelic]
 
+        qc_fields = (_resolve_qc_fields_vcf(callset, tag_to_path, unknown_tags)
+                     if fields else {})
+        # The biallelic filter trims the variant axis; QC arrays must be
+        # sliced consistently or they'd no longer align with the genotype
+        # matrix.
+        for tag, arr in qc_fields.items():
+            qc_fields[tag] = arr[is_biallelic]
+
         # sum alleles to get alt count (0/1/2)
         geno = np.sum(gt, axis=2).astype(np.int8)  # (n_variants, n_samples)
         # handle missing (-1 in either allele)
@@ -383,7 +410,8 @@ class GenotypeMatrix:
 
         n_total_sites = geno.shape[1] if include_invariant else None
         gm = cls(geno, pos, chrom_start=pos[0], chrom_end=pos[-1],
-                 n_total_sites=n_total_sites, samples=samples)
+                 n_total_sites=n_total_sites, samples=samples,
+                 fields=qc_fields)
         if accessible_bed is not None:
             chrom = None
             if 'variants/CHROM' in callset:
@@ -398,13 +426,14 @@ class GenotypeMatrix:
                   streaming: str = "auto",
                   chunk_bp: int = 1_500_000,
                   prefetch: int = 1,
-                  backend: str = "auto"):
+                  backend: str = "auto",
+                  fields: list = None):
         """Construct a GenotypeMatrix from a Zarr store.
 
         Identical interface to ``HaplotypeMatrix.from_zarr``;
         see that method's docstring for the meaning of every kwarg
         (``streaming``, ``pop_assignment`` flexibility, ``chunk_bp``,
-        ``prefetch``, ``backend``). The only difference is the
+        ``prefetch``, ``backend``, ``fields``). The only difference is the
         returned type: this returns ``GenotypeMatrix`` (or
         ``StreamingGenotypeMatrix`` on the streaming path) where
         each row is a (n_indiv, ploidy) genotype call, versus
@@ -417,7 +446,7 @@ class GenotypeMatrix:
             If True, set ``n_total_sites`` from the loaded variant
             count. Unique to this entry point (the haplotype matrix
             does not need it).
-        path, region, accessible_bed, pop_assignment, streaming, chunk_bp, prefetch, backend
+        path, region, accessible_bed, pop_assignment, streaming, chunk_bp, prefetch, backend, fields
             See ``HaplotypeMatrix.from_zarr``.
 
         Returns
@@ -436,6 +465,11 @@ class GenotypeMatrix:
             )
 
         if streaming == "always":
+            if fields:
+                raise NotImplementedError(
+                    "fields= is not supported on the streaming "
+                    "(streaming='always') path yet. Load eagerly to "
+                    "access VCF FORMAT/INFO arrays.")
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
@@ -452,6 +486,12 @@ class GenotypeMatrix:
                                                 streaming=streaming,
                                                 pop_assignment=pop_assignment)
         if choice == "streaming":
+            if fields:
+                raise NotImplementedError(
+                    "fields= is not supported on the streaming path; "
+                    "matrix would not fit at streaming='auto'. Pass "
+                    "streaming='never' to force eager (and fit-check), "
+                    "or load without fields=.")
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
@@ -460,12 +500,13 @@ class GenotypeMatrix:
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
                                 include_invariant=include_invariant,
-                                pop_assignment=pop_assignment)
+                                pop_assignment=pop_assignment,
+                                fields=fields)
 
     @classmethod
     def _build_eager(cls, path, *, region, accessible_bed,
-                     include_invariant, pop_assignment):
-        from .zarr_io import read_genotypes, normalize_pop_input
+                     include_invariant, pop_assignment, fields=None):
+        from .zarr_io import read_genotypes, normalize_pop_input, read_qc_fields
         from ._gpu_genotype_prep import build_genotype_matrix
 
         data = read_genotypes(path, region)
@@ -483,6 +524,12 @@ class GenotypeMatrix:
             n_total_sites=n_total_sites,
             samples=list(samples) if samples else None,
         )
+        if fields:
+            gm.fields = read_qc_fields(
+                path, fields,
+                variant_indices=data.get('variant_indices'),
+                region=region,
+            )
         if accessible_bed is not None:
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
 
