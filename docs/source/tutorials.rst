@@ -17,6 +17,7 @@ time, see :doc:`examples` instead.
    tutorials/sweep_tajimas_d_bootstrap
    tutorials/admixture_detection
    tutorials/accessibility_mask
+   tutorials/qc_fields
    tutorials/local_pca
    tutorials/ld_blocks
    tutorials/scikit_allel_comparison
