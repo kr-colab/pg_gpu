@@ -4,6 +4,16 @@ import os
 import sys
 sys.path.insert(0, os.path.abspath('../..'))
 
+# Read the Docs and other CPU-only build environments can't install
+# kvikio (which needs CUDA at build time), so ``import kvikio`` in
+# ``pg_gpu.streaming_matrix`` fails before autodoc gets a chance to
+# walk the module. Pre-inject a Mock under the same env-var gate that
+# pg_gpu.__init__ already uses for its CuPy availability check.
+if os.environ.get('READTHEDOCS') or os.environ.get('PG_GPU_SKIP_CUDA_CHECK'):
+    from unittest.mock import MagicMock
+    for _name in ('kvikio', 'kvikio.defaults', 'kvikio.zarr'):
+        sys.modules.setdefault(_name, MagicMock())
+
 import pg_gpu
 release = pg_gpu.__version__
 
@@ -27,6 +37,11 @@ html_theme = 'sphinx_rtd_theme'
 # Autodoc settings
 autodoc_member_order = 'bysource'
 autodoc_typehints = 'description'
+# Stand-ins for GPU-only deps that aren't installable on a CPU-only
+# build host. The sys.modules pre-injection above covers the top-level
+# ``import pg_gpu`` chain; this list covers any module autodoc imports
+# afresh as it walks the API reference.
+autodoc_mock_imports = ['kvikio', 'kvikio.defaults', 'kvikio.zarr']
 
 # Napoleon settings
 napoleon_google_docstring = True
