@@ -67,11 +67,14 @@ either type.
 2. QC field inspection — direct zarr (CPU-only, no memory cap)
 --------------------------------------------------------------
 
-``fields=`` on ``HaplotypeMatrix.from_zarr`` requires
-``streaming='never'`` (a hard library constraint), which caps the
-loadable region. For QC inspection over a large region, skip pg_gpu's
-loader and read the QC arrays directly via ``zarr.open`` — they're
-plain numpy datasets keyed ``variant_<TAG>`` / ``call_<TAG>``.
+``fields=`` on ``HaplotypeMatrix.from_zarr`` is eager-only: it raises
+``NotImplementedError`` whenever the load takes the streaming path
+(always under ``streaming='always'``; under ``streaming='auto'`` only
+when the matrix would not fit eagerly in <50 % of free GPU memory).
+For QC inspection over a region bigger than that, skip pg_gpu's loader
+and read the QC arrays directly via ``zarr.open`` — they're plain zarr
+arrays keyed ``variant_<TAG>`` / ``call_<TAG>`` and slicing them with
+``[:]`` returns numpy, with no GPU involvement and no memory cap.
 
 .. code-block:: python
 
@@ -95,39 +98,43 @@ The per-site DataFrame feeds into bivariate hexbin matrices,
 constant/all-NaN flagging, and histogram panels — all standard
 numpy/pandas.
 
-3. Windowed π in 10 kb windows, three missingness modes
--------------------------------------------------------
+3. Windowed π in 10 kb windows, two missingness modes
+-----------------------------------------------------
 
-``windowed_analysis`` accepts a ``missing_data=`` mode:
+``windowed_analysis`` accepts a ``missing_data=`` mode. Two modes are
+implemented:
 
-* ``'include'`` — per-site ``n_valid``; divide by total window length.
-* ``'exclude'`` — drop sites with any missing call.
-* ``'pairwise'`` — pixy-style; count only called pairs per site,
-  denominator is the total of these pair counts.
+* ``'include'`` (default) — keep every site, use per-site ``n_valid``
+  for the SFS counts; unbiased under MCAR.
+* ``'exclude'`` — drop sites with any missing call before computing.
+  Stricter and easier to reason about, but on Ag1000G-style cohorts
+  (~75 % per-site missingness in some panels) the surviving site count
+  can be zero in entire windows.
 
 .. code-block:: python
 
    from pg_gpu import windowed_analysis
 
    results = {}
-   for mode in ['include', 'exclude', 'pairwise']:
+   for mode in ['include', 'exclude']:
        results[mode] = windowed_analysis(
            hm, window_size=10_000, step_size=10_000,
            statistics=['pi'], missing_data=mode,
        )
 
-In a dataset with ~75% per-site missingness (typical for Ag1000G),
-``'pairwise'`` ≈ ``'include'`` to within a few percent and is the
-strictly correct estimator under MCAR; ``'exclude'`` is brutal and can
-return zero-site windows.
+For most analyses ``'include'`` is the right default. ``'exclude'``
+mostly serves as a sanity check: when the two estimators agree, the
+missingness is approximately MCAR; large divergence suggests structured
+missingness that needs upstream investigation.
 
 4. Accessibility-mask normalization
 -----------------------------------
 
-``AccessibleMask`` flips windowed π's span normalization from
-"per window length" to "per callable base in window". On a 36%-callable
-region the un-masked estimate underestimates per-callable-base π by
-roughly 3×.
+``AccessibleMask`` flips windowed π's span normalization from "per
+window length" to "per callable base in window". On Ag1000G X
+(~67 % callable) the un-masked estimate is biased low by roughly
+``1 / 0.67 ≈ 1.5×``; the exact factor per window is
+``window_size / callable_bases_in_window``.
 
 .. code-block:: python
 
@@ -141,7 +148,7 @@ roughly 3×.
 
    df_masked = windowed_analysis(
        hm, window_size=10_000, step_size=10_000,
-       statistics=['pi'], missing_data='pairwise',
+       statistics=['pi'], missing_data='include',
    )
 
 5. PCA with metadata coloring
@@ -160,26 +167,35 @@ frequency. Standard recipe:
              .from_zarr(ZARR_X, region='X:1-2000000', streaming='never')
              .apply_biallelic_filter())
 
-   # MAF > 0.05 (subsumes "segregating only").
+   # MAF > 0.05 (subsumes "segregating only"). hm_pca.haplotypes is a
+   # cupy array; pg_gpu is GPU-only so there's no numpy branch here.
+   import cupy as cp
    haps    = hm_pca.haplotypes
-   import cupy as cp; xp = cp if type(haps).__module__.startswith('cupy') else np
-   af      = xp.where((haps >= 0).sum(0) > 0,
-                      (haps == 1).sum(0) / xp.maximum((haps >= 0).sum(0), 1),
-                      0.0)
-   maf     = xp.minimum(af, 1.0 - af)
-   keep    = xp.where(maf > 0.05)[0]
-   hm_pca  = hm_pca.get_subset(keep.get() if hasattr(keep, 'get') else keep)
+   n_valid = (haps >= 0).sum(axis=0)
+   alt     = (haps == 1).sum(axis=0)
+   af      = cp.where(n_valid > 0, alt / cp.maximum(n_valid, 1), 0.0)
+   maf     = cp.minimum(af, 1.0 - af)
+   keep    = cp.where(maf > 0.05)[0]
+   hm_pca  = hm_pca.get_subset(keep)
 
    unlinked = hm_pca.locate_unlinked(size=100, step=20, threshold=0.1)
-   hm_pca   = hm_pca.get_subset(np.where(
-       unlinked.get() if hasattr(unlinked, 'get') else unlinked)[0])
+   hm_pca   = hm_pca.get_subset(cp.where(unlinked)[0])
 
    coords, explained = decomposition.randomized_pca(hm_pca, n_components=10)
 
-Merge the per-haplotype coords down to per-sample by averaging
-consecutive pairs (bio2zarr orders haplotypes as
-``sample0_hap0, sample0_hap1, sample1_hap0, …``), then join to the
-metadata DataFrame on ``sample_id``.
+Merge per-haplotype coordinates down to per-sample. pg_gpu's
+VCZ-loaded ``HaplotypeMatrix`` arranges the haplotype axis as
+``[ploidy 0 of every sample, then ploidy 1 of every sample]`` — sample
+``i``'s two haplotypes live at row ``i`` and row ``i + n_samples``, NOT
+at consecutive rows ``2i`` and ``2i+1``. Average across the two halves:
+
+.. code-block:: python
+
+   n_samples  = hm_pca.num_haplotypes // 2
+   per_sample = (coords[:n_samples] + coords[n_samples:]) / 2
+
+Then join ``per_sample`` (shape ``(n_samples, n_components)``) to the
+metadata DataFrame on ``sample_id`` for population/country coloring.
 
 6. Per-population diversity, SFS, divergence
 --------------------------------------------
@@ -191,16 +207,25 @@ single GPU passes.
 
    from pg_gpu import diversity, divergence, sfs as pg_sfs
 
-   # country -> haplotype indices (sample i -> [2i, 2i+1])
-   meta = pd.read_csv('ag1kgp3.gamb.ck_short_sorted_rdl.csv')
-   s2i  = {s: i for i, s in enumerate(sample_ids)}
-   c2h  = {c: [j for s in g['sample_id'] if s in s2i for j in (2*s2i[s], 2*s2i[s]+1)]
-           for c, g in meta.groupby('country')}
-   top4 = sorted(c2h, key=lambda k: -len(c2h[k]))[:4]
-
+   # Build country -> haplotype-axis index lists. pg_gpu lays out the
+   # haplotype axis as [ploidy 0 of every sample, then ploidy 1 of every
+   # sample], so sample i's haplotypes are at indices i and i + n_samples
+   # — never consecutive pairs.
    hm_stats = (HaplotypeMatrix.from_zarr(ZARR_X, region='X:1-2000000',
                                          streaming='never')
                .apply_biallelic_filter())
+
+   meta = pd.read_csv('ag1kgp3.gamb.ck_short_sorted_rdl.csv')
+   sample_ids = hm_stats.samples
+   n_samples  = len(sample_ids)
+   s2i  = {s: i for i, s in enumerate(sample_ids)}
+   c2h  = {
+       c: [j for s in g['sample_id'] if s in s2i
+           for j in (s2i[s], s2i[s] + n_samples)]
+       for c, g in meta.groupby('country')
+   }
+   top4 = sorted(c2h, key=lambda k: -len(c2h[k]))[:4]
+
    hm_stats.sample_sets = {c: c2h[c] for c in top4}
 
    # Per-population: pi, theta_w, theta_h, theta_l, tajimas_d.
@@ -222,23 +247,35 @@ single GPU passes.
    # Windowed FST and dxy for the most-diverged pair.
    wdf = windowed_analysis(
        hm_stats, window_size=10_000, step_size=10_000,
-       statistics=['fst','dxy'], populations=[p1, p2],
-       missing_data='pairwise',
+       statistics=['fst', 'dxy'], populations=[p1, p2],
+       missing_data='include',
    )
 
 7. Selection scans (iHS + Garud's H)
 ------------------------------------
 
+iHS and Garud's H are single-population statistics that assume phased
+haplotypes. Run them per population — passing the multi-pop matrix
+without ``population=`` would mix all four populations into one scan,
+which is rarely informative for either statistic.
+
 .. code-block:: python
 
    from pg_gpu import selection
 
-   ihs = selection.ihs(hm_stats)
-   h1, h12, h123, h2_h1 = selection.garud_h(hm_stats)
+   ihs_by_pop = {}
+   garud_by_pop = {}
+   for pop in top4:
+       ihs_by_pop[pop] = selection.ihs(hm_stats, population=pop)
+       garud_by_pop[pop] = selection.garud_h(hm_stats, population=pop)
+       # garud_h returns (h1, h12, h123, h2_h1)
 
-Both expect phased biallelic data. ``hm_stats`` is already biallelic,
-and the unphased zarr is loaded as 'phased' for these purposes — a
-documented compromise for Ag1000G-style cohorts.
+pg_gpu's loaders do not inspect or enforce phase — they treat each VCF
+``GT`` field as two haplotypes regardless of the ``/`` vs ``|``
+separator. The two statistics give meaningful answers only when the
+upstream data is statistically phased; the Ag1000G Ag3.0 panel used
+here was phased with SHAPEIT before release, so the assumption holds.
+On an unphased call set, expect spurious signals.
 
 8. 2-locus LD stats (moments-LD)
 --------------------------------
@@ -252,7 +289,7 @@ GPU, restrict to a smaller region and two populations.
 
 .. code-block:: python
 
-   from pg_gpu import moments_ld
+   from pg_gpu.moments_ld import compute_ld_statistics
    import numpy as np
 
    hm_ld   = (HaplotypeMatrix
@@ -262,7 +299,7 @@ GPU, restrict to a smaller region and two populations.
    hm_ld.sample_sets = {p: hm_stats.sample_sets[p] for p in ld_pops}
 
    bp_bins  = np.logspace(2, 5, 10).astype(int)
-   ld_stats = moments_ld.compute_ld_statistics(
+   ld_stats = compute_ld_statistics(
        haplotype_matrix=hm_ld,
        pop_assignment={p: hm_ld.sample_sets[p] for p in ld_pops},
        pops=ld_pops, bp_bins=bp_bins, ac_filter=True, report=False,
@@ -282,26 +319,48 @@ demographic fitter.
 9. Block-jackknife confidence interval
 --------------------------------------
 
+``resampling.block_jackknife`` operates on **pre-binned per-block
+values** that the caller computes first — it does not take a
+HaplotypeMatrix and has no ``block_size=`` kwarg. The typical pattern
+is: compute the statistic in non-overlapping windows of the block size
+you want, then pass the resulting per-window array through.
+
 .. code-block:: python
 
-   from pg_gpu import resampling, diversity
+   from pg_gpu import resampling, windowed_analysis
+   import numpy as np
 
    pop = max(hm_stats.sample_sets, key=lambda k: len(hm_stats.sample_sets[k]))
-   pi_est, pi_se, pi_ci = resampling.block_jackknife(
-       hm_stats,
-       statistic=lambda m: diversity.pi(m, population=pop),
-       block_size=200_000,
-   )
 
-200 kb blocks are a reasonable default for taxa with ~kb-scale LD
-decay; tune from the LD-decay panel in §8.
+   # Per-block π estimates. 200 kb is a reasonable default for taxa with
+   # ~kb-scale LD decay; tune from the LD-decay panel in §8.
+   df = windowed_analysis(
+       hm_stats, window_size=200_000, step_size=200_000,
+       statistics=['pi'], populations=[pop],
+   )
+   pi_per_block = df[f'pi_{pop}'].to_numpy()
+
+   pi_est, pi_se, _ = resampling.block_jackknife(
+       pi_per_block,
+       statistic=lambda v: float(np.mean(v)),
+   )
+   # Approximate normal-theory 95% CI (delete-1 block jackknife):
+   ci_lo, ci_hi = pi_est - 1.96 * pi_se, pi_est + 1.96 * pi_se
+
+For ratio-of-sums statistics (Hudson FST, Patterson F3/D) compute the
+numerator and denominator components per block separately and pass them
+as a tuple so the jackknife applies the same block mask to both —
+``admixture.average_patterson_f3(h, pop_c, pop_a, pop_b, blen=N)`` and
+``average_patterson_d(..., blen=N)`` wrap that pattern internally.
 
 Reproduce
 ---------
 
-Paste each section into a fresh Python session with pg_gpu installed
-and a converted VCZ on disk. The whole sequence completes in ~30
-minutes on a single A100 GPU.
+Work through the sections in order in a single Python session — later
+sections reuse objects defined earlier (``hm_stats``, ``top4``, etc.).
+pg_gpu installed and a converted VCZ on disk are the only
+prerequisites. The whole sequence completes in ~30 minutes on a single
+A100 GPU.
 
 The Claude Code skill that drives this workflow conversationally lives
-at ``.claude/SKILL.md`` (added separately).
+at ``.claude/SKILL.md``.
