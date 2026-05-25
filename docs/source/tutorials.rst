@@ -23,6 +23,7 @@ time, see :doc:`examples` instead.
    tutorials/scikit_allel_comparison
    tutorials/moments_integration
    tutorials/biobank_streaming
+   tutorials/pg_gpu_skill_walkthrough
 
 Each tutorial follows the same structure:
 
