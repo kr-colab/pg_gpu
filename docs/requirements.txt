@@ -10,3 +10,4 @@ tskit
 msprime
 zarr
 tqdm
+nbsphinx
