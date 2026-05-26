@@ -29,6 +29,7 @@ extensions = [
     'sphinx.ext.viewcode',
     'sphinx.ext.intersphinx',
     'sphinx_rtd_theme',
+    'nbsphinx',
 ]
 
 # Theme
@@ -53,3 +54,6 @@ intersphinx_mapping = {
     'numpy': ('https://numpy.org/doc/stable/', None),
     'cupy': ('https://docs.cupy.dev/en/stable/', None),
 }
+
+html_static_path = ['_static']
+html_css_files = ['custom.css']
