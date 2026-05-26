@@ -1,0 +1,12 @@
+/* Big bold prompt line — same visual weight as a small heading,
+ * but not parsed as a Sphinx heading (no TOC entry). */
+.user-prompt {
+    font-size: 1.35em;
+    font-weight: 600;
+    color: #2c5282;
+    line-height: 1.45;
+    margin: 2em 0 0.6em 0;
+}
+.user-prompt code {
+    font-size: 0.92em;   /* slightly smaller so paths don't dwarf the surrounding text */
+}
