@@ -459,11 +459,15 @@ df = windowed_analysis(
     missing_data='include',        # 'include' or 'exclude'
     span_normalize=True,           # bool; True auto-detects best denominator
 )
-# Columns: window_start, window_stop, n_variants, then one column per
-# requested statistic. Two-pop stats are suffixed with the pop pair, e.g.
-# fst_pop1_pop2, dxy_pop1_pop2. If `accessible_bed=` is passed (or the
-# matrix already has a mask attached) span_normalize uses the per-window
-# accessible-base count as the denominator.
+# Columns: chrom, start, end, center, n_variants, window_id, then one
+# column per requested statistic with the bare stat name ('pi', 'fst',
+# 'dxy', ...). The fused kernels emit bare names regardless of how
+# populations= is set — don't expect 'pi_pop1' / 'fst_pop1_pop2' suffixes
+# here. (Those only appear in the slow per-window WindowedAnalyzer.compute
+# path, which fires for non-fused stats like LD-bin stats.) If
+# accessible_bed= is passed (or the matrix already has a mask attached),
+# span_normalize uses the per-window accessible-base count as the
+# denominator.
 
 # More control: the class form (eager path; per-region calls, configured
 # missing-data and span-normalization once and reused across calls).
@@ -497,8 +501,7 @@ Quick plot of a windowed scan:
 
 ```python
 fig, ax = plt.subplots(figsize=(12, 3))
-ax.plot(df['window_start'] + (df['window_stop'] - df['window_start']) / 2,
-        df['pi'], lw=0.6)
+ax.plot(df['center'], df['pi'], lw=0.6)
 ax.set_xlabel('position (bp)')
 ax.set_ylabel(r'$\pi$')
 ax.margins(x=0)
@@ -714,8 +717,8 @@ Notes:
   sns.scatterplot(df, x='PC1', y='PC2', hue='pop')`.
 - **Windowed FST + dxy on one figure**: call `windowed_analysis(h, ...,
   statistics=['fst', 'dxy'], populations=['pop1', 'pop2'])` once, then
-  plot `df['fst_pop1_pop2']` against `ax` and `df['dxy_pop1_pop2']`
-  against `ax.twinx()`.
+  plot `df['fst']` against `ax` and `df['dxy']` against `ax.twinx()` —
+  the fused two-pop kernels emit bare column names, no pop-pair suffix.
 
 ---
 
