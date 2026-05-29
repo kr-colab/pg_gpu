@@ -23,11 +23,7 @@ args = parser.parse_args()
 os.makedirs(os.path.dirname(args.output), exist_ok=True) if os.path.dirname(args.output) else None
 
 
-if args.s > 0:
-    fixation_time = args.fixation_time if args.fixation_time is not None else max(1, int(0.05 * args.popsize))  # 5% of Ne
-
-
-if args.s == 0:
+if args.s <= 0:
     ts = msprime.sim_ancestry(
         args.samples,
         recombination_rate=args.r,
@@ -36,6 +32,9 @@ if args.s == 0:
         random_seed=args.seed,
     )
 else:
+    # 5% of Ne is a reasonable default sweep age when --fixation_time is not given.
+    fixation_time = (args.fixation_time if args.fixation_time is not None
+                     else max(1, int(0.05 * args.popsize)))
     ts = msprime.sim_ancestry(
         args.samples,
         recombination_rate=args.r,
