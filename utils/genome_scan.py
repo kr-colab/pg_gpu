@@ -2,9 +2,10 @@
 """
 Genome scan workflow with pg_gpu.
 
-Loads genotype data from a VCF or zarr store, optionally assigns
-populations from a tab-delimited file, computes windowed and scalar
-statistics on the GPU, and produces a multi-panel genome scan figure.
+Loads genotype data from a VCF, zarr store, or tskit tree sequence,
+optionally assigns populations from a tab-delimited file, computes
+windowed and scalar statistics on the GPU, and produces a multi-panel
+genome scan figure.
 
 Usage
 -----
@@ -14,13 +15,18 @@ Usage
     # from zarr, two populations
     python genome_scan.py data.zarr --region 3R --pop-file pops.tsv
 
+    # from a (compressed) tree sequence -- populations come from TS metadata
+    python genome_scan.py data.tsz
+    python genome_scan.py data.trees --region 1000000-5000000
+
     # with accessible mask and custom windows
     python genome_scan.py data.vcf.gz --region 3R --pop-file pops.tsv \
         --accessible-bed mask.bed --window-size 50000 --step-size 10000
 
 The population file should be tab-delimited with columns: sample, pop.
-When two populations are present, divergence statistics (Fst, Dxy) and
-joint SFS are included automatically.
+Tree-sequence inputs derive populations from the TS metadata automatically
+(``--pop-file`` is ignored). When two populations are present, divergence
+statistics (Fst, Dxy) and joint SFS are included automatically.
 """
 
 import argparse
@@ -34,13 +40,22 @@ import seaborn as sns
 from pg_gpu import HaplotypeMatrix, diversity, divergence, sfs, windowed_analysis
 
 
+VCF_EXTS = (".vcf", ".vcf.gz", ".bcf")
+TS_EXTS  = (".trees", ".tsz")
+
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def parse_args():
     p = argparse.ArgumentParser(description="pg_gpu genome scan workflow")
-    p.add_argument("input", help="path to VCF (.vcf, .vcf.gz, .bcf) or zarr store")
-    p.add_argument("--region", help="genomic region, e.g. '3R' or '3R:1000000-5000000'")
-    p.add_argument("--pop-file", help="tab-delimited file (sample, pop)")
+    p.add_argument("input",
+                   help="path to VCF (.vcf, .vcf.gz, .bcf), zarr store, "
+                        "or tree sequence (.trees, .tsz)")
+    p.add_argument("--region",
+                   help="genomic region. VCF/zarr: '3R' or '3R:1-5000000'. "
+                        "Tree sequence: 'start-end' (chrom prefix optional, ignored)")
+    p.add_argument("--pop-file",
+                   help="tab-delimited file (sample, pop) -- VCF/zarr only")
     p.add_argument("--accessible-bed", help="BED file of accessible regions")
     p.add_argument("--window-size", type=int, default=100_000)
     p.add_argument("--step-size", type=int, default=10_000)
@@ -49,19 +64,80 @@ def parse_args():
     return p.parse_args()
 
 
-def load_data(args):
-    """Load VCF or zarr, optionally assign populations."""
-    path = args.input
-    if path.endswith((".vcf", ".vcf.gz", ".bcf")):
-        hm = HaplotypeMatrix.from_vcf(
-            path, region=args.region, accessible_bed=args.accessible_bed,
-        )
+def _load_ts_input(path, args):
+    """Load a tree sequence (.trees / .tsz), trim to region, build a
+    GPU-resident HaplotypeMatrix, and apply an accessible mask if given.
+
+    Region for a tree sequence is interpreted as bare ``'start-end'``
+    base-pair coordinates; a ``'chrom:start-end'`` form is accepted for
+    CLI consistency but the chrom prefix is ignored (tree sequences carry
+    a single contig).
+    """
+    import tskit
+    if path.endswith(".tsz"):
+        import tszip
+        ts = tszip.load(path)
     else:
-        hm = HaplotypeMatrix.from_zarr(
-            path, region=args.region, accessible_bed=args.accessible_bed,
+        ts = tskit.load(path)
+
+    if args.region:
+        # Accept either 'start-end' or 'chrom:start-end' -- chrom is ignored.
+        rng = args.region.split(":")[-1]
+        start, end = (int(x) for x in rng.split("-"))
+        ts = ts.keep_intervals([[start, end]], simplify=True)
+
+    hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+
+    if args.accessible_bed:
+        # Tree-sequence coords are 0-based; from_ts requires a chrom name to
+        # match BED entries, which is rarely meaningful for a simulated TS.
+        # Build the mask by hand: union every BED interval into a bool array
+        # the size of the trimmed sequence.
+        seq_len = int(ts.sequence_length)
+        accessible = np.zeros(seq_len, dtype=bool)
+        with open(args.accessible_bed) as f:
+            for line in f:
+                if line.startswith(("#", "track")):
+                    continue
+                parts = line.split()
+                accessible[int(parts[1]):int(parts[2])] = True
+        hm.set_accessible_mask(accessible)
+
+    # from_ts auto-populates sample_sets from population metadata when the
+    # populations are named. Anonymous (no-name) populations come back as
+    # sample_sets=None -- expose them as a single 'pop0' so the downstream
+    # population dispatch has something to key off.
+    if hm.sample_sets is None and ts.num_populations:
+        hm.sample_sets = {"pop0": list(range(hm.num_haplotypes))}
+
+    return hm
+
+
+def load_data(args):
+    """Dispatch on file extension and return a populated HaplotypeMatrix."""
+    path = args.input.lower()
+
+    if path.endswith(VCF_EXTS):
+        hm = HaplotypeMatrix.from_vcf(
+            args.input, region=args.region,
+            accessible_bed=args.accessible_bed,
         )
-    if args.pop_file:
-        hm.load_pop_file(args.pop_file)
+        if args.pop_file:
+            hm.load_pop_file(args.pop_file)
+    elif path.endswith(TS_EXTS):
+        hm = _load_ts_input(args.input, args)
+        if args.pop_file:
+            print("warning: --pop-file ignored for tree-sequence input; "
+                  "populations come from the TS metadata.")
+    else:
+        # treat as a zarr store (no canonical extension)
+        hm = HaplotypeMatrix.from_zarr(
+            args.input, region=args.region,
+            accessible_bed=args.accessible_bed,
+        )
+        if args.pop_file:
+            hm.load_pop_file(args.pop_file)
+
     print(f"Loaded {hm.num_haplotypes} haplotypes × {hm.num_variants:,} variants")
     return hm
 
