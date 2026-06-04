@@ -6,12 +6,36 @@ GPU-accelerated population genetics statistics using CuPy.
 
 ## Installation
 
-pg_gpu uses [pixi](https://pixi.sh) for environment management.
-Requires an NVIDIA GPU.
+pg_gpu requires a Linux x86_64 machine with an NVIDIA GPU and a CUDA 12 driver.
+Nothing else is needed -- the full GPU runtime, including the CUDA toolkit
+headers cupy uses to JIT-compile its kernels, is pulled from PyPI via the
+`cupy-cuda12x[ctk]` dependency.
+
+### With pixi (recommended)
+
+The pinned, reproducible environment is managed with [pixi](https://pixi.sh)
+and is the recommended way to install pg_gpu:
 
 ```bash
 pixi install
 pixi shell
+```
+
+### Into an existing conda / venv environment
+
+To use pg_gpu from your own workflow (Snakemake, Jupyter, an existing conda
+env), install it with pip:
+
+```bash
+pip install "git+https://github.com/kr-colab/pg_gpu"
+```
+
+This pulls the full runtime stack (cupy-cuda12x with toolkit headers, bio2zarr,
+kvikio, nvcomp) as declared in `pyproject.toml`. For development against a local
+checkout, use an editable install:
+
+```bash
+pip install -e ".[dev]"
 ```
 
 ## Quick Start
