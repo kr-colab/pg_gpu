@@ -7,16 +7,20 @@ For a high-level overview of what pg_gpu is and what it offers, see
 Requirements
 ------------
 
-* A CUDA 12+ capable NVIDIA GPU
-* `pixi <https://pixi.sh>`_ for environment management
+* A Linux x86_64 machine with a CUDA 12+ capable NVIDIA GPU
+* `pixi <https://pixi.sh>`_ for the recommended environment (or ``pip``
+  into an environment you already manage -- see
+  `Installation into an Existing Environment`_)
 
 Everything else (Python 3.12, CuPy, NumPy, SciPy, the matching CUDA
 toolchain) is pinned and installed by ``pixi`` from ``pixi.lock``. We
-require pixi -- not out of caprice, but because building CuPy / CUDA
+recommend pixi -- not out of caprice, but because building CuPy / CUDA
 extensions reproducibly is otherwise painful: pixi pulls a portable
 NVIDIA toolchain into the project and removes the usual
 "works-on-my-machine" tax. If you have never used pixi before, the
 `installation page <https://pixi.sh/latest/#installation>`_ is a one-liner.
+If you would rather not adopt pixi, pg_gpu is also a standard
+pip-installable package; see `Installation into an Existing Environment`_.
 
 Installation with Pixi
 ----------------------
@@ -74,6 +78,43 @@ environment that has both libraries installed:
 
 See :doc:`tutorials/moments_integration` for the full
 demographic-inference walk-through.
+
+Installation into an Existing Environment
+-----------------------------------------
+
+If you already manage dependencies with conda, a virtualenv, or another
+tool -- for example to call pg_gpu from a Snakemake rule or an existing
+Jupyter kernel -- you can install it directly with ``pip`` instead of
+adopting pixi:
+
+.. code-block:: bash
+
+   pip install "git+https://github.com/kr-colab/pg_gpu.git"
+
+This pulls the full runtime stack declared in ``pyproject.toml``:
+``cupy-cuda12x[ctk]`` (CuPy plus the CUDA toolkit headers it needs to
+JIT-compile its kernels), ``kvikio`` / ``nvcomp`` for GPU decompression,
+``bio2zarr``, and the usual scientific-Python libraries -- all from the
+default PyPI index. The only system requirement is a Linux x86_64 machine
+with an NVIDIA CUDA 12 driver; no separate conda or system-wide CUDA
+toolkit is needed.
+
+For development against a local checkout, use an editable install with the
+``dev`` extra:
+
+.. code-block:: bash
+
+   git clone https://github.com/kr-colab/pg_gpu.git
+   cd pg_gpu
+   pip install -e ".[dev]"
+
+The optional extras mirror the pixi environments: ``docs`` for the
+documentation toolchain and ``moments`` for the moments LD integration
+(e.g. ``pip install -e ".[dev,moments]"``).
+
+Pixi remains the recommended, fully pinned environment (see above); the
+pip path trades that reproducibility for fitting into an environment you
+already control.
 
 Running Tests
 -------------
