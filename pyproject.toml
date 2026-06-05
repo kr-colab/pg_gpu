@@ -8,8 +8,32 @@ version = "0.1.0"
 description = "GPU-accelerated population genetics statistics"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
-    { name = "Andrew Kern", email = "adk@uoregon.edu" },
+    { name = "Andrew Kern", email = "adkern@uoregon.edu" },
+]
+maintainers = [
+    { name = "Andrew Kern", email = "adkern@uoregon.edu" },
+]
+keywords = [
+    "population genetics",
+    "popgen",
+    "genomics",
+    "bioinformatics",
+    "GPU",
+    "CUDA",
+    "CuPy",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
 ]
 
 # pg_gpu is GPU-first: cupy and the kvikio/nvcomp GPU-decompression stack are
@@ -59,6 +83,9 @@ moments = [
 
 [project.urls]
 Homepage = "https://github.com/kr-colab/pg_gpu"
+Documentation = "https://pg-gpu.readthedocs.io"
+Repository = "https://github.com/kr-colab/pg_gpu"
+Issues = "https://github.com/kr-colab/pg_gpu/issues"
 
 [tool.pytest.ini_options]
 pythonpath = [
