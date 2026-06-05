@@ -92,8 +92,7 @@ adopting pixi:
    pip install "git+https://github.com/kr-colab/pg_gpu.git"
 
 This pulls the full runtime stack declared in ``pyproject.toml``:
-``cupy-cuda12x[ctk]`` (CuPy plus the CUDA toolkit headers it needs to
-JIT-compile its kernels), ``kvikio`` / ``nvcomp`` for GPU decompression,
+``cupy-cuda12x[ctk]``, ``kvikio`` / ``nvcomp``,
 ``bio2zarr``, and the usual scientific-Python libraries -- all from the
 default PyPI index. The only system requirement is a Linux x86_64 machine
 with an NVIDIA CUDA 12 driver; no separate conda or system-wide CUDA
