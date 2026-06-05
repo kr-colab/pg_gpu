@@ -6,7 +6,7 @@ channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]
 
 [dependencies]
-python = ">=3.12,<3.13"
+python = ">=3.12"
 numpy = ">=2.0"
 scipy = ">=1.12"
 pandas = ">=2.0"
@@ -60,7 +60,7 @@ sphinx = ">=4.0"
 sphinx-rtd-theme = ">=1.0"
 
 [feature.lint.dependencies]
-python = ">=3.12,<3.13"
+python = ">=3.12"
 ruff = ">=0.4"
 
 [environments]
