@@ -15,6 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # hatch-vcs derives the version from git tags, so the tag and history
+          # must be present; the default shallow checkout omits them.
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
