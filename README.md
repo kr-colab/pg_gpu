@@ -3,6 +3,7 @@
 GPU-accelerated population genetics statistics using CuPy.
 
 [![Documentation Status](https://readthedocs.org/projects/pg-gpu/badge/?version=latest)](https://pg-gpu.readthedocs.io/en/latest/?badge=latest)
+[![bioRxiv](https://img.shields.io/endpoint?url=https%3A%2F%2Fandrewkern.github.io%2Fbiorxiv-badge%2Fbadges%2F10.64898__2026.05.29.728868.json)](https://doi.org/10.64898/2026.05.29.728868)
 
 ## Installation
 
