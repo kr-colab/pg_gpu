@@ -24,10 +24,10 @@ pixi shell
 ### Into an existing conda / venv environment
 
 To use pg_gpu from your own workflow (Snakemake, Jupyter, an existing conda
-env), install it with pip:
+env), install it from PyPI with pip:
 
 ```bash
-pip install "git+https://github.com/kr-colab/pg_gpu"
+pip install pg_gpu
 ```
 
 This pulls the full runtime stack (cupy-cuda12x with toolkit headers, bio2zarr,
