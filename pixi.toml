@@ -1,6 +1,7 @@
 [workspace]
 name = "pg_gpu"
-version = "0.1.0"
+# No version here on purpose: the package version is derived from git tags by
+# hatch-vcs (see pyproject.toml), so duplicating it would only drift.
 description = "GPU-accelerated population genetics statistics"
 channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]
