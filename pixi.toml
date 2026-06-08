@@ -6,7 +6,7 @@ channels = ["conda-forge", "bioconda"]
 platforms = ["linux-64"]
 
 [dependencies]
-python = ">=3.12,<3.13"
+python = ">=3.12"
 numpy = ">=2.0"
 scipy = ">=1.12"
 pandas = ">=2.0"
@@ -19,23 +19,24 @@ pandoc = ">=3.9.0.2,<4"
 nbsphinx = ">=0.9.8,<0.10"
 
 [pypi-dependencies]
+# The runtime stack (cupy-cuda12x, bio2zarr[vcf], and the kvikio/nvcomp
+# GPU-decompression libraries) is declared in pyproject.toml's
+# [project.dependencies] so that a plain `pip install` into a conda/venv
+# environment pulls everything. The editable install below brings those
+# transitive deps into the pixi environment too -- pyproject is the single
+# source of truth. All of them (including kvikio-cu12 / nvidia-nvcomp-cu12)
+# resolve from the default PyPI index now, so no extra index is needed.
 pg_gpu = { path = ".", editable = true }
-bio2zarr = { version = ">=0.1", extras = ["vcf"] }
-
-# Streaming-from-zarr uses kvikio + nvCOMP to decode store chunks on the
-# GPU when the codec is GPU-decodable (zstd / blosc / lz4 / deflate).
-# Hard dependency: pg_gpu is GPU-first and the streaming dispatch always
-# imports these unconditionally. Conda-forge's kvikio is cuda13/cp311
-# only at the moment, so we go through NVIDIA's PyPI index.
-"kvikio-cu12" = ">=25.0"
-"nvidia-nvcomp-cu12" = ">=4.0"
-
-[pypi-options]
-extra-index-urls = ["https://pypi.nvidia.com"]
 
 [feature.gpu.dependencies]
-cupy = ">=13.0"
+# cupy comes from pyproject's cupy-cuda12x pip wheel; cuda-version pins the
+# conda-side CUDA runtime so any conda GPU packages stay on the 12.x ABI.
+# cuda-cudart-dev supplies the toolkit headers (cuda_fp16.h, etc.): cupy's
+# runtime NVRTC kernel compilation discovers the conda CUDA include dir and
+# expects those headers there -- the pip wheel ships runtime libs but not the
+# full toolkit headers, so without this cp.unique/sort kernels fail to build.
 cuda-version = "12.*"
+cuda-cudart-dev = "12.*"
 notebook = ">=7.5.5,<8"
 
 [feature.gpu.system-requirements]
@@ -59,7 +60,7 @@ sphinx = ">=4.0"
 sphinx-rtd-theme = ">=1.0"
 
 [feature.lint.dependencies]
-python = ">=3.12,<3.13"
+python = ">=3.12"
 ruff = ">=0.4"
 
 [environments]

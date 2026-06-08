@@ -2,18 +2,101 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# Restrict the source distribution to the package and its tests. Without an
+# explicit allowlist hatchling sweeps in everything not git-ignored -- stray
+# PDFs, scratch data, and local .claude/ config -- which should not ship to
+# PyPI. pyproject.toml, README.md, and LICENSE are always included via project
+# metadata.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/pg_gpu",
+    "/tests",
+]
+
 [project]
 name = "pg_gpu"
 version = "0.1.0"
 description = "GPU-accelerated population genetics statistics"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
-    { name = "Andrew Kern", email = "adk@uoregon.edu" },
+    { name = "Andrew Kern", email = "adkern@uoregon.edu" },
+]
+maintainers = [
+    { name = "Andrew Kern", email = "adkern@uoregon.edu" },
+]
+keywords = [
+    "population genetics",
+    "popgen",
+    "genomics",
+    "bioinformatics",
+    "GPU",
+    "CUDA",
+    "CuPy",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
+]
+
+# pg_gpu is GPU-first: cupy and the kvikio/nvcomp GPU-decompression stack are
+# hard runtime requirements, not optional extras. The cupy [ctk] extra pulls
+# the CUDA toolkit headers (nvrtc + runtime) from PyPI -- cupy 14 stopped
+# bundling them, and they are needed at runtime because cupy JIT-compiles its
+# kernels with NVRTC. With [ctk], a plain `pip install` works given only an
+# NVIDIA CUDA-12 driver; no separate conda/system CUDA toolkit is required.
+# matplotlib/seaborn back the plotting module (imported from __init__); tskit
+# is imported directly by HaplotypeMatrix (otherwise only transitive via msprime).
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.12",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "scikit-allel>=1.3",
+    "msprime>=1.0",
+    "tskit>=0.5",
+    "h5py>=3.0",
+    "tqdm>=4.0",
+    "zarr>=2.16",
+    "bio2zarr[vcf]>=0.1",
+    "cupy-cuda12x[ctk]>=13.0",
+    "kvikio-cu12>=25.0",
+    "nvidia-nvcomp-cu12>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-xdist>=3.0",
+    "ipython>=8.0",
+    "ipykernel>=6.0",
+    "ruff>=0.4",
+]
+docs = [
+    "sphinx>=4.0",
+    "sphinx-rtd-theme>=1.0",
+    "nbsphinx>=0.9.8",
+]
+moments = [
+    "moments-popgen",
+    "demes",
+    "demesdraw",
 ]
 
 [project.urls]
-Homepage = "https://github.com/andrewkern/pg_gpu"
+Homepage = "https://github.com/kr-colab/pg_gpu"
+Documentation = "https://pg-gpu.readthedocs.io"
+Repository = "https://github.com/kr-colab/pg_gpu"
+Issues = "https://github.com/kr-colab/pg_gpu/issues"
 
 [tool.pytest.ini_options]
 pythonpath = [
