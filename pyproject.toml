@@ -1,6 +1,12 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+# The package version is derived from the latest git tag (e.g. tag v0.1.0 ->
+# version 0.1.0), so a release is cut by tagging -- there is no version string
+# to bump by hand. Untagged builds get a setuptools-scm dev version.
+[tool.hatch.version]
+source = "vcs"
 
 # Restrict the source distribution to the package and its tests. Without an
 # explicit allowlist hatchling sweeps in everything not git-ignored -- stray
@@ -15,7 +21,7 @@ include = [
 
 [project]
 name = "pg_gpu"
-version = "0.1.0"
+dynamic = ["version"]
 description = "GPU-accelerated population genetics statistics"
 readme = "README.md"
 requires-python = ">=3.12"
