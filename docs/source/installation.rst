@@ -84,12 +84,12 @@ Installation into an Existing Environment
 
 If you already manage dependencies with conda, a virtualenv, or another
 tool -- for example to call pg_gpu from a Snakemake rule or an existing
-Jupyter kernel -- you can install it directly with ``pip`` instead of
+Jupyter kernel -- you can install it from PyPI with ``pip`` instead of
 adopting pixi:
 
 .. code-block:: bash
 
-   pip install "git+https://github.com/kr-colab/pg_gpu.git"
+   pip install pg_gpu
 
 This pulls the full runtime stack declared in ``pyproject.toml``:
 ``cupy-cuda12x[ctk]``, ``kvikio`` / ``nvcomp``,
