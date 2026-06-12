@@ -123,6 +123,12 @@ class ZarrGenotypeSource:
         self.chrom = chrom
 
         cg = self._store["call_genotype"]
+        # The streaming gather and the (n_dip, 2) -> 2 * n_dip haplotype layout
+        # assume diploid. A non-diploid ploidy axis is caught here from the
+        # store metadata alone (no genotype read); pseudo-diploid encodings,
+        # which keep a ploidy-2 axis, are flagged by the eager loader instead.
+        from ._ploidy_check import _require_diploid_ploidy
+        _require_diploid_ploidy(cg.shape[2], f"streaming zarr store '{self.path}'")
         self.chunks = tuple(cg.chunks)
         self.num_diploids = int(cg.shape[1])
         self.num_haplotypes = 2 * self.num_diploids

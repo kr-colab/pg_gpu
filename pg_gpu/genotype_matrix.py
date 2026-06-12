@@ -383,6 +383,9 @@ class GenotypeMatrix:
         pos = callset['variants/POS']
         samples = list(callset['samples'])
 
+        from ._ploidy_check import check_diploid_encoding
+        check_diploid_encoding(gt, sample_names=samples, source=f"VCF '{path}'")
+
         # Filter to biallelic sites (max allele index <= 1)
         is_biallelic = np.all(gt <= 1, axis=(1, 2)) | np.all(gt < 0, axis=(1, 2))
         gt_array = allel.GenotypeArray(gt)
@@ -513,6 +516,10 @@ class GenotypeMatrix:
         gt = data['gt']  # (n_variants, n_samples, ploidy)
         positions = data['positions']
         samples = data['samples']
+
+        from ._ploidy_check import check_diploid_encoding
+        check_diploid_encoding(gt, sample_names=samples,
+                               source=f"zarr store '{path}'")
 
         n_total_sites = gt.shape[0] if include_invariant else None
         chrom = region.split(':')[0] if region else None
