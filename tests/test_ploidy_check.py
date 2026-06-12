@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from pg_gpu import GenotypeMatrix, HaplotypeMatrix, HaploidDataWarning
-from pg_gpu._ploidy_check import check_diploid_encoding
+from pg_gpu._warnings import check_diploid_encoding
 
 
 def _i8(rows):

@@ -370,7 +370,7 @@ class GenotypeMatrix:
             _build_read_vcf_fields, _classify_vcf_qc_tags,
             _resolve_qc_fields_vcf,
         )
-        from ._memory_warning import _maybe_memory_warn
+        from ._warnings import _maybe_memory_warn
         _maybe_memory_warn(path)
         if fields:
             tag_to_path, unknown_tags = _classify_vcf_qc_tags(path, fields)
@@ -383,7 +383,7 @@ class GenotypeMatrix:
         pos = callset['variants/POS']
         samples = list(callset['samples'])
 
-        from ._ploidy_check import check_diploid_encoding
+        from ._warnings import check_diploid_encoding
         check_diploid_encoding(gt, sample_names=samples, source=f"VCF '{path}'")
 
         # Filter to biallelic sites (max allele index <= 1)
@@ -517,7 +517,7 @@ class GenotypeMatrix:
         positions = data['positions']
         samples = data['samples']
 
-        from ._ploidy_check import check_diploid_encoding
+        from ._warnings import check_diploid_encoding
         check_diploid_encoding(gt, sample_names=samples,
                                source=f"zarr store '{path}'")
 

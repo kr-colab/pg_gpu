@@ -11,7 +11,7 @@ import warnings
 import pytest
 
 from pg_gpu import MemoryLimitedWarning
-from pg_gpu._memory_warning import (
+from pg_gpu._warnings import (
     _maybe_memory_warn, _region_span_bp, _vcf_header_sample_count,
     _warned_paths,
 )
@@ -153,7 +153,7 @@ class TestFromVcfIntegration:
         # warning before parsing. Uses the existing simple_vcf_file
         # shape but with enough samples to clear the test threshold.
         from pg_gpu import HaplotypeMatrix
-        from pg_gpu._memory_warning import VCF_WARN_SAMPLES
+        from pg_gpu._warnings import VCF_WARN_SAMPLES
         path = str(tmp_path / "hm.vcf")
         _write_minimal_vcf(path, n_samples=VCF_WARN_SAMPLES + 10)
         with pytest.warns(MemoryLimitedWarning):
@@ -161,7 +161,7 @@ class TestFromVcfIntegration:
 
     def test_genotype_matrix_from_vcf_warns(self, tmp_path):
         from pg_gpu import GenotypeMatrix
-        from pg_gpu._memory_warning import VCF_WARN_SAMPLES
+        from pg_gpu._warnings import VCF_WARN_SAMPLES
         path = str(tmp_path / "gm.vcf")
         _write_minimal_vcf(path, n_samples=VCF_WARN_SAMPLES + 10)
         with pytest.warns(MemoryLimitedWarning):

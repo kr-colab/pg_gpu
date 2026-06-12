@@ -32,6 +32,7 @@ import zarr
 from kvikio.zarr import GDSStore
 
 from ._gpu_genotype_prep import build_genotype_matrix, build_haplotype_matrix
+from ._warnings import BadlyChunkedWarning
 
 
 def _pad_to(arr, shape):
@@ -95,13 +96,6 @@ class ChunkFetcher(ABC):
 #: anything else fall back to the host fetcher; on-disk pg_gpu / bio2zarr
 #: stores default to zstd, so the common case is GPU-decodable.
 _NVCOMP_SUPPORTED_CODECS = frozenset({"zstd", "blosc", "lz4", "deflate"})
-
-
-class BadlyChunkedWarning(UserWarning):
-    """Emitted when ``backend='auto'`` picks ``host`` on a store whose
-    call_genotype chunking would have defeated the kvikio fetcher's
-    win. The store is functional but a bio2zarr-style re-encode would
-    unlock the GPU-decode fast path."""
 
 
 def _pick_chunk_fetcher(source, *, backend):

@@ -127,7 +127,7 @@ class ZarrGenotypeSource:
         # assume diploid. A non-diploid ploidy axis is caught here from the
         # store metadata alone (no genotype read); pseudo-diploid encodings,
         # which keep a ploidy-2 axis, are flagged by the eager loader instead.
-        from ._ploidy_check import _require_diploid_ploidy
+        from ._warnings import _require_diploid_ploidy
         _require_diploid_ploidy(cg.shape[2], f"streaming zarr store '{self.path}'")
         self.chunks = tuple(cg.chunks)
         self.num_diploids = int(cg.shape[1])

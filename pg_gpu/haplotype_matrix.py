@@ -463,7 +463,7 @@ class HaplotypeMatrix:
         HaplotypeMatrix
             Phased haplotype data with sample names stored.
         """
-        from ._memory_warning import _maybe_memory_warn
+        from ._warnings import _maybe_memory_warn
         _maybe_memory_warn(path, region=region)
         if fields:
             tag_to_path, unknown_tags = _classify_vcf_qc_tags(path, fields)
@@ -478,7 +478,7 @@ class HaplotypeMatrix:
                              + (f" for region {region}" if region else ""))
 
         genotypes = allel.GenotypeArray(vcf['calldata/GT'])
-        from ._ploidy_check import check_diploid_encoding
+        from ._warnings import check_diploid_encoding
         check_diploid_encoding(genotypes, sample_names=list(vcf['samples']),
                                source=f"VCF '{path}'")
         num_variants, num_samples, _ = genotypes.shape
@@ -671,7 +671,7 @@ class HaplotypeMatrix:
         # the (n_dip, 2) -> 2 * n_dip haplotype layout all assume diploid.
         # Reject non-diploid ploidy and genuine haploid calls, and warn when the
         # data are polymorphic yet hold no heterozygote (a hemizygous tell).
-        from ._ploidy_check import check_diploid_encoding
+        from ._warnings import check_diploid_encoding
         check_diploid_encoding(gt, sample_names=sample_names,
                                source=f"zarr store '{path}'")
 
