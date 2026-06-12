@@ -51,11 +51,10 @@ def _format_sample_list(names, idx, limit=6):
 
 
 def _require_diploid_ploidy(ploidy, source):
-    """Raise unless the genotype ploidy axis is 2.
+    """Raise unless the ploidy axis is 2.
 
-    Factored out so the streaming reader (which knows the ploidy axis from
-    store metadata, without reading any genotypes) and the value-based
-    detector share one message and one tracking link.
+    Shared by the streaming reader (ploidy from store metadata) and the
+    value-based detector so the message lives in one place.
     """
     if ploidy != 2:
         raise ValueError(
@@ -110,13 +109,9 @@ def check_diploid_encoding(gt, sample_names=None, source="input"):
     called0 = a0 >= 0
     called1 = a1 >= 0
 
-    # scikit-allel pads a true haploid call (GT=1) as [allele, -1]: the first
-    # allele present, the second missing, never the reverse. A partially
-    # missing diploid call (GT=1/.) produces the same [allele, -1] shape, so
-    # the padding shape alone is not proof. A sample is haploid only if its
-    # first allele appears somewhere yet its second allele is missing at every
-    # site -- any fully called or reverse half-call genotype (which padding can
-    # never produce) means the second allele was called and rules it out.
+    # scikit-allel pads a haploid call (GT=1) as [allele, -1], but a half-missing
+    # diploid (GT=1/.) looks identical. So a sample is haploid only if its second
+    # allele is missing at every site; one full or [-1, allele] call rules it out.
     haploid_sample = called0.any(axis=0) & ~called1.any(axis=0)
     if haploid_sample.any():
         idx = np.nonzero(haploid_sample)[0]
@@ -128,13 +123,10 @@ def check_diploid_encoding(gt, sample_names=None, source="input"):
             f"haplotype count and biasing every statistic. Haploid / "
             f"hemizygous input is not yet supported (see {ISSUE_URL}).")
 
-    # Ambiguous case: the data are polymorphic but no genotype is ever
-    # heterozygous. True for a hemizygous sample set encoded as pseudo-diploid
-    # homozygotes (e.g. a male-only X chromosome), and also for a fully inbred
-    # panel -- so warn rather than raise. Checked dataset-wide because a single
-    # real heterozygote anywhere rules the encoding out, which keeps this from
-    # firing on ordinary diploid data where some individuals are incidentally
-    # homozygous throughout a small region.
+    # Polymorphic but not one heterozygote anywhere: looks like hemizygous
+    # samples encoded as homozygous diploids (or a fully inbred panel), so warn
+    # rather than raise. Checked dataset-wide -- a single real het rules it out,
+    # so ordinary diploid data with a few all-homozygous samples stays quiet.
     carries_alt = (a0 > 0) | (a1 > 0)
     has_heterozygote = bool((called0 & called1 & (a0 != a1)).any())
     if carries_alt.any() and not has_heterozygote:
