@@ -385,18 +385,24 @@ def _compute_heterozygosity(mat, pops, use_genotypes=False):
         ref_counts.append(n_hap - alt)
         hap_sizes.append(n_hap)
 
+    # A site where a population has no genotyped individual (n_hap == 0, which
+    # missing data allows even after the union-biallelic filter) makes the
+    # haploid-size denominator zero. The alt/ref counts are also zero there, so
+    # the site's heterozygosity contribution is zero; clamp the denominator to
+    # avoid 0/0 = NaN poisoning the per-site sum.
     result = {}
     for ii in range(num_pops):
         for jj in range(ii, num_pops):
             if ii == jj:
+                denom = cp.maximum(hap_sizes[ii] * (hap_sizes[ii] - 1), 1.0)
                 val = float(cp.sum(
-                    2.0 * ref_counts[ii] * alt_counts[ii]
-                    / (hap_sizes[ii] * (hap_sizes[ii] - 1))
+                    2.0 * ref_counts[ii] * alt_counts[ii] / denom
                 ).get())
             else:
+                denom = cp.maximum(hap_sizes[ii] * hap_sizes[jj], 1.0)
                 val = float(cp.sum(
                     (ref_counts[ii] * alt_counts[jj] + alt_counts[ii] * ref_counts[jj])
-                    / (hap_sizes[ii] * hap_sizes[jj])
+                    / denom
                 ).get())
             result[f"H_{ii}_{jj}"] = val
 

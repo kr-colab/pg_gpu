@@ -196,13 +196,22 @@ void k(const double*g, double*ns, double*D, double*A, double*Bv,
     Vcoef[idx]=d*(1.+a)+.25*MB;
 }''', "k", options=("-std=c++11",))
 
+# The between-pop Dz denominators are products of falling factorials of the
+# per-pair valid sample counts (n, n*(n-1), n*(n-1)*(n-2)). With missing data a
+# pop's valid count at a pair can fall below the order of its factorial -- e.g.
+# a 14-sample pop with only two individuals typed at both loci gives
+# n*(n-1)*(n-2)=0 -- so the unguarded ratio was 0/0 = NaN, and one such pair
+# poisoned the whole bin sum. A degenerate pair contributes nothing, so emit 0
+# when the denominator is non-positive (matching _DZ_III_KERN and the pi2
+# kernels, which already guard the same way).
 _DZ_DISTINCT_KERN = cp.RawKernel(r'''
 extern "C" __global__
 void k(const double*ns,const double*D,const double*A,const double*Bv,
        const int*I,const int*J,const int*K,double*out,const int N){
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
     int i=I[t],j=J[t],k=K[t];
-    out[t]=2.*D[i]*Bv[j]*A[k]/(ns[i]*(ns[i]-1.)*ns[j]*ns[k]);
+    double d=ns[i]*(ns[i]-1.)*ns[j]*ns[k];
+    out[t]=(d>0.0)?2.*D[i]*Bv[j]*A[k]/d:0.0;
 }''', "k", options=("-std=c++11",))
 
 _DZ_IIJ_KERN = cp.RawKernel(r'''
@@ -211,7 +220,8 @@ void k(const double*ns,const double*Ucoef,const double*A,
        const int*I,const int*J,double*out,const int N){
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
     int i=I[t],j=J[t];
-    out[t]=2.*Ucoef[i]*A[j]/(ns[j]*ns[i]*(ns[i]-1.)*(ns[i]-2.));
+    double d=ns[j]*ns[i]*(ns[i]-1.)*(ns[i]-2.);
+    out[t]=(d>0.0)?2.*Ucoef[i]*A[j]/d:0.0;
 }''', "k", options=("-std=c++11",))
 
 _DZ_IJI_KERN = cp.RawKernel(r'''
@@ -220,7 +230,8 @@ void k(const double*ns,const double*Vcoef,const double*Bv,
        const int*I,const int*J,double*out,const int N){
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
     int i=I[t],j=J[t];
-    out[t]=2.*Vcoef[i]*Bv[j]/(ns[j]*ns[i]*(ns[i]-1.)*(ns[i]-2.));
+    double d=ns[j]*ns[i]*(ns[i]-1.)*(ns[i]-2.);
+    out[t]=(d>0.0)?2.*Vcoef[i]*Bv[j]/d:0.0;
 }''', "k", options=("-std=c++11",))
 
 _DZ_IJJ_KERN = cp.RawKernel(r'''
@@ -229,7 +240,8 @@ void k(const double*ns,const double*D,const double*Wjj,
        const int*I,const int*J,double*out,const int N){
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
     int i=I[t],j=J[t];
-    out[t]=2.*D[i]*Wjj[j]/(ns[j]*(ns[j]-1.)*ns[i]*(ns[i]-1.));
+    double d=ns[j]*(ns[j]-1.)*ns[i]*(ns[i]-1.);
+    out[t]=(d>0.0)?2.*D[i]*Wjj[j]/d:0.0;
 }''', "k", options=("-std=c++11",))
 
 _DZ_III_KERN = cp.RawKernel(r'''
@@ -516,7 +528,14 @@ class _GenoPopFlat:
         def flat(arrs):
             return cp.ascontiguousarray(cp.concatenate(arrs))
 
-        inv_n = [1.0 / p.n for p in pops]
+        # Guard n==0 (a population with no individual genotyped at both loci of
+        # a pair, which missing data allows): 1/n would be inf and feed NaN into
+        # the normalized-frequency pi2 kernels (alldiff, iikl, ijkk, shared,
+        # none of which divide by a per-pair denominator that could catch it).
+        # The allele counts pA..qB are 0 whenever n is 0, so a maximum(n,1)
+        # divisor yields frequency 0 and the degenerate pair contributes
+        # nothing -- matching the falling-factorial guards used elsewhere.
+        inv_n = [1.0 / cp.maximum(p.n, 1.0) for p in pops]
         # Normalized frequencies for between-pop factored kernels
         self.p = flat([pops[i].pA * inv_n[i] for i in range(P)])
         self.r = flat([pops[i].qA * inv_n[i] for i in range(P)])
