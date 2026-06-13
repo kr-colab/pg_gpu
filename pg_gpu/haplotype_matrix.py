@@ -463,7 +463,7 @@ class HaplotypeMatrix:
         HaplotypeMatrix
             Phased haplotype data with sample names stored.
         """
-        from ._memory_warning import _maybe_memory_warn
+        from ._warnings import _maybe_memory_warn
         _maybe_memory_warn(path, region=region)
         if fields:
             tag_to_path, unknown_tags = _classify_vcf_qc_tags(path, fields)
@@ -478,8 +478,10 @@ class HaplotypeMatrix:
                              + (f" for region {region}" if region else ""))
 
         genotypes = allel.GenotypeArray(vcf['calldata/GT'])
-        num_variants, num_samples, ploidy = genotypes.shape
-        assert ploidy == 2
+        from ._warnings import check_diploid_encoding
+        check_diploid_encoding(genotypes, sample_names=list(vcf['samples']),
+                               source=f"VCF '{path}'")
+        num_variants, num_samples, _ = genotypes.shape
 
         haplotypes = np.empty((num_variants, 2 * num_samples), dtype=genotypes.dtype)
         haplotypes[:, :num_samples] = genotypes[:, :, 0]
@@ -665,14 +667,13 @@ class HaplotypeMatrix:
         positions = data['positions']
         sample_names = data['samples']
 
-        if gt.shape[2] != 2:
-            # The eager and streaming readers, the kvikio sample-subset
-            # gather, and the (n_dip, 2) -> 2 * n_dip haplotype layout all
-            # assume diploid. Haploid / polyploid stores need a different
-            # gather path and are not currently supported.
-            raise ValueError(
-                f"HaplotypeMatrix.from_zarr requires diploid (ploidy 2) "
-                f"genotypes; got ploidy {gt.shape[2]}.")
+        # The eager and streaming readers, the kvikio sample-subset gather, and
+        # the (n_dip, 2) -> 2 * n_dip haplotype layout all assume diploid.
+        # Reject non-diploid ploidy and genuine haploid calls, and warn when the
+        # data are polymorphic yet hold no heterozygote (a hemizygous tell).
+        from ._warnings import check_diploid_encoding
+        check_diploid_encoding(gt, sample_names=sample_names,
+                               source=f"zarr store '{path}'")
 
         hm = build_haplotype_matrix(
             gt, positions,
