@@ -169,3 +169,63 @@ def test_normal_vcf_loads_without_warning(simple_vcf_file):
         warnings.simplefilter("error", HaploidDataWarning)
         hm = HaplotypeMatrix.from_vcf(simple_vcf_file)
     assert hm.num_haplotypes == 4  # 2 diploid samples -> 4 haplotypes
+
+
+# --- integration through the zarr loaders (dump to VCZ and reload) ----------
+#
+# from_vcf goes through scikit-allel; from_zarr reads a VCZ store via a separate
+# path, so the detector is wired in independently and needs its own coverage.
+
+
+def _to_vcz(hap, tmp_path, name="store.vcz"):
+    """Write a (n_hap, n_var) haplotype matrix to a VCZ store and return its
+    path. The matrix is paired into diploids as (hap[i], hap[i + n_samples]),
+    so a first half equal to the second half yields homozygous individuals."""
+    path = str(tmp_path / name)
+    hm = HaplotypeMatrix(np.asarray(hap, dtype=np.int8),
+                         np.arange(1, hap.shape[1] + 1) * 100, 100,
+                         hap.shape[1] * 100,
+                         samples=[f"s{i}" for i in range(hap.shape[0] // 2)])
+    hm.to_zarr(path, format="vcz", contig_name="chr1")
+    return path
+
+
+@pytest.fixture
+def pseudo_diploid_vcz(tmp_path):
+    # First half of rows == second half -> every individual is homozygous;
+    # the alternate allele is present, so it is polymorphic but never het.
+    block = _i8([[1, 0], [0, 1], [1, 1]])  # 3 samples, 2 variants
+    return _to_vcz(np.vstack([block, block]), tmp_path)
+
+
+def test_haplotype_from_zarr_warns_pseudo_diploid(pseudo_diploid_vcz):
+    with pytest.warns(HaploidDataWarning, match="no heterozygous"):
+        HaplotypeMatrix.from_zarr(pseudo_diploid_vcz)
+
+
+def test_genotype_from_zarr_warns_pseudo_diploid(pseudo_diploid_vcz):
+    with pytest.warns(HaploidDataWarning, match="no heterozygous"):
+        GenotypeMatrix.from_zarr(pseudo_diploid_vcz)
+
+
+def test_normal_diploid_zarr_loads_without_warning(tmp_path):
+    # Individual 0 = (row0, row2) is heterozygous at variant 0, so the data is
+    # genuinely diploid and must reload quietly.
+    hap = _i8([[1, 0], [0, 1], [0, 0], [1, 1]])  # 2 individuals, 2 variants
+    path = _to_vcz(hap, tmp_path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", HaploidDataWarning)
+        hm = HaplotypeMatrix.from_zarr(path)
+    assert hm.num_haplotypes == 4
+
+
+def test_from_zarr_rejects_non_diploid_ploidy(tmp_path):
+    # A genuinely haploid store has a ploidy-1 call_genotype axis; from_zarr
+    # rejects it from the store metadata.
+    from pg_gpu.zarr_io import write_vcz
+    gt = _i8([[[1], [0], [1]], [[0], [1], [1]]])  # (2 var, 3 samples, ploidy 1)
+    path = str(tmp_path / "haploid.vcz")
+    write_vcz(path, gt, np.array([100, 200]),
+              samples=["s0", "s1", "s2"], contig_name="chr1")
+    with pytest.raises(ValueError, match="ploidy 1"):
+        HaplotypeMatrix.from_zarr(path)
