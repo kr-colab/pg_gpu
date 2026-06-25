@@ -46,9 +46,13 @@ def moments_stats():
 @pytest.fixture(scope="module")
 def gpu_stats():
     """Compute pg_gpu stats once for the module."""
+    # The moments fixtures use the haplotype estimator (use_genotypes=False),
+    # so pin pg_gpu to the same estimator. The default is use_genotypes=True
+    # (to match moments' own default), which would compute the genotype
+    # estimator and not be comparable to the moments-haplotype reference.
     return compute_ld_statistics(
         VCF, pop_file=POP_FILE, pops=POPS,
-        bp_bins=BP_BINS, report=False,
+        bp_bins=BP_BINS, use_genotypes=False, report=False,
     )
 
 
@@ -127,9 +131,10 @@ class TestPopAssignmentAlias:
     them through the same code path."""
 
     def test_pop_assignment_matches_pop_file(self, gpu_stats):
+        # Match the gpu_stats fixture's estimator so the two are comparable.
         alias = compute_ld_statistics(
             VCF, pop_assignment=POP_FILE, pops=POPS,
-            bp_bins=BP_BINS, report=False,
+            bp_bins=BP_BINS, use_genotypes=False, report=False,
         )
         # Same VCF + same pop file -> identical structure (bins,
         # stats, pops) and per-bin sums equal to machine precision.
@@ -239,7 +244,7 @@ def three_pop_data():
             bp_bins=bp_bins, use_genotypes=False, report=False)
         g_stats = compute_ld_statistics(
             vcf, pop_file=pop_file, pops=pops,
-            bp_bins=bp_bins, report=False)
+            bp_bins=bp_bins, use_genotypes=False, report=False)
         yield m_stats, g_stats, pops
     finally:
         os.unlink(vcf)
@@ -257,7 +262,7 @@ def four_pop_data():
             bp_bins=bp_bins, use_genotypes=False, report=False)
         g_stats = compute_ld_statistics(
             vcf, pop_file=pop_file, pops=pops,
-            bp_bins=bp_bins, report=False)
+            bp_bins=bp_bins, use_genotypes=False, report=False)
         yield m_stats, g_stats, pops
     finally:
         os.unlink(vcf)

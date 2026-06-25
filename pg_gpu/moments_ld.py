@@ -39,7 +39,7 @@ from . import ld_statistics
 
 def compute_ld_statistics(
     vcf_file=None, rec_map_file=None, pop_file=None, pops=None,
-    r_bins=None, bp_bins=None, use_genotypes=False,
+    r_bins=None, bp_bins=None, use_genotypes=True,
     report=True, ac_filter=True, haplotype_matrix=None,
     genotype_matrix=None, accessible_bed=None,
     pop_assignment=None,
@@ -72,6 +72,19 @@ def compute_ld_statistics(
     The returned dict has the same structure (keys 'bins', 'sums', 'stats',
     'pops') and can be passed directly to moments inference functions.
 
+    .. important::
+       ``use_genotypes`` defaults to ``True``, matching
+       ``moments.LD.Parsing.compute_ld_statistics``. This is deliberate:
+       the two functions compute *different estimators*
+       (``True`` = unphased 9-way genotype counts, ``False`` = phased
+       4-way haplotype counts), which agree in expectation but give
+       different values on finite data. Matching the moments default means
+       a bare import swap reproduces moments exactly. If your data are
+       phased and you want the haplotype estimator, you must pass
+       ``use_genotypes=False`` here **and** to moments -- setting it on
+       only one side silently compares two different estimators (a
+       discrepancy that looks like a bug but is not).
+
     Parameters
     ----------
     vcf_file : str, optional
@@ -92,9 +105,13 @@ def compute_ld_statistics(
         Recombination rate bin edges (Morgans).
     bp_bins : array-like, optional
         Base-pair distance bin edges (alternative to r_bins).
-    use_genotypes : bool
-        If True, use diploid genotype counts (9-way) instead of haplotype
-        counts (4-way). Requires unphased diploid data.
+    use_genotypes : bool, default True
+        Selects the estimator, and defaults to ``True`` to match
+        ``moments.LD.Parsing.compute_ld_statistics``. If True, use diploid
+        genotype counts (9-way), the correct estimator for unphased data.
+        If False, use haplotype counts (4-way), which requires phased data.
+        The two estimators differ on finite data; keep this flag identical
+        on both the pg_gpu and moments sides of any comparison.
     report : bool
         Print progress.
     ac_filter : bool
