@@ -33,6 +33,18 @@ unchanged. The validation tests run pg_gpu's parser against
 ``moments``'s on the same VCFs and confirm machine precision agreement
 (max relative error :math:`< 10^{-11}`).
 
+.. important::
+
+   Both functions take a ``use_genotypes`` flag that selects the
+   *estimator*: ``True`` (the default on both sides) uses unphased 9-way
+   genotype counts, ``False`` uses phased 4-way haplotype counts. The two
+   agree in expectation but give different values on finite data. pg_gpu
+   defaults to ``True`` specifically to match ``moments.LD`` so a bare
+   import swap reproduces it. If you override the flag, set it the **same**
+   on both the pg_gpu and moments sides -- mixing them (e.g. phased
+   haplotype counts on one side, genotype counts on the other) silently
+   compares two different estimators and looks like a bug that is not one.
+
 The packaged script is an end-to-end demonstration: it simulates 200
 replicate 1 Mb regions under a three-population model with recent
 admixture using ``msprime``, parses each replicate with pg_gpu, fits
