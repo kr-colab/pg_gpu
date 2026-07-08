@@ -872,24 +872,6 @@ def pi_components(haplotypes, n_total_sites=None, n_haplotypes_full=None):
     return total_diffs, total_comps, total_missing, n_sites
 
 
-def _dac_and_n(haplotypes):
-    """Shared helper: derived allele counts and valid sample counts per site.
-
-    Uses adaptive chunking from _memutil for memory safety on large matrices.
-
-    Parameters
-    ----------
-    haplotypes : cupy.ndarray, int8, shape (n_hap, n_var)
-
-    Returns
-    -------
-    dac : cupy.ndarray, int64, shape (n_var,)
-    n_valid : cupy.ndarray, int64, shape (n_var,)
-    """
-    from ._memutil import dac_and_n
-    return dac_and_n(haplotypes)
-
-
 
 def pi(haplotype_matrix: HaplotypeMatrix,
        population: Optional[Union[str, list]] = None,
@@ -1137,24 +1119,18 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
+    from ._memutil import allele_counts
     if missing_data == 'exclude':
         matrix = matrix.exclude_missing_sites()
         if matrix.num_variants == 0:
             return 0
-        allele_counts = cp.sum(matrix.haplotypes, axis=0)
 
-    else:  # missing_data == 'include'
-        derived_counts, n_valid_per_site = _dac_and_n(matrix.haplotypes)
-        sites_with_data = n_valid_per_site >= 1
-
-        if not cp.any(sites_with_data):
-            return 0
-
-        valid_sites = cp.where(sites_with_data)[0]
-        return int(cp.sum(derived_counts[valid_sites] == 1).get())
-
-    # For exclude mode
-    return int(cp.sum(allele_counts == 1).get())
+    ac, n_valid = allele_counts(matrix.haplotypes)
+    # A singleton is a derived allele carried by exactly one sample at a
+    # segregating site (count == 1, which is < n whenever n >= 2). A
+    # multiallelic site can contribute more than one singleton.
+    derived = ac[:, 1:]
+    return int(cp.sum((derived == 1) & (derived < n_valid[:, None])).get())
 
 
 def diversity_stats(haplotype_matrix: HaplotypeMatrix,
@@ -1620,18 +1596,22 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    dac_i, n_valid_i = _dac_and_n(matrix.haplotypes)
-    dac = dac_i.astype(cp.float64)
+    from ._memutil import allele_counts
+    ac, n_valid_i = allele_counts(matrix.haplotypes)
+    if ac.shape[1] < 2:  # no derived alleles present anywhere
+        return 0.0
     n_valid = n_valid_i.astype(cp.float64)
-
+    # Per-allele DAF: the frequency of each individual derived allele. NOTE
+    # (issue #100): "max DAF" is the frequency of the single most common derived
+    # allele, not the total non-ancestral fraction of the sample.
+    freq = ac[:, 1:].astype(cp.float64) / cp.maximum(n_valid[:, None], 1.0)
+    present = ac[:, 1:] > 0
     if missing_data == 'exclude':
-        complete = n_valid_i == matrix.haplotypes.shape[0]
-        freqs = cp.where(complete, dac / n_valid, -1.0)
+        keep = present & (n_valid_i[:, None] == matrix.haplotypes.shape[0])
+        freq = cp.where(keep, freq, -1.0)
     else:
-        usable = n_valid > 0
-        freqs = cp.where(usable, dac / n_valid, 0.0)
-
-    return float(cp.max(freqs).get())
+        freq = cp.where(present & (n_valid_i[:, None] > 0), freq, 0.0)
+    return float(cp.max(freq).get())
 
 
 def haplotype_count(haplotype_matrix: HaplotypeMatrix,
@@ -1718,18 +1698,20 @@ def daf_histogram(matrix, n_bins: int = 20,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    dac_i, n_valid_i = _dac_and_n(matrix.haplotypes)
-    dac = dac_i.astype(cp.float64)
+    from ._memutil import allele_counts
+    ac, n_valid_i = allele_counts(matrix.haplotypes)
     n_valid = n_valid_i.astype(cp.float64)
-
+    # Per-allele DAF: each derived allele contributes its own frequency. NOTE
+    # (issue #100): this histograms individual derived-allele frequencies (was
+    # the per-site total non-ancestral fraction), and only present derived
+    # alleles are binned (no 0-frequency spike from monomorphic sites).
+    freq = ac[:, 1:].astype(cp.float64) / cp.maximum(n_valid[:, None], 1.0)
+    present = ac[:, 1:] > 0
     if missing_data == 'exclude':
-        complete = n_valid_i == matrix.haplotypes.shape[0]
-        dafs = (dac / n_valid)[complete]
+        keep = present & (n_valid_i[:, None] == matrix.haplotypes.shape[0])
     else:
-        usable = n_valid > 0
-        dafs = cp.where(usable, dac / n_valid, 0.0)
-
-    return _histogram_from_dafs(dafs, n_bins)
+        keep = present & (n_valid_i[:, None] > 0)
+    return _histogram_from_dafs(freq[keep], n_bins)
 
 
 def diplotype_frequency_spectrum(genotype_matrix,
@@ -1874,22 +1856,23 @@ def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    dac_i, n_valid_i = _dac_and_n(matrix.haplotypes)
-    dac = dac_i.astype(cp.float64)
+    from ._memutil import allele_counts
+    ac, n_valid_i = allele_counts(matrix.haplotypes)
     n_valid = n_valid_i.astype(cp.float64)
     n = matrix.haplotypes.shape[0]
+    ac_f = ac.astype(cp.float64)
 
+    # He = 1 - sum_a p_a^2 over ALL alleles (per-allele; reduces to 2p(1-p) for
+    # biallelic). The old 2p(1-p) with p = total-derived collapsed multiallelic
+    # alleles into one class (issue #100).
     if missing_data == 'include':
-        p = cp.where(n_valid > 0, dac / n_valid, 0.0)
-        he = 2.0 * p * (1.0 - p)
-        he = cp.where(n_valid >= 2, he, cp.nan)
+        p_sq = (ac_f ** 2).sum(axis=1) / cp.maximum(n_valid, 1.0) ** 2
+        he = cp.where(n_valid >= 2, 1.0 - p_sq, cp.nan)
     else:
-        p = dac / n
-        he = 2.0 * p * (1.0 - p)
-
+        p_sq = (ac_f ** 2).sum(axis=1) / (n ** 2)
+        he = 1.0 - p_sq
         if missing_data == 'exclude':
-            incomplete = n_valid_i < n
-            he[incomplete] = cp.nan
+            he = cp.where(n_valid_i < n, cp.nan, he)
 
     return he.get()
 
@@ -2070,21 +2053,19 @@ def mu_sfs(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    dac, n_valid = _dac_and_n(matrix.haplotypes)
-
+    from ._memutil import allele_counts
+    ac, n_valid = allele_counts(matrix.haplotypes)
+    derived = ac[:, 1:]
+    nn = n_valid[:, None]
+    # per-derived-allele edge/segregating classification (mutation-count basis)
+    is_seg = (derived > 0) & (derived < nn)
+    is_edge = is_seg & ((derived == 1) | (derived == nn - 1))
     if missing_data == 'exclude':
-        n = matrix.haplotypes.shape[0]
-        complete = n_valid == n
-        is_seg = complete & (dac > 0) & (dac < n)
-        is_edge = complete & ((dac == 1) | (dac == n - 1))
-    else:
-        usable = n_valid >= 2
-        is_seg = usable & (dac > 0) & (dac < n_valid)
-        is_edge = usable & ((dac == 1) | (dac == n_valid - 1))
+        complete = (n_valid == matrix.haplotypes.shape[0])[:, None]
+        is_seg = is_seg & complete
+        is_edge = is_edge & complete
 
-    n_seg = cp.sum(is_seg)
-    if int(n_seg.get()) == 0:
+    n_seg = int(cp.sum(is_seg).get())
+    if n_seg == 0:
         return 0.0
-
-    n_edge = cp.sum(is_edge)
-    return float((n_edge.astype(cp.float64) / n_seg.astype(cp.float64)).get())
+    return float(cp.sum(is_edge).get() / n_seg)

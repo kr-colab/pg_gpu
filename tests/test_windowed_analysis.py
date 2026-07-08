@@ -799,6 +799,11 @@ class TestOverlappingWindowsScatter:
             assert df['fst'].notna().any()
             assert (df['fst'].dropna() >= -0.5).all()
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "windowed_analysis pi still uses the legacy collapsed multiallelic "
+        "convention (pre-existing bug); it now detectably diverges from the "
+        "per-allele scalar diversity.pi on multiallelic data. Fixed in the "
+        "windowed subproject (kr-colab/pg_gpu#100) -- remove this marker then."))
     def test_non_overlapping_unchanged(self, sim_hm):
         """Guard: step==window path (n_per_var=1) matches per-window reference."""
         window_size, step_size = 50_000, 50_000

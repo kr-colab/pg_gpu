@@ -255,6 +255,47 @@ class TestPerAlleleSFS:
         assert not np.isclose(pi_sfs, pi_scalar, rtol=1e-6)
 
 
+class TestMultiallelicConsumers:
+    """singleton_count / heterozygosity_expected / max_daf / mu_sfs / daf_histogram."""
+
+    def test_singleton_count_per_allele(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        ac = allel.HaplotypeArray(ts.genotype_matrix()).count_alleles()
+        # per-allele singletons: derived alleles carried by exactly one sample
+        ref = int(np.sum(ac[:, 1:] == 1))
+        assert diversity.singleton_count(hm) == ref
+
+    def test_heterozygosity_expected_per_allele(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        n = ts.num_samples
+        ac = np.asarray(allel.HaplotypeArray(ts.genotype_matrix()).count_alleles(),
+                        dtype=float)
+        # He = 1 - sum_a p_a^2 over all alleles (no missing so n_valid = n)
+        ref = 1.0 - (ac ** 2).sum(axis=1) / (n ** 2)
+        np.testing.assert_allclose(diversity.heterozygosity_expected(hm), ref, rtol=1e-9)
+
+    def test_heterozygosity_expected_triallelic(self):
+        # {0:2, 1:1, 2:1}, n=4: He = 1 - (2^2 + 1 + 1)/16 = 1 - 6/16 = 0.625
+        hm = HaplotypeMatrix(np.array([[0], [0], [1], [2]], dtype=np.int8),
+                             np.array([100]), 0, 200)
+        np.testing.assert_allclose(diversity.heterozygosity_expected(hm)[0],
+                                   0.625, rtol=1e-12)
+
+    def test_max_daf_is_single_derived_allele(self):
+        # {0:1, 1:5, 2:4}, n=10: per-allele max DAF = 0.5 (allele 1), NOT the
+        # total non-ancestral fraction 0.9.
+        col = [[0]] + [[1]] * 5 + [[2]] * 4
+        hm = HaplotypeMatrix(np.array(col, dtype=np.int8), np.array([100]), 0, 200)
+        np.testing.assert_allclose(diversity.max_daf(hm), 0.5, rtol=1e-12)
+
+    def test_mu_sfs_and_daf_histogram_run(self, multiallelic_hm):
+        _, hm = multiallelic_hm
+        assert 0.0 <= diversity.mu_sfs(hm) <= 1.0
+        hist, edges = diversity.daf_histogram(hm)
+        assert np.isclose(hist.sum(), 1.0)
+        assert len(edges) == len(hist) + 1
+
+
 class TestMultiallelicEdgeCases:
     """Hand-built sites: per-allele pi and mutation-count segregating."""
 
