@@ -24,8 +24,12 @@ simulations/
 commit_message.txt
 *.png
 *.csv
+
 CLAUDE.md
 TODO_*.md
+.claude/
+plans/
+debug/
 
 # Local-only design specs and brainstorming notes
 docs/superpowers/
