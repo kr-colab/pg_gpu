@@ -1,0 +1,221 @@
+"""
+Multiallelic-site correctness for the diversity family (issue #100).
+
+Oracle: tskit (per-allele pi/SFS; mutation-count segregating/Watterson). Also
+scikit-allel where it coincides (pi). The biallelic control confirms parity on
+biallelic data. Fixtures live in conftest.py (multiallelic_ts / multiallelic_hm).
+"""
+
+import numpy as np
+import allel
+import pytest
+
+from pg_gpu import HaplotypeMatrix
+from pg_gpu import diversity
+
+
+def _a1(n):
+    return float(np.sum(1.0 / np.arange(1, n)))
+
+
+def _strict_biallelic_mask(G):
+    """Sites whose sample alleles are exactly {0, 1}."""
+    return (G.max(axis=1) == 1) & (G == 0).any(axis=1) & (G == 1).any(axis=1)
+
+
+def _expected_segregating(hap, exclude=False):
+    """Independent numpy reference: mutation-count segregating sites.
+
+    hap is (n_hap, n_var) with -1 for missing. ``exclude`` drops any variant
+    with a missing genotype first (the missing_data='exclude' semantics).
+    """
+    hap = np.asarray(hap)
+    total = 0
+    for j in range(hap.shape[1]):
+        col = hap[:, j]
+        if exclude and np.any(col < 0):
+            continue
+        valid = col[col >= 0]
+        if valid.size < 2:
+            continue
+        total += np.unique(valid).size - 1
+    return total
+
+
+def _expected_pi(hap):
+    """Independent numpy reference: per-site per-allele mean pairwise difference."""
+    hap = np.asarray(hap)
+    total = 0.0
+    for j in range(hap.shape[1]):
+        valid = hap[:, j][hap[:, j] >= 0]
+        n = valid.size
+        if n < 2:
+            continue
+        _, counts = np.unique(valid, return_counts=True)
+        total += 1.0 - float(np.sum(counts * (counts - 1))) / (n * (n - 1))
+    return total
+
+
+class TestDiversityCoreVsTskit:
+    """pi / segregating / Watterson / Tajima numerator against tskit."""
+
+    def test_fixture_is_multiallelic(self, multiallelic_hm):
+        ts, _ = multiallelic_hm
+        G = ts.genotype_matrix()
+        n_alleles = np.array([np.unique(G[i]).size for i in range(ts.num_sites)])
+        assert (n_alleles >= 3).sum() > 0, "fixture has no multiallelic sites"
+
+    def test_pi_matches_tskit(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        pi_pg = diversity.pi(hm, span_normalize=False)
+        pi_ts = float(ts.diversity(mode="site", span_normalise=False))
+        np.testing.assert_allclose(pi_pg, pi_ts, rtol=1e-9)
+
+    def test_pi_matches_allel(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        ac = allel.HaplotypeArray(ts.genotype_matrix()).count_alleles()
+        pi_allel = float(np.nansum(allel.mean_pairwise_difference(ac)))
+        np.testing.assert_allclose(diversity.pi(hm, span_normalize=False),
+                                   pi_allel, rtol=1e-9)
+
+    def test_segregating_matches_tskit_mutation_count(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        s_pg = diversity.segregating_sites(hm)
+        s_ts = ts.segregating_sites(mode="site", span_normalise=False)
+        assert s_pg == int(round(float(s_ts)))
+
+    def test_watterson_is_mutation_count_over_a1(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        # no missing data -> n_valid == n everywhere, so theta_w = S / a1(n)
+        s_ts = float(ts.segregating_sites(mode="site", span_normalise=False))
+        expected = s_ts / _a1(ts.num_samples)
+        np.testing.assert_allclose(diversity.theta_w(hm, span_normalize=False),
+                                   expected, rtol=1e-9)
+
+    def test_tajimas_d_matches_tskit(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        ct = diversity._compute_thetas(hm, ("pi", "watterson"))
+        num_pg = ct["thetas"]["pi"] - ct["thetas"]["watterson"]
+        pi_ts = float(ts.diversity(mode="site", span_normalise=False))
+        s_ts = float(ts.segregating_sites(mode="site", span_normalise=False))
+        num_ts = pi_ts - s_ts / _a1(ts.num_samples)
+        np.testing.assert_allclose(num_pg, num_ts, rtol=1e-9)
+        # Full D matches tskit exactly on complete data: tskit plugs the
+        # mutation-count S straight into the classic Tajima variance
+        # sqrt(a*S + (b/c)*S(S-1)), which is what pg_gpu's Achaz framework
+        # reduces to for the (pi, watterson) pair with the same S.
+        np.testing.assert_allclose(diversity.tajimas_d(hm),
+                                   float(ts.Tajimas_D(mode="site")), rtol=1e-9)
+
+    def test_theta_h_matches_tskit_sfs(self, multiallelic_hm):
+        # oracle: tskit per-allele SFS through the theta_H weight 2*i^2/(n(n-1))
+        ts, hm = multiallelic_hm
+        xi = ts.allele_frequency_spectrum(polarised=True, span_normalise=False)
+        n = ts.num_samples
+        i = np.arange(len(xi), dtype=float)
+        ref = float(np.sum(xi * 2.0 * i ** 2 / (n * (n - 1))))
+        np.testing.assert_allclose(diversity.theta_h(hm, span_normalize=False),
+                                   ref, rtol=1e-9)
+
+    def test_theta_l_matches_tskit_sfs(self, multiallelic_hm):
+        # oracle: tskit per-allele SFS through the theta_L weight i/(n-1)
+        ts, hm = multiallelic_hm
+        xi = ts.allele_frequency_spectrum(polarised=True, span_normalise=False)
+        n = ts.num_samples
+        i = np.arange(len(xi), dtype=float)
+        ref = float(np.sum(xi * i / (n - 1)))
+        np.testing.assert_allclose(diversity.theta_l(hm, span_normalize=False),
+                                   ref, rtol=1e-9)
+
+
+class TestBiallelicControl:
+    """On strict-biallelic sites, pg_gpu matches both tskit and scikit-allel."""
+
+    def test_biallelic_pi_and_segregating(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        G = ts.genotype_matrix()
+        nonbi = np.where(~_strict_biallelic_mask(G))[0].astype(np.int32)
+        ts_bi = ts.delete_sites(nonbi)
+        hm_bi = hm.apply_biallelic_filter()
+
+        # tskit oracle
+        np.testing.assert_allclose(
+            diversity.pi(hm_bi, span_normalize=False),
+            float(ts_bi.diversity(mode="site", span_normalise=False)), rtol=1e-9)
+        assert diversity.segregating_sites(hm_bi) == int(round(
+            float(ts_bi.segregating_sites(mode="site", span_normalise=False))))
+
+        # scikit-allel oracle
+        ac_bi = allel.HaplotypeArray(G[_strict_biallelic_mask(G)]).count_alleles()
+        np.testing.assert_allclose(
+            diversity.pi(hm_bi, span_normalize=False),
+            float(np.nansum(allel.mean_pairwise_difference(ac_bi))), rtol=1e-9)
+
+
+class TestMissingData:
+    """Missing genotypes (-1): the include per-site path and the exclude filter."""
+
+    # cols: biallelic+missing / triallelic+missing / biallelic+missing /
+    #       mostly-missing (n_valid<2) / complete triallelic / complete monomorphic
+    HAP = np.array([
+        [0, 0, 1, 1, -1, -1],
+        [0, 1, 2, -1, -1, -1],
+        [0, 0, 0, 1, -1, -1],
+        [-1, -1, -1, -1, -1, 0],
+        [0, 1, 0, 1, 2, 2],
+        [0, 0, 0, 0, 0, 0],
+    ], dtype=np.int8).T  # -> (6 haplotypes, 6 variants)
+
+    def _hm(self):
+        return HaplotypeMatrix(self.HAP.copy(), np.arange(6) * 100, 0, 600)
+
+    def test_segregating_include(self):
+        # per-site: n_valid>=2 sites counted by mutation count; the n_valid=1
+        # site is dropped. Reference: 1 + 2 + 1 + 0 + 2 + 0 = 6.
+        got = diversity.segregating_sites(self._hm(), missing_data="include")
+        assert got == _expected_segregating(self.HAP, exclude=False) == 6
+
+    def test_segregating_exclude(self):
+        # exclude drops any variant with missing -> only the 2 complete sites
+        # remain (triallelic -> 2, monomorphic -> 0). Reference: 2.
+        got = diversity.segregating_sites(self._hm(), missing_data="exclude")
+        assert got == _expected_segregating(self.HAP, exclude=True) == 2
+
+    def test_pi_include_with_missing(self):
+        # include mode uses per-site n_valid. Oracle 1: a numpy per-site
+        # per-allele reference. Oracle 2: allel (note HAP is n_hap x n_var, so
+        # transpose for allel's n_var x n_hap layout).
+        pi_pg = diversity.pi(self._hm(), span_normalize=False, missing_data="include")
+        np.testing.assert_allclose(pi_pg, _expected_pi(self.HAP), rtol=1e-9)
+        ac = allel.HaplotypeArray(self.HAP.T).count_alleles()
+        pi_allel = float(np.nansum(allel.mean_pairwise_difference(ac, fill=0)))
+        np.testing.assert_allclose(pi_pg, pi_allel, rtol=1e-9)
+
+
+class TestMultiallelicEdgeCases:
+    """Hand-built sites: per-allele pi and mutation-count segregating."""
+
+    def _hm(self, col):
+        hap = np.array(col, dtype=np.int8)
+        return HaplotypeMatrix(hap, np.array([100]), 0, 200)
+
+    def test_reference_absent_site(self):
+        # alleles {1, 2}, ancestral 0 absent: pi = 1 - (C(2,2)+C(2,2))/C(4,2)
+        hm = self._hm([[1], [1], [2], [2]])
+        np.testing.assert_allclose(diversity.pi(hm, span_normalize=False),
+                                   1.0 - 2.0 / 6.0, rtol=1e-12)
+        assert diversity.segregating_sites(hm) == 1  # 2 alleles -> 1 mutation
+
+    def test_triallelic_site(self):
+        # counts 2,1,1: pi = 1 - C(2,2)/C(4,2) = 1 - 1/6
+        hm = self._hm([[0], [0], [1], [2]])
+        np.testing.assert_allclose(diversity.pi(hm, span_normalize=False),
+                                   1.0 - 1.0 / 6.0, rtol=1e-12)
+        assert diversity.segregating_sites(hm) == 2  # 3 alleles -> 2 mutations
+
+    def test_tetraallelic_site(self):
+        # all four distinct: every pair differs -> pi = 1.0
+        hm = self._hm([[0], [1], [2], [3]])
+        np.testing.assert_allclose(diversity.pi(hm, span_normalize=False),
+                                   1.0, rtol=1e-12)
+        assert diversity.segregating_sites(hm) == 3

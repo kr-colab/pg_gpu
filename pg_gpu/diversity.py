@@ -190,9 +190,11 @@ def _achaz_variance(w1_name, w2_name, n, S):
 def _site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=None):
     """Compute per-site contribution for a theta estimator on GPU.
 
-    This is the single source of truth for what each estimator computes.
-    Both scalar (_compute_thetas) and windowed (_windowed_thetas_scatter)
-    paths call this function.
+    LEGACY (collapsed, biallelic) path: derived alleles are lumped into a single
+    ``dac`` count, so this is not multiallelic-correct. The scalar diversity path
+    now uses the per-allele ``_ac_contribution``; this function is retained only
+    for ``windowed_analysis``, which still imports it and is migrated to the
+    per-allele primitive in a later subproject.
 
     Parameters
     ----------
@@ -266,6 +268,81 @@ def _prepare_dac(matrix):
     return dac, n_valid, d, n_safe, seg, matrix.num_haplotypes
 
 
+def _prepare_allele_counts(matrix):
+    """Compute per-allele counts and valid counts on GPU.
+
+    Returns (ac, n_valid, n_hap): the per-allele count matrix (n_var, K),
+    per-site non-missing counts, and total haplotype count. Shared per-allele
+    intermediate for the scalar diversity path (multiallelic-correct).
+    """
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    from ._memutil import allele_counts
+    ac, n_valid = allele_counts(matrix.haplotypes)
+    return ac, n_valid, matrix.num_haplotypes
+
+
+def _ac_contribution(name, ac, n_valid, n_hap):
+    """Per-site contribution for a theta estimator from per-allele counts.
+
+    Per-allele single source of truth for the scalar theta path. ``ac`` is the
+    (n_var, K) per-allele count matrix (column 0 is the ancestral/reference
+    allele); ``n_valid`` the per-site non-missing count. Each estimator is a
+    closed-form reduction over the allele axis. pi and watterson use
+    self-correcting closed forms; the SFS-weighted estimators (theta_h, theta_l,
+    eta*) count only polymorphic derived alleles (0 < count < n), which excludes
+    fixed-derived alleles to match the per-allele SFS.
+
+    Returns a float64 (n_var,) array (zero for non-contributing sites).
+    """
+    n = n_valid.astype(cp.float64)
+    n_safe = cp.maximum(n, 2.0)
+    has_data = n_valid >= 2
+    dcols = ac[:, 1:]                     # per-derived-allele counts
+    nn = n_valid[:, None]
+    poly = (dcols > 0) & (dcols < nn)     # segregating (non-fixed) derived alleles
+
+    if name in ('pi', 'theta_pi'):
+        pairs = n_safe * (n_safe - 1.0)
+        same = (ac * (ac - 1)).sum(axis=1).astype(cp.float64)
+        return cp.where(n >= 2.0, (pairs - same) / pairs, 0.0)
+    elif name in ('watterson', 'theta_s'):
+        a1_inv = _get_a1_inv(n_hap)
+        alleles_present = (ac > 0).sum(axis=1)
+        return cp.where(
+            has_data, (alleles_present - 1).astype(cp.float64) * a1_inv[n_valid], 0.0)
+    elif name == 'theta_h':
+        num = 2.0 * (dcols.astype(cp.float64) ** 2 * poly).sum(axis=1)
+        return cp.where(has_data, num / (n_safe * (n_safe - 1.0)), 0.0)
+    elif name == 'theta_l':
+        num = (dcols.astype(cp.float64) * poly).sum(axis=1)
+        return cp.where(has_data, num / (n_safe - 1.0), 0.0)
+    elif name == 'eta1':
+        # Singleton derived alleles (count == 1).
+        a1_inv = _get_a1_inv(n_hap)
+        cnt = (dcols == 1).sum(axis=1).astype(cp.float64)
+        return cp.where(has_data, cnt * a1_inv[n_valid], 0.0)
+    elif name == 'eta1_star':
+        # Singletons + (n-1)-tons.
+        a1_inv = _get_a1_inv(n_hap)
+        is_edge = (dcols == 1) | (dcols == (n_valid - 1)[:, None])
+        cnt = is_edge.sum(axis=1).astype(cp.float64)
+        return cp.where(has_data, cnt * a1_inv[n_valid], 0.0)
+    elif name == 'minus_eta1':
+        # Non-singleton segregating derived alleles (2 <= count < n).
+        norm = _get_minus_eta1_norm(n_hap)
+        cnt = ((dcols >= 2) & (dcols < nn)).sum(axis=1).astype(cp.float64)
+        return cp.where(has_data, cnt * norm[n_valid], 0.0)
+    elif name == 'minus_eta1_star':
+        # Interior derived alleles (2 <= count <= n-2).
+        norm = _get_minus_eta1_star_norm(n_hap)
+        cnt = ((dcols >= 2) & (dcols <= (n_valid - 2)[:, None])).sum(axis=1).astype(cp.float64)
+        return cp.where(has_data, cnt * norm[n_valid], 0.0)
+    else:
+        raise ValueError(f"Unknown estimator: {name}. Use FrequencySpectrum "
+                         f"for custom weight functions.")
+
+
 def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')):
     """Compute multiple theta estimators via direct vectorized GPU arithmetic.
 
@@ -283,16 +360,18 @@ def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')
         'S': int, number of segregating sites
         'n_harmonic_mean': int, harmonic mean of per-site sample sizes
     """
-    dac, n_valid, d, n_safe, seg, n_hap = _prepare_dac(matrix)
+    ac, n_valid, n_hap = _prepare_allele_counts(matrix)
 
     thetas = {}
     for name in estimators:
-        val = cp.sum(_site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=dac))
+        val = cp.sum(_ac_contribution(name, ac, n_valid, n_hap))
         thetas[name] = float(val.get())
 
-    S = int(cp.sum(seg).get())
-
+    # Segregating sites = number of mutations = sum over sites of (alleles - 1)
+    # (tskit convention: triallelic counts as 2; reference-absent sites count).
     has_data = n_valid >= 2
+    S = int(cp.sum(cp.where(has_data, (ac > 0).sum(axis=1) - 1, 0)).get())
+
     if cp.any(has_data):
         valid_n = n_valid[has_data].astype(cp.float64)
         n_harm = round(float(len(valid_n) / cp.sum(1.0 / valid_n).get()))
@@ -751,13 +830,14 @@ def pi_components(haplotypes, n_total_sites=None, n_haplotypes_full=None):
     total_missing : float
     n_sites : int
     """
-    dac, n_valid_i = _dac_and_n(haplotypes)
+    from ._memutil import allele_counts
+    ac, n_valid_i = allele_counts(haplotypes)
     n_valid = n_valid_i.astype(cp.float64)
-    derived = dac.astype(cp.float64)
-    ancestral = n_valid - derived
 
-    site_diffs = derived * ancestral
+    # Per-allele differing pairs at a site: C(n,2) - sum_a C(ac_a, 2).
+    same_pairs = (ac * (ac - 1)).sum(axis=1).astype(cp.float64) / 2.0
     site_comps = n_valid * (n_valid - 1) / 2.0
+    site_diffs = site_comps - same_pairs
 
     usable = n_valid >= 2
     total_diffs = float(cp.sum(site_diffs[usable]).get())
@@ -1013,26 +1093,21 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
+    from ._memutil import allele_counts
     if missing_data == 'exclude':
         matrix = matrix.exclude_missing_sites()
         if matrix.num_variants == 0:
             return 0
-        allele_counts = cp.sum(matrix.haplotypes, axis=0)
-        n_haplotypes = matrix.num_haplotypes
-        segregating = (allele_counts > 0) & (allele_counts < n_haplotypes)
 
-    else:  # missing_data == 'include'
-        derived_counts, n_valid_per_site = _dac_and_n(matrix.haplotypes)
-        sites_with_data = n_valid_per_site >= 2
+    ac, n_valid_per_site = allele_counts(matrix.haplotypes)
+    sites_with_data = n_valid_per_site >= 2
+    if not cp.any(sites_with_data):
+        return 0
 
-        if not cp.any(sites_with_data):
-            return 0
-
-        valid_sites = cp.where(sites_with_data)[0]
-        segregating_mask = (derived_counts[valid_sites] > 0) & (derived_counts[valid_sites] < n_valid_per_site[valid_sites])
-        return int(cp.sum(segregating_mask).get())
-
-    return int(cp.sum(segregating).get())
+    # tskit convention: segregating count = number of mutations = sum(alleles - 1);
+    # a triallelic site contributes 2, and reference-absent sites are counted.
+    alleles_present = (ac > 0).sum(axis=1)
+    return int(cp.sum(cp.where(sites_with_data, alleles_present - 1, 0)).get())
 
 
 def singleton_count(haplotype_matrix: HaplotypeMatrix,
