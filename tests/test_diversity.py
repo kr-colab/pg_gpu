@@ -221,11 +221,14 @@ class TestAlleleFrequencySpectrum:
         if isinstance(afs, np.ndarray):
             afs = np.asarray(afs)
 
-        # Should have 25 sites with 0 copies and 25 with n_samples copies
-        assert afs[0] == 25  # Sites with 0 derived alleles
-        assert afs[n_samples] == 25  # Sites with all derived alleles
-        # All other frequencies should be 0
-        assert np.sum(afs[1:n_samples]) == 0
+        # Per-allele polarised SFS (issue #100): both fixed classes are excluded,
+        # matching tskit. A monomorphic-ancestral site has no derived allele
+        # (bin 0), and a fully-derived site is monomorphic-derived (bin n) -- so
+        # neither contributes and the whole spectrum is empty here. (Invariant
+        # counting is a separate concern: FrequencySpectrum's n_total_sites.)
+        assert afs[0] == 0
+        assert afs[n_samples] == 0
+        assert np.sum(afs) == 0
 
     def test_afs_singletons(self):
         """Test AFS with singleton sites."""

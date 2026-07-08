@@ -642,16 +642,25 @@ class FrequencySpectrum:
         if n_total_sites is None:
             n_total_sites = matrix.n_total_sites
 
-        from ._memutil import dac_and_n as _dac_n
-        dac, n_valid = _dac_n(matrix.haplotypes)
+        from ._memutil import allele_counts
+        ac, n_valid = allele_counts(matrix.haplotypes)
 
         if missing_data == 'exclude':
             complete = n_valid == n_hap
-            dac = dac[complete]
+            ac = ac[complete]
             n_valid = n_valid[complete]
 
+        # NOTE (issue #100): per-allele polarised SFS -- each derived allele
+        # contributes at its own frequency for 0 < count < n (both fixed classes,
+        # bin 0 and bin n, excluded, matching tskit). The SFS is marginal (it
+        # forgets which derived alleles co-occur at a site), so on MULTIALLELIC
+        # data the estimators that depend on co-occurrence diverge from the
+        # authoritative scalar functions (diversity.pi etc.): pi -- and hence
+        # Tajima's D and Fay-Wu H -- overcount, and Watterson (sum of xi) differs
+        # from the scalar distinct-alleles-1 at reference-absent sites.
+        # theta_h/theta_l and the eta-family are exact.
         self.sfs_by_n = {}
-        if len(dac) == 0:
+        if len(n_valid) == 0:
             self.n_max = 0
             self.n_segregating = 0
         else:
@@ -662,7 +671,12 @@ class FrequencySpectrum:
                 if ni < 2:
                     continue
                 mask = n_valid == ni
-                xi = cp.bincount(dac[mask], minlength=ni + 1)[:ni + 1]
+                vals = ac[mask][:, 1:]
+                vals = vals[(vals > 0) & (vals < ni)]
+                if vals.size:
+                    xi = cp.bincount(vals, minlength=ni + 1)[:ni + 1]
+                else:  # no segregating derived alleles (cupy bincount rejects empty)
+                    xi = cp.zeros(ni + 1, dtype=cp.int64)
                 self.sfs_by_n[ni] = xi.astype(cp.float64).get()
             self.n_segregating = sum(
                 int(np.sum(xi[1:n])) for n, xi in self.sfs_by_n.items())
@@ -1000,7 +1014,9 @@ def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     ndarray
-        Array where element i contains the number of sites with i derived alleles
+        Per-allele (unfolded) SFS: element i is the number of derived alleles
+        carried by i samples. A multiallelic site contributes one entry per
+        derived allele.
     """
 
     # Get population subset if specified
@@ -1013,50 +1029,27 @@ def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
+    from ._memutil import allele_counts
+    max_n = matrix.num_haplotypes
+
     if missing_data == 'exclude':
         matrix = matrix.exclude_missing_sites()
         if matrix.num_variants == 0:
-            return np.zeros(matrix.num_haplotypes + 1, dtype=np.int64)
-        n_haplotypes = matrix.num_haplotypes
-        freqs = cp.sum(matrix.haplotypes, axis=0)
-
-    else:  # missing_data == 'include'
-        max_n = matrix.num_haplotypes
-        derived_counts, n_valid_per_site = _dac_and_n(matrix.haplotypes)
-
-        sites_with_data = n_valid_per_site > 0
-        if not cp.any(sites_with_data):
             return np.zeros(max_n + 1, dtype=np.int64)
 
-        # Filter to sites with valid data and check they're biallelic
-        valid_sites = cp.where(sites_with_data)[0]
-        derived_at_valid = derived_counts[valid_sites]
-        n_valid_at_valid = n_valid_per_site[valid_sites]
-
-        # Check biallelic assumption: derived count should be <= n_valid
-        biallelic_mask = derived_at_valid <= n_valid_at_valid
-        final_derived = derived_at_valid[biallelic_mask]
-
-        # Create AFS histogram
-        # Use bincount which is more efficient than a loop
-        if len(final_derived) > 0:
-            # Ensure derived counts don't exceed max_n
-            final_derived = cp.minimum(final_derived, max_n)
-            afs = cp.bincount(final_derived, minlength=max_n + 1)
-            # Ensure correct size and type
-            if len(afs) < max_n + 1:
-                afs_full = cp.zeros(max_n + 1, dtype=cp.int64)
-                afs_full[:len(afs)] = afs
-                afs = afs_full
-            else:
-                afs = afs[:max_n + 1].astype(cp.int64)
-        else:
-            return np.zeros(max_n + 1, dtype=np.int64)
-
-        return afs.get()
-
-    # For exclude mode, create standard histogram
-    return cp.histogram(freqs, bins=cp.arange(n_haplotypes + 2))[0].get()
+    ac, n_valid = allele_counts(matrix.haplotypes)
+    # Per-allele polarised SFS: each derived allele contributes one count at its
+    # sample frequency, for 0 < count < n. Both fixed classes are excluded --
+    # bin 0 (invariant-ancestral: no derived allele) and bin n (monomorphic-
+    # derived) -- so this matches tskit's polarised allele_frequency_spectrum
+    # exactly. Invariant-site counting is a separate concern (see
+    # FrequencySpectrum's n_total_sites).
+    derived = ac[:, 1:]
+    vals = derived[(derived > 0) & (derived < n_valid[:, None])]
+    if vals.size == 0:  # no segregating derived alleles (cupy bincount rejects empty)
+        return np.zeros(max_n + 1, dtype=np.int64)
+    afs = cp.bincount(vals, minlength=max_n + 1)[:max_n + 1]
+    return afs.astype(cp.int64).get()
 
 
 def segregating_sites(haplotype_matrix: HaplotypeMatrix,

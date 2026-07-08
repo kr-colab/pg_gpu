@@ -12,6 +12,7 @@ import pytest
 
 from pg_gpu import HaplotypeMatrix
 from pg_gpu import diversity
+from pg_gpu.diversity import FrequencySpectrum
 
 
 def _a1(n):
@@ -190,6 +191,68 @@ class TestMissingData:
         ac = allel.HaplotypeArray(self.HAP.T).count_alleles()
         pi_allel = float(np.nansum(allel.mean_pairwise_difference(ac, fill=0)))
         np.testing.assert_allclose(pi_pg, pi_allel, rtol=1e-9)
+
+
+class TestPerAlleleSFS:
+    """allele_frequency_spectrum + FrequencySpectrum on the per-allele SFS."""
+
+    def test_afs_matches_tskit(self, multiallelic_hm):
+        # Full array matches tskit's polarised AFS exactly: per-allele interior,
+        # both fixed classes (bins 0 and n) excluded.
+        ts, hm = multiallelic_hm
+        afs_pg = np.asarray(diversity.allele_frequency_spectrum(hm))
+        afs_ts = ts.allele_frequency_spectrum(polarised=True, span_normalise=False)
+        np.testing.assert_array_equal(afs_pg, afs_ts.astype(int))
+
+    def test_afs_interior_matches_allel(self, multiallelic_hm):
+        # Independent-library check on the segregating interior (1..n-1).
+        ts, hm = multiallelic_hm
+        n = ts.num_samples
+        ac = allel.HaplotypeArray(ts.genotype_matrix()).count_alleles()
+        per_allele = ac[:, 1:].flatten()
+        per_allele = per_allele[(per_allele > 0) & (per_allele < n)].astype(np.int64)
+        ref = np.bincount(per_allele, minlength=n + 1)[:n + 1]
+        afs_pg = np.asarray(diversity.allele_frequency_spectrum(hm))
+        np.testing.assert_array_equal(afs_pg[1:n], ref[1:n])
+
+    def test_afs_excludes_fixed_classes(self):
+        # Both fixed classes are excluded (matches tskit): a fully-derived site
+        # (bin n) and a monomorphic-ancestral site (bin 0) contribute nothing.
+        derived = HaplotypeMatrix(np.array([[1], [1], [1], [1]], dtype=np.int8),
+                                  np.array([100]), 0, 200)
+        ancestral = HaplotypeMatrix(np.array([[0], [0], [0], [0]], dtype=np.int8),
+                                    np.array([100]), 0, 200)
+        assert np.asarray(diversity.allele_frequency_spectrum(derived)).sum() == 0
+        assert np.asarray(diversity.allele_frequency_spectrum(ancestral)).sum() == 0
+
+    def test_freqspec_theta_h_l_match_scalar(self, multiallelic_hm):
+        # theta_h / theta_l are additive per allele, so the SFS path equals the
+        # scalar path even on multiallelic data.
+        _, hm = multiallelic_hm
+        fs = FrequencySpectrum(hm)
+        np.testing.assert_allclose(fs.theta('theta_h'),
+                                   diversity.theta_h(hm, span_normalize=False), rtol=1e-9)
+        np.testing.assert_allclose(fs.theta('theta_l'),
+                                   diversity.theta_l(hm, span_normalize=False), rtol=1e-9)
+
+    def test_freqspec_matches_scalar_biallelic(self, multiallelic_hm):
+        # On biallelic data every estimator agrees between the two paths.
+        _, hm = multiallelic_hm
+        hm_bi = hm.apply_biallelic_filter()
+        fs = FrequencySpectrum(hm_bi)
+        for name, fn in [('pi', diversity.pi), ('watterson', diversity.theta_w),
+                         ('theta_h', diversity.theta_h), ('theta_l', diversity.theta_l)]:
+            np.testing.assert_allclose(fs.theta(name),
+                                       fn(hm_bi, span_normalize=False), rtol=1e-9)
+
+    def test_freqspec_pi_diverges_from_scalar_on_multiallelic(self, multiallelic_hm):
+        # Documented divergence (issue #100): the marginal SFS overcounts pi on
+        # multiallelic data; the scalar diversity.pi is authoritative.
+        _, hm = multiallelic_hm
+        pi_sfs = FrequencySpectrum(hm).theta('pi')
+        pi_scalar = diversity.pi(hm, span_normalize=False)
+        assert pi_sfs > pi_scalar
+        assert not np.isclose(pi_sfs, pi_scalar, rtol=1e-6)
 
 
 class TestMultiallelicEdgeCases:
