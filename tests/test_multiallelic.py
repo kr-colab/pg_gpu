@@ -289,6 +289,73 @@ class TestPerAlleleSFS:
         assert not np.isclose(pi_sfs, pi_scalar, rtol=1e-6)
 
 
+class TestJointSFS:
+    """Joint / projected SFS per-allele vs tskit (two sample sets)."""
+
+    @staticmethod
+    def _pops(ts):
+        s = ts.samples()
+        h = len(s) // 2
+        return list(s[:h]), list(s[h:])
+
+    def test_joint_sfs_matches_tskit(self, multiallelic_hm):
+        from pg_gpu import sfs as sfs_mod
+        ts, hm = multiallelic_hm
+        A, B = self._pops(ts)
+        j_pg = np.asarray(sfs_mod.joint_sfs(hm, A, B))
+        j_ts = ts.allele_frequency_spectrum([A, B], polarised=True,
+                                            span_normalise=False)
+        np.testing.assert_array_equal(j_pg, j_ts.astype(int))
+
+    def test_joint_sfs_excludes_only_global_mono_corners(self, multiallelic_hm):
+        # Edge cells (alleles private to / fixed within one pop) are populated;
+        # only the two global-monomorphic corners are dropped.
+        from pg_gpu import sfs as sfs_mod
+        ts, hm = multiallelic_hm
+        A, B = self._pops(ts)
+        j = np.asarray(sfs_mod.joint_sfs(hm, A, B))
+        assert j[0, 0] == 0 and j[-1, -1] == 0
+        assert j[0, 1:].sum() > 0 and j[1:, 0].sum() > 0  # private-allele edges
+
+    def test_joint_sfs_folded_matches_tskit(self, multiallelic_hm):
+        # Folded joint = tskit polarised=False: fold each site as a unit by the
+        # global minor (NOT allel's per-axis fold), weight 1/2, corners dropped.
+        from pg_gpu import sfs as sfs_mod
+        ts, hm = multiallelic_hm
+        A, B = self._pops(ts)
+        jf_pg = np.asarray(sfs_mod.joint_sfs_folded(hm, A, B))
+        jf_ts = ts.allele_frequency_spectrum([A, B], polarised=False,
+                                             span_normalise=False)
+        np.testing.assert_allclose(jf_pg, jf_ts)
+        assert np.any(jf_pg != np.round(jf_pg))  # half-integers on multiallelic
+
+    def test_joint_sfs_folded_scaled_matches_base(self, multiallelic_hm):
+        from pg_gpu import sfs as sfs_mod
+        ts, hm = multiallelic_hm
+        A, B = self._pops(ts)
+        n1, n2 = len(A), len(B)
+        base = np.asarray(sfs_mod.joint_sfs_folded(hm, A, B))
+        scaled = np.asarray(sfs_mod.joint_sfs_folded_scaled(hm, A, B))
+        i = np.arange(base.shape[0])[:, None]
+        j = np.arange(base.shape[1])[None, :]
+        np.testing.assert_allclose(scaled, base * i * j * (n1 - i) * (n2 - j))
+
+    def test_projection_matches_per_allele_sandwich(self, multiallelic_hm):
+        # project_joint_sfs == P1 @ joint_sfs @ P2.T on the per-allele joint.
+        from pg_gpu import sfs as sfs_mod
+        from pg_gpu.diversity import _projection_matrix
+        ts, hm = multiallelic_hm
+        A, B = self._pops(ts)
+        n1, n2 = len(A), len(B)
+        t1, t2 = 8, 9
+        full = np.asarray(sfs_mod.joint_sfs(hm, A, B)).astype(np.float64)
+        P1 = _projection_matrix(n1, t1)
+        P2 = _projection_matrix(n2, t2)
+        expected = P1 @ full @ P2.T
+        result = sfs_mod.project_joint_sfs(hm, A, B, target_n1=t1, target_n2=t2)
+        np.testing.assert_allclose(result, expected, rtol=1e-9, atol=1e-9)
+
+
 class TestMultiallelicConsumers:
     """singleton_count / heterozygosity_expected / max_daf / mu_sfs / daf_histogram."""
 
