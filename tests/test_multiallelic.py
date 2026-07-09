@@ -12,6 +12,7 @@ import pytest
 
 from pg_gpu import HaplotypeMatrix
 from pg_gpu import diversity
+from pg_gpu import sfs
 from pg_gpu.diversity import FrequencySpectrum
 
 
@@ -194,15 +195,7 @@ class TestMissingData:
 
 
 class TestPerAlleleSFS:
-    """allele_frequency_spectrum + FrequencySpectrum on the per-allele SFS."""
-
-    def test_afs_matches_tskit(self, multiallelic_hm):
-        # Full array matches tskit's polarised AFS exactly: per-allele interior,
-        # both fixed classes (bins 0 and n) excluded.
-        ts, hm = multiallelic_hm
-        afs_pg = np.asarray(diversity.allele_frequency_spectrum(hm))
-        afs_ts = ts.allele_frequency_spectrum(polarised=True, span_normalise=False)
-        np.testing.assert_array_equal(afs_pg, afs_ts.astype(int))
+    """sfs.sfs + FrequencySpectrum on the per-allele SFS."""
 
     def test_sfs_module_matches_tskit(self, multiallelic_hm):
         # The sfs module's unfolded SFS is per-allele and matches tskit too.
@@ -246,7 +239,7 @@ class TestPerAlleleSFS:
         per_allele = ac[:, 1:].flatten()
         per_allele = per_allele[(per_allele > 0) & (per_allele < n)].astype(np.int64)
         ref = np.bincount(per_allele, minlength=n + 1)[:n + 1]
-        afs_pg = np.asarray(diversity.allele_frequency_spectrum(hm))
+        afs_pg = np.asarray(sfs.sfs(hm))
         np.testing.assert_array_equal(afs_pg[1:n], ref[1:n])
 
     def test_afs_excludes_fixed_classes(self):
@@ -256,8 +249,8 @@ class TestPerAlleleSFS:
                                   np.array([100]), 0, 200)
         ancestral = HaplotypeMatrix(np.array([[0], [0], [0], [0]], dtype=np.int8),
                                     np.array([100]), 0, 200)
-        assert np.asarray(diversity.allele_frequency_spectrum(derived)).sum() == 0
-        assert np.asarray(diversity.allele_frequency_spectrum(ancestral)).sum() == 0
+        assert np.asarray(sfs.sfs(derived)).sum() == 0
+        assert np.asarray(sfs.sfs(ancestral)).sum() == 0
 
     def test_freqspec_theta_h_l_match_scalar(self, multiallelic_hm):
         # theta_h / theta_l are additive per allele, so the SFS path equals the

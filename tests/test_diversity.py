@@ -7,6 +7,7 @@ import numpy as np
 import cupy as cp
 from pg_gpu import HaplotypeMatrix
 from pg_gpu import diversity
+from pg_gpu import sfs
 
 
 class TestNucleotideDiversity:
@@ -216,7 +217,7 @@ class TestAlleleFrequencySpectrum:
         positions = np.arange(n_variants) * 1000
         matrix = HaplotypeMatrix(haplotypes, positions)
 
-        afs = diversity.allele_frequency_spectrum(matrix)
+        afs = sfs.sfs(matrix)
 
         if isinstance(afs, np.ndarray):
             afs = np.asarray(afs)
@@ -243,7 +244,7 @@ class TestAlleleFrequencySpectrum:
         positions = np.arange(n_variants) * 1000
         matrix = HaplotypeMatrix(haplotypes, positions)
 
-        afs = diversity.allele_frequency_spectrum(matrix)
+        afs = sfs.sfs(matrix)
 
         if isinstance(afs, np.ndarray):
             afs = np.asarray(afs)
@@ -454,7 +455,7 @@ class TestGPUCalculations:
         assert isinstance(seg_sites, int)
 
         # AFS should return GPU array
-        afs = diversity.allele_frequency_spectrum(matrix)
+        afs = sfs.sfs(matrix)
         assert isinstance(afs, np.ndarray)
 
 

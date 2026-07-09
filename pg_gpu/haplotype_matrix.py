@@ -1530,15 +1530,6 @@ class HaplotypeMatrix:
             }
 
     ####### some polymorphism statistics #######
-    def allele_frequency_spectrum(self) -> cp.ndarray:
-        """
-        Calculate the allele frequency spectrum for a haplotype matrix.
-
-        Note: This method is deprecated. Use diversity.allele_frequency_spectrum() instead.
-        """
-        from . import diversity
-        return diversity.allele_frequency_spectrum(self)
-
     def diversity(self, span_normalize=True) -> float:
         """
         Calculate the nucleotide diversity (π) for the haplotype matrix.

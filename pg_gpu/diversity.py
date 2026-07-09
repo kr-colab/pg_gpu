@@ -975,65 +975,6 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
     return _compute_neutrality_test(matrix, 'pi', 'watterson')
 
 
-def allele_frequency_spectrum(haplotype_matrix: HaplotypeMatrix,
-                            population: Optional[Union[str, list]] = None,
-                            missing_data: str = 'include') -> cp.ndarray:
-    """
-    Calculate the allele frequency spectrum (AFS).
-
-    The AFS is a histogram of allele frequencies across all sites.
-
-    Parameters
-    ----------
-    haplotype_matrix : HaplotypeMatrix
-        The haplotype data
-    population : str or list, optional
-        Population name or list of sample indices. If None, uses all samples
-    missing_data : str
-        'include' - Calculate AFS using available data per site.
-        'exclude' - Only use sites with no missing data.
-
-    Returns
-    -------
-    ndarray
-        Per-allele (unfolded) SFS: element i is the number of derived alleles
-        carried by i samples. A multiallelic site contributes one entry per
-        derived allele.
-    """
-
-    # Get population subset if specified
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    # Ensure on GPU
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    from ._memutil import allele_counts
-    max_n = matrix.num_haplotypes
-
-    if missing_data == 'exclude':
-        matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return np.zeros(max_n + 1, dtype=np.int64)
-
-    ac, n_valid = allele_counts(matrix.haplotypes)
-    # Per-allele polarised SFS: each derived allele contributes one count at its
-    # sample frequency, for 0 < count < n. Both fixed classes are excluded --
-    # bin 0 (invariant-ancestral: no derived allele) and bin n (monomorphic-
-    # derived) -- so this matches tskit's polarised allele_frequency_spectrum
-    # exactly. Invariant-site counting is a separate concern (see
-    # FrequencySpectrum's n_total_sites).
-    derived = ac[:, 1:]
-    vals = derived[(derived > 0) & (derived < n_valid[:, None])]
-    if vals.size == 0:  # no segregating derived alleles (cupy bincount rejects empty)
-        return np.zeros(max_n + 1, dtype=np.int64)
-    afs = cp.bincount(vals, minlength=max_n + 1)[:max_n + 1]
-    return afs.astype(cp.int64).get()
-
-
 def segregating_sites(haplotype_matrix: HaplotypeMatrix,
                      population: Optional[Union[str, list]] = None,
                      missing_data: str = 'include') -> int:

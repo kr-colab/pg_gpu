@@ -15,70 +15,14 @@ from ._utils import get_population_matrix as _get_population_matrix
 from .streaming_matrix import StreamingHaplotypeMatrix, _stream_sum
 
 
-def _derived_allele_counts(haplotype_matrix, missing_data='include'):
-    """Compute derived allele counts per variant on GPU.
-
-    Parameters
-    ----------
-    haplotype_matrix : HaplotypeMatrix
-    missing_data : str
-        'include' - return per-site n_valid
-        'exclude' - filter to complete sites
-
-    Returns
-    -------
-    dac : cupy.ndarray, int64, shape (n_variants,)
-        Derived allele counts.
-    n : int or cupy.ndarray
-        Total haplotypes (int) or per-site valid counts (array).
-    """
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
-
-    hap = haplotype_matrix.haplotypes  # (n_haplotypes, n_variants)
-
-    if missing_data == 'include':
-        from ._memutil import dac_and_n
-        dac, n_valid = dac_and_n(hap)
-        return dac, n_valid
-    elif missing_data == 'exclude':
-        from ._memutil import dac_and_n
-        dac, n_valid = dac_and_n(hap)
-        incomplete = n_valid < hap.shape[0]
-        dac[incomplete] = -1
-        n = hap.shape[0]
-        return dac, n
-    else:
-        from ._memutil import chunked_sum_int32
-        n = hap.shape[0]
-        dac = chunked_sum_int32(cp.maximum(hap, 0))
-        return dac, n
-
-
-def _allele_counts(haplotype_matrix, missing_data='include'):
-    """Compute biallelic allele counts [ref, alt] per variant.
-
-    Returns
-    -------
-    ac : cupy.ndarray, int64, shape (n_variants, 2)
-    n : int or cupy.ndarray
-    """
-    dac, n = _derived_allele_counts(haplotype_matrix, missing_data)
-    if isinstance(n, cp.ndarray):
-        ref_counts = n - dac
-    else:
-        ref_counts = n - dac
-    ac = cp.stack([ref_counts, dac], axis=1)
-    return ac, n
-
-
 def _per_allele_counts(matrix, n_alleles=None):
     """Per-allele counts (n_var, K) and per-site n_valid via the fused kernel.
 
     K defaults to the site-local maximum allele index + 1; pass ``n_alleles``
     for a fixed/global width (e.g. to align populations for the joint SFS).
-    Multiallelic-correct (each allele counted separately), unlike the collapsed
-    ``_derived_allele_counts``.
+    Multiallelic-correct: each allele is counted separately. This is the sole
+    counting primitive for every SFS in this module (the old collapsed
+    ``dac_and_n`` wrappers were removed once all variants went per-allele).
     """
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()

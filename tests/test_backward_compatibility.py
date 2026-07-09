@@ -108,32 +108,10 @@ class TestHaplotypeMatrixCompatibility:
 
         assert abs(tajd_old - tajd_allel) < 1e-8
 
-    def test_allele_frequency_spectrum_compatibility(self, test_matrix):
-        """Test that HaplotypeMatrix.allele_frequency_spectrum() matches diversity module."""
-        # Old method
-        afs_old = test_matrix.allele_frequency_spectrum()
-
-        # New module method
-        afs_new = diversity.allele_frequency_spectrum(test_matrix)
-
-        # Convert to numpy if needed
-        if hasattr(afs_old, 'get'):
-            afs_old = np.asarray(afs_old)
-        if hasattr(afs_new, 'get'):
-            afs_new = np.asarray(afs_new)
-
-        # Should be identical
-        np.testing.assert_array_equal(afs_old, afs_new)
-
-        # Should also match scikit-allel SFS
-        h = allel.HaplotypeArray(test_matrix.haplotypes.T if isinstance(test_matrix.haplotypes, np.ndarray)
-                                 else test_matrix.haplotypes.get().T)
-        ac = h.count_alleles()
-        sfs_allel = allel.sfs(ac[:, 1])
-
-        # pg_gpu AFS has n+1 bins, scikit-allel SFS has variable length
-        sfs_length = len(sfs_allel) - 1  # Exclude sfs_allel[0] since we start from index 1
-        np.testing.assert_array_equal(afs_old[1:1+sfs_length], sfs_allel[1:])
+    # NOTE: HaplotypeMatrix.allele_frequency_spectrum() and
+    # diversity.allele_frequency_spectrum() were removed (issue #100 consolidation);
+    # the SFS now lives only in the sfs module. See
+    # tests/test_sfs_allel_comparison.py::TestSFSComparison::test_sfs.
 
     @pytest.mark.skipif(not cp.cuda.is_available(), reason="GPU not available")
     def test_gpu_compatibility(self):
@@ -150,18 +128,15 @@ class TestHaplotypeMatrixCompatibility:
         pi_gpu_old = matrix.diversity(span_normalize=True)
         theta_gpu_old = matrix.watersons_theta(span_normalize=True)
         tajd_gpu_old = matrix.Tajimas_D()
-        afs_gpu_old = matrix.allele_frequency_spectrum()
 
         # New methods should give identical results
         pi_gpu_new = diversity.pi(matrix, span_normalize=True)
         theta_gpu_new = diversity.theta_w(matrix, span_normalize=True)
         tajd_gpu_new = diversity.tajimas_d(matrix)
-        afs_gpu_new = diversity.allele_frequency_spectrum(matrix)
 
         assert abs(pi_gpu_old - pi_gpu_new) < 1e-15
         assert abs(theta_gpu_old - theta_gpu_new) < 1e-15
         assert abs(tajd_gpu_old - tajd_gpu_new) < 1e-15
-        np.testing.assert_array_equal(np.asarray(afs_gpu_old), np.asarray(afs_gpu_new))
 
         # CPU version should match
         matrix_cpu = HaplotypeMatrix(haplotypes, positions, positions[0], positions[-1])
@@ -191,7 +166,6 @@ class TestDeprecationWarnings:
             pi_val = matrix.diversity()
             theta_val = matrix.watersons_theta()
             tajd_val = matrix.Tajimas_D()
-            afs_val = matrix.allele_frequency_spectrum()
 
         # Filter out any unrelated warnings
         relevant_warnings = [w for w in warning_list if 'deprecated' in str(w.message).lower()]
@@ -247,10 +221,6 @@ class TestAPIConsistency:
         tajd_new = diversity.tajimas_d(matrix)
         assert type(tajd_old) == type(tajd_new) == float
 
-        afs_old = matrix.allele_frequency_spectrum()
-        afs_new = diversity.allele_frequency_spectrum(matrix)
-        assert type(afs_old) == type(afs_new)  # Both should be same array type
-
 
 class TestDocumentationExamples:
     """Test examples that might be in documentation to ensure they still work."""
@@ -297,7 +267,6 @@ class TestDocumentationExamples:
             'pi': matrix.diversity(span_normalize=True),
             'theta': matrix.watersons_theta(span_normalize=True),
             'tajimas_d': matrix.Tajimas_D(),
-            'afs': matrix.allele_frequency_spectrum()
         }
 
         # New workflow
@@ -305,23 +274,9 @@ class TestDocumentationExamples:
             'pi': diversity.pi(matrix, span_normalize=True),
             'theta': diversity.theta_w(matrix, span_normalize=True),
             'tajimas_d': diversity.tajimas_d(matrix),
-            'afs': diversity.allele_frequency_spectrum(matrix)
         }
 
         # Should be identical
         assert abs(old_results['pi'] - new_results['pi']) < 1e-15
         assert abs(old_results['theta'] - new_results['theta']) < 1e-15
         assert abs(old_results['tajimas_d'] - new_results['tajimas_d']) < 1e-15
-
-        # AFS arrays should be identical
-        if hasattr(old_results['afs'], 'get'):
-            old_afs = np.asarray(old_results['afs'])
-        else:
-            old_afs = old_results['afs']
-
-        if hasattr(new_results['afs'], 'get'):
-            new_afs = np.asarray(new_results['afs'])
-        else:
-            new_afs = new_results['afs']
-
-        np.testing.assert_array_equal(old_afs, new_afs)
