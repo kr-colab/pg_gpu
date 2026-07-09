@@ -72,6 +72,20 @@ def _allele_counts(haplotype_matrix, missing_data='include'):
     return ac, n
 
 
+def _per_allele_counts(matrix, n_alleles=None):
+    """Per-allele counts (n_var, K) and per-site n_valid via the fused kernel.
+
+    K defaults to the site-local maximum allele index + 1; pass ``n_alleles``
+    for a fixed/global width (e.g. to align populations for the joint SFS).
+    Multiallelic-correct (each allele counted separately), unlike the collapsed
+    ``_derived_allele_counts``.
+    """
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    from ._memutil import allele_counts
+    return allele_counts(matrix.haplotypes, n_alleles=n_alleles)
+
+
 # ---------------------------------------------------------------------------
 # Public API: Single-population SFS
 # ---------------------------------------------------------------------------
@@ -108,26 +122,41 @@ def sfs(haplotype_matrix: HaplotypeMatrix,
     else:
         matrix = haplotype_matrix
 
-    dac, n = _derived_allele_counts(matrix, missing_data)
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    max_n = matrix.num_haplotypes
 
     if missing_data == 'exclude':
-        # filter out incomplete sites (marked as -1)
-        valid = dac >= 0
-        dac = dac[valid]
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
+            return np.zeros(max_n + 1, dtype=np.int64)
 
-    if isinstance(n, cp.ndarray):
-        max_n = int(cp.max(n).get()) if n.size > 0 else 0
-    else:
-        max_n = int(n)
-
-    s = cp.bincount(dac.astype(cp.int32), minlength=max_n + 1)
-    return s[:max_n + 1].get()
+    ac, n_valid = _per_allele_counts(matrix)
+    # Per-allele polarised SFS: each derived allele contributes one count at its
+    # own sample frequency, for 0 < count < n (both fixed classes excluded),
+    # matching tskit's polarised allele_frequency_spectrum.
+    derived = ac[:, 1:]
+    vals = derived[(derived > 0) & (derived < n_valid[:, None])]
+    if vals.size == 0:
+        return np.zeros(max_n + 1, dtype=np.int64)
+    s = cp.bincount(vals, minlength=max_n + 1)[:max_n + 1]
+    return s.astype(cp.int64).get()
 
 
 def sfs_folded(haplotype_matrix: HaplotypeMatrix,
                population: Optional[Union[str, list]] = None,
                missing_data: str = 'include'):
     """Compute the folded site frequency spectrum (minor allele counts).
+
+    Per-allele and conforming to tskit's ``allele_frequency_spectrum(
+    polarised=False)``: **every** allele (the reference/ancestral column
+    included) contributes weight 1/2 to bin ``min(count, n - count)``, and the
+    fixed class (bin 0) is dropped. A k-allelic site therefore contributes k
+    half-weight entries, so bin values are half-integers on multiallelic data;
+    on biallelic data the reference and derived alleles land in the same
+    ``min`` bin, summing to the usual integer count. This cannot be built from
+    the unfolded ``sfs()`` (which discards the reference column), but it is a
+    single pass over the per-allele counts.
 
     Parameters
     ----------
@@ -139,31 +168,41 @@ def sfs_folded(haplotype_matrix: HaplotypeMatrix,
 
     Returns
     -------
-    ndarray, int64, shape (n_chromosomes // 2 + 1,)
-        Element k = number of variants with minor allele count k.
+    ndarray, float64, shape (n_chromosomes // 2 + 1,)
+        Element k = folded weight of alleles with minor allele count k.
     """
+    if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
+        return _stream_sum(
+            haplotype_matrix,
+            lambda chunk: sfs_folded(chunk, population=population,
+                                     missing_data=missing_data),
+        )
 
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
-    ac, n = _allele_counts(matrix, missing_data)
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    max_n = matrix.num_haplotypes
+    length = max_n // 2 + 1
 
     if missing_data == 'exclude':
-        valid = ac[:, 1] >= 0  # dac >= 0
-        ac = ac[valid]
+        matrix = matrix.exclude_missing_sites()
+        if matrix.num_variants == 0:
+            return np.zeros(length, dtype=np.float64)
 
-    mac = cp.amin(ac, axis=1).astype(cp.int32)
-
-    if isinstance(n, cp.ndarray):
-        max_n = int(cp.max(n).get()) if n.size > 0 else 0
-    else:
-        max_n = int(n)
-
-    x = max_n // 2 + 1
-    s = cp.bincount(mac, minlength=x)[:x]
-    return s.get()
+    ac, n_valid = _per_allele_counts(matrix)
+    # Fold every allele (reference column 0 included) to bin min(count, n-count),
+    # weight 1/2; drop the fixed class (foldbin == 0, i.e. count in {0, n}).
+    foldbin = cp.minimum(ac, n_valid[:, None] - ac)
+    mask = (ac > 0) & (foldbin > 0)
+    vals = foldbin[mask].astype(cp.int32)
+    if vals.size == 0:
+        return np.zeros(length, dtype=np.float64)
+    s = 0.5 * cp.bincount(vals, minlength=length)[:length]
+    return s.astype(cp.float64).get()
 
 
 def sfs_scaled(haplotype_matrix: HaplotypeMatrix,
@@ -205,14 +244,12 @@ def sfs_folded_scaled(haplotype_matrix: HaplotypeMatrix,
     -------
     ndarray, float64, shape (n_chromosomes // 2 + 1,)
     """
+    # sfs_folded already handles streaming / population subsetting and is pinned
+    # to tskit; scaling is a fixed transform on top of it (no tskit analogue).
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        n = _get_population_matrix(haplotype_matrix, population).num_haplotypes
     else:
-        matrix = haplotype_matrix
-
-    _, n = _derived_allele_counts(matrix, missing_data)
-    if isinstance(n, cp.ndarray):
-        n = int(cp.max(n).get()) if n.size > 0 else 0
+        n = haplotype_matrix.num_haplotypes
     s = sfs_folded(haplotype_matrix, population, missing_data=missing_data)
     return scale_sfs_folded(s, n)
 

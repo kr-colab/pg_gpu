@@ -47,7 +47,11 @@ class TestSFSComparison:
         # allel: pass n explicitly to match full-size output
         dac = np.sum(hap, axis=0)
         expected = allel.sfs(dac, n=n)
-        np.testing.assert_array_equal(result, expected)
+        # sfs.sfs is now the per-allele polarised SFS (tskit convention): both
+        # fixed classes (bins 0 and n) are excluded, whereas allel.sfs includes
+        # them. Compare the segregating interior; assert the endpoints are dropped.
+        np.testing.assert_array_equal(result[1:n], expected[1:n])
+        assert result[0] == 0 and result[n] == 0
 
     def test_sfs_folded(self, single_pop_data):
         matrix, hap = single_pop_data

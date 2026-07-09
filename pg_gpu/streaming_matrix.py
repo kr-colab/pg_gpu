@@ -55,7 +55,10 @@ def _stream_sum(streaming_hm, kernel_fn):
     """
     total = None
     for _, _, chunk in streaming_hm.iter_gpu_chunks():
-        s = np.asarray(kernel_fn(chunk), dtype=np.int64)
+        # Preserve the kernel's own dtype: integer bincounts (sfs, joint_sfs)
+        # stay int64; the folded SFS carries half-integer weights, so it must
+        # accumulate in float (a forced int64 cast would truncate per chunk).
+        s = np.asarray(kernel_fn(chunk))
         if total is None:
             total = s.copy()
             continue

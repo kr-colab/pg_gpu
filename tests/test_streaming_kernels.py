@@ -302,6 +302,13 @@ class TestSFSDispatch:
         s_s = sfs_module.sfs(stream)
         np.testing.assert_array_equal(s_e, s_s)
 
+    def test_sfs_folded_equivalent(self, vcz_store):
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                            chunk_bp=10_000)
+        np.testing.assert_allclose(sfs_module.sfs_folded(eager),
+                                   sfs_module.sfs_folded(stream))
+
     def test_joint_sfs_equivalent(self, vcz_store, tmp_path):
         n_dip = HaplotypeMatrix.from_zarr(vcz_store).num_haplotypes // 2
         half = n_dip // 2

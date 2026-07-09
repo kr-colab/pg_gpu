@@ -204,6 +204,40 @@ class TestPerAlleleSFS:
         afs_ts = ts.allele_frequency_spectrum(polarised=True, span_normalise=False)
         np.testing.assert_array_equal(afs_pg, afs_ts.astype(int))
 
+    def test_sfs_module_matches_tskit(self, multiallelic_hm):
+        # The sfs module's unfolded SFS is per-allele and matches tskit too.
+        from pg_gpu import sfs as sfs_mod
+        ts, hm = multiallelic_hm
+        afs_pg = np.asarray(sfs_mod.sfs(hm))
+        afs_ts = ts.allele_frequency_spectrum(polarised=True, span_normalise=False)
+        np.testing.assert_array_equal(afs_pg, afs_ts.astype(int))
+
+    def test_sfs_folded_matches_tskit(self, multiallelic_hm):
+        # Folded SFS is per-allele = tskit polarised=False: every allele (ref
+        # included) weight 1/2 at min(count, n-count), fixed class dropped.
+        # Half-integer bins appear on multiallelic data.
+        from pg_gpu import sfs as sfs_mod
+        ts, hm = multiallelic_hm
+        n = ts.num_samples
+        folded_pg = np.asarray(sfs_mod.sfs_folded(hm))
+        folded_ts = ts.allele_frequency_spectrum(polarised=False,
+                                                 span_normalise=False)
+        # pg_gpu returns the compact folded domain [0, n//2]; tskit pads to n+1
+        # with zeros above n//2.
+        np.testing.assert_allclose(folded_pg, folded_ts[:n // 2 + 1])
+        # multiallelic input really does produce half-integer weights
+        assert np.any(folded_pg != np.round(folded_pg))
+
+    def test_sfs_folded_scaled_matches_tskit_base(self, multiallelic_hm):
+        # Scaled folded = tskit-pinned folded base * the k*(n-k)/n transform.
+        from pg_gpu import sfs as sfs_mod
+        ts, hm = multiallelic_hm
+        n = ts.num_samples
+        base = np.asarray(sfs_mod.sfs_folded(hm))
+        scaled = np.asarray(sfs_mod.sfs_folded_scaled(hm))
+        k = np.arange(base.shape[0])
+        np.testing.assert_allclose(scaled, base * k * (n - k) / n)
+
     def test_afs_interior_matches_allel(self, multiallelic_hm):
         # Independent-library check on the segregating interior (1..n-1).
         ts, hm = multiallelic_hm
