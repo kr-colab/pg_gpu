@@ -196,8 +196,7 @@ def fst_tskit(haplotype_matrix: HaplotypeMatrix,
     where, per site, Hw = (pi_1 + pi_2) / 2 is the mean within-population
     pairwise difference (unbiased) and Hb = dxy is the between-population
     divergence. Both are per-allele, so this matches
-    ``ts.Fst([pop1, pop2], mode='site')`` on multiallelic data. See
-    ``plans/NOTES_fst_estimators.md`` (untracked) for the estimator comparison.
+    ``ts.Fst([pop1, pop2], mode='site')`` on multiallelic data.
 
     Parameters
     ----------
