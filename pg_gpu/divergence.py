@@ -243,6 +243,40 @@ def fst_tskit(haplotype_matrix: HaplotypeMatrix,
     return 0.0
 
 
+def _pop_wc_stats(pop_haps, k):
+    """Per-allele diploid stats for Weir & Cockerham from one population.
+
+    Consecutive haplotypes are one diploid individual (a trailing unpaired
+    haplotype is dropped). For each allele ``a`` in ``0..k-1`` returns the
+    number of copies and the number of individuals heterozygous FOR THAT ALLELE
+    (exactly one copy) -- the per-allele observed het that WC's c component
+    needs (see the NOTE in ``fst_weir_cockerham``).
+
+    Returns
+    -------
+    ac : cupy.ndarray, float64, shape (n_variants, k)
+        Allele copies from complete diploid pairs.
+    het : cupy.ndarray, float64, shape (n_variants, k)
+        Per-allele heterozygote counts.
+    n : cupy.ndarray, float64, shape (n_variants,)
+        Complete diploid individuals per site.
+    """
+    n_pairs = pop_haps.shape[0] // 2
+    ha = pop_haps[0:2 * n_pairs:2, :]
+    hb = pop_haps[1:2 * n_pairs:2, :]
+    both = (ha >= 0) & (hb >= 0)
+    n = cp.sum(both, axis=0).astype(cp.float64)     # complete individuals/site
+    n_var = pop_haps.shape[1]
+    ac = cp.zeros((n_var, k), dtype=cp.float64)      # allele copies (from pairs)
+    het = cp.zeros((n_var, k), dtype=cp.float64)     # per-allele heterozygotes
+    for allele in range(k):
+        a_ha = (ha == allele) & both
+        a_hb = (hb == allele) & both
+        ac[:, allele] = cp.sum(a_ha, axis=0) + cp.sum(a_hb, axis=0)
+        het[:, allele] = cp.sum(a_ha != a_hb, axis=0)  # exactly one copy
+    return ac, het, n
+
+
 def fst_weir_cockerham(haplotype_matrix,
                        pop1: Union[str, list],
                        pop2: Union[str, list],
@@ -287,90 +321,73 @@ def fst_weir_cockerham(haplotype_matrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    # Compute per-site observed heterozygosity and allele counts from
-    # complete diploid pairs only. WC FST requires that frequencies and
-    # het are computed from the same set of individuals — using all valid
-    # haplotypes for counts but only complete pairs for n inflates
-    # frequencies by 1/(1-miss_rate) under MCAR.
-    def _pop_diploid_stats(pop_haps):
-        ha = pop_haps[0::2, :]  # first haplotype of each diploid
-        hb = pop_haps[1::2, :]  # second haplotype
-        both_valid = (ha >= 0) & (hb >= 0)
-        het = (ha != hb) & both_valid
-        n_called = cp.sum(both_valid, axis=0).astype(cp.float64)
-        h_bar = cp.where(n_called > 0,
-                         cp.sum(het, axis=0).astype(cp.float64) / n_called, 0.0)
-        # Derived allele count from complete pairs only
-        derived = cp.sum(
-            cp.where(both_valid, ha, 0) + cp.where(both_valid, hb, 0),
-            axis=0).astype(cp.float64)
-        return h_bar, n_called, derived
+    # NOTE: WC is a per-allele one-vs-rest ANOVA. For each allele it splits the
+    # variance of the "carries this allele" gamete indicator into between-pop
+    # (a), between-individual-within-pop (b), and between-gamete-within-
+    # individual (c) components, and FST = sum_alleles a / sum_alleles (a+b+c).
+    # The c component IS the per-allele observed heterozygosity -- individuals
+    # with exactly ONE copy of the allele -- so het is counted PER ALLELE, not
+    # the site-level "any difference" H_obs in diversity.heterozygosity_observed.
+    # The two coincide only for biallelic sites; for 3+ alleles a 1/2 individual
+    # is het for alleles 1 and 2 but homozygous for allele 0. Multiallelic form
+    # matches scikit-allel's weir_cockerham_fst (a/b/c are (n_var, K); sum over
+    # alleles and sites).
+    k = max(int(pop1_haps.max()) if pop1_haps.size else 0,
+            int(pop2_haps.max()) if pop2_haps.size else 0, 0) + 1
 
-    if len(pop1_idx) >= 2 and len(pop2_idx) >= 2:
-        h_bar1, n1, pop1_counts = _pop_diploid_stats(pop1_haps)
-        h_bar2, n2, pop2_counts = _pop_diploid_stats(pop2_haps)
-    else:
-        pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
-        pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
-        pop1_counts = pop1_counts.astype(cp.float64)
-        pop2_counts = pop2_counts.astype(cp.float64)
-        n1 = pop1_n.astype(cp.float64)
-        n2 = pop2_n.astype(cp.float64)
-        h_bar1 = cp.zeros_like(n1)
-        h_bar2 = cp.zeros_like(n2)
-
-    # Allele frequencies from complete diploid pairs
-    pop1_freqs = cp.where(n1 > 0, pop1_counts / (2.0 * n1), 0.0)
-    pop2_freqs = cp.where(n2 > 0, pop2_counts / (2.0 * n2), 0.0)
+    ac1, het1, n1 = _pop_wc_stats(pop1_haps, k)
+    ac2, het2, n2 = _pop_wc_stats(pop2_haps, k)
 
     r = 2.0
     n_total = n1 + n2
     n_bar = n_total / r
 
-    # n_C: sample size correction factor
+    # Per-allele frequencies within each pop (diploid: 2 gametes per individual);
+    # only where the pop has complete individuals (freq 0 elsewhere, unused).
+    p1 = cp.zeros_like(ac1)
+    p2 = cp.zeros_like(ac2)
+    v1 = n1 > 0
+    v2 = n2 > 0
+    p1[v1] = ac1[v1] / (2.0 * n1[v1])[:, None]
+    p2[v2] = ac2[v2] / (2.0 * n2[v2])[:, None]
+
+    # Sample-size correction, pooled freq, allele-freq variance, per-allele het,
+    # computed only at sites with data (subset on the mask, as the biallelic
+    # code did -- avoids the div-by-zero guards).
     nc = cp.zeros_like(n_total)
-    valid = n_total > 0
-    nc[valid] = (n_total[valid] - (n1[valid]**2 + n2[valid]**2) / n_total[valid]) / (r - 1)
+    p_bar = cp.zeros_like(ac1)
+    s_squared = cp.zeros_like(ac1)
+    h_bar = cp.zeros_like(ac1)
+    vt = n_total > 0
+    nt = n_total[vt]
+    n1t = n1[vt][:, None]
+    n2t = n2[vt][:, None]
+    nc[vt] = (nt - (n1[vt]**2 + n2[vt]**2) / nt) / (r - 1)
+    p_bar[vt] = (n1t * p1[vt] + n2t * p2[vt]) / nt[:, None]
+    s_squared[vt] = (n1t * (p1[vt] - p_bar[vt])**2
+                     + n2t * (p2[vt] - p_bar[vt])**2) / ((r - 1) * (nt / r)[:, None])
+    h_bar[vt] = (het1[vt] + het2[vt]) / nt[:, None]       # per-allele obs het
 
-    # Weighted average allele frequency
-    p_bar = cp.zeros_like(pop1_freqs)
-    valid = n_total > 0
-    p_bar[valid] = (n1[valid] * pop1_freqs[valid] + n2[valid] * pop2_freqs[valid]) / n_total[valid]
-
-    # Sample variance of allele frequencies
-    s_squared = cp.zeros_like(p_bar)
-    valid = n_bar > 0
-    s_squared[valid] = (n1[valid] * (pop1_freqs[valid] - p_bar[valid])**2 +
-                       n2[valid] * (pop2_freqs[valid] - p_bar[valid])**2) / ((r - 1) * n_bar[valid])
-
-    # Average observed heterozygosity weighted by sample size
-    h_bar = cp.zeros_like(p_bar)
-    valid = n_total > 0
-    h_bar[valid] = (n1[valid] * h_bar1[valid] + n2[valid] * h_bar2[valid]) / n_total[valid]
-
-    # W-C variance components (Eqs 2, 3, 4 from Weir & Cockerham 1984)
-    a = cp.zeros_like(p_bar)
-    b = cp.zeros_like(p_bar)
-    c = cp.zeros_like(p_bar)
-
+    # W-C variance components (Eqs 2, 3, 4 from Weir & Cockerham 1984), per
+    # allele, only where estimable (n_bar > 1). Sum over alleles AND sites.
+    a = cp.zeros_like(ac1)
+    b = cp.zeros_like(ac1)
+    c = cp.zeros_like(ac1)
     valid = (n_bar > 1) & (nc > 0)
+    nb = n_bar[valid][:, None]
+    ncc = nc[valid][:, None]
     pq = p_bar[valid] * (1 - p_bar[valid])
     s2 = s_squared[valid]
-    nb = n_bar[valid]
-    ncc = nc[valid]
     hb = h_bar[valid]
-
     a[valid] = (nb / ncc) * (s2 - (1.0 / (nb - 1)) * (pq - (r - 1) * s2 / r - hb / 4.0))
     b[valid] = (nb / (nb - 1)) * (pq - (r - 1) * s2 / r - (2 * nb - 1) * hb / (4.0 * nb))
     c[valid] = hb / 2.0
 
-    # Global FST = sum(a) / sum(a + b + c)
-    valid_mask = (n1 > 0) & (n2 > 0)
-    if cp.any(valid_mask):
-        sum_a = float(cp.sum(a[valid_mask]).get())
-        sum_abc = float(cp.sum((a + b + c)[valid_mask]).get())
-        if sum_abc > 0:
-            return sum_a / sum_abc
+    # Global FST = sum(a) / sum(a + b + c), summed over alleles AND sites.
+    sum_a = float(cp.sum(a).get())
+    sum_abc = float(cp.sum(a + b + c).get())
+    if sum_abc > 0:
+        return sum_a / sum_abc
     return 0.0
 
 

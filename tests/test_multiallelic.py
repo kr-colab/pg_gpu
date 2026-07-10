@@ -414,6 +414,27 @@ class TestDivergenceVsTskit:
         gst_ref = (ht[v] - hs[v]).sum() / ht[v].sum()
         np.testing.assert_allclose(gst_pg, gst_ref, rtol=1e-12)
 
+    def test_fst_weir_cockerham_matches_allel(self, multiallelic_ts):
+        # WC per-allele one-vs-rest a/b/c summed over alleles (incl. per-allele
+        # observed het) == allel.weir_cockerham_fst on multiallelic diploid data.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        G = ts.genotype_matrix()
+        nsites, n_nodes = G.shape
+        n_ind = n_nodes // 2
+        half = n_ind // 2
+        gd = G.reshape(nsites, n_ind, 2)
+        subpops = [list(range(half)), list(range(half, n_ind))]
+        a, b, c = allel.weir_cockerham_fst(allel.GenotypeArray(gd), subpops)
+        fst_allel = np.sum(a) / np.sum(a + b + c)
+
+        hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+        # individual i == haplotype rows 2i, 2i+1
+        hm.sample_sets = {'A': list(range(2 * half)),
+                          'B': list(range(2 * half, n_nodes))}
+        fst_pg = divergence.fst_weir_cockerham(hm, 'A', 'B')
+        np.testing.assert_allclose(fst_pg, fst_allel, rtol=1e-9)
+
     def test_pbs_matches_allel(self, multiallelic_ts):
         # PBS composes three per-allele Hudson FSTs; matches allel.pbs.
         from pg_gpu import divergence
