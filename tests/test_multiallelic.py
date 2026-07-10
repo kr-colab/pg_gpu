@@ -379,6 +379,17 @@ class TestDivergenceVsTskit:
         num, den = allel.hudson_fst(ac1, ac2)
         np.testing.assert_allclose(fst_pg, np.sum(num) / np.sum(den), rtol=1e-9)
 
+    def test_fst_tskit_matches_tskit(self, multiallelic_ts):
+        # tskit's FST = (Hb - Hw)/(Hb + Hw); a distinct assembly from Hudson.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        fst_pg = divergence.fst_tskit(hm, 'A', 'B')
+        np.testing.assert_allclose(fst_pg, ts.Fst([A, B], mode='site'), rtol=1e-9)
+        # dispatcher routes method='tskit' here; and it differs from Hudson
+        assert divergence.fst(hm, 'A', 'B', method='tskit') == fst_pg
+        assert not np.isclose(fst_pg, divergence.fst_hudson(hm, 'A', 'B'))
+
     def test_pbs_matches_allel(self, multiallelic_ts):
         # PBS composes three per-allele Hudson FSTs; matches allel.pbs.
         from pg_gpu import divergence

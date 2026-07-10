@@ -102,7 +102,9 @@ def fst(haplotype_matrix: HaplotypeMatrix,
     pop2 : str or list
         Second population (name from sample_sets or list of indices)
     method : str
-        FST estimation method ('hudson', 'weir_cockerham', 'nei')
+        FST estimation method ('hudson', 'tskit', 'weir_cockerham', 'nei').
+        'hudson' is the classic 1 - Hw/Hb estimator (== scikit-allel); 'tskit'
+        is tskit's (Hb - Hw)/(Hb + Hw) combination. See fst_tskit.
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
@@ -114,6 +116,8 @@ def fst(haplotype_matrix: HaplotypeMatrix,
     """
     if method == 'hudson':
         return fst_hudson(haplotype_matrix, pop1, pop2, missing_data)
+    elif method == 'tskit':
+        return fst_tskit(haplotype_matrix, pop1, pop2, missing_data)
     elif method == 'weir_cockerham':
         return fst_weir_cockerham(haplotype_matrix, pop1, pop2, missing_data)
     elif method == 'nei':
@@ -174,6 +178,68 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     valid_mask = den > 0
     if cp.any(valid_mask):
         return float((cp.sum(num[valid_mask]) / cp.sum(den[valid_mask])).get())
+    return 0.0
+
+
+def fst_tskit(haplotype_matrix: HaplotypeMatrix,
+              pop1: Union[str, list],
+              pop2: Union[str, list],
+              missing_data: str = 'include') -> float:
+    """
+    Compute tskit's FST estimator between two populations.
+
+    tskit assembles the same within/between pieces as Hudson but with a
+    different combination (added here for tskit parity; NOT the classic Hudson
+    ``1 - Hw/Hb`` returned by ``fst_hudson``):
+
+        FST = (sum(Hb) - sum(Hw)) / (sum(Hb) + sum(Hw))
+
+    where, per site, Hw = (pi_1 + pi_2) / 2 is the mean within-population
+    pairwise difference (unbiased) and Hb = dxy is the between-population
+    divergence. Both are per-allele, so this matches
+    ``ts.Fst([pop1, pop2], mode='site')`` on multiallelic data. See
+    ``plans/NOTES_fst_estimators.md`` (untracked) for the estimator comparison.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+        The haplotype data
+    pop1 : str or list
+        First population
+    pop2 : str or list
+        Second population
+    missing_data : str
+        'include' - Use all sites, calculate from available data per site
+        'exclude' - Only use sites with no missing data
+
+    Returns
+    -------
+    float
+        tskit's FST estimate
+    """
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2])
+        if haplotype_matrix.num_variants == 0:
+            return 0.0
+
+    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
+    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
+    pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
+    pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
+
+    # Reuse the per-allele Hudson pieces: den = Hb (between), den - num = Hw
+    # (within). tskit combines them as (Hb - Hw) / (Hb + Hw), summed over sites.
+    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
+    num, den = _hudson_fst_from_counts(ac1, nv1, ac2, nv2)
+    between_sum = float(cp.sum(den).get())
+    within_sum = float(cp.sum(den - num).get())
+    total = between_sum + within_sum
+    if total > 0:
+        return (between_sum - within_sum) / total
     return 0.0
 
 
