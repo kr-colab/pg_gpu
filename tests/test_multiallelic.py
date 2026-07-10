@@ -390,6 +390,30 @@ class TestDivergenceVsTskit:
         assert divergence.fst(hm, 'A', 'B', method='tskit') == fst_pg
         assert not np.isclose(fst_pg, divergence.fst_hudson(hm, 'A', 'B'))
 
+    def test_fst_nei_matches_hand_formula(self, multiallelic_ts):
+        # Nei GST per-allele: HS = 1 - sum_a p_a^2 (weighted), HT from pooled
+        # pbar_a. allel has no Nei GST, so pin to the numpy hand formula.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        gst_pg = divergence.fst_nei(hm, 'A', 'B')
+
+        G = ts.genotype_matrix()
+        K = int(G.max()) + 1
+        Ai, Bi = hm.sample_sets['A'], hm.sample_sets['B']
+        ac1 = np.stack([(G[:, Ai] == a).sum(1) for a in range(K)], axis=1).astype(float)
+        ac2 = np.stack([(G[:, Bi] == a).sum(1) for a in range(K)], axis=1).astype(float)
+        n1, n2 = ac1.sum(1), ac2.sum(1)
+        p1, p2 = ac1 / n1[:, None], ac2 / n2[:, None]
+        h1, h2 = 1 - (p1**2).sum(1), 1 - (p2**2).sum(1)
+        tot = n1 + n2
+        hs = (h1 * n1 + h2 * n2) / tot
+        pbar = (n1[:, None] * p1 + n2[:, None] * p2) / tot[:, None]
+        ht = 1 - (pbar**2).sum(1)
+        v = ht > 0
+        gst_ref = (ht[v] - hs[v]).sum() / ht[v].sum()
+        np.testing.assert_allclose(gst_pg, gst_ref, rtol=1e-12)
+
     def test_pbs_matches_allel(self, multiallelic_ts):
         # PBS composes three per-allele Hudson FSTs; matches allel.pbs.
         from pg_gpu import divergence

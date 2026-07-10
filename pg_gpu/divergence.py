@@ -416,27 +416,28 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
-    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
-    pop1_counts = pop1_counts.astype(cp.float64)
-    pop2_counts = pop2_counts.astype(cp.float64)
-    n1 = pop1_n.astype(cp.float64)
-    n2 = pop2_n.astype(cp.float64)
+    # Per-allele Nei GST: within het HS = 1 - sum_a p_a^2 (per pop, sample-size
+    # weighted), total het HT = 1 - sum_a pbar_a^2 with the pooled allele freq
+    # pbar_a = (n1*p1_a + n2*p2_a)/(n1+n2). Reduces to the biallelic 2p(1-p)
+    # forms; multiallelic-correct.
+    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
+    n1 = nv1.astype(cp.float64)
+    n2 = nv2.astype(cp.float64)
+    tot = n1 + n2
+    both = tot > 0
 
-    pop1_freqs = cp.where(n1 > 0, pop1_counts / n1, 0.0)
-    pop2_freqs = cp.where(n2 > 0, pop2_counts / n2, 0.0)
+    p1 = cp.where((n1 > 0)[:, None], ac1.astype(cp.float64) / n1[:, None], 0.0)
+    p2 = cp.where((n2 > 0)[:, None], ac2.astype(cp.float64) / n2[:, None], 0.0)
 
-    # Within-population heterozygosity
-    hs1 = 2.0 * pop1_freqs * (1 - pop1_freqs)
-    hs2 = 2.0 * pop2_freqs * (1 - pop2_freqs)
+    h1 = 1.0 - cp.sum(p1 * p1, axis=1)
+    h2 = 1.0 - cp.sum(p2 * p2, axis=1)
 
-    hs = cp.zeros_like(hs1)
-    p_total = cp.zeros_like(pop1_freqs)
-    valid = (n1 + n2) > 0
-    hs[valid] = (hs1[valid] * n1[valid] + hs2[valid] * n2[valid]) / (n1[valid] + n2[valid])
-    p_total[valid] = (pop1_freqs[valid] * n1[valid] + pop2_freqs[valid] * n2[valid]) / (n1[valid] + n2[valid])
+    hs = cp.zeros_like(h1)
+    hs[both] = (h1[both] * n1[both] + h2[both] * n2[both]) / tot[both]
 
-    ht = 2.0 * p_total * (1 - p_total)
+    pbar = cp.zeros_like(p1)
+    pbar[both] = (n1[both, None] * p1[both] + n2[both, None] * p2[both]) / tot[both, None]
+    ht = 1.0 - cp.sum(pbar * pbar, axis=1)
 
     # Calculate GST - only for sites with sufficient data
     valid_mask = (ht > 0) & (n1 > 0) & (n2 > 0)
