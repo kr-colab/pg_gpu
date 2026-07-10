@@ -193,8 +193,7 @@ def _site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=None):
     LEGACY (collapsed, biallelic) path: derived alleles are lumped into a single
     ``dac`` count, so this is not multiallelic-correct. The scalar diversity path
     now uses the per-allele ``_ac_contribution``; this function is retained only
-    for ``windowed_analysis``, which still imports it and is migrated to the
-    per-allele primitive in a later subproject.
+    for ``windowed_analysis``, which still imports it.
 
     Parameters
     ----------

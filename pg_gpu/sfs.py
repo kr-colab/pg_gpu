@@ -272,7 +272,7 @@ def _joint_folded_cells(haplotype_matrix, pop1, pop2, missing_data):
     dropped. Returns ``(fA, fB, n1, n2)`` (flat GPU int64), to be binned with
     weight 1/2. Unlike the unfolded rule, this folds *the whole site by one
     global minor allele* rather than each axis independently -- which is where
-    tskit departs from scikit-allel's per-axis fold (see the ledger).
+    tskit departs from scikit-allel's per-axis fold.
     """
     ac1, ac2, nv1, nv2, n1, n2 = _joint_aligned_counts(haplotype_matrix,
                                                        pop1, pop2)
@@ -482,7 +482,7 @@ def joint_sfs_folded(haplotype_matrix: HaplotypeMatrix,
     output is the full ``(n1+1, n2+1)`` array (the kept region is the
     lower-total triangle; the rest is zero), with half-integer weights on
     multiallelic data. **This departs from scikit-allel's per-axis fold even on
-    biallelic data** (see the ledger) -- we pin to tskit here.
+    biallelic data** -- we pin to tskit here.
 
     Returns
     -------

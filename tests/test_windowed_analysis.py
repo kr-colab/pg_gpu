@@ -819,6 +819,29 @@ class TestOverlappingWindowsScatter:
                       if sub.num_variants > 0 else 0.0)
             assert np.isclose(pi_scatter, pi_ref, rtol=1e-10, atol=1e-12)
 
+    @pytest.mark.xfail(strict=True, reason=(
+        "windowed_analysis dxy/fst still collapse multiallelic sites: "
+        "_allele_sum_and_n uses cp.sum(hap) (mechanism A, sums allele indices), "
+        "so windowed dxy detectably diverges from the per-allele scalar "
+        "divergence.dxy made correct in subproject 0003. Pre-existing; fixed in "
+        "the windowed subproject (kr-colab/pg_gpu#100) -- remove this marker then."))
+    def test_twopop_non_overlapping_dxy_matches_scalar(self, sim_hm):
+        """Per-window windowed dxy should equal scalar divergence.dxy on the
+        window subset; currently fails on multiallelic sites (collapsed path)."""
+        window_size, step_size = 50_000, 50_000
+        df = windowed_analysis(sim_hm, window_size=window_size,
+                               step_size=step_size, statistics=['dxy'],
+                               populations=['pop1', 'pop2'], span_normalize=False)
+        for start, dxy_scatter in zip(df['start'], df['dxy']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            sub.sample_sets = sim_hm.sample_sets
+            dxy_ref = (divergence.dxy(sub, 'pop1', 'pop2', span_normalize=False)
+                       if sub.num_variants > 0 else 0.0)
+            assert np.isclose(dxy_scatter, dxy_ref, rtol=1e-10, atol=1e-12)
+
     def test_max_daf_overlapping_windows(self):
         """max_daf per window reflects max DAF among contained variants,
         including variants shared between overlapping windows."""

@@ -349,6 +349,145 @@ class TestJointSFS:
         np.testing.assert_allclose(result, expected, rtol=1e-9, atol=1e-9)
 
 
+class TestDivergenceVsTskit:
+    """Count-based divergence per-allele vs tskit (dxy/da) and scikit-allel
+    (Hudson FST / PBS), on multiallelic two/three sample sets."""
+
+    @staticmethod
+    def _pops(ts):
+        s = ts.samples()
+        h = len(s) // 2
+        return list(s[:h]), list(s[h:])
+
+    def _hm_with_pops(self, ts):
+        # HaplotypeMatrix carrying sample_sets so divergence funcs can name pops.
+        A, B = self._pops(ts)
+        hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+        hm.sample_sets = {'A': list(range(len(A))),
+                          'B': list(range(len(A), len(A) + len(B)))}
+        return hm, A, B
+
+    def test_fst_hudson_matches_allel(self, multiallelic_ts):
+        # Classic Hudson FST = sum(num)/sum(den); per-allele == allel.hudson_fst.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        fst_pg = divergence.fst_hudson(hm, 'A', 'B')
+        ha = allel.HaplotypeArray(ts.genotype_matrix())
+        ac1 = ha.count_alleles(subpop=hm.sample_sets['A'])
+        ac2 = ha.count_alleles(subpop=hm.sample_sets['B'])
+        num, den = allel.hudson_fst(ac1, ac2)
+        np.testing.assert_allclose(fst_pg, np.sum(num) / np.sum(den), rtol=1e-9)
+
+    def test_fst_tskit_matches_tskit(self, multiallelic_ts):
+        # tskit's FST = (Hb - Hw)/(Hb + Hw); a distinct assembly from Hudson.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        fst_pg = divergence.fst_tskit(hm, 'A', 'B')
+        np.testing.assert_allclose(fst_pg, ts.Fst([A, B], mode='site'), rtol=1e-9)
+        # dispatcher routes method='tskit' here; and it differs from Hudson
+        assert divergence.fst(hm, 'A', 'B', method='tskit') == fst_pg
+        assert not np.isclose(fst_pg, divergence.fst_hudson(hm, 'A', 'B'))
+
+    def test_fst_nei_matches_hand_formula(self, multiallelic_ts):
+        # Nei GST per-allele: HS = 1 - sum_a p_a^2 (weighted), HT from pooled
+        # pbar_a. allel has no Nei GST, so pin to the numpy hand formula.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        gst_pg = divergence.fst_nei(hm, 'A', 'B')
+
+        G = ts.genotype_matrix()
+        K = int(G.max()) + 1
+        Ai, Bi = hm.sample_sets['A'], hm.sample_sets['B']
+        ac1 = np.stack([(G[:, Ai] == a).sum(1) for a in range(K)], axis=1).astype(float)
+        ac2 = np.stack([(G[:, Bi] == a).sum(1) for a in range(K)], axis=1).astype(float)
+        n1, n2 = ac1.sum(1), ac2.sum(1)
+        p1, p2 = ac1 / n1[:, None], ac2 / n2[:, None]
+        h1, h2 = 1 - (p1**2).sum(1), 1 - (p2**2).sum(1)
+        tot = n1 + n2
+        hs = (h1 * n1 + h2 * n2) / tot
+        pbar = (n1[:, None] * p1 + n2[:, None] * p2) / tot[:, None]
+        ht = 1 - (pbar**2).sum(1)
+        v = ht > 0
+        gst_ref = (ht[v] - hs[v]).sum() / ht[v].sum()
+        np.testing.assert_allclose(gst_pg, gst_ref, rtol=1e-12)
+
+    def test_fst_weir_cockerham_matches_allel(self, multiallelic_ts):
+        # WC per-allele one-vs-rest a/b/c summed over alleles (incl. per-allele
+        # observed het) == allel.weir_cockerham_fst on multiallelic diploid data.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        G = ts.genotype_matrix()
+        nsites, n_nodes = G.shape
+        n_ind = n_nodes // 2
+        half = n_ind // 2
+        gd = G.reshape(nsites, n_ind, 2)
+        subpops = [list(range(half)), list(range(half, n_ind))]
+        a, b, c = allel.weir_cockerham_fst(allel.GenotypeArray(gd), subpops)
+        fst_allel = np.sum(a) / np.sum(a + b + c)
+
+        hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+        # individual i == haplotype rows 2i, 2i+1
+        hm.sample_sets = {'A': list(range(2 * half)),
+                          'B': list(range(2 * half, n_nodes))}
+        fst_pg = divergence.fst_weir_cockerham(hm, 'A', 'B')
+        np.testing.assert_allclose(fst_pg, fst_allel, rtol=1e-9)
+
+    def test_pbs_matches_allel(self, multiallelic_ts):
+        # PBS composes three per-allele Hudson FSTs; matches allel.pbs.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        n = ts.num_samples
+        t = n // 3
+        sets = {'A': list(range(t)), 'B': list(range(t, 2 * t)),
+                'C': list(range(2 * t, n))}
+        hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+        hm.sample_sets = sets
+        w = 50
+        pbs_pg = divergence.pbs(hm, 'A', 'B', 'C', window_size=w)
+        ha = allel.HaplotypeArray(ts.genotype_matrix())
+        ac = {k: ha.count_alleles(subpop=v) for k, v in sets.items()}
+        pbs_allel = allel.pbs(ac['A'], ac['B'], ac['C'], window_size=w, normed=True)
+        valid = ~np.isnan(pbs_pg) & ~np.isnan(pbs_allel)
+        np.testing.assert_allclose(pbs_pg[valid], pbs_allel[valid], rtol=1e-6, atol=1e-9)
+
+    def test_dxy_matches_tskit(self, multiallelic_ts):
+        # dxy = 1 - sum_a p1_a*p2_a per site; mean over sites == tskit divergence.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        dxy_pg = divergence.dxy(hm, 'A', 'B', span_normalize=False)
+        dxy_ts = ts.divergence([A, B], mode='site', span_normalise=False) / ts.num_sites
+        np.testing.assert_allclose(dxy_pg, dxy_ts, rtol=1e-12)
+
+    def test_dxy_components_consistent_with_dxy(self, multiallelic_ts):
+        # Raw-count path (used by windowed analysis) agrees with dxy's mean.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        pop1 = hm.haplotypes[hm.sample_sets['A'], :]
+        pop2 = hm.haplotypes[hm.sample_sets['B'], :]
+        diffs, comps, nsites = divergence.dxy_components(pop1, pop2)
+        dxy_pg = divergence.dxy(hm, 'A', 'B', span_normalize=False)
+        # No missing data => n1*n2 constant across sites, so the pooled ratio
+        # diffs/comps equals dxy's mean-of-per-site-ratios.
+        assert nsites == ts.num_sites
+        np.testing.assert_allclose(diffs / comps, dxy_pg, rtol=1e-12)
+
+    def test_da_uses_per_allele_pieces(self, multiallelic_ts):
+        # da = dxy - (pi1+pi2)/2, both per-allele now (internally consistent).
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        da = divergence.da(hm, 'A', 'B', span_normalize=False)
+        dxy_pg = divergence.dxy(hm, 'A', 'B', span_normalize=False)
+        pi1 = diversity.pi(hm, 'A', span_normalize=False)
+        pi2 = diversity.pi(hm, 'B', span_normalize=False)
+        np.testing.assert_allclose(da, dxy_pg - (pi1 + pi2) / 2.0, rtol=1e-12)
+
+
 class TestMultiallelicConsumers:
     """singleton_count / heterozygosity_expected / max_daf / mu_sfs / daf_histogram."""
 
