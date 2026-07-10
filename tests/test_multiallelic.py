@@ -349,6 +349,58 @@ class TestJointSFS:
         np.testing.assert_allclose(result, expected, rtol=1e-9, atol=1e-9)
 
 
+class TestDivergenceVsTskit:
+    """Count-based divergence per-allele vs tskit (two sample sets)."""
+
+    @staticmethod
+    def _pops(ts):
+        s = ts.samples()
+        h = len(s) // 2
+        return list(s[:h]), list(s[h:])
+
+    def _hm_with_pops(self, ts):
+        # HaplotypeMatrix carrying sample_sets so divergence funcs can name pops.
+        A, B = self._pops(ts)
+        hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+        hm.sample_sets = {'A': list(range(len(A))),
+                          'B': list(range(len(A), len(A) + len(B)))}
+        return hm, A, B
+
+    def test_dxy_matches_tskit(self, multiallelic_ts):
+        # dxy = 1 - sum_a p1_a*p2_a per site; mean over sites == tskit divergence.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        dxy_pg = divergence.dxy(hm, 'A', 'B', span_normalize=False)
+        dxy_ts = ts.divergence([A, B], mode='site', span_normalise=False) / ts.num_sites
+        np.testing.assert_allclose(dxy_pg, dxy_ts, rtol=1e-12)
+
+    def test_dxy_components_consistent_with_dxy(self, multiallelic_ts):
+        # Raw-count path (used by windowed analysis) agrees with dxy's mean.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        pop1 = hm.haplotypes[hm.sample_sets['A'], :]
+        pop2 = hm.haplotypes[hm.sample_sets['B'], :]
+        diffs, comps, nsites = divergence.dxy_components(pop1, pop2)
+        dxy_pg = divergence.dxy(hm, 'A', 'B', span_normalize=False)
+        # No missing data => n1*n2 constant across sites, so the pooled ratio
+        # diffs/comps equals dxy's mean-of-per-site-ratios.
+        assert nsites == ts.num_sites
+        np.testing.assert_allclose(diffs / comps, dxy_pg, rtol=1e-12)
+
+    def test_da_uses_per_allele_pieces(self, multiallelic_ts):
+        # da = dxy - (pi1+pi2)/2, both per-allele now (internally consistent).
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        da = divergence.da(hm, 'A', 'B', span_normalize=False)
+        dxy_pg = divergence.dxy(hm, 'A', 'B', span_normalize=False)
+        pi1 = diversity.pi(hm, 'A', span_normalize=False)
+        pi2 = diversity.pi(hm, 'B', span_normalize=False)
+        np.testing.assert_allclose(da, dxy_pg - (pi1 + pi2) / 2.0, rtol=1e-12)
+
+
 class TestMultiallelicConsumers:
     """singleton_count / heterozygosity_expected / max_daf / mu_sfs / daf_histogram."""
 

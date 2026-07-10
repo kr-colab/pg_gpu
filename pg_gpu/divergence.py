@@ -15,10 +15,46 @@ from ._memutil import dac_and_n as _pop_dac_and_n
 from .diversity import _apply_span_normalize, pi as _diversity_pi
 
 
+def _aligned_pop_counts(pop1_haps, pop2_haps):
+    """Per-allele counts for two populations on a shared global K.
+
+    Both populations are counted with the same allele-index width
+    K = max allele index over both pops + 1, so column ``a`` denotes the same
+    allele in each (the alignment discipline from the joint SFS). This is what
+    makes ``sum_a ac1[:, a] * ac2[:, a]`` a valid per-allele cross term.
+
+    Parameters
+    ----------
+    pop1_haps, pop2_haps : cupy.ndarray, shape (n_haplotypes, n_variants)
+        Haplotype data for each population, with -1 for missing.
+
+    Returns
+    -------
+    ac1, ac2 : cupy.ndarray, int64, shape (n_variants, K)
+        Per-allele counts on the shared K.
+    nv1, nv2 : cupy.ndarray, int64, shape (n_variants,)
+        Per-site valid (non-missing) haplotype counts.
+    """
+    from ._memutil import allele_counts
+    k1 = int(pop1_haps.max()) if pop1_haps.size else 0
+    k2 = int(pop2_haps.max()) if pop2_haps.size else 0
+    k = max(k1, k2, 0) + 1
+    ac1, nv1 = allele_counts(pop1_haps, n_alleles=k)
+    ac2, nv2 = allele_counts(pop2_haps, n_alleles=k)
+    return ac1, ac2, nv1, nv2
+
+
 def dxy_components(pop1_haps, pop2_haps):
     """Compute between-population pairwise differences and comparisons.
 
     Returns raw counts for custom aggregation (e.g., windowed analysis).
+    Per-allele (multiallelic-correct): at a site the number of differing
+    cross-population pairs is
+
+        diffs = nv1 * nv2 - sum_a ac1_a * ac2_a
+
+    (comparisons minus same-allele pairs, summed over every allele a), which
+    reduces to the biallelic ancestral/derived form when there are two alleles.
 
     Parameters
     ----------
@@ -34,19 +70,14 @@ def dxy_components(pop1_haps, pop2_haps):
     n_sites : int
         Number of sites with data in both populations.
     """
-    pop1_derived, pop1_n = _pop_dac_and_n(pop1_haps)
-    pop2_derived, pop2_n = _pop_dac_and_n(pop2_haps)
-    pop1_n = pop1_n.astype(cp.float64)
-    pop2_n = pop2_n.astype(cp.float64)
-    pop1_derived = pop1_derived.astype(cp.float64)
-    pop2_derived = pop2_derived.astype(cp.float64)
-    pop1_ancestral = pop1_n - pop1_derived
-    pop2_ancestral = pop2_n - pop2_derived
+    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
+    nv1 = nv1.astype(cp.float64)
+    nv2 = nv2.astype(cp.float64)
+    same = cp.sum(ac1.astype(cp.float64) * ac2.astype(cp.float64), axis=1)
+    site_comps = nv1 * nv2
+    site_diffs = site_comps - same
 
-    site_diffs = pop1_derived * pop2_ancestral + pop1_ancestral * pop2_derived
-    site_comps = pop1_n * pop2_n
-
-    usable = (pop1_n > 0) & (pop2_n > 0)
+    usable = (nv1 > 0) & (nv2 > 0)
     total_diffs = float(cp.sum(site_diffs[usable]).get())
     total_comps = float(cp.sum(site_comps[usable]).get())
     n_sites = int(cp.sum(usable).get())
@@ -434,22 +465,18 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
 
     n_filtered = pop1_haps.shape[1]
 
-    # Get allele frequencies from non-missing data per site
-    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
-    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
-    pop1_counts = pop1_counts.astype(cp.float64)
-    pop2_counts = pop2_counts.astype(cp.float64)
-    pop1_n = pop1_n.astype(cp.float64)
-    pop2_n = pop2_n.astype(cp.float64)
+    # Per-allele Dxy: dxy = 1 - sum_a p1_a * p2_a, from non-missing data per
+    # site. Reduces to the biallelic p1 + p2 - 2*p1*p2 when there are two
+    # alleles; multiallelic-correct (matches tskit divergence).
+    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
+    nv1 = nv1.astype(cp.float64)
+    nv2 = nv2.astype(cp.float64)
 
-    pop1_freqs = cp.where(pop1_n > 0, pop1_counts / pop1_n, 0.0)
-    pop2_freqs = cp.where(pop2_n > 0, pop2_counts / pop2_n, 0.0)
-
-    # Calculate Dxy only for sites with data
-    valid_mask = (pop1_n > 0) & (pop2_n > 0)
+    valid_mask = (nv1 > 0) & (nv2 > 0)
+    p1 = cp.where(valid_mask[:, None], ac1.astype(cp.float64) / nv1[:, None], 0.0)
+    p2 = cp.where(valid_mask[:, None], ac2.astype(cp.float64) / nv2[:, None], 0.0)
     dxy_per_site = cp.zeros(n_filtered)
-    dxy_per_site[valid_mask] = (pop1_freqs[valid_mask] + pop2_freqs[valid_mask] -
-                               2 * pop1_freqs[valid_mask] * pop2_freqs[valid_mask])
+    dxy_per_site[valid_mask] = 1.0 - cp.sum(p1 * p2, axis=1)[valid_mask]
 
     if per_site:
         return dxy_per_site.get()
