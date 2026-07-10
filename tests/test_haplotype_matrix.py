@@ -290,12 +290,14 @@ def test_transfer_to_cpu():
 
 
 def test_allele_frequency_spectrum(sample_vcf):
-    """Test calculation of allele frequency spectrum."""
+    """Test calculation of the SFS (formerly HaplotypeMatrix.allele_frequency_spectrum,
+    removed in the issue #100 consolidation; the SFS now lives in the sfs module)."""
+    from pg_gpu import sfs as sfs_mod
     hap_matrix = HaplotypeMatrix.from_vcf(sample_vcf)
-    afs = hap_matrix.allele_frequency_spectrum()
+    afs = sfs_mod.sfs(hap_matrix)
     assert isinstance(afs, np.ndarray)
     assert afs.ndim == 1
-    # AFS has n+1 bins for frequencies 0 to n
+    # SFS has n+1 bins for frequencies 0 to n
     assert afs.size == hap_matrix.num_haplotypes + 1
 
 def test_diversity(sample_vcf):

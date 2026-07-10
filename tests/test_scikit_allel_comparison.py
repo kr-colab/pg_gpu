@@ -10,7 +10,7 @@ import numpy as np
 import cupy as cp
 import allel
 from pg_gpu import HaplotypeMatrix
-from pg_gpu import diversity, divergence
+from pg_gpu import diversity, divergence, sfs as sfs_mod
 
 
 class TestDiversityComparison:
@@ -130,7 +130,7 @@ class TestDiversityComparison:
 
         # pg_gpu
         matrix = HaplotypeMatrix(haplotypes, positions, test_data['start'], test_data['end'])
-        afs_pg = diversity.allele_frequency_spectrum(matrix)
+        afs_pg = sfs_mod.sfs(matrix)
         if hasattr(afs_pg, 'get'):
             afs_pg = np.asarray(afs_pg)
 

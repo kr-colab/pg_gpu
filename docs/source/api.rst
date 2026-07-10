@@ -111,7 +111,6 @@ Core Functions
 .. autofunction:: pg_gpu.diversity.theta_w
 .. autofunction:: pg_gpu.diversity.tajimas_d
 .. autofunction:: pg_gpu.diversity.haplotype_diversity
-.. autofunction:: pg_gpu.diversity.allele_frequency_spectrum
 .. autofunction:: pg_gpu.diversity.segregating_sites
 .. autofunction:: pg_gpu.diversity.singleton_count
 .. autofunction:: pg_gpu.diversity.fay_wus_h
