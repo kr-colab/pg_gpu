@@ -350,7 +350,8 @@ class TestJointSFS:
 
 
 class TestDivergenceVsTskit:
-    """Count-based divergence per-allele vs tskit (two sample sets)."""
+    """Count-based divergence per-allele vs tskit (dxy/da) and scikit-allel
+    (Hudson FST / PBS), on multiallelic two/three sample sets."""
 
     @staticmethod
     def _pops(ts):
@@ -365,6 +366,36 @@ class TestDivergenceVsTskit:
         hm.sample_sets = {'A': list(range(len(A))),
                           'B': list(range(len(A), len(A) + len(B)))}
         return hm, A, B
+
+    def test_fst_hudson_matches_allel(self, multiallelic_ts):
+        # Classic Hudson FST = sum(num)/sum(den); per-allele == allel.hudson_fst.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, A, B = self._hm_with_pops(ts)
+        fst_pg = divergence.fst_hudson(hm, 'A', 'B')
+        ha = allel.HaplotypeArray(ts.genotype_matrix())
+        ac1 = ha.count_alleles(subpop=hm.sample_sets['A'])
+        ac2 = ha.count_alleles(subpop=hm.sample_sets['B'])
+        num, den = allel.hudson_fst(ac1, ac2)
+        np.testing.assert_allclose(fst_pg, np.sum(num) / np.sum(den), rtol=1e-9)
+
+    def test_pbs_matches_allel(self, multiallelic_ts):
+        # PBS composes three per-allele Hudson FSTs; matches allel.pbs.
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        n = ts.num_samples
+        t = n // 3
+        sets = {'A': list(range(t)), 'B': list(range(t, 2 * t)),
+                'C': list(range(2 * t, n))}
+        hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+        hm.sample_sets = sets
+        w = 50
+        pbs_pg = divergence.pbs(hm, 'A', 'B', 'C', window_size=w)
+        ha = allel.HaplotypeArray(ts.genotype_matrix())
+        ac = {k: ha.count_alleles(subpop=v) for k, v in sets.items()}
+        pbs_allel = allel.pbs(ac['A'], ac['B'], ac['C'], window_size=w, normed=True)
+        valid = ~np.isnan(pbs_pg) & ~np.isnan(pbs_allel)
+        np.testing.assert_allclose(pbs_pg[valid], pbs_allel[valid], rtol=1e-6, atol=1e-9)
 
     def test_dxy_matches_tskit(self, multiallelic_ts):
         # dxy = 1 - sum_a p1_a*p2_a per site; mean over sites == tskit divergence.

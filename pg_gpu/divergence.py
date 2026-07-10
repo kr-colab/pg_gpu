@@ -165,43 +165,16 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    pop1_counts, pop1_n = _pop_dac_and_n(pop1_haps)
-    pop2_counts, pop2_n = _pop_dac_and_n(pop2_haps)
-    pop1_counts = pop1_counts.astype(cp.float64)
-    pop2_counts = pop2_counts.astype(cp.float64)
-    n1 = pop1_n.astype(cp.float64)
-    n2 = pop2_n.astype(cp.float64)
+    # Per-allele Hudson: within = mean within-pop pairwise diff, between = dxy,
+    # FST = 1 - sum(within)/sum(between) (ratio-of-averages). den > 0 already
+    # implies both pops have data and the site is polymorphic between them.
+    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
+    num, den = _hudson_fst_from_counts(ac1, nv1, ac2, nv2)
 
-    pop1_freqs = cp.where(n1 > 0, pop1_counts / n1, 0.0)
-    pop2_freqs = cp.where(n2 > 0, pop2_counts / n2, 0.0)
-
-    # Per-site within-population mean pairwise difference
-    # mpd(p, n) = p*(1-p)*n/(n-1)  (unbiased heterozygosity)
-    within1 = cp.zeros_like(pop1_freqs)
-    within2 = cp.zeros_like(pop2_freqs)
-    valid1 = n1 > 1
-    valid2 = n2 > 1
-    within1[valid1] = (pop1_freqs[valid1] * (1 - pop1_freqs[valid1])
-                       * n1[valid1] / (n1[valid1] - 1))
-    within2[valid2] = (pop2_freqs[valid2] * (1 - pop2_freqs[valid2])
-                       * n2[valid2] / (n2[valid2] - 1))
-    within = (within1 + within2) / 2.0
-
-    # Per-site between-population mean pairwise difference
-    between = (pop1_freqs * (1 - pop2_freqs)
-               + pop2_freqs * (1 - pop1_freqs)) / 2.0
-
-    # Numerator and denominator per SNP (ratio-of-averages)
-    num = between - within
-    den = between
-
-    valid_mask = (den > 0) & (n1 > 0) & (n2 > 0)
-
+    valid_mask = den > 0
     if cp.any(valid_mask):
-        fst_val = float((cp.sum(num[valid_mask]) / cp.sum(den[valid_mask])).get())
-        return fst_val
-    else:
-        return 0.0
+        return float((cp.sum(num[valid_mask]) / cp.sum(den[valid_mask])).get())
+    return 0.0
 
 
 def fst_weir_cockerham(haplotype_matrix,
@@ -693,43 +666,44 @@ def _get_population_indices(haplotype_matrix: HaplotypeMatrix,
         return list(pop)
 
 
-def _pop_allele_counts(haplotype_matrix, pop, missing_data='include'):
-    """Compute per-variant allele counts for a population on GPU.
+def _hudson_fst_from_counts(ac1, nv1, ac2, nv2):
+    """Per-variant Hudson FST num/den from per-allele counts on a shared K.
 
-    Returns (ac_0, ac_1, n) as CuPy arrays. n is per-site (array)
-    for 'include' mode, and also per-site after filtering
-    for 'exclude' mode.
+    Classic Hudson estimator (== scikit-allel): FST = sum(num) / sum(den) with
+    per-site num = Hb - Hw, den = Hb, where Hw is the mean within-population
+    pairwise difference and Hb the between-population divergence. The
+    same-allele pair counts sum over every allele column, so this is
+    multiallelic-correct and reduces to the biallelic ancestral/derived form
+    (ac columns [ref, alt]) exactly.
+
+    Parameters
+    ----------
+    ac1, ac2 : cupy.ndarray, shape (n_variants, K)
+        Per-allele counts on the SAME K (see _aligned_pop_counts).
+    nv1, nv2 : cupy.ndarray, shape (n_variants,)
+        Per-site valid haplotype counts.
+
+    Returns
+    -------
+    num, den : cupy.ndarray, float64, shape (n_variants,)
     """
-    if missing_data == 'exclude':
-        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
-            populations=[pop])
+    nv1 = nv1.astype(cp.float64)
+    nv2 = nv2.astype(cp.float64)
+    ac1 = ac1.astype(cp.float64)
+    ac2 = ac2.astype(cp.float64)
 
-    pop_idx = _get_population_indices(haplotype_matrix, pop)
-    h = haplotype_matrix.haplotypes[pop_idx, :]
-    ac_1, n = _pop_dac_and_n(h)
-    n = n.astype(cp.float64)
-    ac_1 = ac_1.astype(cp.float64)
-    ac_0 = n - ac_1
-    return ac_0, ac_1, n
-
-
-def _hudson_fst_from_counts(ac1_0, ac1_1, n1, ac2_0, ac2_1, n2):
-    """Compute per-variant Hudson FST num/den from precomputed allele counts.
-
-    Returns (num, den) as CuPy arrays on GPU.
-    """
-    n1_pairs = n1 * (n1 - 1) / 2
-    n1_same = (ac1_0 * (ac1_0 - 1) + ac1_1 * (ac1_1 - 1)) / 2
+    n1_pairs = nv1 * (nv1 - 1) / 2
+    n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
     mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
 
-    n2_pairs = n2 * (n2 - 1) / 2
-    n2_same = (ac2_0 * (ac2_0 - 1) + ac2_1 * (ac2_1 - 1)) / 2
+    n2_pairs = nv2 * (nv2 - 1) / 2
+    n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
     mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
 
     within = (mpd1 + mpd2) / 2.0
 
-    n_between = n1 * n2
-    n_between_same = ac1_0 * ac2_0 + ac1_1 * ac2_1
+    n_between = nv1 * nv2
+    n_between_same = cp.sum(ac1 * ac2, axis=1)
     between = cp.where(n_between > 0,
                        (n_between - n_between_same) / n_between, 0.0)
 
@@ -800,15 +774,27 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
-    # precompute allele counts once per population
-    ac1_0, ac1_1, n1 = _pop_allele_counts(haplotype_matrix, pop1, missing_data)
-    ac2_0, ac2_1, n2 = _pop_allele_counts(haplotype_matrix, pop2, missing_data)
-    ac3_0, ac3_1, n3 = _pop_allele_counts(haplotype_matrix, pop3, missing_data)
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2, pop3])
+
+    # Per-allele counts for all three pops on a shared global K, so each pair's
+    # cross term sum_a ac_i,a * ac_j,a is over aligned alleles.
+    from ._memutil import allele_counts
+    h1 = haplotype_matrix.haplotypes[_get_population_indices(haplotype_matrix, pop1), :]
+    h2 = haplotype_matrix.haplotypes[_get_population_indices(haplotype_matrix, pop2), :]
+    h3 = haplotype_matrix.haplotypes[_get_population_indices(haplotype_matrix, pop3), :]
+    k = max(int(h1.max()) if h1.size else 0,
+            int(h2.max()) if h2.size else 0,
+            int(h3.max()) if h3.size else 0, 0) + 1
+    ac1, nv1 = allele_counts(h1, n_alleles=k)
+    ac2, nv2 = allele_counts(h2, n_alleles=k)
+    ac3, nv3 = allele_counts(h3, n_alleles=k)
 
     # compute all three pairwise FST num/den from shared counts
-    num12, den12 = _hudson_fst_from_counts(ac1_0, ac1_1, n1, ac2_0, ac2_1, n2)
-    num13, den13 = _hudson_fst_from_counts(ac1_0, ac1_1, n1, ac3_0, ac3_1, n3)
-    num23, den23 = _hudson_fst_from_counts(ac2_0, ac2_1, n2, ac3_0, ac3_1, n3)
+    num12, den12 = _hudson_fst_from_counts(ac1, nv1, ac2, nv2)
+    num13, den13 = _hudson_fst_from_counts(ac1, nv1, ac3, nv3)
+    num23, den23 = _hudson_fst_from_counts(ac2, nv2, ac3, nv3)
 
     fst12 = _windowed_fst(num12, den12, window_size, window_start,
                           window_stop, window_step)
