@@ -17,6 +17,12 @@ class GenotypeMatrix:
 
     Shape: (n_individuals, n_variants). Missing data encoded as -1.
 
+    Biallelic by construction: values are alt-allele dosage (0/1/2), so this
+    structure cannot represent multiallelic genotypes -- ``from_vcf`` filters
+    multiallelic sites out and ``from_haplotype_matrix`` sums paired haplotypes
+    (well-defined only for {0,1} alleles). For multiallelic data use the
+    allele-index ``HaplotypeMatrix``.
+
     Parameters
     ----------
     genotypes : ndarray, int8, shape (n_individuals, n_variants)

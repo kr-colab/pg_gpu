@@ -349,6 +349,111 @@ class TestJointSFS:
         np.testing.assert_allclose(result, expected, rtol=1e-9, atol=1e-9)
 
 
+class TestPairwiseDistanceKernel:
+    """Multiallelic pairwise Hamming distance kernel (0003b) vs numpy direct."""
+
+    @staticmethod
+    def _direct(hap):
+        # raw = # jointly-valid sites that differ; jv = # jointly-valid sites
+        n = hap.shape[0]
+        raw = np.zeros((n, n))
+        jv = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                both = (hap[i] >= 0) & (hap[j] >= 0)
+                jv[i, j] = both.sum()
+                raw[i, j] = (both & (hap[i] != hap[j])).sum()
+        return raw, jv
+
+    def test_multiallelic_with_missing_matches_numpy(self):
+        import cupy as cp
+        from pg_gpu.distance_stats import _pairwise_diffs_matrix_gpu
+        rng = np.random.RandomState(0)
+        hap = rng.randint(0, 4, size=(8, 200)).astype(np.int8)  # 4 alleles
+        hap[rng.random((8, 200)) < 0.1] = -1                     # 10% missing
+        assert hap.max() > 1                                     # genuinely multiallelic
+        raw_ref, jv_ref = self._direct(hap)
+        norm_ref = np.where(jv_ref > 0, raw_ref / jv_ref, 0.0)
+        raw = cp.asnumpy(_pairwise_diffs_matrix_gpu(hap, 'include'))
+        norm = cp.asnumpy(_pairwise_diffs_matrix_gpu(hap, 'normalize'))
+        np.testing.assert_allclose(raw, raw_ref)
+        np.testing.assert_allclose(norm, norm_ref)
+        assert np.allclose(np.diag(raw), 0)
+        assert not (raw < 0).any()          # the old binary-only identity went negative
+
+    def test_biallelic_bit_identical_to_gram_trick(self):
+        import cupy as cp
+        from pg_gpu.distance_stats import _pairwise_diffs_matrix_gpu
+        rng = np.random.RandomState(1)
+        hb = rng.randint(0, 2, size=(6, 150)).astype(np.int8)   # no missing
+        old = (hb.sum(1)[:, None] + hb.sum(1)[None, :]
+               - 2 * (hb.astype(float) @ hb.astype(float).T))
+        new = cp.asnumpy(_pairwise_diffs_matrix_gpu(hb, 'include'))
+        np.testing.assert_array_equal(new, old)
+
+
+class TestDistanceStatsConsumers:
+    """Distance-based stats inherit the corrected multiallelic Hamming kernel."""
+
+    @staticmethod
+    def _raw_hamming(haps):
+        # raw pairwise Hamming count (fixture has no missing data)
+        n = haps.shape[0]
+        D = np.zeros((n, n))
+        for i in range(n):
+            D[i] = (haps != haps[i]).sum(axis=1)
+        return D
+
+    def _setup(self, ts):
+        n = ts.num_samples
+        h = n // 2
+        hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+        hm.sample_sets = {'A': list(range(h)), 'B': list(range(h, n))}
+        haps = ts.genotype_matrix().T          # (n_samples, n_sites) allele indices
+        # Guard the coverage claim: allele indices must exceed {0,1}, i.e. the
+        # exact regime where the old binary-only kernel broke.
+        assert haps.max() > 1, "fixture is not multiallelic"
+        return hm, h, n, haps
+
+    def test_pairwise_diffs_haploid_matches_numpy(self, multiallelic_ts):
+        from pg_gpu import distance_stats as ds
+        ts = multiallelic_ts
+        hm, h, n, haps = self._setup(ts)
+        got = np.asarray(ds.pairwise_diffs_haploid(hm))     # condensed, per-site avg
+        D = self._raw_hamming(haps) / haps.shape[1]
+        ii, jj = np.triu_indices(n, k=1)
+        np.testing.assert_allclose(got, D[ii, jj], rtol=1e-9)
+
+    def test_pairwise_distance_matrix_blocks_match_numpy(self, multiallelic_ts):
+        import cupy as cp
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, h, n, haps = self._setup(ts)
+        D = self._raw_hamming(haps)
+        between, within1, within2 = divergence.pairwise_distance_matrix(hm, 'A', 'B')
+        np.testing.assert_allclose(cp.asnumpy(between), D[:h, h:])
+        np.testing.assert_allclose(cp.asnumpy(within1), D[:h, :h])
+        np.testing.assert_allclose(cp.asnumpy(within2), D[h:, h:])
+
+    # NOTE: zx is excluded -- it is an LD/ZnS ratio (ld_statistics.zns), not a
+    # distance-matrix statistic, so it does not consume the Hamming kernel.
+    @pytest.mark.parametrize("statname",
+                             ["snn", "dxy_min", "gmin", "dd", "dd_rank"])
+    def test_distance_stat_consumes_corrected_kernel(self, multiallelic_ts, statname):
+        # stat via the pg_gpu kernel == stat fed numpy-reference distance matrices,
+        # so each stat correctly consumes the corrected multiallelic distances.
+        import cupy as cp
+        from pg_gpu import divergence
+        ts = multiallelic_ts
+        hm, h, n, haps = self._setup(ts)
+        D = self._raw_hamming(haps)
+        ref = (cp.asarray(D[:h, h:]), cp.asarray(D[:h, :h]), cp.asarray(D[h:, h:]))
+        fn = getattr(divergence, statname)
+        got = fn(hm, 'A', 'B')
+        ref_val = fn(hm, 'A', 'B', distance_matrices=ref)
+        np.testing.assert_allclose(got, ref_val, rtol=1e-9, equal_nan=True)
+
+
 class TestDivergenceVsTskit:
     """Count-based divergence per-allele vs tskit (dxy/da) and scikit-allel
     (Hudson FST / PBS), on multiallelic two/three sample sets."""
