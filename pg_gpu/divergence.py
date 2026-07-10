@@ -11,7 +11,6 @@ import numpy as np
 import cupy as cp
 from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
-from ._memutil import dac_and_n as _pop_dac_and_n
 from .diversity import _apply_span_normalize, pi as _diversity_pi
 
 
@@ -658,6 +657,8 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
             results['fst'] = fst(haplotype_matrix, pop1, pop2, missing_data=missing_data)
         elif stat == 'fst_hudson':
             results['fst_hudson'] = fst_hudson(haplotype_matrix, pop1, pop2, missing_data=missing_data)
+        elif stat == 'fst_tskit':
+            results['fst_tskit'] = fst_tskit(haplotype_matrix, pop1, pop2, missing_data=missing_data)
         elif stat == 'fst_wc':
             results['fst_wc'] = fst_weir_cockerham(haplotype_matrix, pop1, pop2, missing_data=missing_data)
         elif stat == 'fst_nei':
