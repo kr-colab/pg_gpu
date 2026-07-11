@@ -977,6 +977,82 @@ class TestMultiallelicSinglePop:
             else:
                 assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
 
+    @pytest.fixture(scope="class")
+    def sim_hm_missing(self, sim_hm):
+        """Multiallelic data with ~10% missing calls injected (-1)."""
+        import cupy as cp
+        hap = (sim_hm.haplotypes.get()
+               if isinstance(sim_hm.haplotypes, cp.ndarray)
+               else np.asarray(sim_hm.haplotypes)).copy()
+        pos = (sim_hm.positions.get()
+               if isinstance(sim_hm.positions, cp.ndarray)
+               else np.asarray(sim_hm.positions))
+        rng = np.random.RandomState(7)
+        hap[rng.random(hap.shape) < 0.1] = -1
+        return HaplotypeMatrix(hap, pos, chrom_start=sim_hm.chrom_start,
+                               chrom_end=sim_hm.chrom_end)
+
+    def test_per_variant_missing_data_matches_scalar(self, sim_hm_missing):
+        """With missing data, the per-variant engine still matches the scalar for
+        the stats that use per-site n_valid (everything except tajimas_d, whose
+        variance effective-n is a separate issue -- see the xfail below)."""
+        from pg_gpu.windowed_analysis import windowed_statistics
+        hm = sim_hm_missing
+        window_size = 25_000
+        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        stats = ['pi', 'theta_w', 'segregating_sites', 'singletons',
+                 'het_expected']
+        r = windowed_statistics(hm, bp_bins=bp, statistics=stats,
+                                per_base=False, chrom='1')
+        for i, start in enumerate(r['start']):
+            stop = start + window_size
+            if stop > hm.chrom_end:
+                continue
+            sub = self._window_subset(hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(r['pi'][i], diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert np.isclose(r['theta_w'][i],
+                              diversity.theta_w(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert r['segregating_sites'][i] == diversity.segregating_sites(sub)
+            assert r['singletons'][i] == diversity.singleton_count(sub)
+            assert np.isclose(
+                r['het_expected'][i],
+                float(np.nanmean(diversity.heterozygosity_expected(sub))),
+                rtol=1e-9, atol=1e-11)
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "windowed tajimas_d variance uses nominal n_hap; the scalar uses the "
+        "harmonic-mean effective n over per-site n_valid, so they diverge under "
+        "missing data (issue #100). Fixing the windowed effective-n convention "
+        "needs outside input; remove this marker when reconciled."))
+    def test_per_variant_missing_data_tajimas_d_matches_scalar(self,
+                                                               sim_hm_missing):
+        """Per-window tajimas_d should equal the scalar on the window subset;
+        currently diverges with missing data (effective-n convention)."""
+        from pg_gpu.windowed_analysis import windowed_statistics
+        hm = sim_hm_missing
+        window_size = 25_000
+        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        r = windowed_statistics(hm, bp_bins=bp, statistics=['tajimas_d'],
+                                per_base=False, chrom='1')
+        for i, start in enumerate(r['start']):
+            stop = start + window_size
+            if stop > hm.chrom_end:
+                continue
+            sub = self._window_subset(hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            td_w, td_ref = r['tajimas_d'][i], diversity.tajimas_d(sub)
+            if np.isnan(td_w) or np.isnan(td_ref):
+                assert np.isnan(td_w) and np.isnan(td_ref)
+            else:
+                assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
+
 
 class TestMultiallelicTwoPop:
     """Issue #100: two-pop windowed scalar stats must be

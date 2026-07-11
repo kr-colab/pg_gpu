@@ -2905,59 +2905,6 @@ def _bin_counts(bin_idx, n_bins):
     return cp.bincount(bin_idx[valid], minlength=n_bins)
 
 
-def _allele_sum_and_n(hap, has_missing=None):
-    """Sum of alleles and valid count per variant, skipping missing (-1).
-
-    Parameters
-    ----------
-    hap : cupy.ndarray
-    has_missing : bool, optional
-        If known, skip the check. If None, checks for negatives.
-
-    Returns
-    -------
-    dac : cupy.ndarray  — derived allele count per variant
-    n_valid : cupy.ndarray or int — valid haplotypes per variant
-    """
-    if has_missing is None:
-        has_missing = bool(int(cp.min(hap)) < 0)
-    if has_missing:
-        valid_mask = hap >= 0
-        dac = cp.sum(cp.where(valid_mask, hap, 0), axis=0)
-        n_valid = cp.sum(valid_mask, axis=0)
-    else:
-        dac = cp.sum(hap, axis=0)
-        n_valid = hap.shape[0]
-    return dac, n_valid
-
-
-def _per_variant_mpd(hap, n_hap):
-    """Mean pairwise difference per variant (GPU)."""
-    dac, n_valid = _allele_sum_and_n(hap)
-    dac = dac.astype(cp.float64)
-    if isinstance(n_valid, int):
-        n = cp.float64(n_valid)
-    else:
-        n = n_valid.astype(cp.float64)
-    usable = n > 1
-    p = cp.where(usable, dac / n, 0.0)
-    mpd = cp.zeros_like(dac)
-    mpd[usable] = 2.0 * p[usable] * (1.0 - p[usable]) * n[usable] / (n[usable] - 1)
-    return mpd
-
-
-def _per_variant_is_seg(hap, n_hap_int):
-    """Boolean: is variant segregating (GPU)."""
-    dac, n_valid = _allele_sum_and_n(hap)
-    return (dac > 0) & (dac < n_valid)
-
-
-def _per_variant_is_singleton(hap, n_hap_int):
-    """Boolean: is variant a singleton (GPU)."""
-    dac, n_valid = _allele_sum_and_n(hap)
-    return (dac == 1) | (dac == n_valid - 1)
-
-
 def _per_variant_fst_hudson_components(hap1, hap2, n1, n2):
     """Per-variant Hudson FST numerator and denominator (GPU).
 
