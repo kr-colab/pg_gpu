@@ -799,13 +799,9 @@ class TestOverlappingWindowsScatter:
             assert df['fst'].notna().any()
             assert (df['fst'].dropna() >= -0.5).all()
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "windowed_analysis pi still uses the legacy collapsed multiallelic "
-        "convention (pre-existing bug); it now detectably diverges from the "
-        "per-allele scalar diversity.pi on multiallelic data. Fixed in the "
-        "windowed subproject (kr-colab/pg_gpu#100) -- remove this marker then."))
     def test_non_overlapping_unchanged(self, sim_hm):
-        """Guard: step==window path (n_per_var=1) matches per-window reference."""
+        """Guard: step==window windowed pi equals per-window diversity.pi, now
+        that windowed_analysis uses the per-allele path (issue #100 / 0005a)."""
         window_size, step_size = 50_000, 50_000
         df = windowed_analysis(sim_hm, window_size=window_size,
                                step_size=step_size, statistics=['pi'],
@@ -871,6 +867,86 @@ class TestOverlappingWindowsScatter:
             assert np.isclose(max_daf_scatter, ref, atol=1e-12), (
                 f"window [{start}, {stop}): scatter={max_daf_scatter}, "
                 f"ref={ref}")
+
+
+class TestMultiallelicSinglePop:
+    """Issue #100 / subproject 0005a: single-pop windowed scalar stats must
+    be multiallelic-correct -- each window equals the per-allele scalar
+    ``diversity`` function on that window's subset -- on BOTH single-pop
+    engines: the host scatter path (``_windowed_thetas_scatter``, reached by a
+    pure single-pop scalar request) and the fused CUDA kernel
+    (``_fused_windowed_kernel_v2`` via ``windowed_statistics_fused``)."""
+
+    @pytest.fixture(scope="class")
+    def sim_hm(self):
+        import msprime
+        ts = msprime.sim_ancestry(
+            samples=25, sequence_length=100_000, recombination_rate=1e-8,
+            population_size=20_000, ploidy=2, random_seed=42)
+        ts = msprime.sim_mutations(
+            ts, rate=1e-6, model=msprime.JC69(state_independent=True),
+            random_seed=43)
+        # Sanity: this configuration produces genuinely multiallelic sites,
+        # so the per-allele path is actually exercised (not just biallelic).
+        G = ts.genotype_matrix()
+        n_multi = sum(np.unique(G[i]).size >= 3 for i in range(ts.num_sites))
+        assert n_multi > 50, f"fixture not multiallelic enough: {n_multi}"
+        return HaplotypeMatrix.from_ts(ts)
+
+    def _window_subset(self, hm, start, stop):
+        import cupy as cp
+        pos = hm.positions.get() if isinstance(hm.positions, cp.ndarray) else np.asarray(hm.positions)
+        hap = hm.haplotypes.get() if isinstance(hm.haplotypes, cp.ndarray) else np.asarray(hm.haplotypes)
+        mask = (pos >= start) & (pos < stop)
+        return HaplotypeMatrix(hap[:, mask], pos[mask],
+                               chrom_start=int(start), chrom_end=int(stop))
+
+    def test_scatter_path_matches_scalar(self, sim_hm):
+        """Host scatter engine: per-window pi/theta_w/segregating equal the
+        per-allele scalar functions on the window subset."""
+        window_size = 25_000
+        df = windowed_analysis(sim_hm, window_size=window_size,
+                               step_size=window_size,
+                               statistics=['pi', 'theta_w', 'segregating_sites'],
+                               span_normalize=False)
+        for start, pi_w, tw_w, seg_w in zip(
+                df['start'], df['pi'], df['theta_w'], df['segregating_sites']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(pi_w, diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(tw_w, diversity.theta_w(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(seg_w, diversity.segregating_sites(sub),
+                              rtol=1e-9, atol=1e-12)
+
+    def test_fused_kernel_matches_scalar(self, sim_hm):
+        """Fused CUDA kernel: per-window pi/segregating/theta_h equal the
+        per-allele scalar functions on the window subset."""
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        window_size = 25_000
+        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        r = windowed_statistics_fused(
+            sim_hm, bp_bins=bp,
+            statistics=('pi', 'segregating_sites', 'theta_h'),
+            per_base=False, chrom='1')
+        for start, pi_w, seg_w in zip(r['start'], r['pi'],
+                                      r['segregating_sites']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(pi_w, diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(seg_w, diversity.segregating_sites(sub),
+                              rtol=1e-9, atol=1e-12)
 
 
 class TestCanonicalWindowSchema:

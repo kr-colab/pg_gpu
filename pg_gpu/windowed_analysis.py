@@ -718,8 +718,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
                               span_normalize, chrom=None):
     """Compute windowed theta estimators via scatter-add on GPU.
 
-    Uses dac_and_n fused kernel + direct vectorized arithmetic + scatter_add
-    for per-window accumulation. Handles variable sample sizes per site.
+    Uses per-allele counts (``allele_counts``) + per-variant contributions
+    (``_ac_contribution``) + scatter_add for per-window accumulation, so
+    multiallelic sites are handled per-allele. Handles variable sample sizes
+    per site.
     """
     from ._utils import get_population_matrix
     from cupyx import scatter_add
@@ -738,8 +740,14 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         if matrix.num_variants == 0:
             return pd.DataFrame()
 
-    from .diversity import _prepare_dac, _site_contribution
-    dac, n_valid, d, n_safe, seg, n_hap = _prepare_dac(matrix)
+    from .diversity import _prepare_allele_counts, _ac_contribution
+    ac, n_valid, n_hap = _prepare_allele_counts(matrix)
+    # Per-allele intermediates (multiallelic-correct; match the scalar diversity
+    # path). mut = per-variant mutation count = (#alleles present) - 1.
+    n = n_valid.astype(cp.float64)
+    has_data = n_valid >= 2
+    alleles_present = (ac > 0).sum(axis=1)
+    mut = cp.where(has_data, cp.maximum(alleles_present - 1, 0), 0).astype(cp.float64)
 
     pos = matrix.positions
     if isinstance(pos, cp.ndarray):
@@ -803,20 +811,28 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         'watterson': stats_set & {'theta_w', 'tajimas_d', 'zeng_e', 'zeng_dh'},
     }
 
-    # Compute per-variant contributions via _site_contribution (single source of truth)
+    # Compute per-variant contributions via _ac_contribution (single source of truth)
     raw = {}
     for est_name, dependents in needs.items():
         if dependents:
             raw[est_name] = scatter_sum(
-                _site_contribution(est_name, d, n_safe, seg, n_valid, n_hap, dac=dac))
+                _ac_contribution(est_name, ac, n_valid, n_hap))
 
     if stats_set & {'segregating_sites', 'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}:
-        seg_count = scatter_sum(seg.astype(cp.float64))
+        seg_count = scatter_sum(mut)
+    derived = ac[:, 1:]
     if 'singletons' in stats_set:
-        is_sing = seg & ((dac == 1) | (dac == n_valid - 1))
-        sing_count = scatter_sum(is_sing.astype(cp.float64))
+        # Per-allele: derived alleles (columns >= 1) observed exactly once.
+        n_sing = ((derived == 1).sum(axis=1) if derived.shape[1]
+                  else cp.zeros(ac.shape[0], dtype=cp.int64))
+        sing_count = scatter_sum(cp.where(has_data, n_sing, 0).astype(cp.float64))
     if 'max_daf' in stats_set:
-        dafs = cp.where(seg, d / n_safe, 0.0).get()
+        # Per-allele: highest derived-allele frequency at the site.
+        if derived.shape[1]:
+            p_der = derived.astype(cp.float64) / cp.where(n > 0, n, 1.0)[:, None]
+            dafs = cp.where(has_data, p_der.max(axis=1), 0.0).get()
+        else:
+            dafs = np.zeros(ac.shape[0])
         rep_dafs = np.broadcast_to(dafs[:, None], contains.shape) * contains
         max_daf_arr = np.zeros(n_windows)
         np.maximum.at(max_daf_arr, k_safe.ravel(), rep_dafs.ravel())
@@ -1251,7 +1267,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 on='window_id', how='left')
         return result
 
-    # Scatter-add path: single-pop theta estimators via dac_and_n + scatter
+    # Scatter-add path: single-pop theta estimators via per-allele counts + scatter
     scatter_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
                       'theta_h', 'theta_l', 'fay_wu_h', 'singletons',
                       'normalized_fay_wu_h', 'zeng_e', 'zeng_dh', 'max_daf'}
@@ -1408,7 +1424,66 @@ def _compute_mean_r2(matrix: HaplotypeMatrix, max_distance: int,
 # Haplotype data is transposed before kernel launch so variants are the
 # leading dimension (column-major for haplotype access). This ensures
 # coalesced memory reads when threads iterate over haplotypes.
+_FUSED_MAX_ALLELES = 8
+"""Per-variant allele capacity of the fused windowed CUDA kernels.
+
+The kernels count alleles into a fixed cnt[MAX_ALLELES] array per variant, so a
+site with an allele index >= this cap cannot be represented and is filtered out
+(with a MultiallelicCapWarning). Keep in sync with the ``#define MAX_ALLELES`` in
+the kernel sources. Nucleotide data has at most 4 alleles, so the cap is never
+hit in practice.
+"""
+
+
+def _warn_fused_allele_cap(n_over):
+    """Emit a MultiallelicCapWarning for ``n_over`` sites dropped by the cap."""
+    import warnings
+    from ._warnings import MultiallelicCapWarning
+    warnings.warn(
+        f"{n_over} site(s) with an allele index >= {_FUSED_MAX_ALLELES} were "
+        "excluded from the fused windowed statistics (kernel per-allele "
+        "capacity). Nucleotide data has at most 4 alleles; the non-windowed "
+        "diversity/divergence functions handle any number of alleles.",
+        MultiallelicCapWarning, stacklevel=3)
+
+
+def _filter_fused_allele_cap(hap, positions):
+    """Drop variants whose max allele index >= _FUSED_MAX_ALLELES (fused kernels).
+
+    ``hap`` is the transposed (n_var, n_hap) matrix on GPU. Returns ``(hap,
+    positions)`` filtered consistently. Emits a ``MultiallelicCapWarning`` with
+    the dropped-site count when any site exceeds the cap. Missing (-1) never
+    triggers the cap.
+    """
+    overcap = hap.max(axis=1) >= _FUSED_MAX_ALLELES
+    n_over = int(overcap.sum())
+    if n_over:
+        _warn_fused_allele_cap(n_over)
+        keep = ~overcap
+        hap = hap[keep]
+        positions = positions[keep]
+    return hap, positions
+
+
+def _filter_fused_allele_cap_raw(hap_raw, positions):
+    """Cap filter for the chunked path's un-transposed (n_hap, n_var) matrix.
+
+    Reduces over the haplotype axis (axis 0) to get per-variant max allele
+    indices without a full transpose, then slices variants (axis 1) and
+    positions consistently. Same semantics as ``_filter_fused_allele_cap``.
+    """
+    overcap = hap_raw.max(axis=0) >= _FUSED_MAX_ALLELES
+    n_over = int(overcap.sum())
+    if n_over:
+        _warn_fused_allele_cap(n_over)
+        keep = ~overcap
+        hap_raw = hap_raw[:, keep]
+        positions = positions[keep]
+    return hap_raw, positions
+
+
 _fused_windowed_kernel_v2 = cp.RawKernel(r'''
+#define MAX_ALLELES 8   /* keep in sync with _FUSED_MAX_ALLELES (host guard) */
 extern "C" __global__
 void fused_windowed_stats_v2(const signed char* hap_t,
                              const long long* win_start,
@@ -1438,30 +1513,46 @@ void fused_windowed_stats_v2(const signed char* hap_t,
         return;
     }
 
-    double dn = (double)n_hap;
     double t_mpd = 0.0, t_seg = 0.0, t_sing = 0.0;
     double t_count = 0.0, t_theta_h = 0.0, t_max_daf = 0.0;
 
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
-        int dac = 0;
         const signed char* row = hap_t + (long long)v * n_hap;
+        /* Per-allele counts over non-missing calls. Sites with an allele index
+           >= MAX_ALLELES are filtered out on the host before launch, so every
+           allele here fits in cnt[]. */
+        int cnt[MAX_ALLELES];
+        for (int a = 0; a < MAX_ALLELES; a++) cnt[a] = 0;
+        int nv = 0;
         for (int h = 0; h < n_hap; h++) {
-            if (row[h] > 0) dac++;
+            signed char al = row[h];
+            if (al >= 0) { nv++; if (al < MAX_ALLELES) cnt[al]++; }
         }
-
-        double p = (double)dac / dn;
-        t_mpd += 2.0 * p * (1.0 - p) * dn / (dn - 1.0);
-
-        int is_seg = (dac > 0 && dac < n_hap) ? 1 : 0;
-        t_seg += is_seg;
-        t_sing += (dac == 1 || dac == n_hap - 1) ? 1.0 : 0.0;
         t_count += 1.0;
+        if (nv < 2) continue;
+        double dn = (double)nv;
 
-        if (is_seg) {
-            t_theta_h += 2.0 * (double)dac * (double)dac / (dn * (dn - 1.0));
+        double same = 0.0;      /* sum_a cnt_a*(cnt_a-1) : same-allele pairs */
+        double th = 0.0;        /* theta_h numerator: sum_{a>=1,0<c<nv} 2 c^2 */
+        double mdaf = 0.0;      /* max derived-allele frequency */
+        int n_present = 0;
+        for (int a = 0; a < MAX_ALLELES; a++) {
+            int c = cnt[a];
+            if (c > 0) n_present++;
+            same += (double)c * (double)(c - 1);
+            if (a >= 1 && c > 0) {
+                if (c == 1) t_sing += 1.0;            /* per-derived-allele singleton */
+                double freq = (double)c / dn;
+                if (freq > mdaf) mdaf = freq;
+                if (c < nv) th += 2.0 * (double)c * (double)c;
+            }
         }
-        if (p > t_max_daf) t_max_daf = p;
+        /* pi = 1 - sum_a C(c,2)/C(n,2); seg = mutation count (alleles present - 1) */
+        t_mpd += 1.0 - same / (dn * (dn - 1.0));
+        t_seg += (double)(n_present - 1);
+        t_theta_h += th / (dn * (dn - 1.0));
+        if (mdaf > t_max_daf) t_max_daf = mdaf;
     }
 
     // Sum reduction for 5 accumulators
@@ -1828,6 +1919,12 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     positions = matrix.positions
     if not isinstance(positions, cp.ndarray):
         positions = cp.asarray(positions)
+
+    # Drop sites the fused kernel's per-allele capacity can't represent (rare;
+    # nucleotide data has <= 4 alleles). Must precede window indexing so the
+    # variant-index ranges are computed against the retained sites.
+    hap, positions = _filter_fused_allele_cap(hap, positions)
+    n_total_var = hap.shape[0]
 
     # Support overlapping windows via explicit start/stop arrays
     if _win_starts is not None and _win_stops is not None:
@@ -2196,11 +2293,15 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 
     hap_raw = matrix.haplotypes
     n_hap = hap_raw.shape[0]
-    n_total_var = hap_raw.shape[1]
 
     positions = matrix.positions
     if not isinstance(positions, cp.ndarray):
         positions = cp.asarray(positions)
+
+    # Drop sites the fused kernel's per-allele capacity can't represent. Must
+    # precede window indexing so variant-index ranges match the retained sites.
+    hap_raw, positions = _filter_fused_allele_cap_raw(hap_raw, positions)
+    n_total_var = hap_raw.shape[1]
 
     # Window ranges (same setup as non-chunked)
     if _win_starts is not None and _win_stops is not None:

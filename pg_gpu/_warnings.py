@@ -67,6 +67,23 @@ class BadlyChunkedWarning(UserWarning):
     unlock the GPU-decode fast path."""
 
 
+class MultiallelicCapWarning(UserWarning):
+    """Emitted when a fused windowed kernel drops sites with more alleles
+    than the kernel's fixed per-allele capacity.
+
+    The fused windowed-statistics CUDA kernels count alleles into a fixed-size
+    per-variant array (``MAX_ALLELES``), so any site with more alleles than that
+    cap is excluded from the windowed scalar statistics and a count is reported.
+    The cap is generous (nucleotide data has at most 4 alleles); this only fires
+    on unusually multiallelic input. The (non-windowed) scalar functions in
+    ``diversity`` / ``divergence`` handle arbitrary allele counts. Silence with::
+
+        import warnings
+        from pg_gpu import MultiallelicCapWarning
+        warnings.filterwarnings("ignore", category=MultiallelicCapWarning)
+    """
+
+
 # ── VCF size heuristic ──────────────────────────────────────────────────────
 #
 # VCF text parsing is single-threaded in htslib and the whole genotype matrix
