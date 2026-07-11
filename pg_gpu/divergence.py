@@ -495,8 +495,9 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator.
-        ``False``: return raw sum / sites-with-data average.
+        ``True`` (default): auto-detect best denominator (per-base rate).
+        ``False``: return the raw sum of per-site Dxy over sites with data
+        (consistent with ``diversity.pi`` and the other raw-sum statistics).
 
     Returns
     -------
@@ -537,9 +538,6 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         return dxy_per_site.get()
     else:
         dxy_sum = cp.sum(dxy_per_site)
-        if span_normalize is False:
-            n_sites = int(cp.sum(valid_mask).get())
-            return float(dxy_sum.get() / n_sites) if n_sites > 0 else 0.0
         return _apply_span_normalize(dxy_sum, haplotype_matrix, span_normalize)
 
 
