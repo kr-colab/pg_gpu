@@ -909,44 +909,34 @@ def _twopop_site_components(hap1, hap2):
       mpd2 = within-pop2 mean pairwise difference per site
       between = between-pop mean pairwise difference per site
 
-    All quantities use per-site valid counts (missing-data aware).
-    Reduces along the sample axis in chunks to avoid materializing
-    full (n_hap, n_var) float64 intermediates.
+    Per-allele (multiallelic-correct): the same-allele pair counts sum over
+    every allele column on a shared allele-index width K, so ``between``
+    equals the per-site Dxy (``1 - sum_a p1_a p2_a``) and mpd1/mpd2 the
+    per-site within-pop pi -- identical to the scalar ``divergence`` functions
+    (``_hudson_fst_from_counts`` / ``dxy``). Reduces to the biallelic
+    ancestral/derived form when there are two alleles. All quantities use
+    per-site valid counts (missing-data aware).
     """
-    n_var = hap1.shape[1]
+    from .divergence import _aligned_pop_counts
 
-    # Compute per-site allele counts and valid counts via chunked reduction.
-    # Only allocates (n_hap, chunk) temporaries instead of (n_hap, n_var).
-    ac1 = cp.zeros(n_var, dtype=cp.float64)
-    n1 = cp.zeros(n_var, dtype=cp.float64)
-    ac2 = cp.zeros(n_var, dtype=cp.float64)
-    n2 = cp.zeros(n_var, dtype=cp.float64)
-    chunk = max(1, n_var // 20)
-    for s in range(0, n_var, chunk):
-        e = min(s + chunk, n_var)
-        h1c = hap1[:, s:e]
-        v1 = h1c >= 0
-        n1[s:e] = cp.sum(v1, axis=0)
-        ac1[s:e] = cp.sum(cp.where(v1, h1c, 0), axis=0)
-        del h1c, v1
-        h2c = hap2[:, s:e]
-        v2 = h2c >= 0
-        n2[s:e] = cp.sum(v2, axis=0)
-        ac2[s:e] = cp.sum(cp.where(v2, h2c, 0), axis=0)
-        del h2c, v2
+    ac1, ac2, n1, n2 = _aligned_pop_counts(hap1, hap2)
+    ac1 = ac1.astype(cp.float64)
+    ac2 = ac2.astype(cp.float64)
+    n1 = n1.astype(cp.float64)
+    n2 = n2.astype(cp.float64)
 
-    # Within-pop mean pairwise differences
+    # Within-pop mean pairwise differences (same pairs summed over alleles)
     n1_pairs = n1 * (n1 - 1) / 2
-    n1_same = ((n1 - ac1) * (n1 - ac1 - 1) + ac1 * (ac1 - 1)) / 2
+    n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
     mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
 
     n2_pairs = n2 * (n2 - 1) / 2
-    n2_same = ((n2 - ac2) * (n2 - ac2 - 1) + ac2 * (ac2 - 1)) / 2
+    n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
     mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
 
-    # Between-pop mean pairwise differences
+    # Between-pop mean pairwise differences (per-allele cross term)
     n_between = n1 * n2
-    n_between_same = (n1 - ac1) * (n2 - ac2) + ac1 * ac2
+    n_between_same = cp.sum(ac1 * ac2, axis=1)
     between = cp.where(n_between > 0,
                        (n_between - n_between_same) / n_between, 0.0)
 
@@ -1447,30 +1437,15 @@ def _warn_fused_allele_cap(n_over):
         MultiallelicCapWarning, stacklevel=3)
 
 
-def _filter_fused_allele_cap(hap, positions):
-    """Drop variants whose max allele index >= _FUSED_MAX_ALLELES (fused kernels).
-
-    ``hap`` is the transposed (n_var, n_hap) matrix on GPU. Returns ``(hap,
-    positions)`` filtered consistently. Emits a ``MultiallelicCapWarning`` with
-    the dropped-site count when any site exceeds the cap. Missing (-1) never
-    triggers the cap.
-    """
-    overcap = hap.max(axis=1) >= _FUSED_MAX_ALLELES
-    n_over = int(overcap.sum())
-    if n_over:
-        _warn_fused_allele_cap(n_over)
-        keep = ~overcap
-        hap = hap[keep]
-        positions = positions[keep]
-    return hap, positions
-
-
 def _filter_fused_allele_cap_raw(hap_raw, positions):
     """Cap filter for the chunked path's un-transposed (n_hap, n_var) matrix.
 
     Reduces over the haplotype axis (axis 0) to get per-variant max allele
     indices without a full transpose, then slices variants (axis 1) and
-    positions consistently. Same semantics as ``_filter_fused_allele_cap``.
+    positions consistently. Drops variants whose max allele index
+    >= _FUSED_MAX_ALLELES and emits a ``MultiallelicCapWarning``; missing (-1)
+    never triggers the cap. (The non-chunked single-pass path filters inline,
+    capturing the keep mask so the two-pop kernel's hap1/hap2 align.)
     """
     overcap = hap_raw.max(axis=0) >= _FUSED_MAX_ALLELES
     n_over = int(overcap.sum())
@@ -1594,6 +1569,7 @@ void fused_windowed_stats_v2(const signed char* hap_t,
 
 # Two-population fused kernel for FST and Dxy
 _fused_windowed_twopop_kernel = cp.RawKernel(r'''
+#define MAX_ALLELES 8   /* keep in sync with _FUSED_MAX_ALLELES (host guard) */
 extern "C" __global__
 void fused_windowed_twopop(const signed char* hap1_t,
                            const signed char* hap2_t,
@@ -1631,44 +1607,52 @@ void fused_windowed_twopop(const signed char* hap1_t,
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
 
-        // Count valid (non-missing) samples and alt alleles per site
-        int ac1_1 = 0, valid1 = 0;
+        // Per-allele counts over non-missing calls (shared cnt width for both
+        // pops). Sites with an allele index >= MAX_ALLELES are filtered on the
+        // host before launch, so every allele fits in cnt[].
+        int cnt1[MAX_ALLELES];
+        int cnt2[MAX_ALLELES];
+        for (int a = 0; a < MAX_ALLELES; a++) { cnt1[a] = 0; cnt2[a] = 0; }
+        int valid1 = 0;
         const signed char* row1 = hap1_t + (long long)v * n_hap1;
         for (int h = 0; h < n_hap1; h++) {
             signed char a = row1[h];
-            if (a >= 0) { valid1++; if (a > 0) ac1_1++; }
+            if (a >= 0) { valid1++; if (a < MAX_ALLELES) cnt1[a]++; }
         }
-        int ac2_1 = 0, valid2 = 0;
+        int valid2 = 0;
         const signed char* row2 = hap2_t + (long long)v * n_hap2;
         for (int h = 0; h < n_hap2; h++) {
             signed char a = row2[h];
-            if (a >= 0) { valid2++; if (a > 0) ac2_1++; }
+            if (a >= 0) { valid2++; if (a < MAX_ALLELES) cnt2[a]++; }
         }
 
         if (valid1 == 0 || valid2 == 0) continue;
 
         double dn1 = (double)valid1;
         double dn2 = (double)valid2;
-        double ac1_0 = dn1 - ac1_1;
-        double ac2_0 = dn2 - ac2_1;
-        double d_ac1_1 = (double)ac1_1;
-        double d_ac2_1 = (double)ac2_1;
 
-        // Hudson: within-pop mean pairwise difference
-        double n1_pairs = dn1 * (dn1 - 1.0) / 2.0;
-        double n1_same = (ac1_0 * (ac1_0 - 1.0) + d_ac1_1 * (d_ac1_1 - 1.0)) / 2.0;
-        double mpd1 = (n1_pairs > 0) ? (n1_pairs - n1_same) / n1_pairs : 0.0;
-
-        double n2_pairs = dn2 * (dn2 - 1.0) / 2.0;
-        double n2_same = (ac2_0 * (ac2_0 - 1.0) + d_ac2_1 * (d_ac2_1 - 1.0)) / 2.0;
-        double mpd2 = (n2_pairs > 0) ? (n2_pairs - n2_same) / n2_pairs : 0.0;
-
+        // Per-allele within-pop mean pairwise difference (same pairs summed over
+        // alleles) and between-pop difference (per-allele cross term) -- mirrors
+        // divergence._hudson_fst_from_counts / dxy, multiallelic-correct.
+        double same1 = 0.0, same2 = 0.0, between_same = 0.0;
+        for (int a = 0; a < MAX_ALLELES; a++) {
+            double c1 = (double)cnt1[a];
+            double c2 = (double)cnt2[a];
+            same1 += c1 * (c1 - 1.0);
+            same2 += c2 * (c2 - 1.0);
+            between_same += c1 * c2;
+        }
+        double mpd1 = (dn1 > 1.0) ? 1.0 - same1 / (dn1 * (dn1 - 1.0)) : 0.0;
+        double mpd2 = (dn2 > 1.0) ? 1.0 - same2 / (dn2 * (dn2 - 1.0)) : 0.0;
         double within = (mpd1 + mpd2) / 2.0;
+        double between = 1.0 - between_same / (dn1 * dn2);
 
-        // Between-pop mean pairwise difference
-        double n_between = dn1 * dn2;
-        double n_between_same = ac1_0 * ac2_0 + d_ac1_1 * d_ac2_1;
-        double between = (n_between > 0) ? (n_between - n_between_same) / n_between : 0.0;
+        // Total non-reference copy counts (all alt alleles collapsed) retained
+        // for the HAPLOID Weir-Cockerham block below, which is deliberately
+        // unchanged -- the fused fst_wc haploid/diploid mismatch is tracked
+        // separately and is out of scope here.
+        double d_ac1_1 = dn1 - (double)cnt1[0];
+        double d_ac2_1 = dn2 - (double)cnt2[0];
 
         t_fst_num += between - within;
         t_fst_den += between;
@@ -1922,8 +1906,16 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     # Drop sites the fused kernel's per-allele capacity can't represent (rare;
     # nucleotide data has <= 4 alleles). Must precede window indexing so the
-    # variant-index ranges are computed against the retained sites.
-    hap, positions = _filter_fused_allele_cap(hap, positions)
+    # variant-index ranges are computed against the retained sites. Capture the
+    # keep mask so the two-pop path can slice hap1/hap2 to the same variants
+    # (positions/window indices are computed against the filtered set below).
+    cap_keep = hap.max(axis=1) < _FUSED_MAX_ALLELES if hap.shape[0] else None
+    if cap_keep is not None and not bool(cap_keep.all()):
+        _warn_fused_allele_cap(int((~cap_keep).sum()))
+        hap = hap[cap_keep]
+        positions = positions[cap_keep]
+    else:
+        cap_keep = None
     n_total_var = hap.shape[0]
 
     # Support overlapping windows via explicit start/stop arrays
@@ -2057,6 +2049,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         n2 = m2.haplotypes.shape[0]
         hap1 = cp.ascontiguousarray(m1.haplotypes.T.astype(cp.int8))
         hap2 = cp.ascontiguousarray(m2.haplotypes.T.astype(cp.int8))
+        # Align to the variants retained by the allele-cap filter above, so the
+        # variant axis matches positions/win_start/win_stop/n_total_var.
+        if cap_keep is not None:
+            hap1 = hap1[cap_keep]
+            hap2 = hap2[cap_keep]
 
         out_fst_num = cp.zeros(n_windows, dtype=cp.float64)
         out_fst_den = cp.zeros(n_windows, dtype=cp.float64)

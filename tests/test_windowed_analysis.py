@@ -801,7 +801,7 @@ class TestOverlappingWindowsScatter:
 
     def test_non_overlapping_unchanged(self, sim_hm):
         """Guard: step==window windowed pi equals per-window diversity.pi, now
-        that windowed_analysis uses the per-allele path (issue #100 / 0005a)."""
+        that windowed_analysis uses the per-allele path (issue #100)."""
         window_size, step_size = 50_000, 50_000
         df = windowed_analysis(sim_hm, window_size=window_size,
                                step_size=step_size, statistics=['pi'],
@@ -815,15 +815,9 @@ class TestOverlappingWindowsScatter:
                       if sub.num_variants > 0 else 0.0)
             assert np.isclose(pi_scatter, pi_ref, rtol=1e-10, atol=1e-12)
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "windowed_analysis dxy/fst still collapse multiallelic sites: "
-        "_allele_sum_and_n uses cp.sum(hap) (mechanism A, sums allele indices), "
-        "so windowed dxy detectably diverges from the per-allele scalar "
-        "divergence.dxy made correct in subproject 0003. Pre-existing; fixed in "
-        "the windowed subproject (kr-colab/pg_gpu#100) -- remove this marker then."))
     def test_twopop_non_overlapping_dxy_matches_scalar(self, sim_hm):
-        """Per-window windowed dxy should equal scalar divergence.dxy on the
-        window subset; currently fails on multiallelic sites (collapsed path)."""
+        """Per-window windowed dxy equals scalar divergence.dxy on the window
+        subset, now that the two-pop path is per-allele (issue #100)."""
         window_size, step_size = 50_000, 50_000
         df = windowed_analysis(sim_hm, window_size=window_size,
                                step_size=step_size, statistics=['dxy'],
@@ -870,7 +864,7 @@ class TestOverlappingWindowsScatter:
 
 
 class TestMultiallelicSinglePop:
-    """Issue #100 / subproject 0005a: single-pop windowed scalar stats must
+    """Issue #100: single-pop windowed scalar stats must
     be multiallelic-correct -- each window equals the per-allele scalar
     ``diversity`` function on that window's subset -- on BOTH single-pop
     engines: the host scatter path (``_windowed_thetas_scatter``, reached by a
@@ -947,6 +941,124 @@ class TestMultiallelicSinglePop:
                               rtol=1e-9, atol=1e-12)
             assert np.isclose(seg_w, diversity.segregating_sites(sub),
                               rtol=1e-9, atol=1e-12)
+
+
+class TestMultiallelicTwoPop:
+    """Issue #100: two-pop windowed scalar stats must be
+    multiallelic-correct -- each window equals the per-allele scalar
+    ``divergence`` functions on that window's subset. Exercises the host scatter
+    engine (``_windowed_twopop_scatter``, reached by a pure two-pop request)."""
+
+    @pytest.fixture(scope="class")
+    def sim_hm(self):
+        import msprime
+        ts = msprime.sim_ancestry(
+            samples=30, sequence_length=100_000, recombination_rate=1e-8,
+            population_size=20_000, ploidy=2, random_seed=42)
+        ts = msprime.sim_mutations(
+            ts, rate=1e-6, model=msprime.JC69(state_independent=True),
+            random_seed=43)
+        G = ts.genotype_matrix()
+        n_multi = sum(np.unique(G[i]).size >= 3 for i in range(ts.num_sites))
+        assert n_multi > 50, f"fixture not multiallelic enough: {n_multi}"
+        hm = HaplotypeMatrix.from_ts(ts)
+        n = hm.num_haplotypes
+        hm.sample_sets = {"p1": list(range(n // 2)),
+                          "p2": list(range(n // 2, n))}
+        return hm
+
+    def _window_subset(self, hm, start, stop):
+        import cupy as cp
+        pos = hm.positions.get() if isinstance(hm.positions, cp.ndarray) else np.asarray(hm.positions)
+        hap = hm.haplotypes.get() if isinstance(hm.haplotypes, cp.ndarray) else np.asarray(hm.haplotypes)
+        mask = (pos >= start) & (pos < stop)
+        sub = HaplotypeMatrix(hap[:, mask], pos[mask],
+                              chrom_start=int(start), chrom_end=int(stop))
+        sub.sample_sets = hm.sample_sets
+        return sub
+
+    def test_scatter_dxy_fst_da_match_scalar(self, sim_hm):
+        window_size = 25_000
+        df = windowed_analysis(sim_hm, window_size=window_size,
+                               step_size=window_size,
+                               statistics=['dxy', 'fst', 'da'],
+                               populations=['p1', 'p2'], span_normalize=False)
+        for start, dxy_w, fst_w, da_w in zip(
+                df['start'], df['dxy'], df['fst'], df['da']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(dxy_w,
+                              divergence.dxy(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(da_w,
+                              divergence.da(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')
+            if np.isnan(fst_w) or np.isnan(fst_ref):
+                assert np.isnan(fst_w) and np.isnan(fst_ref)
+            else:
+                assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
+
+    def test_fused_dxy_fst_da_match_scalar(self, sim_hm):
+        """Fused CUDA two-pop kernel: dxy/fst_hudson/da per window == scalar.
+        (fst_wc is excluded: the fused kernel's WC is a haploid estimator that
+        differs from the scalar diploid fst_weir_cockerham, a separate issue.)"""
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        window_size = 25_000
+        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        r = windowed_statistics_fused(
+            sim_hm, bp_bins=bp, statistics=('dxy', 'fst_hudson', 'da'),
+            pop1='p1', pop2='p2', per_base=False, chrom='1')
+        for start, dxy_w, fst_w, da_w in zip(
+                r['start'], r['dxy'], r['fst_hudson'], r['da']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(dxy_w,
+                              divergence.dxy(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(da_w,
+                              divergence.da(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')
+            if np.isnan(fst_w) or np.isnan(fst_ref):
+                assert np.isnan(fst_w) and np.isnan(fst_ref)
+            else:
+                assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
+
+    def test_per_variant_dxy_fst_match_scalar(self, sim_hm):
+        """Per-variant engine (windowed_statistics): two-pop dxy/fst per window
+        == scalar. Inherits the per-allele _twopop_site_components fix."""
+        from pg_gpu.windowed_analysis import windowed_statistics
+        window_size = 25_000
+        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        r = windowed_statistics(
+            sim_hm, bp_bins=bp, statistics=['fst', 'dxy'],
+            pop1='p1', pop2='p2', per_base=False, chrom='1')
+        for start, dxy_w, fst_w in zip(r['start'], r['dxy'], r['fst']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(dxy_w,
+                              divergence.dxy(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')
+            if np.isnan(fst_w) or np.isnan(fst_ref):
+                assert np.isnan(fst_w) and np.isnan(fst_ref)
+            else:
+                assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
 
 
 class TestCanonicalWindowSchema:
