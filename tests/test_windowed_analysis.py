@@ -942,6 +942,41 @@ class TestMultiallelicSinglePop:
             assert np.isclose(seg_w, diversity.segregating_sites(sub),
                               rtol=1e-9, atol=1e-12)
 
+    def test_per_variant_matches_scalar(self, sim_hm):
+        """Per-variant engine (windowed_statistics): all six single-pop stats
+        per window == the per-allele scalar functions on the window subset."""
+        from pg_gpu.windowed_analysis import windowed_statistics
+        window_size = 25_000
+        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        stats = ['pi', 'theta_w', 'segregating_sites', 'singletons',
+                 'het_expected', 'tajimas_d']
+        r = windowed_statistics(sim_hm, bp_bins=bp, statistics=stats,
+                                per_base=False, chrom='1')
+        for i, start in enumerate(r['start']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(r['pi'][i], diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert np.isclose(r['theta_w'][i],
+                              diversity.theta_w(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert r['segregating_sites'][i] == diversity.segregating_sites(sub)
+            assert r['singletons'][i] == diversity.singleton_count(sub)
+            assert np.isclose(
+                r['het_expected'][i],
+                float(np.nanmean(diversity.heterozygosity_expected(sub))),
+                rtol=1e-9, atol=1e-11)
+            td_w, td_ref = r['tajimas_d'][i], diversity.tajimas_d(sub)
+            if np.isnan(td_w) or np.isnan(td_ref):
+                assert np.isnan(td_w) and np.isnan(td_ref)
+            else:
+                assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
+
 
 class TestMultiallelicTwoPop:
     """Issue #100: two-pop windowed scalar stats must be

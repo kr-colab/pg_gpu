@@ -3064,34 +3064,34 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
             results['end'], is_accessible)
         window_bases = cp.asarray(window_bases, dtype=cp.float64)
 
-    # Phase 1: compute per-variant values and aggregate
+    # Phase 1: per-variant per-allele contributions (multiallelic-correct),
+    # mirroring diversity._ac_contribution and the scatter engine so all three
+    # single-pop windowed engines agree with the scalar diversity functions.
+    from ._memutil import allele_counts
+    from .diversity import _ac_contribution, _achaz_variance_coefficients
 
-    # check for missing data once, share across all stats
-    _has_missing = bool(int(cp.min(hap)) < 0)
+    ac, n_valid_i = allele_counts(hap)
+    n_v = n_valid_i.astype(cp.float64)
+    has_data = n_valid_i >= 2
+    derived = ac[:, 1:]                        # per-derived-allele counts
+    # per-site mutation count = (#alleles present) - 1  (tskit segregating)
+    alleles_present = (ac > 0).sum(axis=1)
+    mut = cp.where(has_data, cp.maximum(alleles_present - 1, 0),
+                   0).astype(cp.float64)
 
-    # precompute allele counts once (shared across all stats)
-    dac, n_valid = _allele_sum_and_n(hap, has_missing=_has_missing)
-    dac = dac.astype(cp.float64)
-    if isinstance(n_valid, int):
-        n_v = cp.float64(n_valid)
-        usable = cp.ones(dac.shape, dtype=bool)
-    else:
-        n_v = n_valid.astype(cp.float64)
-        usable = n_v > 1
-    p = cp.where(usable, dac / n_v, 0.0)
-    need_mpd = any(s in statistics for s in ('pi', 'tajimas_d'))
+    need_pi = any(s in statistics for s in ('pi', 'tajimas_d'))
+    need_watt = any(s in statistics for s in ('theta_w', 'tajimas_d'))
     need_seg = any(s in statistics for s in
                    ('theta_w', 'tajimas_d', 'segregating_sites'))
 
-    if need_mpd:
-        mpd = cp.zeros_like(dac)
-        mpd[usable] = 2.0 * p[usable] * (1.0 - p[usable]) * n_v[usable] / (n_v[usable] - 1) if not isinstance(n_valid, int) else 2.0 * p[usable] * (1.0 - p[usable]) * n_hap / (n_hap - 1)
-    else:
-        mpd = None
-    is_seg = (dac > 0) & (dac < n_v) if need_seg else None
+    pi_contrib = (_ac_contribution('pi', ac, n_valid_i, n_hap_int)
+                  if need_pi else None)
+    watt_contrib = (_ac_contribution('watterson', ac, n_valid_i, n_hap_int)
+                    if need_watt else None)
+    seg_count = _scatter_sum(mut, bin_idx, n_windows) if need_seg else None
 
     if 'pi' in statistics:
-        pi_sum = _scatter_sum(mpd, bin_idx, n_windows)
+        pi_sum = _scatter_sum(pi_contrib, bin_idx, n_windows)
         if per_base:
             results['pi'] = cp.where(window_bases > 0,
                                      pi_sum / window_bases, cp.nan).get()
@@ -3099,10 +3099,9 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
             results['pi'] = pi_sum.get()
 
     if 'theta_w' in statistics:
-        seg_counts = _scatter_sum(is_seg.astype(cp.float64), bin_idx, n_windows)
-        n = n_hap_int
-        a1 = np.sum(1.0 / np.arange(1, n))
-        theta_abs = seg_counts / a1
+        # Watterson via per-site a1(n_valid) (missing-data aware), == the
+        # scatter/scalar path; == old seg/a1(n_hap) when data is complete.
+        theta_abs = _scatter_sum(watt_contrib, bin_idx, n_windows)
         if per_base:
             results['theta_w'] = cp.where(window_bases > 0,
                                           theta_abs / window_bases, cp.nan).get()
@@ -3110,49 +3109,45 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
             results['theta_w'] = theta_abs.get()
 
     if 'segregating_sites' in statistics:
-        seg_vals = is_seg if is_seg is not None else (dac > 0) & (dac < n_v)
-        seg_counts_out = _scatter_sum(seg_vals.astype(cp.float64), bin_idx,
-                                      n_windows)
-        results['segregating_sites'] = seg_counts_out.get().astype(int)
+        # Mutation count (alleles_present - 1) = tskit segregating; == the
+        # biallelic boolean is_seg for two-allele sites.
+        results['segregating_sites'] = seg_count.get().astype(int)
 
     if 'singletons' in statistics:
-        is_sing = (dac == 1) | (dac == n_v - 1)
-        sing_counts = _scatter_sum(is_sing.astype(cp.float64), bin_idx,
-                                   n_windows)
+        # Per-allele: derived alleles observed exactly once (unfolded, ==
+        # scalar singleton_count). The old (dac==1)|(dac==n-1) also counted
+        # ancestral-allele singletons (folded).
+        n_sing = ((derived == 1).sum(axis=1) if derived.shape[1]
+                  else cp.zeros(ac.shape[0], dtype=cp.int64))
+        sing = cp.where(has_data, n_sing, 0).astype(cp.float64)
+        sing_counts = _scatter_sum(sing, bin_idx, n_windows)
         results['singletons'] = sing_counts.get().astype(int)
 
     if 'het_expected' in statistics:
-        he = 2.0 * p * (1.0 - p)
+        # He = 1 - sum_a p_a^2 (per-allele; reduces to 2p(1-p) for biallelic).
+        p_sq = (ac.astype(cp.float64) ** 2).sum(axis=1) / cp.maximum(n_v, 1.0) ** 2
+        he = cp.where(has_data, 1.0 - p_sq, 0.0)
         he_sum = _scatter_sum(he, bin_idx, n_windows)
         results['het_expected'] = cp.where(
             variant_counts > 0,
             he_sum / variant_counts.astype(cp.float64), cp.nan).get()
 
     if 'tajimas_d' in statistics:
-        # aggregate mpd and seg counts into windows, then apply formula
-        pi_sum_td = _scatter_sum(mpd, bin_idx, n_windows) if 'pi' not in statistics else _scatter_sum(mpd, bin_idx, n_windows)
-        seg_counts_td = _scatter_sum(is_seg.astype(cp.float64), bin_idx,
-                                     n_windows)
-
-        n = n_hap_int
-        a1 = np.sum(1.0 / np.arange(1, n))
-        a2 = np.sum(1.0 / np.arange(1, n) ** 2)
-        b1 = (n + 1) / (3 * (n - 1))
-        b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
-        c1 = b1 - 1 / a1
-        c2 = b2 - (n + 2) / (a1 * n) + a2 / a1 ** 2
-        e1 = c1 / a1
-        e2 = c2 / (a1 ** 2 + a2)
-
-        S = seg_counts_td.get()
-        pi_w = pi_sum_td.get()
-
-        d_num = pi_w - S / a1
-        d_var = e1 * S + e2 * S * (S - 1)
-        d_std = np.sqrt(np.maximum(d_var, 0))
-
-        tajd = np.where(d_std > 0, d_num / d_std, np.nan)
-        tajd[S < 3] = np.nan
+        # numerator = pi - theta_w (per-allele sums); Achaz (2009) variance from
+        # a single n_hap and mutation-count S, matching the scatter engine. (The
+        # effective-n-under-missing-data question is tracked separately.)
+        pi_sum_td = _scatter_sum(pi_contrib, bin_idx, n_windows)
+        watt_sum_td = _scatter_sum(watt_contrib, bin_idx, n_windows)
+        S = seg_count.get()
+        a1 = sum(1.0 / i for i in range(1, n_hap_int))
+        a2 = sum(1.0 / (i ** 2) for i in range(1, n_hap_int))
+        theta_est = S / a1
+        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
+        alpha, beta = _achaz_variance_coefficients('pi', 'watterson', n_hap_int)
+        var = alpha * theta_est + beta * theta_sq_est
+        num = (pi_sum_td - watt_sum_td).get()
+        with np.errstate(invalid='ignore', divide='ignore'):
+            tajd = np.where((var > 0) & (S >= 3), num / np.sqrt(var), np.nan)
         results['tajimas_d'] = tajd
 
     # two-population statistics
