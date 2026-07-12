@@ -593,6 +593,115 @@ class TestDivergenceVsTskit:
         np.testing.assert_allclose(da, dxy_pg - (pi1 + pi2) / 2.0, rtol=1e-12)
 
 
+class TestFStatisticsVsTskit:
+    """Patterson f2 / f3 per-allele vs tskit (unbiased U-statistics)."""
+
+    @staticmethod
+    def _pops(ts):
+        s = ts.samples()
+        q = len(s) // 4
+        return (list(s[:q]), list(s[q:2 * q]), list(s[2 * q:3 * q]),
+                list(s[3 * q:]))
+
+    def _hm(self, ts):
+        s = ts.samples()
+        q = len(s) // 4
+        hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+        hm.sample_sets = {'A': list(range(q)), 'B': list(range(q, 2 * q)),
+                          'C': list(range(2 * q, 3 * q)),
+                          'D': list(range(3 * q, len(s)))}
+        return hm
+
+    def test_f2_matches_tskit(self, multiallelic_ts):
+        from pg_gpu import admixture
+        ts = multiallelic_ts
+        A, B, _, _ = self._pops(ts)
+        hm = self._hm(ts)
+        f2_pg = float(np.nansum(admixture.patterson_f2(hm, 'A', 'B')))
+        f2_ts = float(ts.f2([A, B], mode='site', span_normalise=False))
+        np.testing.assert_allclose(f2_pg, f2_ts, rtol=1e-9)
+        assert f2_pg < 0  # unbiased estimator can be negative (and is here)
+
+    def test_f3_matches_tskit(self, multiallelic_ts):
+        # pg_gpu patterson_f3(C, A, B) == f3(C; A, B); tskit target set is first.
+        from pg_gpu import admixture
+        ts = multiallelic_ts
+        A, B, C, _ = self._pops(ts)
+        hm = self._hm(ts)
+        T, _ = admixture.patterson_f3(hm, 'C', 'A', 'B')
+        f3_pg = float(np.nansum(T))
+        f3_ts = float(ts.f3([C, A, B], mode='site', span_normalise=False))
+        np.testing.assert_allclose(f3_pg, f3_ts, rtol=1e-9)
+
+    def test_f4_matches_tskit(self, multiallelic_ts):
+        from pg_gpu import admixture
+        ts = multiallelic_ts
+        A, B, C, D = self._pops(ts)
+        hm = self._hm(ts)
+        f4_pg = float(np.nansum(admixture.patterson_f4(hm, 'A', 'B', 'C', 'D')))
+        f4_ts = float(ts.f4([A, B, C, D], mode='site', span_normalise=False))
+        np.testing.assert_allclose(f4_pg, f4_ts, rtol=1e-9)
+
+    def test_patterson_d_is_biallelic_restricted(self, multiallelic_ts):
+        # D silently excludes >2-allele sites (num=den=0) and stays in [-1, 1];
+        # exclusion is silent, matching the package's biallelic filtering.
+        from pg_gpu import admixture
+        ts = multiallelic_ts
+        hm = self._hm(ts)
+        num, den = admixture.patterson_d(hm, 'A', 'B', 'C', 'D')
+        d_val = np.nansum(num) / np.nansum(den)
+        assert -1.0 <= d_val <= 1.0
+        # reference: strictly-biallelic subset ({0,1} across all four pops) gives
+        # the same D (non-biallelic sites contribute 0 to both sums).
+        G = ts.genotype_matrix()
+        cols = (list(hm.sample_sets['A']) + list(hm.sample_sets['B'])
+                + list(hm.sample_sets['C']) + list(hm.sample_sets['D']))
+        n_alleles = np.array([np.unique(G[i, cols]).size
+                              for i in range(ts.num_sites)])
+        assert (n_alleles > 2).any()          # fixture really has multiallelic sites
+        d_all = num[n_alleles <= 2]
+        assert np.allclose(num[n_alleles > 2], 0.0)   # multiallelic sites zeroed
+
+    def test_moving_and_jackknife_inherit_per_allele_fix(self, multiallelic_ts):
+        # moving_* / average_* build on the corrected _patterson_*_gpu helpers,
+        # so they inherit the per-allele fix. A single all-variant window
+        # reproduces the global estimate; jackknife runs and is finite.
+        from pg_gpu import admixture
+        ts = multiallelic_ts
+        hm = self._hm(ts)
+        nv = hm.num_variants
+
+        T, B = admixture.patterson_f3(hm, 'C', 'A', 'B')
+        f3_global = float(np.nansum(T) / np.nansum(B))
+        f3_win = admixture.moving_patterson_f3(hm, 'C', 'A', 'B', size=nv,
+                                               normed=True)
+        assert len(f3_win) == 1
+        np.testing.assert_allclose(f3_win[0], f3_global, rtol=1e-9)
+
+        num, den = admixture.patterson_d(hm, 'A', 'B', 'C', 'D')
+        d_global = float(np.nansum(num) / np.nansum(den))
+        d_win = admixture.moving_patterson_d(hm, 'A', 'B', 'C', 'D', size=nv)
+        assert len(d_win) == 1
+        np.testing.assert_allclose(d_win[0], d_global, rtol=1e-9)
+
+        blen = max(nv // 5, 1)
+        f3_est = admixture.average_patterson_f3(hm, 'C', 'A', 'B', blen=blen)[0]
+        d_est = admixture.average_patterson_d(hm, 'A', 'B', 'C', 'D', blen=blen)[0]
+        assert np.isfinite(f3_est) and np.isfinite(d_est)
+
+    def test_f3_normalizer_is_unbiased_het_of_target(self, multiallelic_ts):
+        # B == unbiased heterozygosity of C == tskit diversity(C) per site.
+        from pg_gpu import admixture
+        ts = multiallelic_ts
+        _, _, C, _ = self._pops(ts)
+        hm = self._hm(ts)
+        _, B = admixture.patterson_f3(hm, 'C', 'A', 'B')
+        het_c = float(np.nansum(B))
+        div_c = float(np.atleast_1d(
+            ts.diversity([C], mode='site', span_normalise=False))[0])
+        np.testing.assert_allclose(het_c, div_c, rtol=1e-9)
+
+
 class TestMultiallelicConsumers:
     """singleton_count / heterozygosity_expected / max_daf / mu_sfs / daf_histogram."""
 

@@ -13,49 +13,76 @@ from ._utils import get_population_matrix as _get_population_matrix
 from .resampling import block_jackknife, _moving_nansum, _moving_nanmean
 
 
-def _allele_freq(haplotype_matrix):
-    """Compute alternate allele frequency from per-site valid data."""
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
+def _aligned_allele_counts(haplotype_matrix, pops):
+    """Per-allele counts for a list of populations on a shared global K.
 
-    hap = haplotype_matrix.haplotypes
-    valid_mask = hap >= 0
-    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-    n1 = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
-    return cp.where(n_valid > 0, n1 / n_valid, 0.0)
-
-
-def _allele_freq_and_het(haplotype_matrix):
-    """Compute alternate allele frequency and unbiased heterozygosity.
-
-    Parameters
-    ----------
-    haplotype_matrix : HaplotypeMatrix
-
-    Returns
-    -------
-    freq : cupy.ndarray, float64, shape (n_variants,)
-        Alternate allele frequency.
-    h : cupy.ndarray, float64, shape (n_variants,)
-        Unbiased heterozygosity estimator: n0*n1 / (n*(n-1)).
-    n : cupy.ndarray, float64, shape (n_variants,)
-        Allele number per site (n_valid).
+    Returns a list of ``(x, n)`` per pop, where ``x`` is ``(n_var, K)`` allele
+    counts (float64) and ``n`` is ``(n_var,)`` valid haplotype counts. K is the
+    max allele index over ALL listed pops + 1, so column ``a`` denotes the same
+    allele in every pop (the alignment discipline from the joint SFS /
+    divergence). This is the counting substrate for the tskit f-statistics.
     """
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
+    from ._memutil import allele_counts
+    mats = [_get_population_matrix(haplotype_matrix, p) for p in pops]
+    for m in mats:
+        if m.device == 'CPU':
+            m.transfer_to_gpu()
+    k = max((int(m.haplotypes.max()) for m in mats if m.haplotypes.size),
+            default=0)
+    n_alleles = max(k, 0) + 1
+    out = []
+    for m in mats:
+        x, n = allele_counts(m.haplotypes, n_alleles=n_alleles)
+        out.append((x.astype(cp.float64), n.astype(cp.float64)))
+    return out
 
-    hap = haplotype_matrix.haplotypes
 
-    valid_mask = hap >= 0
-    an = cp.sum(valid_mask, axis=0).astype(cp.float64)
-    n1 = cp.sum(cp.where(valid_mask, hap, 0), axis=0).astype(cp.float64)
-    n0 = an - n1
+def _f2_terms(xa, na, xb, nb):
+    """Per-variant f2(A,B), the tskit unbiased U-statistic summed over alleles.
 
-    freq = cp.where(an > 0, n1 / an, 0.0)
-    h = cp.where(an > 1, (n0 * n1) / (an * (an - 1)), 0.0)
+    x* are (n_var, K) per-allele counts on a shared K; n* are (n_var,) valid
+    counts. Matches tskit's ``ts.f2``. Non-estimable sites (n < 2 in either pop)
+    contribute 0.
+    """
+    na_, nb_ = na[:, None], nb[:, None]
+    num = (xa * (xa - 1) * (nb_ - xb) * (nb_ - xb - 1)
+           - xa * (na_ - xa) * (nb_ - xb) * xb)
+    den = na_ * (na_ - 1) * nb_ * (nb_ - 1)
+    return cp.where(den > 0, num / den, 0.0).sum(axis=1)
 
-    return freq, h, an
 
+def _f3_terms(xi, ni, xj, nj, xk, nk):
+    """Per-variant f3(I; J, K), the tskit unbiased U-statistic over alleles.
+
+    I is the target population (tskit's first sample set). Matches ``ts.f3``.
+    """
+    ni_, nj_, nk_ = ni[:, None], nj[:, None], nk[:, None]
+    num = (xi * (xi - 1) * (nj_ - xj) * (nk_ - xk)
+           - xi * (ni_ - xi) * (nj_ - xj) * xk)
+    den = ni_ * (ni_ - 1) * nj_ * nk_
+    return cp.where(den > 0, num / den, 0.0).sum(axis=1)
+
+
+def _het_unbiased(x, n):
+    """Per-variant unbiased heterozygosity: (n^2 - sum_a x_a^2) / (n(n-1)).
+
+    Per-allele; reduces to the biallelic 2*n0*n1/(n(n-1)) form. Used as the f3
+    normalization (B = heterozygosity of the target population).
+    """
+    sumsq = (x * x).sum(axis=1)
+    return cp.where(n > 1, (n * n - sumsq) / (n * (n - 1)), 0.0)
+
+
+def _f4_terms(xa, na, xb, nb, xc, nc, xd, nd):
+    """Per-variant f4(A,B,C,D), the tskit unbiased U-statistic over alleles.
+
+    Matches tskit's ``ts.f4``.
+    """
+    na_, nb_, nc_, nd_ = na[:, None], nb[:, None], nc[:, None], nd[:, None]
+    num = (xa * xc * (nb_ - xb) * (nd_ - xd)
+           - xa * xd * (nb_ - xb) * (nc_ - xc))
+    den = na_ * nb_ * nc_ * nd_
+    return cp.where(den > 0, num / den, 0.0).sum(axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -88,14 +115,9 @@ def patterson_f2(haplotype_matrix: HaplotypeMatrix,
         if haplotype_matrix.num_variants == 0:
             return np.array([])
 
-    ma = _get_population_matrix(haplotype_matrix, pop_a)
-    mb = _get_population_matrix(haplotype_matrix, pop_b)
-
-    a, ha, sa = _allele_freq_and_het(ma)
-    b, hb, sb = _allele_freq_and_het(mb)
-
-    f2 = ((a - b) ** 2) - (ha / sa) - (hb / sb)
-    return f2.get()
+    (xa, na), (xb, nb) = _aligned_allele_counts(haplotype_matrix,
+                                                [pop_a, pop_b])
+    return _f2_terms(xa, na, xb, nb).get()
 
 
 def patterson_f3(haplotype_matrix: HaplotypeMatrix,
@@ -122,50 +144,69 @@ def patterson_f3(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     T : ndarray, float64, shape (n_variants,)
-        Un-normalized F3 estimates per variant.
+        Un-normalized F3 estimates per variant (matches tskit f3(C; A, B)).
     B : ndarray, float64, shape (n_variants,)
-        Heterozygosity estimates (2 * h_hat) for population C.
+        Unbiased heterozygosity of the target population C (f3 normalization).
     """
-    if missing_data == 'exclude':
-        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
-            populations=[pop_c, pop_a, pop_b])
-        if haplotype_matrix.num_variants == 0:
-            return np.array([]), np.array([])
-
-    mc = _get_population_matrix(haplotype_matrix, pop_c)
-    ma = _get_population_matrix(haplotype_matrix, pop_a)
-    mb = _get_population_matrix(haplotype_matrix, pop_b)
-
-    c, hc, sc = _allele_freq_and_het(mc)
-    a, _, _ = _allele_freq_and_het(ma)
-    b, _, _ = _allele_freq_and_het(mb)
-
-    T = ((c - a) * (c - b)) - (hc / sc)
-    B = 2 * hc
-
-    return T.get(), B.get()
+    return tuple(v.get() for v in
+                 _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
+                                   missing_data))
 
 
 def _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
                       missing_data='include'):
-    """Like patterson_f3 but returns CuPy arrays (no D2H transfer)."""
+    """Like patterson_f3 but returns CuPy arrays (no D2H transfer).
+
+    T = tskit f3(C; A, B) per variant (unbiased U-statistic); B = unbiased
+    heterozygosity of the target population C (the f3 normalization).
+    """
     if missing_data == 'exclude':
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop_c, pop_a, pop_b])
         if haplotype_matrix.num_variants == 0:
             return cp.array([]), cp.array([])
 
-    mc = _get_population_matrix(haplotype_matrix, pop_c)
-    ma = _get_population_matrix(haplotype_matrix, pop_a)
-    mb = _get_population_matrix(haplotype_matrix, pop_b)
+    (xc, nc), (xa, na), (xb, nb) = _aligned_allele_counts(
+        haplotype_matrix, [pop_c, pop_a, pop_b])
 
-    c, hc, sc = _allele_freq_and_het(mc)
-    a, _, _ = _allele_freq_and_het(ma)
-    b, _, _ = _allele_freq_and_het(mb)
-
-    T = ((c - a) * (c - b)) - (hc / sc)
-    B = 2 * hc
+    T = _f3_terms(xc, nc, xa, na, xb, nb)   # target C is tskit's first set
+    B = _het_unbiased(xc, nc)
     return T, B
+
+
+def patterson_f4(haplotype_matrix: HaplotypeMatrix,
+                 pop_a: Union[str, list],
+                 pop_b: Union[str, list],
+                 pop_c: Union[str, list],
+                 pop_d: Union[str, list],
+                 missing_data: str = 'include'):
+    """Patterson's f4(A, B; C, D) statistic (per variant).
+
+    The unbiased per-allele U-statistic, matching tskit's ``f4`` (site mode).
+    A tree-of-populations under (A,B),(C,D) has f4 == 0; a nonzero value
+    indicates gene flow.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop_a, pop_b, pop_c, pop_d : str or list
+        Population names or sample indices.
+    missing_data : str
+        'include' - per-site n_valid; 'exclude' - filter complete sites.
+
+    Returns
+    -------
+    f4 : ndarray, float64, shape (n_variants,)
+        Per-variant f4 estimates (sum over variants gives the statistic).
+    """
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop_a, pop_b, pop_c, pop_d])
+        if haplotype_matrix.num_variants == 0:
+            return np.array([])
+    (xa, na), (xb, nb), (xc, nc), (xd, nd) = _aligned_allele_counts(
+        haplotype_matrix, [pop_a, pop_b, pop_c, pop_d])
+    return _f4_terms(xa, na, xb, nb, xc, nc, xd, nd).get()
 
 
 def patterson_d(haplotype_matrix: HaplotypeMatrix,
@@ -193,50 +234,59 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
         Numerator (un-normalized F4 estimates).
     den : ndarray, float64, shape (n_variants,)
         Denominator.
+
+    Notes
+    -----
+    D is a biallelic-SNP statistic: sites with more than two alleles across the
+    four populations are excluded (num = den = 0), silently, as biallelic
+    filtering is handled elsewhere in the package. A multiallelic generalization
+    is a possible future extension.
     """
-    if missing_data == 'exclude':
-        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
-            populations=[pop_a, pop_b, pop_c, pop_d])
-        if haplotype_matrix.num_variants == 0:
-            return np.array([]), np.array([])
-
-    ma = _get_population_matrix(haplotype_matrix, pop_a)
-    mb = _get_population_matrix(haplotype_matrix, pop_b)
-    mc = _get_population_matrix(haplotype_matrix, pop_c)
-    md = _get_population_matrix(haplotype_matrix, pop_d)
-
-    a = _allele_freq(ma)
-    b = _allele_freq(mb)
-    c = _allele_freq(mc)
-    d = _allele_freq(md)
-
-    num = (a - b) * (c - d)
-    den = (a + b - 2 * a * b) * (c + d - 2 * c * d)
-
-    return num.get(), den.get()
+    return tuple(v.get() for v in
+                 _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
+                                  missing_data))
 
 
 def _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
                      missing_data='include'):
-    """Like patterson_d but returns CuPy arrays (no D2H transfer)."""
+    """Like patterson_d but returns CuPy arrays (no D2H transfer).
+
+    BIALLELIC-RESTRICTED: D (ABBA-BABA) is defined on biallelic SNPs; sites with
+    >2 alleles across the four pops are excluded (num=den=0). On the retained
+    sites the allele frequency is a proper per-allele frequency (count of the
+    single alt allele / n), NOT cp.sum(hap)/n -- so a biallelic {0,2}-type site
+    is handled correctly, not index-inflated. The multiallelic generalization is
+    deferred (needs validation; no reference implementation to pin to).
+    """
     if missing_data == 'exclude':
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop_a, pop_b, pop_c, pop_d])
         if haplotype_matrix.num_variants == 0:
             return cp.array([]), cp.array([])
 
-    ma = _get_population_matrix(haplotype_matrix, pop_a)
-    mb = _get_population_matrix(haplotype_matrix, pop_b)
-    mc = _get_population_matrix(haplotype_matrix, pop_c)
-    md = _get_population_matrix(haplotype_matrix, pop_d)
+    (xa, na), (xb, nb), (xc, nc), (xd, nd) = _aligned_allele_counts(
+        haplotype_matrix, [pop_a, pop_b, pop_c, pop_d])
 
-    a = _allele_freq(ma)
-    b = _allele_freq(mb)
-    c = _allele_freq(mc)
-    d = _allele_freq(md)
+    # Sites with >2 alleles across the four pops are dropped (num=den=0),
+    # silently -- consistent with the package's biallelic filtering elsewhere
+    # (e.g. GenotypeMatrix.from_vcf); the biallelic-only contract is documented.
+    present = (xa + xb + xc + xd) > 0
+    biallelic = present.sum(axis=1) <= 2
 
-    num = (a - b) * (c - d)
-    den = (a + b - 2 * a * b) * (c + d - 2 * c * d)
+    # Alt allele = highest-index present allele (== allele 1 for a {0,1} site,
+    # so this reduces to the previous behaviour on standard biallelic data);
+    # D is invariant to which of the two alleles is chosen.
+    k = xa.shape[1]
+    alt = cp.where(present, cp.arange(k)[None, :], -1).argmax(axis=1)[:, None]
+
+    def freq(x, n):
+        alt_count = cp.take_along_axis(x, alt, axis=1)[:, 0]
+        return cp.where(n > 0, alt_count / n, 0.0)
+
+    a, b, c, d = freq(xa, na), freq(xb, nb), freq(xc, nc), freq(xd, nd)
+    num = cp.where(biallelic, (a - b) * (c - d), 0.0)
+    den = cp.where(biallelic,
+                   (a + b - 2 * a * b) * (c + d - 2 * c * d), 0.0)
     return num, den
 
 
