@@ -1172,6 +1172,95 @@ class TestMultiallelicTwoPop:
                 assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
 
 
+class TestMultiallelicCap:
+    """The fused windowed kernels can't represent an allele index at/above the
+    per-allele cap (``_FUSED_MAX_ALLELES``); such sites are dropped before launch
+    with a MultiallelicCapWarning, and the retained sites are computed exactly as
+    if the over-cap sites were absent. (The host scatter engine has no cap, so
+    this is fused-only.)"""
+
+    def _build(self, seed=0):
+        """Data with two over-cap sites among normal biallelic/low-multiallelic
+        sites. Returns (hm, hm_clean, bp, overcap)."""
+        from pg_gpu.windowed_analysis import _FUSED_MAX_ALLELES
+        rng = np.random.RandomState(seed)
+        n_hap, n_var, seq_len = 30, 60, 60_000
+        # nucleotide-scale alleles that stay strictly under the cap
+        within = min(4, _FUSED_MAX_ALLELES)
+        positions = np.sort(rng.choice(np.arange(1, seq_len), size=n_var,
+                                       replace=False)).astype(float)
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        # a few genuine multiallelic sites within the cap
+        for j in range(0, n_var, 12):
+            hap[:, j] = rng.randint(0, within, n_hap)
+        # two sites that hit the cap: one allele index == _FUSED_MAX_ALLELES,
+        # which the filter (>= cap) must drop
+        overcap = [15, 37]
+        for j in overcap:
+            hap[:, j] = rng.randint(0, within, n_hap)
+            hap[0, j] = _FUSED_MAX_ALLELES
+        hm = HaplotypeMatrix(hap, positions, chrom_start=0, chrom_end=seq_len)
+        keep = np.ones(n_var, dtype=bool)
+        keep[overcap] = False
+        hm_clean = HaplotypeMatrix(hap[:, keep], positions[keep],
+                                   chrom_start=0, chrom_end=seq_len)
+        for h in (hm, hm_clean):
+            n = h.num_haplotypes
+            h.sample_sets = {"p1": list(range(n // 2)),
+                             "p2": list(range(n // 2, n))}
+        bp = np.arange(0, seq_len + 20_000, 20_000, dtype=float)
+        return hm, hm_clean, bp, overcap
+
+    def test_fused_single_pop_cap_warns_and_matches(self):
+        from pg_gpu import MultiallelicCapWarning
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        hm, hm_clean, bp, _ = self._build()
+        stats = ('pi', 'segregating_sites', 'theta_h')
+        with pytest.warns(MultiallelicCapWarning):
+            r = windowed_statistics_fused(hm, bp_bins=bp, statistics=stats,
+                                          per_base=False, chrom='1')
+        r_clean = windowed_statistics_fused(hm_clean, bp_bins=bp,
+                                            statistics=stats, per_base=False,
+                                            chrom='1')
+        for k in stats:
+            np.testing.assert_allclose(r[k], r_clean[k], rtol=1e-12,
+                                       equal_nan=True)
+        # dropped sites are not counted
+        np.testing.assert_array_equal(r['n_variants'], r_clean['n_variants'])
+
+    def test_fused_chunked_cap_warns_and_matches(self):
+        from pg_gpu import MultiallelicCapWarning
+        from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked
+        hm, hm_clean, bp, _ = self._build()
+        stats = ('pi', 'segregating_sites')
+        with pytest.warns(MultiallelicCapWarning):
+            r = windowed_statistics_fused_chunked(hm, bp_bins=bp,
+                                                  statistics=stats,
+                                                  per_base=False, chrom='1')
+        r_clean = windowed_statistics_fused_chunked(hm_clean, bp_bins=bp,
+                                                    statistics=stats,
+                                                    per_base=False, chrom='1')
+        for k in stats:
+            np.testing.assert_allclose(r[k], r_clean[k], rtol=1e-12,
+                                       equal_nan=True)
+
+    def test_fused_two_pop_cap_warns_and_matches(self):
+        from pg_gpu import MultiallelicCapWarning
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        hm, hm_clean, bp, _ = self._build()
+        stats = ('dxy', 'fst_hudson')
+        with pytest.warns(MultiallelicCapWarning):
+            r = windowed_statistics_fused(hm, bp_bins=bp, statistics=stats,
+                                          pop1='p1', pop2='p2', per_base=False,
+                                          chrom='1')
+        r_clean = windowed_statistics_fused(hm_clean, bp_bins=bp, statistics=stats,
+                                            pop1='p1', pop2='p2', per_base=False,
+                                            chrom='1')
+        for k in stats:
+            np.testing.assert_allclose(r[k], r_clean[k], rtol=1e-12,
+                                       equal_nan=True)
+
+
 class TestCanonicalWindowSchema:
     """Regression for issue #70: every dispatch path must emit the same
     window prefix columns so that cross-path requests and downstream joins
