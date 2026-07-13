@@ -559,12 +559,13 @@ class TestDivergenceVsTskit:
         np.testing.assert_allclose(pbs_pg[valid], pbs_allel[valid], rtol=1e-6, atol=1e-9)
 
     def test_dxy_matches_tskit(self, multiallelic_ts):
-        # dxy = 1 - sum_a p1_a*p2_a per site; mean over sites == tskit divergence.
+        # dxy = 1 - sum_a p1_a*p2_a per site. span_normalize=False returns the
+        # raw sum over sites, which equals tskit's site divergence sum.
         from pg_gpu import divergence
         ts = multiallelic_ts
         hm, A, B = self._hm_with_pops(ts)
         dxy_pg = divergence.dxy(hm, 'A', 'B', span_normalize=False)
-        dxy_ts = ts.divergence([A, B], mode='site', span_normalise=False) / ts.num_sites
+        dxy_ts = ts.divergence([A, B], mode='site', span_normalise=False)
         np.testing.assert_allclose(dxy_pg, dxy_ts, rtol=1e-12)
 
     def test_dxy_components_consistent_with_dxy(self, multiallelic_ts):
@@ -576,10 +577,11 @@ class TestDivergenceVsTskit:
         pop2 = hm.haplotypes[hm.sample_sets['B'], :]
         diffs, comps, nsites = divergence.dxy_components(pop1, pop2)
         dxy_pg = divergence.dxy(hm, 'A', 'B', span_normalize=False)
-        # No missing data => n1*n2 constant across sites, so the pooled ratio
-        # diffs/comps equals dxy's mean-of-per-site-ratios.
+        # dxy (span_normalize=False) is the raw sum of per-site ratios. With no
+        # missing data n1*n2 is constant, so the pooled ratio diffs/comps equals
+        # the per-site mean == dxy_pg / nsites.
         assert nsites == ts.num_sites
-        np.testing.assert_allclose(diffs / comps, dxy_pg, rtol=1e-12)
+        np.testing.assert_allclose(diffs / comps, dxy_pg / nsites, rtol=1e-12)
 
     def test_da_uses_per_allele_pieces(self, multiallelic_ts):
         # da = dxy - (pi1+pi2)/2, both per-allele now (internally consistent).

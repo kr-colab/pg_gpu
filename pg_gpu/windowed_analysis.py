@@ -718,8 +718,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
                               span_normalize, chrom=None):
     """Compute windowed theta estimators via scatter-add on GPU.
 
-    Uses dac_and_n fused kernel + direct vectorized arithmetic + scatter_add
-    for per-window accumulation. Handles variable sample sizes per site.
+    Uses per-allele counts (``allele_counts``) + per-variant contributions
+    (``_ac_contribution``) + scatter_add for per-window accumulation, so
+    multiallelic sites are handled per-allele. Handles variable sample sizes
+    per site.
     """
     from ._utils import get_population_matrix
     from cupyx import scatter_add
@@ -738,8 +740,14 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         if matrix.num_variants == 0:
             return pd.DataFrame()
 
-    from .diversity import _prepare_dac, _site_contribution
-    dac, n_valid, d, n_safe, seg, n_hap = _prepare_dac(matrix)
+    from .diversity import _prepare_allele_counts, _ac_contribution
+    ac, n_valid, n_hap = _prepare_allele_counts(matrix)
+    # Per-allele intermediates (multiallelic-correct; match the scalar diversity
+    # path). mut = per-variant mutation count = (#alleles present) - 1.
+    n = n_valid.astype(cp.float64)
+    has_data = n_valid >= 2
+    alleles_present = (ac > 0).sum(axis=1)
+    mut = cp.where(has_data, cp.maximum(alleles_present - 1, 0), 0).astype(cp.float64)
 
     pos = matrix.positions
     if isinstance(pos, cp.ndarray):
@@ -803,20 +811,28 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         'watterson': stats_set & {'theta_w', 'tajimas_d', 'zeng_e', 'zeng_dh'},
     }
 
-    # Compute per-variant contributions via _site_contribution (single source of truth)
+    # Compute per-variant contributions via _ac_contribution (single source of truth)
     raw = {}
     for est_name, dependents in needs.items():
         if dependents:
             raw[est_name] = scatter_sum(
-                _site_contribution(est_name, d, n_safe, seg, n_valid, n_hap, dac=dac))
+                _ac_contribution(est_name, ac, n_valid, n_hap))
 
     if stats_set & {'segregating_sites', 'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}:
-        seg_count = scatter_sum(seg.astype(cp.float64))
+        seg_count = scatter_sum(mut)
+    derived = ac[:, 1:]
     if 'singletons' in stats_set:
-        is_sing = seg & ((dac == 1) | (dac == n_valid - 1))
-        sing_count = scatter_sum(is_sing.astype(cp.float64))
+        # Per-allele: derived alleles (columns >= 1) observed exactly once.
+        n_sing = ((derived == 1).sum(axis=1) if derived.shape[1]
+                  else cp.zeros(ac.shape[0], dtype=cp.int64))
+        sing_count = scatter_sum(cp.where(has_data, n_sing, 0).astype(cp.float64))
     if 'max_daf' in stats_set:
-        dafs = cp.where(seg, d / n_safe, 0.0).get()
+        # Per-allele: highest derived-allele frequency at the site.
+        if derived.shape[1]:
+            p_der = derived.astype(cp.float64) / cp.where(n > 0, n, 1.0)[:, None]
+            dafs = cp.where(has_data, p_der.max(axis=1), 0.0).get()
+        else:
+            dafs = np.zeros(ac.shape[0])
         rep_dafs = np.broadcast_to(dafs[:, None], contains.shape) * contains
         max_daf_arr = np.zeros(n_windows)
         np.maximum.at(max_daf_arr, k_safe.ravel(), rep_dafs.ravel())
@@ -893,44 +909,34 @@ def _twopop_site_components(hap1, hap2):
       mpd2 = within-pop2 mean pairwise difference per site
       between = between-pop mean pairwise difference per site
 
-    All quantities use per-site valid counts (missing-data aware).
-    Reduces along the sample axis in chunks to avoid materializing
-    full (n_hap, n_var) float64 intermediates.
+    Per-allele (multiallelic-correct): the same-allele pair counts sum over
+    every allele column on a shared allele-index width K, so ``between``
+    equals the per-site Dxy (``1 - sum_a p1_a p2_a``) and mpd1/mpd2 the
+    per-site within-pop pi -- identical to the scalar ``divergence`` functions
+    (``_hudson_fst_from_counts`` / ``dxy``). Reduces to the biallelic
+    ancestral/derived form when there are two alleles. All quantities use
+    per-site valid counts (missing-data aware).
     """
-    n_var = hap1.shape[1]
+    from .divergence import _aligned_pop_counts
 
-    # Compute per-site allele counts and valid counts via chunked reduction.
-    # Only allocates (n_hap, chunk) temporaries instead of (n_hap, n_var).
-    ac1 = cp.zeros(n_var, dtype=cp.float64)
-    n1 = cp.zeros(n_var, dtype=cp.float64)
-    ac2 = cp.zeros(n_var, dtype=cp.float64)
-    n2 = cp.zeros(n_var, dtype=cp.float64)
-    chunk = max(1, n_var // 20)
-    for s in range(0, n_var, chunk):
-        e = min(s + chunk, n_var)
-        h1c = hap1[:, s:e]
-        v1 = h1c >= 0
-        n1[s:e] = cp.sum(v1, axis=0)
-        ac1[s:e] = cp.sum(cp.where(v1, h1c, 0), axis=0)
-        del h1c, v1
-        h2c = hap2[:, s:e]
-        v2 = h2c >= 0
-        n2[s:e] = cp.sum(v2, axis=0)
-        ac2[s:e] = cp.sum(cp.where(v2, h2c, 0), axis=0)
-        del h2c, v2
+    ac1, ac2, n1, n2 = _aligned_pop_counts(hap1, hap2)
+    ac1 = ac1.astype(cp.float64)
+    ac2 = ac2.astype(cp.float64)
+    n1 = n1.astype(cp.float64)
+    n2 = n2.astype(cp.float64)
 
-    # Within-pop mean pairwise differences
+    # Within-pop mean pairwise differences (same pairs summed over alleles)
     n1_pairs = n1 * (n1 - 1) / 2
-    n1_same = ((n1 - ac1) * (n1 - ac1 - 1) + ac1 * (ac1 - 1)) / 2
+    n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
     mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
 
     n2_pairs = n2 * (n2 - 1) / 2
-    n2_same = ((n2 - ac2) * (n2 - ac2 - 1) + ac2 * (ac2 - 1)) / 2
+    n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
     mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
 
-    # Between-pop mean pairwise differences
+    # Between-pop mean pairwise differences (per-allele cross term)
     n_between = n1 * n2
-    n_between_same = (n1 - ac1) * (n2 - ac2) + ac1 * ac2
+    n_between_same = cp.sum(ac1 * ac2, axis=1)
     between = cp.where(n_between > 0,
                        (n_between - n_between_same) / n_between, 0.0)
 
@@ -1251,7 +1257,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 on='window_id', how='left')
         return result
 
-    # Scatter-add path: single-pop theta estimators via dac_and_n + scatter
+    # Scatter-add path: single-pop theta estimators via per-allele counts + scatter
     scatter_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
                       'theta_h', 'theta_l', 'fay_wu_h', 'singletons',
                       'normalized_fay_wu_h', 'zeng_e', 'zeng_dh', 'max_daf'}
@@ -1408,7 +1414,51 @@ def _compute_mean_r2(matrix: HaplotypeMatrix, max_distance: int,
 # Haplotype data is transposed before kernel launch so variants are the
 # leading dimension (column-major for haplotype access). This ensures
 # coalesced memory reads when threads iterate over haplotypes.
+_FUSED_MAX_ALLELES = 8
+"""Per-variant allele capacity of the fused windowed CUDA kernels.
+
+The kernels count alleles into a fixed cnt[MAX_ALLELES] array per variant, so a
+site with an allele index >= this cap cannot be represented and is filtered out
+(with a MultiallelicCapWarning). Keep in sync with the ``#define MAX_ALLELES`` in
+the kernel sources. Nucleotide data has at most 4 alleles, so the cap is never
+hit in practice.
+"""
+
+
+def _warn_fused_allele_cap(n_over):
+    """Emit a MultiallelicCapWarning for ``n_over`` sites dropped by the cap."""
+    import warnings
+    from ._warnings import MultiallelicCapWarning
+    warnings.warn(
+        f"{n_over} site(s) with an allele index >= {_FUSED_MAX_ALLELES} were "
+        "excluded from the fused windowed statistics (kernel per-allele "
+        "capacity). Nucleotide data has at most 4 alleles; the non-windowed "
+        "diversity/divergence functions handle any number of alleles.",
+        MultiallelicCapWarning, stacklevel=3)
+
+
+def _filter_fused_allele_cap_raw(hap_raw, positions):
+    """Cap filter for the chunked path's un-transposed (n_hap, n_var) matrix.
+
+    Reduces over the haplotype axis (axis 0) to get per-variant max allele
+    indices without a full transpose, then slices variants (axis 1) and
+    positions consistently. Drops variants whose max allele index
+    >= _FUSED_MAX_ALLELES and emits a ``MultiallelicCapWarning``; missing (-1)
+    never triggers the cap. (The non-chunked single-pass path filters inline,
+    capturing the keep mask so the two-pop kernel's hap1/hap2 align.)
+    """
+    overcap = hap_raw.max(axis=0) >= _FUSED_MAX_ALLELES
+    n_over = int(overcap.sum())
+    if n_over:
+        _warn_fused_allele_cap(n_over)
+        keep = ~overcap
+        hap_raw = hap_raw[:, keep]
+        positions = positions[keep]
+    return hap_raw, positions
+
+
 _fused_windowed_kernel_v2 = cp.RawKernel(r'''
+#define MAX_ALLELES 8   /* keep in sync with _FUSED_MAX_ALLELES (host guard) */
 extern "C" __global__
 void fused_windowed_stats_v2(const signed char* hap_t,
                              const long long* win_start,
@@ -1438,30 +1488,46 @@ void fused_windowed_stats_v2(const signed char* hap_t,
         return;
     }
 
-    double dn = (double)n_hap;
     double t_mpd = 0.0, t_seg = 0.0, t_sing = 0.0;
     double t_count = 0.0, t_theta_h = 0.0, t_max_daf = 0.0;
 
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
-        int dac = 0;
         const signed char* row = hap_t + (long long)v * n_hap;
+        /* Per-allele counts over non-missing calls. Sites with an allele index
+           >= MAX_ALLELES are filtered out on the host before launch, so every
+           allele here fits in cnt[]. */
+        int cnt[MAX_ALLELES];
+        for (int a = 0; a < MAX_ALLELES; a++) cnt[a] = 0;
+        int nv = 0;
         for (int h = 0; h < n_hap; h++) {
-            if (row[h] > 0) dac++;
+            signed char al = row[h];
+            if (al >= 0) { nv++; if (al < MAX_ALLELES) cnt[al]++; }
         }
-
-        double p = (double)dac / dn;
-        t_mpd += 2.0 * p * (1.0 - p) * dn / (dn - 1.0);
-
-        int is_seg = (dac > 0 && dac < n_hap) ? 1 : 0;
-        t_seg += is_seg;
-        t_sing += (dac == 1 || dac == n_hap - 1) ? 1.0 : 0.0;
         t_count += 1.0;
+        if (nv < 2) continue;
+        double dn = (double)nv;
 
-        if (is_seg) {
-            t_theta_h += 2.0 * (double)dac * (double)dac / (dn * (dn - 1.0));
+        double same = 0.0;      /* sum_a cnt_a*(cnt_a-1) : same-allele pairs */
+        double th = 0.0;        /* theta_h numerator: sum_{a>=1,0<c<nv} 2 c^2 */
+        double mdaf = 0.0;      /* max derived-allele frequency */
+        int n_present = 0;
+        for (int a = 0; a < MAX_ALLELES; a++) {
+            int c = cnt[a];
+            if (c > 0) n_present++;
+            same += (double)c * (double)(c - 1);
+            if (a >= 1 && c > 0) {
+                if (c == 1) t_sing += 1.0;            /* per-derived-allele singleton */
+                double freq = (double)c / dn;
+                if (freq > mdaf) mdaf = freq;
+                if (c < nv) th += 2.0 * (double)c * (double)c;
+            }
         }
-        if (p > t_max_daf) t_max_daf = p;
+        /* pi = 1 - sum_a C(c,2)/C(n,2); seg = mutation count (alleles present - 1) */
+        t_mpd += 1.0 - same / (dn * (dn - 1.0));
+        t_seg += (double)(n_present - 1);
+        t_theta_h += th / (dn * (dn - 1.0));
+        if (mdaf > t_max_daf) t_max_daf = mdaf;
     }
 
     // Sum reduction for 5 accumulators
@@ -1503,6 +1569,7 @@ void fused_windowed_stats_v2(const signed char* hap_t,
 
 # Two-population fused kernel for FST and Dxy
 _fused_windowed_twopop_kernel = cp.RawKernel(r'''
+#define MAX_ALLELES 8   /* keep in sync with _FUSED_MAX_ALLELES (host guard) */
 extern "C" __global__
 void fused_windowed_twopop(const signed char* hap1_t,
                            const signed char* hap2_t,
@@ -1540,44 +1607,52 @@ void fused_windowed_twopop(const signed char* hap1_t,
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
 
-        // Count valid (non-missing) samples and alt alleles per site
-        int ac1_1 = 0, valid1 = 0;
+        // Per-allele counts over non-missing calls (shared cnt width for both
+        // pops). Sites with an allele index >= MAX_ALLELES are filtered on the
+        // host before launch, so every allele fits in cnt[].
+        int cnt1[MAX_ALLELES];
+        int cnt2[MAX_ALLELES];
+        for (int a = 0; a < MAX_ALLELES; a++) { cnt1[a] = 0; cnt2[a] = 0; }
+        int valid1 = 0;
         const signed char* row1 = hap1_t + (long long)v * n_hap1;
         for (int h = 0; h < n_hap1; h++) {
             signed char a = row1[h];
-            if (a >= 0) { valid1++; if (a > 0) ac1_1++; }
+            if (a >= 0) { valid1++; if (a < MAX_ALLELES) cnt1[a]++; }
         }
-        int ac2_1 = 0, valid2 = 0;
+        int valid2 = 0;
         const signed char* row2 = hap2_t + (long long)v * n_hap2;
         for (int h = 0; h < n_hap2; h++) {
             signed char a = row2[h];
-            if (a >= 0) { valid2++; if (a > 0) ac2_1++; }
+            if (a >= 0) { valid2++; if (a < MAX_ALLELES) cnt2[a]++; }
         }
 
         if (valid1 == 0 || valid2 == 0) continue;
 
         double dn1 = (double)valid1;
         double dn2 = (double)valid2;
-        double ac1_0 = dn1 - ac1_1;
-        double ac2_0 = dn2 - ac2_1;
-        double d_ac1_1 = (double)ac1_1;
-        double d_ac2_1 = (double)ac2_1;
 
-        // Hudson: within-pop mean pairwise difference
-        double n1_pairs = dn1 * (dn1 - 1.0) / 2.0;
-        double n1_same = (ac1_0 * (ac1_0 - 1.0) + d_ac1_1 * (d_ac1_1 - 1.0)) / 2.0;
-        double mpd1 = (n1_pairs > 0) ? (n1_pairs - n1_same) / n1_pairs : 0.0;
-
-        double n2_pairs = dn2 * (dn2 - 1.0) / 2.0;
-        double n2_same = (ac2_0 * (ac2_0 - 1.0) + d_ac2_1 * (d_ac2_1 - 1.0)) / 2.0;
-        double mpd2 = (n2_pairs > 0) ? (n2_pairs - n2_same) / n2_pairs : 0.0;
-
+        // Per-allele within-pop mean pairwise difference (same pairs summed over
+        // alleles) and between-pop difference (per-allele cross term) -- mirrors
+        // divergence._hudson_fst_from_counts / dxy, multiallelic-correct.
+        double same1 = 0.0, same2 = 0.0, between_same = 0.0;
+        for (int a = 0; a < MAX_ALLELES; a++) {
+            double c1 = (double)cnt1[a];
+            double c2 = (double)cnt2[a];
+            same1 += c1 * (c1 - 1.0);
+            same2 += c2 * (c2 - 1.0);
+            between_same += c1 * c2;
+        }
+        double mpd1 = (dn1 > 1.0) ? 1.0 - same1 / (dn1 * (dn1 - 1.0)) : 0.0;
+        double mpd2 = (dn2 > 1.0) ? 1.0 - same2 / (dn2 * (dn2 - 1.0)) : 0.0;
         double within = (mpd1 + mpd2) / 2.0;
+        double between = 1.0 - between_same / (dn1 * dn2);
 
-        // Between-pop mean pairwise difference
-        double n_between = dn1 * dn2;
-        double n_between_same = ac1_0 * ac2_0 + d_ac1_1 * d_ac2_1;
-        double between = (n_between > 0) ? (n_between - n_between_same) / n_between : 0.0;
+        // Total non-reference copy counts (all alt alleles collapsed) retained
+        // for the HAPLOID Weir-Cockerham block below, which is deliberately
+        // unchanged -- the fused fst_wc haploid/diploid mismatch is tracked
+        // separately and is out of scope here.
+        double d_ac1_1 = dn1 - (double)cnt1[0];
+        double d_ac2_1 = dn2 - (double)cnt2[0];
 
         t_fst_num += between - within;
         t_fst_den += between;
@@ -1829,6 +1904,20 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     if not isinstance(positions, cp.ndarray):
         positions = cp.asarray(positions)
 
+    # Drop sites the fused kernel's per-allele capacity can't represent (rare;
+    # nucleotide data has <= 4 alleles). Must precede window indexing so the
+    # variant-index ranges are computed against the retained sites. Capture the
+    # keep mask so the two-pop path can slice hap1/hap2 to the same variants
+    # (positions/window indices are computed against the filtered set below).
+    cap_keep = hap.max(axis=1) < _FUSED_MAX_ALLELES if hap.shape[0] else None
+    if cap_keep is not None and not bool(cap_keep.all()):
+        _warn_fused_allele_cap(int((~cap_keep).sum()))
+        hap = hap[cap_keep]
+        positions = positions[cap_keep]
+    else:
+        cap_keep = None
+    n_total_var = hap.shape[0]
+
     # Support overlapping windows via explicit start/stop arrays
     if _win_starts is not None and _win_stops is not None:
         ws_gpu = cp.asarray(_win_starts, dtype=cp.float64)
@@ -1960,6 +2049,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         n2 = m2.haplotypes.shape[0]
         hap1 = cp.ascontiguousarray(m1.haplotypes.T.astype(cp.int8))
         hap2 = cp.ascontiguousarray(m2.haplotypes.T.astype(cp.int8))
+        # Align to the variants retained by the allele-cap filter above, so the
+        # variant axis matches positions/win_start/win_stop/n_total_var.
+        if cap_keep is not None:
+            hap1 = hap1[cap_keep]
+            hap2 = hap2[cap_keep]
 
         out_fst_num = cp.zeros(n_windows, dtype=cp.float64)
         out_fst_den = cp.zeros(n_windows, dtype=cp.float64)
@@ -2196,11 +2290,15 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 
     hap_raw = matrix.haplotypes
     n_hap = hap_raw.shape[0]
-    n_total_var = hap_raw.shape[1]
 
     positions = matrix.positions
     if not isinstance(positions, cp.ndarray):
         positions = cp.asarray(positions)
+
+    # Drop sites the fused kernel's per-allele capacity can't represent. Must
+    # precede window indexing so variant-index ranges match the retained sites.
+    hap_raw, positions = _filter_fused_allele_cap_raw(hap_raw, positions)
+    n_total_var = hap_raw.shape[1]
 
     # Window ranges (same setup as non-chunked)
     if _win_starts is not None and _win_stops is not None:
@@ -2807,59 +2905,6 @@ def _bin_counts(bin_idx, n_bins):
     return cp.bincount(bin_idx[valid], minlength=n_bins)
 
 
-def _allele_sum_and_n(hap, has_missing=None):
-    """Sum of alleles and valid count per variant, skipping missing (-1).
-
-    Parameters
-    ----------
-    hap : cupy.ndarray
-    has_missing : bool, optional
-        If known, skip the check. If None, checks for negatives.
-
-    Returns
-    -------
-    dac : cupy.ndarray  — derived allele count per variant
-    n_valid : cupy.ndarray or int — valid haplotypes per variant
-    """
-    if has_missing is None:
-        has_missing = bool(int(cp.min(hap)) < 0)
-    if has_missing:
-        valid_mask = hap >= 0
-        dac = cp.sum(cp.where(valid_mask, hap, 0), axis=0)
-        n_valid = cp.sum(valid_mask, axis=0)
-    else:
-        dac = cp.sum(hap, axis=0)
-        n_valid = hap.shape[0]
-    return dac, n_valid
-
-
-def _per_variant_mpd(hap, n_hap):
-    """Mean pairwise difference per variant (GPU)."""
-    dac, n_valid = _allele_sum_and_n(hap)
-    dac = dac.astype(cp.float64)
-    if isinstance(n_valid, int):
-        n = cp.float64(n_valid)
-    else:
-        n = n_valid.astype(cp.float64)
-    usable = n > 1
-    p = cp.where(usable, dac / n, 0.0)
-    mpd = cp.zeros_like(dac)
-    mpd[usable] = 2.0 * p[usable] * (1.0 - p[usable]) * n[usable] / (n[usable] - 1)
-    return mpd
-
-
-def _per_variant_is_seg(hap, n_hap_int):
-    """Boolean: is variant segregating (GPU)."""
-    dac, n_valid = _allele_sum_and_n(hap)
-    return (dac > 0) & (dac < n_valid)
-
-
-def _per_variant_is_singleton(hap, n_hap_int):
-    """Boolean: is variant a singleton (GPU)."""
-    dac, n_valid = _allele_sum_and_n(hap)
-    return (dac == 1) | (dac == n_valid - 1)
-
-
 def _per_variant_fst_hudson_components(hap1, hap2, n1, n2):
     """Per-variant Hudson FST numerator and denominator (GPU).
 
@@ -2966,34 +3011,34 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
             results['end'], is_accessible)
         window_bases = cp.asarray(window_bases, dtype=cp.float64)
 
-    # Phase 1: compute per-variant values and aggregate
+    # Phase 1: per-variant per-allele contributions (multiallelic-correct),
+    # mirroring diversity._ac_contribution and the scatter engine so all three
+    # single-pop windowed engines agree with the scalar diversity functions.
+    from ._memutil import allele_counts
+    from .diversity import _ac_contribution, _achaz_variance_coefficients
 
-    # check for missing data once, share across all stats
-    _has_missing = bool(int(cp.min(hap)) < 0)
+    ac, n_valid_i = allele_counts(hap)
+    n_v = n_valid_i.astype(cp.float64)
+    has_data = n_valid_i >= 2
+    derived = ac[:, 1:]                        # per-derived-allele counts
+    # per-site mutation count = (#alleles present) - 1  (tskit segregating)
+    alleles_present = (ac > 0).sum(axis=1)
+    mut = cp.where(has_data, cp.maximum(alleles_present - 1, 0),
+                   0).astype(cp.float64)
 
-    # precompute allele counts once (shared across all stats)
-    dac, n_valid = _allele_sum_and_n(hap, has_missing=_has_missing)
-    dac = dac.astype(cp.float64)
-    if isinstance(n_valid, int):
-        n_v = cp.float64(n_valid)
-        usable = cp.ones(dac.shape, dtype=bool)
-    else:
-        n_v = n_valid.astype(cp.float64)
-        usable = n_v > 1
-    p = cp.where(usable, dac / n_v, 0.0)
-    need_mpd = any(s in statistics for s in ('pi', 'tajimas_d'))
+    need_pi = any(s in statistics for s in ('pi', 'tajimas_d'))
+    need_watt = any(s in statistics for s in ('theta_w', 'tajimas_d'))
     need_seg = any(s in statistics for s in
                    ('theta_w', 'tajimas_d', 'segregating_sites'))
 
-    if need_mpd:
-        mpd = cp.zeros_like(dac)
-        mpd[usable] = 2.0 * p[usable] * (1.0 - p[usable]) * n_v[usable] / (n_v[usable] - 1) if not isinstance(n_valid, int) else 2.0 * p[usable] * (1.0 - p[usable]) * n_hap / (n_hap - 1)
-    else:
-        mpd = None
-    is_seg = (dac > 0) & (dac < n_v) if need_seg else None
+    pi_contrib = (_ac_contribution('pi', ac, n_valid_i, n_hap_int)
+                  if need_pi else None)
+    watt_contrib = (_ac_contribution('watterson', ac, n_valid_i, n_hap_int)
+                    if need_watt else None)
+    seg_count = _scatter_sum(mut, bin_idx, n_windows) if need_seg else None
 
     if 'pi' in statistics:
-        pi_sum = _scatter_sum(mpd, bin_idx, n_windows)
+        pi_sum = _scatter_sum(pi_contrib, bin_idx, n_windows)
         if per_base:
             results['pi'] = cp.where(window_bases > 0,
                                      pi_sum / window_bases, cp.nan).get()
@@ -3001,10 +3046,9 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
             results['pi'] = pi_sum.get()
 
     if 'theta_w' in statistics:
-        seg_counts = _scatter_sum(is_seg.astype(cp.float64), bin_idx, n_windows)
-        n = n_hap_int
-        a1 = np.sum(1.0 / np.arange(1, n))
-        theta_abs = seg_counts / a1
+        # Watterson via per-site a1(n_valid) (missing-data aware), == the
+        # scatter/scalar path; == old seg/a1(n_hap) when data is complete.
+        theta_abs = _scatter_sum(watt_contrib, bin_idx, n_windows)
         if per_base:
             results['theta_w'] = cp.where(window_bases > 0,
                                           theta_abs / window_bases, cp.nan).get()
@@ -3012,49 +3056,45 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
             results['theta_w'] = theta_abs.get()
 
     if 'segregating_sites' in statistics:
-        seg_vals = is_seg if is_seg is not None else (dac > 0) & (dac < n_v)
-        seg_counts_out = _scatter_sum(seg_vals.astype(cp.float64), bin_idx,
-                                      n_windows)
-        results['segregating_sites'] = seg_counts_out.get().astype(int)
+        # Mutation count (alleles_present - 1) = tskit segregating; == the
+        # biallelic boolean is_seg for two-allele sites.
+        results['segregating_sites'] = seg_count.get().astype(int)
 
     if 'singletons' in statistics:
-        is_sing = (dac == 1) | (dac == n_v - 1)
-        sing_counts = _scatter_sum(is_sing.astype(cp.float64), bin_idx,
-                                   n_windows)
+        # Per-allele: derived alleles observed exactly once (unfolded, ==
+        # scalar singleton_count). The old (dac==1)|(dac==n-1) also counted
+        # ancestral-allele singletons (folded).
+        n_sing = ((derived == 1).sum(axis=1) if derived.shape[1]
+                  else cp.zeros(ac.shape[0], dtype=cp.int64))
+        sing = cp.where(has_data, n_sing, 0).astype(cp.float64)
+        sing_counts = _scatter_sum(sing, bin_idx, n_windows)
         results['singletons'] = sing_counts.get().astype(int)
 
     if 'het_expected' in statistics:
-        he = 2.0 * p * (1.0 - p)
+        # He = 1 - sum_a p_a^2 (per-allele; reduces to 2p(1-p) for biallelic).
+        p_sq = (ac.astype(cp.float64) ** 2).sum(axis=1) / cp.maximum(n_v, 1.0) ** 2
+        he = cp.where(has_data, 1.0 - p_sq, 0.0)
         he_sum = _scatter_sum(he, bin_idx, n_windows)
         results['het_expected'] = cp.where(
             variant_counts > 0,
             he_sum / variant_counts.astype(cp.float64), cp.nan).get()
 
     if 'tajimas_d' in statistics:
-        # aggregate mpd and seg counts into windows, then apply formula
-        pi_sum_td = _scatter_sum(mpd, bin_idx, n_windows) if 'pi' not in statistics else _scatter_sum(mpd, bin_idx, n_windows)
-        seg_counts_td = _scatter_sum(is_seg.astype(cp.float64), bin_idx,
-                                     n_windows)
-
-        n = n_hap_int
-        a1 = np.sum(1.0 / np.arange(1, n))
-        a2 = np.sum(1.0 / np.arange(1, n) ** 2)
-        b1 = (n + 1) / (3 * (n - 1))
-        b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
-        c1 = b1 - 1 / a1
-        c2 = b2 - (n + 2) / (a1 * n) + a2 / a1 ** 2
-        e1 = c1 / a1
-        e2 = c2 / (a1 ** 2 + a2)
-
-        S = seg_counts_td.get()
-        pi_w = pi_sum_td.get()
-
-        d_num = pi_w - S / a1
-        d_var = e1 * S + e2 * S * (S - 1)
-        d_std = np.sqrt(np.maximum(d_var, 0))
-
-        tajd = np.where(d_std > 0, d_num / d_std, np.nan)
-        tajd[S < 3] = np.nan
+        # numerator = pi - theta_w (per-allele sums); Achaz (2009) variance from
+        # a single n_hap and mutation-count S, matching the scatter engine. (The
+        # effective-n-under-missing-data question is tracked separately.)
+        pi_sum_td = _scatter_sum(pi_contrib, bin_idx, n_windows)
+        watt_sum_td = _scatter_sum(watt_contrib, bin_idx, n_windows)
+        S = seg_count.get()
+        a1 = sum(1.0 / i for i in range(1, n_hap_int))
+        a2 = sum(1.0 / (i ** 2) for i in range(1, n_hap_int))
+        theta_est = S / a1
+        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
+        alpha, beta = _achaz_variance_coefficients('pi', 'watterson', n_hap_int)
+        var = alpha * theta_est + beta * theta_sq_est
+        num = (pi_sum_td - watt_sum_td).get()
+        with np.errstate(invalid='ignore', divide='ignore'):
+            tajd = np.where((var > 0) & (S >= 3), num / np.sqrt(var), np.nan)
         results['tajimas_d'] = tajd
 
     # two-population statistics
