@@ -18,13 +18,77 @@ from ._utils import get_population_matrix as _get_population_matrix
 _GPU_MEM_BUDGET = 0.3
 
 
+def _multiallelic_onehot_dense(hap_multi, scaler):
+    """Standardized per-present-derived-allele one-hot columns for multiallelic sites.
+
+    ``hap_multi`` is (n_samples, n_sites) with allele indices (>= 2 present at some
+    site) and -1 for missing. Each site contributes one column per PRESENT derived
+    allele (index >= 1); the reference allele (index 0) is dropped. Columns are
+    compacted to present (site, allele) pairs -- never padded to the global allele
+    width -- so a site costs exactly its number of present derived alleles.
+
+    Each column is the indicator (hap == a), with missing rows imputed to p_a and
+    centered by the same p_a (so a missing haplotype contributes exactly 0 while a
+    reference carrier stays at -p_a), then scaled per ``scaler``. p_a = ac_a /
+    n_valid uses the per-site non-missing count. Returns (cols float64
+    (n_samples, n_pairs), n_pairs).
+    """
+    from ._memutil import allele_counts
+
+    n_samp = hap_multi.shape[0]
+    if hap_multi.shape[1] == 0:
+        return cp.zeros((n_samp, 0), dtype=cp.float64), 0
+
+    ac, n_valid = allele_counts(hap_multi)          # (n_sites, K), (n_sites,)
+    if ac.shape[1] < 2:
+        return cp.zeros((n_samp, 0), dtype=cp.float64), 0
+    nv = n_valid.astype(cp.float64)
+
+    present = ac[:, 1:] > 0                          # derived alleles present per site
+    pairs = cp.argwhere(present)                     # (n_pairs, 2): (site, allele-1)
+    n_pairs = int(pairs.shape[0])
+    if n_pairs == 0:
+        return cp.zeros((n_samp, 0), dtype=cp.float64), 0
+
+    sites = pairs[:, 0]
+    alleles = pairs[:, 1] + 1                         # actual allele index (>= 1)
+
+    g = hap_multi[:, sites]                           # (n_samp, n_pairs)
+    valid = g >= 0
+    ac_pairs = ac[sites, alleles].astype(cp.float64)  # count of allele a at the site
+    nvp = nv[sites]
+    p = cp.where(nvp > 0, ac_pairs / nvp, 0.0)        # p_a per column
+
+    ind = (g == alleles[None, :]).astype(cp.float64)
+    col = cp.where(valid, ind, p[None, :])            # missing -> p_a
+    col -= p[None, :]                                 # missing -> 0; ref carrier -> -p_a
+
+    if scaler == 'patterson':
+        scale = cp.sqrt(p * (1.0 - p))
+        scale = cp.where(scale > 0, scale, 1.0)
+        col /= scale[None, :]
+    elif scaler == 'standard':
+        std = cp.std(col, axis=0)
+        good = std > 0
+        col[:, good] /= std[good]
+        col[:, ~good] = 0.0
+    return col, n_pairs
+
+
 def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'):
     """Center and scale haplotype matrix for PCA.
 
+    Multiallelic-correct via a split: sites coded {0,1} (max allele index <= 1) go
+    through the existing biallelic standardization unchanged; sites with an allele
+    index >= 2 go through the per-allele one-hot (``_multiallelic_onehot_dense``).
+    The two column blocks are concatenated, so X @ X.T sums their contributions
+    (Gram additivity), and any downstream normalization divides by the total column
+    count. Biallelic-only data is bit-identical to the previous implementation.
+
     Uses chunked processing for large matrices to avoid OOM.
-    Returns the prepared matrix X on GPU.
+    Returns the prepared matrix X on GPU (or a _DeferredPCA).
     """
-    from ._memutil import dac_and_n, estimate_variant_chunk_size
+    from ._memutil import allele_counts
 
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
@@ -37,68 +101,121 @@ def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'
     hap = matrix.haplotypes
     n_samples, n_var = hap.shape
 
+    max_allele = hap.max(axis=0)
+    # One host transfer for all branch flags, so the common biallelic path pays
+    # no per-window syncs beyond what the original code did (it already
+    # transferred has_missing). exclude-completeness is folded in too.
+    probes = [cp.any(hap < 0), cp.any(max_allele > 1)]
     if missing_data == 'exclude':
-        dac, nv = dac_and_n(hap)
-        complete = nv == n_samples
-        if not cp.all(complete):
-            hap = hap[:, complete]
-            n_var = hap.shape[1]
+        complete_col = cp.sum(hap >= 0, axis=0) == n_samples
+        probes.append(cp.all(complete_col))
+    flags = cp.stack(probes).get()
+    has_missing = bool(flags[0])
+    has_multi = bool(flags[1])
+    if missing_data == 'exclude' and not bool(flags[2]):
+        hap = hap[:, complete_col]
+        max_allele = hap.max(axis=0)
+        has_missing = False  # incomplete sites dropped
 
-    # Compute per-site mean and scale from allele counts (memory-safe)
-    dac, nv = dac_and_n(hap)
-    site_mean = cp.where(nv > 0, dac.astype(cp.float64) / nv.astype(cp.float64), 0.0)
-
-    if scaler == 'patterson':
-        p = site_mean
-        scale = cp.sqrt(p * (1 - p))
-        scale = cp.where(scale > 0, scale, 1.0)
-    elif scaler == 'standard':
-        # Need variance -- compute via second pass or approximate
-        scale = None  # handled below
+    # Partition sites: {0,1}-coded sites (max allele index <= 1) use the existing
+    # biallelic standardization unchanged; sites with an allele index >= 2 use the
+    # per-allele one-hot. The physical split (boolean column indexing, which syncs)
+    # only happens when a multiallelic site is actually present.
+    if has_multi:
+        bi_mask = max_allele <= 1
+        hap_bi = hap[:, bi_mask]
+        hap_multi = hap[:, ~bi_mask]
+        multi_cols, n_multi = _multiallelic_onehot_dense(hap_multi, scaler)
     else:
-        scale = None
+        hap_bi = hap
+        multi_cols, n_multi = None, 0
+    n_bi = hap_bi.shape[1]
 
-    # Check if full float64 matrix fits in memory
+    # Biallelic block scaling metadata via the per-allele primitive. For {0,1}
+    # sites the summed derived count equals the old dac_and_n exactly (so this is
+    # bit-identical), and using allele_counts drops decomposition's last dependence
+    # on the collapsed dac_and_n. ac[:, 1:].sum handles the all-monomorphic (K == 1)
+    # case where there is no derived column.
+    # n_alleles=2 is exact for the biallelic block (partition guarantees max index
+    # <= 1) and avoids the int(hap.max()) reduction (a host sync) that the default
+    # would do -- keeping the per-window sync footprint at the original level.
+    ac_bi, nv = allele_counts(hap_bi, n_alleles=2)
+    dac = ac_bi[:, 1:].sum(axis=1)
+    site_mean = cp.where(nv > 0, dac.astype(cp.float64) / nv.astype(cp.float64), 0.0)
+    if scaler == 'patterson':
+        scale = cp.sqrt(site_mean * (1 - site_mean))
+        scale = cp.where(scale > 0, scale, 1.0)
+    else:
+        scale = None  # 'standard' handled at materialization; None -> center only
+
+    n_cols_total = n_bi + n_multi
+
     free = cp.cuda.Device().mem_info[0]
-    needed = n_samples * n_var * 8  # float64
+    needed = n_samples * n_cols_total * 8  # float64
     if needed < free * 0.4:
-        # Fast path: materialize full matrix
-        has_missing = bool(cp.any(hap < 0).get())
-        if has_missing:
-            valid_mask = hap >= 0
-            X = cp.where(valid_mask, hap, 0).astype(cp.float64)
-            X = cp.where(valid_mask, X, site_mean[None, :])
-        else:
-            X = hap.astype(cp.float64)
-        X -= site_mean
-        if scaler == 'patterson':
-            X /= scale
-        elif scaler == 'standard':
-            std = cp.std(X, axis=0)
-            valid = std > 0
-            X[:, valid] /= std[valid]
-            X[:, ~valid] = 0
-        return X
+        # Dense path: build the biallelic block (existing logic on hap_bi) and
+        # concatenate the multiallelic columns.
+        X_bi = _biallelic_standardize_dense(hap_bi, site_mean, scale, scaler,
+                                            has_missing)
+        if not n_multi:
+            return X_bi
+        if n_bi == 0:
+            return multi_cols
+        return cp.concatenate([X_bi, multi_cols], axis=1)
 
-    # Memory-constrained path: return hap + metadata for chunked PCA
-    # Store scaling info so pca() can chunk the matmul
-    return _DeferredPCA(hap, site_mean, scale, scaler)
+    # Memory-constrained path: chunk the (large) biallelic block; the small
+    # multiallelic block rides along densely.
+    return _DeferredPCA(hap_bi, site_mean, scale, scaler, multi_cols)
+
+
+def _biallelic_standardize_dense(hap_bi, site_mean, scale, scaler, has_missing):
+    """Dense standardized biallelic block (the original standardization, verbatim).
+
+    Bit-identical to the previous _prepare_matrix fast path when all sites are
+    {0,1}-coded. ``has_missing`` is passed in (computed once in _prepare_matrix)
+    to avoid a per-call host sync.
+    """
+    if has_missing:
+        valid_mask = hap_bi >= 0
+        X = cp.where(valid_mask, hap_bi, 0).astype(cp.float64)
+        X = cp.where(valid_mask, X, site_mean[None, :])
+    else:
+        X = hap_bi.astype(cp.float64)
+    X -= site_mean
+    if scaler == 'patterson':
+        X /= scale
+    elif scaler == 'standard':
+        std = cp.std(X, axis=0)
+        valid = std > 0
+        X[:, valid] /= std[valid]
+        X[:, ~valid] = 0
+    return X
 
 
 class _DeferredPCA:
-    """Wrapper for memory-constrained PCA: stores hap + scaling metadata
-    so the caller can compute X @ X.T via chunked matmul without
-    materializing the full float64 matrix."""
+    """Wrapper for memory-constrained PCA: stores the biallelic hap block +
+    scaling metadata (chunked lazily) plus a dense standardized multiallelic
+    one-hot block, so the caller can compute X @ X.T (and X @ Y, X.T @ Y) over
+    the concatenated columns [biallelic | multiallelic] without materializing
+    the full biallelic float64 matrix. Column order is biallelic first."""
 
-    def __init__(self, hap, site_mean, scale, scaler):
-        self.hap = hap
+    def __init__(self, hap, site_mean, scale, scaler, multi_cols=None):
+        self.hap = hap                       # biallelic sites only
         self.site_mean = site_mean
         self.scale = scale
         self.scaler = scaler
-        self.shape = hap.shape
+        self.n_bi = hap.shape[1]
+        # multi_cols is None when there are no multiallelic sites; otherwise it is
+        # built from a site with an allele index >= 2, which always yields at least
+        # one present-derived-allele column. An empty non-None array is a caller bug.
+        if multi_cols is not None:
+            assert multi_cols.shape[1] > 0, "multi_cols must be None, not empty"
+        self.multi_cols = multi_cols
+        self.n_multi = 0 if multi_cols is None else multi_cols.shape[1]
+        self.shape = (hap.shape[0], self.n_bi + self.n_multi)
 
     def _scale_chunk(self, start, end):
-        """Prepare a scaled float64 chunk of the matrix."""
+        """Prepare a scaled float64 chunk of the biallelic block [start, end)."""
         chunk = self.hap[:, start:end]
         # Check this chunk for missing (avoids full-matrix boolean allocation)
         has_missing_chunk = bool(cp.any(chunk < 0).get())
@@ -120,25 +237,29 @@ class _DeferredPCA:
                                            n_intermediates=2)
 
     def chunked_gram(self):
-        """Compute X @ X.T via chunked processing."""
-        n_samples, n_var = self.shape
+        """Compute X @ X.T via chunked processing (biallelic block + multiallelic)."""
+        n_samples = self.shape[0]
         C = cp.zeros((n_samples, n_samples), dtype=cp.float64)
-        for start in range(0, n_var, self._chunk_size):
-            end = min(start + self._chunk_size, n_var)
+        for start in range(0, self.n_bi, self._chunk_size):
+            end = min(start + self._chunk_size, self.n_bi)
             x = self._scale_chunk(start, end)
             C += x @ x.T
             del x
+        if self.multi_cols is not None:
+            C += self.multi_cols @ self.multi_cols.T
         return C
 
     def __matmul__(self, other):
-        """Compute X @ other via chunked processing."""
-        n_samples, n_var = self.shape
+        """Compute X @ other over concatenated [biallelic | multiallelic] columns."""
+        n_samples = self.shape[0]
         result = cp.zeros((n_samples, other.shape[1]), dtype=cp.float64)
-        for start in range(0, n_var, self._chunk_size):
-            end = min(start + self._chunk_size, n_var)
+        for start in range(0, self.n_bi, self._chunk_size):
+            end = min(start + self._chunk_size, self.n_bi)
             x = self._scale_chunk(start, end)
             result += x @ other[start:end, :]
             del x
+        if self.multi_cols is not None:
+            result += self.multi_cols @ other[self.n_bi:, :]
         return result
 
     @property
@@ -155,14 +276,16 @@ class _DeferredPCATranspose:
         self.shape = (parent.shape[1], parent.shape[0])
 
     def __matmul__(self, other):
-        """Compute X.T @ other via chunked processing."""
-        n_samples, n_var = self.parent.shape
-        result = cp.zeros((n_var, other.shape[1]), dtype=cp.float64)
-        for start in range(0, n_var, self.parent._chunk_size):
-            end = min(start + self.parent._chunk_size, n_var)
-            x = self.parent._scale_chunk(start, end)
+        """Compute X.T @ other, returning rows [biallelic; multiallelic]."""
+        p = self.parent
+        result = cp.zeros((p.shape[1], other.shape[1]), dtype=cp.float64)
+        for start in range(0, p.n_bi, p._chunk_size):
+            end = min(start + p._chunk_size, p.n_bi)
+            x = p._scale_chunk(start, end)
             result[start:end, :] = x.T @ other
             del x
+        if p.multi_cols is not None:
+            result[p.n_bi:, :] = p.multi_cols.T @ other
         return result
 
 
