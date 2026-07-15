@@ -1083,6 +1083,12 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
     dispatch both need cross-chunk state and are not yet supported on the
     streaming path; both raise rather than silently returning wrong
     results.
+
+    ``mean_nsl`` is computed per chunk. Unlike the per-site statistics, nSL
+    integrates the shared-haplotype length in both directions across every
+    variant, so a per-chunk scan is truncated at the chunk boundaries: the
+    streaming result approximates the eager whole-region computation rather
+    than reproducing it. Materialize the region eagerly for an exact nSL scan.
     """
     if step_size is None:
         step_size = window_size
@@ -2128,10 +2134,21 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     if 'mean_nsl' in statistics:
         from . import selection as sel
-        # matrix is already population-subsetted (line 1533); don't re-subset
-        nsl_gpu = cp.asarray(sel.nsl(matrix))
-        valid = cp.isfinite(nsl_gpu) & in_range
-        results['mean_nsl'] = _windowed_mean(nsl_gpu, bin_idx, valid, n_windows)
+        # matrix is already population-subsetted (line 1533); don't re-subset.
+        # nSL is scanned once over this whole (eager) matrix, so each per-site
+        # score sees the full region before being binned into windows. Over a
+        # StreamingHaplotypeMatrix this runs per chunk, truncating the scan at
+        # chunk boundaries (see _stream_windowed_analysis).
+        # nsl() returns (n_var,) for biallelic data and (n_var, n_derived) when
+        # multiallelic focal sites are present; average every finite
+        # (site, allele) score falling in each window.
+        nsl_2d = cp.asarray(sel.nsl(matrix)).reshape(matrix.num_variants, -1)
+        m = nsl_2d.shape[1]
+        vals_flat = nsl_2d.reshape(-1)
+        bin_flat = cp.repeat(bin_idx, m)
+        inrange_flat = cp.repeat(in_range, m)
+        valid = cp.isfinite(vals_flat) & inrange_flat
+        results['mean_nsl'] = _windowed_mean(vals_flat, bin_flat, valid, n_windows)
 
     # SNP distance stats per window
     snp_dist_stats = {'snp_dist_mean', 'snp_dist_var', 'snp_dist_min',
