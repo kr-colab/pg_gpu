@@ -321,6 +321,14 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
         is absent at a site). ``standardize_by_allele_count`` takes 1-D input,
         so standardize each derived-allele column separately, pairing column
         ``j`` with that allele's per-site derived count.
+
+    Notes
+    -----
+    nSL scans the shared-haplotype length in both directions across the whole
+    input, so scores depend on the full region. Subsetting or chunking the
+    variants (e.g. windowing via ``mean_nsl``, or a StreamingHaplotypeMatrix)
+    truncates the scan and changes the scores; materialize the region eagerly
+    for a chromosome-wide result.
     """
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
@@ -476,6 +484,13 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
         is absent, or the allele is MAF-filtered). ``standardize_by_allele_count``
         takes 1-D input, so standardize each derived-allele column separately,
         pairing column ``j`` with that allele's per-site derived count.
+
+    Notes
+    -----
+    iHS integrates EHH outward from each focal site across the whole input, so
+    scores depend on the full region. Subsetting or chunking the variants (e.g.
+    windowing, or a StreamingHaplotypeMatrix) truncates the scan and changes the
+    scores; materialize the region eagerly for a chromosome-wide result.
     """
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
