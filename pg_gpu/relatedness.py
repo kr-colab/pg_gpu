@@ -10,6 +10,197 @@ import cupy as cp
 from typing import Optional, Union
 
 
+def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
+                        centre: bool = True, polarised: bool = False,
+                        proportion: bool = False, span_normalize=True,
+                        missing_data: str = 'include'):
+    """Site-mode genetic relatedness between sample sets.
+
+    Matches ``tskit.TreeSequence.genetic_relatedness`` (site mode): the
+    centered per-allele allele-frequency covariance. For sample sets ``i`` and
+    ``j`` it is the sum over sites and over every allele ``a`` of
+    ``(p_i(a) - pbar(a)) * (p_j(a) - pbar(a))``, where ``p_k(a)`` is allele
+    ``a``'s frequency in set ``k`` and ``pbar(a)`` the unweighted mean of
+    ``p_k(a)`` across the sample sets. There is no variance standardization.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+        Sample (haplotype) data. Samples are the unit; individuals or
+        populations are expressed by grouping samples into ``sample_sets``.
+    sample_sets : list of sequences of int, optional
+        Disjoint groups of haplotype (row) indices. Default is one set per
+        haplotype, giving the sample-by-sample matrix.
+    indexes : list of (int, int), optional
+        Pairs of sample-set indices to return. Default returns the full
+        symmetric ``(D, D)`` matrix.
+    centre : bool
+        Center each allele frequency by the across-set mean (True, the default
+        and the standard relatedness) or use the raw frequencies (False, the
+        noncentred form).
+    polarised : bool
+        Sum over all alleles including the reference (False, the default) or
+        over derived alleles only (True).
+    proportion : bool
+        Divide by the number of segregating sites among the analyzed samples
+        (the per-site sum of ``num_alleles - 1``), giving a relatedness
+        proportion. When True, ``span_normalize`` has no effect (it cancels
+        between the covariance and the segregating-site count).
+    span_normalize : bool or str
+        True (default) divides by the analysis span (see ``get_span``); False
+        returns the raw sum. Matches tskit's ``span_normalise``.
+    missing_data : str
+        'include' (default) uses per-site, per-set valid counts; 'exclude'
+        restricts to sites with no missing data among the analyzed samples.
+
+    Returns
+    -------
+    ndarray, float64
+        The ``(D, D)`` matrix, or a 1-D array of values for the requested
+        ``indexes``.
+    """
+    from ._memutil import estimate_variant_chunk_size
+    from .streaming_matrix import _StreamingMatrixBase
+    from .haplotype_matrix import HaplotypeMatrix
+
+    if isinstance(haplotype_matrix, _StreamingMatrixBase):
+        return _stream_genetic_relatedness(
+            haplotype_matrix, sample_sets=sample_sets, indexes=indexes,
+            centre=centre, polarised=polarised, proportion=proportion,
+            span_normalize=span_normalize, missing_data=missing_data)
+    if not isinstance(haplotype_matrix, HaplotypeMatrix):
+        raise TypeError(
+            "genetic_relatedness requires a HaplotypeMatrix (samples are "
+            f"haplotypes); got {type(haplotype_matrix)}")
+
+    if getattr(haplotype_matrix, 'device', 'GPU') == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+    hap = haplotype_matrix.haplotypes
+    n_hap = hap.shape[0]
+    D = n_hap if sample_sets is None else len(sample_sets)
+
+    # missing_data='exclude': keep only sites called in every analyzed sample.
+    if missing_data == 'exclude':
+        if sample_sets is None:
+            covered = cp.ones(n_hap, dtype=bool)
+        else:
+            covered = cp.zeros(n_hap, dtype=bool)
+            for members in sample_sets:
+                covered[cp.asarray(members)] = True
+        complete = cp.all(hap[covered] >= 0, axis=0)
+        hap = hap[:, complete]
+
+    R = cp.zeros((D, D), dtype=cp.float64)
+    # Segregating sites among the analyzed samples: per-site sum of
+    # (present alleles - 1), accumulated on device (only when needed).
+    seg_cols = 0
+    seg_sites = cp.zeros((), dtype=cp.float64)
+    if hap.shape[1] > 0:
+        K = int(hap.max()) + 1
+        chunk = estimate_variant_chunk_size(n_hap, bytes_per_element=8,
+                                            n_intermediates=3,
+                                            memory_fraction=0.25)
+        for start in range(0, hap.shape[1], chunk):
+            end = min(start + chunk, hap.shape[1])
+            cols, col_site, col_allele = _relatedness_columns(
+                hap[:, start:end], sample_sets, K, centre=centre)
+            if proportion and col_site.size:
+                # col_site is site-major sorted; distinct sites = jumps + 1.
+                seg_cols += col_site.size
+                seg_sites += 1 + (cp.diff(col_site) != 0).sum()
+            if polarised:
+                cols = cols[:, col_allele != 0]
+            R += cols @ cols.T
+
+    if proportion:
+        # Divide by segregating sites; span_normalise cancels, so it is ignored.
+        denom = float(seg_cols - seg_sites)
+        if denom > 0:
+            R = R / denom
+    elif span_normalize is not False:
+        mode = 'auto' if span_normalize is True else span_normalize
+        span = haplotype_matrix.get_span(mode)
+        if span > 0:
+            R = R / span
+
+    if indexes is None:
+        return R.get()
+    idx = np.asarray(indexes, dtype=np.intp)
+    return R[cp.asarray(idx[:, 0]), cp.asarray(idx[:, 1])].get()
+
+
+def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
+                                centre, polarised, proportion, span_normalize,
+                                missing_data, block_size=None):
+    """Streaming genetic_relatedness: single pass over variant chunks.
+
+    The relatedness is additive over (site, allele) columns and each column's
+    centering is local to its site, so one pass over the chunks suffices. The
+    (D, D) output is accumulated on host with the set (row) axis tiled into
+    blocks, the same scheme as the streaming GRM/IBS, so it holds when D is
+    large (the per-haplotype default). span_normalise for streaming supports
+    True/False only.
+    """
+    from ._memutil import estimate_indiv_block_size
+
+    n_hap = streaming_matrix.num_haplotypes
+    D = n_hap if sample_sets is None else len(sample_sets)
+
+    covered = None
+    if missing_data == 'exclude':
+        if sample_sets is None:
+            covered = cp.ones(n_hap, dtype=bool)
+        else:
+            covered = cp.zeros(n_hap, dtype=bool)
+            for members in sample_sets:
+                covered[cp.asarray(members)] = True
+
+    # D is known from the sample sets without peeking a chunk, so an empty
+    # source falls through to this zero matrix (relatedness of nothing is 0).
+    R = np.zeros((D, D), dtype=np.float64)
+    seg_cols = 0
+    seg_sites = cp.zeros((), dtype=cp.float64)
+    if block_size is None:
+        block_size = estimate_indiv_block_size(D, n_intermediates=3)
+
+    for _, _, chunk in streaming_matrix.iter_gpu_chunks():
+        hap = chunk.haplotypes
+        if covered is not None:
+            complete = cp.all(hap[covered] >= 0, axis=0)
+            hap = hap[:, complete]
+        if hap.shape[1] == 0:
+            continue
+        K = int(hap.max()) + 1
+        cols, col_site, col_allele = _relatedness_columns(
+            hap, sample_sets, K, centre=centre)
+        if proportion and col_site.size:
+            seg_cols += col_site.size
+            seg_sites += 1 + (cp.diff(col_site) != 0).sum()
+        if polarised:
+            cols = cols[:, col_allele != 0]
+        for r0 in range(0, D, block_size):
+            r1 = min(r0 + block_size, D)
+            R[r0:r1] += (cols[r0:r1] @ cols.T).get()
+
+    if proportion:
+        denom = seg_cols - float(seg_sites.get())
+        if denom > 0:
+            R = R / denom
+    elif span_normalize is not False:
+        if span_normalize is not True:
+            raise NotImplementedError(
+                "streaming genetic_relatedness supports span_normalize "
+                "True or False only")
+        span = streaming_matrix.chrom_end - streaming_matrix.chrom_start + 1
+        if span > 0:
+            R = R / span
+
+    if indexes is None:
+        return R
+    idx = np.asarray(indexes, dtype=np.intp)
+    return R[idx[:, 0], idx[:, 1]]
+
+
 def grm(genotype_matrix_or_haplotype_matrix,
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include') -> np.ndarray:
@@ -192,6 +383,96 @@ def ibs(genotype_matrix_or_haplotype_matrix,
     cp.fill_diagonal(ibs_mat, 1.0)
 
     return ibs_mat.get()
+
+
+# ---------------------------------------------------------------------------
+# genetic_relatedness: per-set, per-allele centered frequency columns
+# ---------------------------------------------------------------------------
+
+def _relatedness_columns(hap, sample_sets, n_alleles, centre=True):
+    """Per-set, per-allele frequency columns for genetic_relatedness.
+
+    Builds a matrix whose row ``k`` is sample set ``k``'s per-allele frequency.
+    Writing ``p_k(a)`` for the frequency of allele ``a`` in set ``k`` and
+    ``pbar(a)`` for the mean of ``p_k(a)`` over the ``D`` sets, with ``centre``
+    the columns are ``p_k(a) - pbar(a)`` and the relatedness of a set pair
+    ``(i, j)`` is the sum over every allele and site of
+    ``(p_i(a) - pbar(a)) * (p_j(a) - pbar(a))``, i.e. ``(C @ C.T)[i, j]`` (the
+    product is formed in a later step); without ``centre`` the columns are the
+    raw ``p_k(a)`` and ``C @ C.T`` is the noncentred form. All alleles including
+    the reference are represented, and there is no variance standardization; a
+    caller wanting derived alleles only drops the ``col_allele == 0`` columns.
+
+    Each present ``(site, allele)`` pair among the analyzed samples is one
+    column; columns are ordered site-major, allele-minor. "Present" is relative
+    to the samples that appear in some set, so passing a subset of samples
+    restricts the alleles considered.
+
+    Parameters
+    ----------
+    hap : cupy.ndarray, int8, shape (n_hap, n_var)
+        Allele indices (0 reference, 1.. alternate), -1 missing.
+    sample_sets : list of 1D index arrays, or None
+        Disjoint groups of haplotype indices. None means one set per haplotype
+        (the tskit-native singleton grouping, ``D = n_hap``).
+    n_alleles : int
+        Global allele-index width ``K`` so allele ``a`` aligns across sets.
+    centre : bool
+        Subtract the across-set mean ``pbar(a)`` from each column (True), or
+        leave the raw per-set frequencies (False, the noncentred form).
+
+    Returns
+    -------
+    cols : cupy.ndarray, float64, shape (D, n_cols)
+    col_site : cupy.ndarray, int64, shape (n_cols,)
+        Site index each column belongs to.
+    col_allele : cupy.ndarray, int64, shape (n_cols,)
+        Allele index each column represents (0 is the reference).
+
+    Notes
+    -----
+    Per-set frequencies use per-site valid counts, so a missing entry lowers only
+    its own set's denominator. The exact missing-data policy (a set with no valid
+    sample at a site, and the include/exclude modes) is applied by the caller; on
+    complete data every set's denominator is its size.
+    """
+    n_hap, n_var = hap.shape
+    K = int(n_alleles)
+    valid = hap >= 0
+
+    if sample_sets is None:
+        M = None
+        D = n_hap
+        covered = valid                                  # every haplotype is a set
+    else:
+        D = len(sample_sets)
+        M = cp.zeros((D, n_hap), dtype=cp.float64)
+        for k, members in enumerate(sample_sets):
+            M[k, cp.asarray(members)] = 1.0
+        covered = valid & (M.sum(axis=0) > 0)[:, None]
+
+    # Present (site, allele) pairs among the analyzed samples -> one argwhere sync.
+    pooled_ac = cp.zeros((n_var, K), dtype=cp.int64)
+    for a in range(K):
+        pooled_ac[:, a] = (covered & (hap == a)).sum(axis=0, dtype=cp.int64)
+    pairs = cp.argwhere(pooled_ac > 0)
+    col_site = pairs[:, 0]
+    col_allele = pairs[:, 1]
+
+    # Per-set count and valid count for each present column.
+    hs = hap[:, col_site]                                # (n_hap, n_cols)
+    carries = ((hs == col_allele[None, :]) & valid[:, col_site]).astype(cp.float64)
+    valid_cols = valid[:, col_site].astype(cp.float64)
+    if M is None:
+        cnt = carries                                    # (D, n_cols), D == n_hap
+        nvalid = valid_cols
+    else:
+        cnt = M @ carries                                # (D, n_cols)
+        nvalid = M @ valid_cols
+
+    p = cp.where(nvalid > 0, cnt / nvalid, 0.0)          # per-set frequency
+    cols = p - p.mean(axis=0, keepdims=True) if centre else p
+    return cols, col_site, col_allele
 
 
 # ---------------------------------------------------------------------------

@@ -405,3 +405,51 @@ class TestStreamingGuardrails:
             windowed_analysis(stream, window_size=5_000,
                               statistics=["local_pca"])
 
+
+
+class TestGeneticRelatednessDispatch:
+    """Streaming genetic_relatedness matches the eager result row-for-row."""
+
+    def _both(self, vcz_store, **kw):
+        from pg_gpu import relatedness
+        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        return (relatedness.genetic_relatedness(eager, **kw),
+                relatedness.genetic_relatedness(stream, **kw))
+
+    def test_singleton_raw_equivalent(self, vcz_store):
+        e, s = self._both(vcz_store, span_normalize=False)
+        np.testing.assert_allclose(s, e, rtol=1e-6, atol=1e-9)
+
+    def test_proportion_equivalent(self, vcz_store):
+        e, s = self._both(vcz_store, proportion=True)
+        np.testing.assert_allclose(s, e, rtol=1e-6, atol=1e-9)
+
+    def test_noncentred_equivalent(self, vcz_store):
+        e, s = self._both(vcz_store, centre=False, span_normalize=False)
+        np.testing.assert_allclose(s, e, rtol=1e-6, atol=1e-9)
+
+    def test_polarised_equivalent(self, vcz_store):
+        e, s = self._both(vcz_store, polarised=True, span_normalize=False)
+        np.testing.assert_allclose(s, e, rtol=1e-6, atol=1e-9)
+
+    def test_grouped_sample_sets_equivalent(self, vcz_store):
+        from pg_gpu import relatedness
+        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        n_hap = stream.num_haplotypes
+        half = n_hap // 2
+        sets = [list(range(0, half)), list(range(half, n_hap))]
+        e = relatedness.genetic_relatedness(eager, sample_sets=sets,
+                                            span_normalize=False)
+        s = relatedness.genetic_relatedness(stream, sample_sets=sets,
+                                            span_normalize=False)
+        np.testing.assert_allclose(s, e, rtol=1e-6, atol=1e-9)
+
+    def test_chunk_boundary_invariance(self, vcz_store):
+        from pg_gpu import relatedness
+        s_a = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                        chunk_bp=10_000)
+        s_b = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                        chunk_bp=20_000)
+        a = relatedness.genetic_relatedness(s_a, span_normalize=False)
+        b = relatedness.genetic_relatedness(s_b, span_normalize=False)
+        np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-12)

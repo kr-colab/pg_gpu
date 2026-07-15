@@ -125,3 +125,204 @@ class TestIBS:
     def test_returns_numpy(self, small_haplotype_matrix):
         ibs_mat = relatedness.ibs(small_haplotype_matrix)
         assert isinstance(ibs_mat, np.ndarray)
+
+
+def _reference_relatedness_columns(hap, sample_sets, n_alleles):
+    """Independent host reference for _relatedness_columns (complete or missing).
+
+    Returns (C, col_site): per-set per-allele frequencies centered by the
+    unweighted across-set mean, columns ordered site-major then allele-minor.
+    """
+    n_hap, n_var = hap.shape
+    valid = hap >= 0
+    sets = ([[h] for h in range(n_hap)] if sample_sets is None
+            else [list(s) for s in sample_sets])
+    covered = np.zeros(n_hap, dtype=bool)
+    for s in sets:
+        covered[s] = True
+    p_cols, site_cols = [], []
+    for s_idx in range(n_var):
+        for a in range(n_alleles):
+            if np.any(covered & (hap[:, s_idx] == a) & valid[:, s_idx]):
+                col = []
+                for st in sets:
+                    nv = int(valid[st, s_idx].sum())
+                    cnt = int(((hap[st, s_idx] == a) & valid[st, s_idx]).sum())
+                    col.append(cnt / nv if nv > 0 else 0.0)
+                p_cols.append(np.array(col))
+                site_cols.append(s_idx)
+    D = len(sets)
+    P = np.stack(p_cols, axis=1) if p_cols else np.zeros((D, 0))
+    C = P - P.mean(axis=0, keepdims=True)
+    return C, np.array(site_cols, dtype=np.int64)
+
+
+class TestRelatednessColumns:
+    """Per-set per-allele centered frequency plumbing for genetic_relatedness."""
+
+    def _run(self, hap, sample_sets):
+        import cupy as cp
+        k = int(hap.max()) + 1 if hap.size else 1
+        C, col_site, _ = relatedness._relatedness_columns(
+            cp.asarray(hap), sample_sets, k)
+        ref_C, ref_site = _reference_relatedness_columns(hap, sample_sets, k)
+        return C.get(), col_site.get(), ref_C, ref_site
+
+    def test_singleton_biallelic(self):
+        rng = np.random.RandomState(0)
+        hap = rng.randint(0, 2, size=(8, 30)).astype(np.int8)
+        C, site, ref_C, ref_site = self._run(hap, None)
+        np.testing.assert_array_equal(site, ref_site)
+        np.testing.assert_allclose(C, ref_C)
+        assert C.shape[0] == 8  # one row per haplotype
+
+    def test_singleton_multiallelic(self):
+        rng = np.random.RandomState(1)
+        hap = rng.randint(0, 3, size=(8, 40)).astype(np.int8)
+        C, site, ref_C, ref_site = self._run(hap, None)
+        np.testing.assert_array_equal(site, ref_site)
+        np.testing.assert_allclose(C, ref_C)
+
+    def test_columns_are_mean_centered(self):
+        # Each column is centered by the across-set mean -> column sums ~ 0.
+        rng = np.random.RandomState(2)
+        hap = rng.randint(0, 3, size=(6, 25)).astype(np.int8)
+        C, *_ = self._run(hap, None)
+        np.testing.assert_allclose(C.sum(axis=0), 0.0, atol=1e-9)
+
+    def test_grouped_sample_sets_multiallelic(self):
+        # Two sample sets of unequal size; centering is the unweighted mean of
+        # the two set frequencies (not the pooled frequency).
+        rng = np.random.RandomState(3)
+        hap = rng.randint(0, 3, size=(10, 30)).astype(np.int8)
+        sample_sets = [np.arange(0, 4), np.arange(4, 10)]
+        C, site, ref_C, ref_site = self._run(hap, sample_sets)
+        np.testing.assert_array_equal(site, ref_site)
+        np.testing.assert_allclose(C, ref_C)
+        assert C.shape[0] == 2
+
+    def test_subset_of_samples_restricts_present_alleles(self):
+        # An allele carried only by an excluded sample must not create a column.
+        hap = np.array([[0], [0], [1], [2]], dtype=np.int8)  # 4 haps, 1 site
+        sample_sets = [np.array([0, 1, 2])]  # excludes hap 3 (the only allele-2)
+        C, site, ref_C, ref_site = self._run(hap, sample_sets)
+        np.testing.assert_array_equal(site, ref_site)
+        np.testing.assert_allclose(C, ref_C)
+        # alleles 0 and 1 present among {0,1,2}; allele 2 excluded -> 2 columns
+        assert C.shape[1] == 2
+
+    def test_relatedness_matrix_symmetric_psd_ish(self):
+        # C @ C.T (the genetic_relatedness matrix) is symmetric with a
+        # non-negative diagonal.
+        rng = np.random.RandomState(4)
+        hap = rng.randint(0, 3, size=(8, 50)).astype(np.int8)
+        C, *_ = self._run(hap, None)
+        R = C @ C.T
+        np.testing.assert_allclose(R, R.T, atol=1e-9)
+        assert bool((np.diag(R) >= -1e-9).all())
+
+
+class TestGeneticRelatedness:
+    """genetic_relatedness pinned to tskit.TreeSequence.genetic_relatedness."""
+
+    def _tskit_matrix(self, ts, sample_sets, proportion=False, **kw):
+        # proportion=False gives the raw centered covariance; proportion=True
+        # divides by segregating sites (per-site sum of num_alleles - 1).
+        D = len(sample_sets)
+        idx = [(i, j) for i in range(D) for j in range(D)]
+        vals = ts.genetic_relatedness(sample_sets, indexes=idx, mode='site',
+                                      proportion=proportion, **kw)
+        return np.asarray(vals).reshape(D, D)
+
+    def test_singleton_pin_raw(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        tsk_sets = [[s] for s in ts.samples()]
+        exp = self._tskit_matrix(ts, tsk_sets, centre=True, polarised=False,
+                                 span_normalise=False)
+        got = relatedness.genetic_relatedness(hm, span_normalize=False)
+        np.testing.assert_allclose(got, exp, atol=1e-9, rtol=1e-6)
+
+    def test_singleton_pin_span_normalised(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        tsk_sets = [[s] for s in ts.samples()]
+        exp = self._tskit_matrix(ts, tsk_sets, centre=True, polarised=False,
+                                 span_normalise=True)
+        got = relatedness.genetic_relatedness(hm, span_normalize=True)
+        np.testing.assert_allclose(got, exp, atol=1e-12, rtol=1e-6)
+
+    def test_grouped_sample_sets_pin(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        samples = list(ts.samples())
+        n = len(samples)
+        half = n // 2
+        pg_sets = [list(range(0, half)), list(range(half, n))]
+        tsk_sets = [[samples[i] for i in grp] for grp in pg_sets]
+        exp = self._tskit_matrix(ts, tsk_sets, centre=True, polarised=False,
+                                 span_normalise=False)
+        got = relatedness.genetic_relatedness(hm, sample_sets=pg_sets,
+                                              span_normalize=False)
+        np.testing.assert_allclose(got, exp, atol=1e-9, rtol=1e-6)
+
+    def test_noncentred_pin(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        tsk_sets = [[s] for s in ts.samples()]
+        exp = self._tskit_matrix(ts, tsk_sets, centre=False, polarised=False,
+                                 span_normalise=False)
+        got = relatedness.genetic_relatedness(hm, centre=False,
+                                              span_normalize=False)
+        np.testing.assert_allclose(got, exp, atol=1e-9, rtol=1e-6)
+
+    def test_polarised_pin(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        tsk_sets = [[s] for s in ts.samples()]
+        exp = self._tskit_matrix(ts, tsk_sets, centre=True, polarised=True,
+                                 span_normalise=False)
+        got = relatedness.genetic_relatedness(hm, polarised=True,
+                                              span_normalize=False)
+        np.testing.assert_allclose(got, exp, atol=1e-9, rtol=1e-6)
+
+    def test_proportion_pin(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        tsk_sets = [[s] for s in ts.samples()]
+        exp = self._tskit_matrix(ts, tsk_sets, proportion=True, centre=True,
+                                 polarised=False, span_normalise=False)
+        got = relatedness.genetic_relatedness(hm, proportion=True)
+        np.testing.assert_allclose(got, exp, atol=1e-12, rtol=1e-6)
+
+    def test_proportion_ignores_span_normalize(self, multiallelic_hm):
+        _, hm = multiallelic_hm
+        a = relatedness.genetic_relatedness(hm, proportion=True,
+                                            span_normalize=False)
+        b = relatedness.genetic_relatedness(hm, proportion=True,
+                                            span_normalize=True)
+        np.testing.assert_allclose(a, b)
+
+    def test_indexes_selection(self, multiallelic_hm):
+        _, hm = multiallelic_hm
+        full = relatedness.genetic_relatedness(hm, span_normalize=False)
+        pairs = [(0, 1), (2, 3), (0, 0)]
+        sub = relatedness.genetic_relatedness(hm, indexes=pairs,
+                                              span_normalize=False)
+        np.testing.assert_allclose(sub, [full[i, j] for i, j in pairs])
+
+    def test_missing_include_matches_host(self):
+        rng = np.random.RandomState(5)
+        hap = rng.randint(0, 3, size=(10, 40)).astype(np.int8)
+        hap[rng.random(hap.shape) < 0.1] = -1
+        hm = HaplotypeMatrix(hap, np.arange(40) * 100)
+        got = relatedness.genetic_relatedness(hm, span_normalize=False)
+        k = int(hap.max()) + 1
+        Cref, _ = _reference_relatedness_columns(hap, None, k)
+        np.testing.assert_allclose(got, Cref @ Cref.T, atol=1e-9)
+
+    def test_missing_exclude_matches_host(self):
+        rng = np.random.RandomState(6)
+        hap = rng.randint(0, 3, size=(10, 40)).astype(np.int8)
+        hap[rng.random(hap.shape) < 0.1] = -1
+        hm = HaplotypeMatrix(hap, np.arange(40) * 100)
+        got = relatedness.genetic_relatedness(hm, missing_data='exclude',
+                                              span_normalize=False)
+        complete = (hap >= 0).all(axis=0)
+        k = int(hap.max()) + 1
+        Cref, _ = _reference_relatedness_columns(hap[:, complete], None, k)
+        np.testing.assert_allclose(got, Cref @ Cref.T, atol=1e-9)
