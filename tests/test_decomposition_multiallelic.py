@@ -231,22 +231,21 @@ class TestLocalPCAMultiallelic:
 
     def _direct_eigvals(self, hap_sub, pos_sub, s, e, k):
         sub = HaplotypeMatrix(hap_sub, pos_sub, int(s), int(e))
-        X = _prepare_matrix(sub, None, None, 'include')
+        X, _ = _prepare_centered(sub, missing_data='include', need_segregating=False)
         C, _ = _window_gram(X, X.shape[1])
         return np.sort(cp.asnumpy(cp.linalg.eigh(C)[0]))[::-1][:k]
 
     def test_single_window_matches_direct(self):
         hm, hap, pos = _windowed_multiallelic_hm(seed=1)
         seqlen = hap.shape[1] * 100
-        res = local_pca(hm, k=3, window_type='bp', window_size=seqlen + 1000,
-                        scaler=None)
+        res = local_pca(hm, k=3, window_type='bp', window_size=seqlen + 1000)
         direct = self._direct_eigvals(hap, pos, 0, seqlen + 1000, 3)
         np.testing.assert_allclose(res.eigvals[0], direct, rtol=1e-8, atol=1e-8)
 
     def test_per_window_matches_direct(self):
         hm, hap, pos = _windowed_multiallelic_hm(seed=2)
         res = local_pca(hm, k=2, window_type='bp', window_size=3000,
-                        step_size=3000, scaler=None)
+                        step_size=3000)
         valid = res.windows['n_variants'].values >= 2
         assert not np.isnan(res.eigvals[valid]).any()
         for w, (s, e, nvar) in enumerate(zip(res.windows['start'],
@@ -260,8 +259,7 @@ class TestLocalPCAMultiallelic:
 
     def test_lostruct_runs_finite(self):
         hm, hap, pos = _windowed_multiallelic_hm(seed=3)
-        lo = lostruct(hm, k=2, window_type='bp', window_size=3000, step_size=3000,
-                      scaler=None)
+        lo = lostruct(hm, k=2, window_type='bp', window_size=3000, step_size=3000)
         assert np.isfinite(lo.distance).all()
         assert np.isfinite(lo.mds).all()
         np.testing.assert_allclose(lo.distance, lo.distance.T, atol=1e-10)
@@ -269,8 +267,8 @@ class TestLocalPCAMultiallelic:
     def test_jackknife_se_finite(self):
         hm, hap, pos = _windowed_multiallelic_hm(seed=4)
         res = local_pca(hm, k=2, window_type='bp', window_size=3000,
-                        step_size=3000, scaler=None)
+                        step_size=3000)
         se = local_pca_jackknife(hm, k=2, n_blocks=3, window_type='bp',
-                                 window_size=3000, step_size=3000, scaler=None)
+                                 window_size=3000, step_size=3000)
         valid = res.windows['n_variants'].values >= 6
         assert np.isfinite(se[valid]).all()

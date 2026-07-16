@@ -168,7 +168,8 @@ def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'
     return _DeferredPCA(hap_bi, site_mean, scale, scaler, multi_cols)
 
 
-def _prepare_centered(haplotype_matrix, population=None, missing_data='include'):
+def _prepare_centered(haplotype_matrix, population=None, missing_data='include',
+                      need_segregating=True, n_alleles=None):
     """All-allele centered one-hot standardization (the tskit convention).
 
     For each present (site, allele) pair -- ALL alleles including the reference --
@@ -180,7 +181,10 @@ def _prepare_centered(haplotype_matrix, population=None, missing_data='include')
 
     Returns (X, n_segregating), where X is (n_samples, n_cols) float64 and
     n_segregating is the per-site sum of (present alleles - 1) -- tskit's
-    segregating-site count, used to normalize the Gram (proportion=True).
+    segregating-site count, used to normalize the Gram (proportion=True). When
+    ``need_segregating`` is False the count is not computed (returned as 0),
+    avoiding its host sync on the per-window path (lostruct normalizes by ncol,
+    not segregating sites).
     """
     from ._memutil import allele_counts
 
@@ -198,7 +202,10 @@ def _prepare_centered(haplotype_matrix, population=None, missing_data='include')
     if hap.shape[1] == 0:
         return cp.zeros((n_samples, 0), dtype=cp.float64), 0
 
-    K = int(hap.max()) + 1 if hap.size else 1
+    if n_alleles is not None:
+        K = int(n_alleles)                             # hoisted (avoids a per-call max sync)
+    else:
+        K = int(hap.max()) + 1 if hap.size else 1
     ac, n_valid = allele_counts(hap, n_alleles=K)     # (n_var, K), (n_var,)
     pairs = cp.argwhere(ac > 0)                        # present (site, allele), all alleles
     if pairs.shape[0] == 0:
@@ -213,7 +220,10 @@ def _prepare_centered(haplotype_matrix, population=None, missing_data='include')
     X = cp.where(valid, ind, p[None, :]) - p[None, :]  # center; missing -> 0
 
     # segregating sites = sum_site (present alleles - 1) = n_cols - n_present_sites.
-    n_segregating = int(pairs.shape[0] - cp.unique(sites).size)
+    if need_segregating:
+        n_segregating = int(pairs.shape[0] - cp.unique(sites).size)
+    else:
+        n_segregating = 0
     return X, n_segregating
 
 
@@ -666,7 +676,6 @@ class LocalPCAResult:
         `pc_dist` for the proportion-of-variance denominator.
     k : int
         Number of PCs retained.
-    scaler : str or None
     missing_data : str
     jackknife_se : numpy.ndarray or None
         Delete-1 block jackknife SE of the top-k eigenvectors. Shape
@@ -680,7 +689,6 @@ class LocalPCAResult:
     eigvecs: np.ndarray
     sumsq: np.ndarray
     k: int
-    scaler: Optional[str]
     missing_data: str
     jackknife_se: Optional[np.ndarray] = None
 
@@ -829,7 +837,7 @@ def _local_pca_window_rsvd(X: "cp.ndarray", n_var: int, k: int,
     return eigvals, eigvecs, sumsq
 
 
-def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
+def _local_pca_streaming(matrix, iterator, k, missing_data,
                           engine, tile_size, oversample,
                           n_subspace_iter, random_state, window_params):
     """Streaming local PCA dispatcher (engine='streaming-dense' or
@@ -848,6 +856,10 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
     peak fragmentation at a small per-call cost.
     """
     n_samples = matrix.num_haplotypes
+    # Global allele width, computed once, so the per-window standardization does
+    # not pay an int(hap.max()) host sync per window (keeps the streaming sync
+    # footprint at the pre-reframe level).
+    n_alleles_all = int(matrix.haplotypes.max()) + 1 if matrix.num_variants else 1
 
     if tile_size is None:
         tile_size = 16
@@ -886,9 +898,8 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
             del window
             continue
 
-        X = _prepare_matrix(window.matrix, scaler, population=None,
-                            missing_data=missing_data)
-        X = _materialize_prepared(X)
+        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
+                                 need_segregating=False, n_alleles=n_alleles_all)
 
         if engine == 'streaming-dense':
             evals, evecs, sumsq = _local_pca_window_dense(
@@ -927,6 +938,7 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
 
     eigvals_host[~valid_mask] = np.nan
     eigvecs_host[~valid_mask] = np.nan
+    _sign_align_windows(eigvecs_host)
     sumsq_host[~valid_mask] = np.nan
 
     chrom_col, start_col, end_col, center_col, nvar_col, wid_col, _ = zip(
@@ -946,7 +958,6 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
         eigvecs=eigvecs_host,
         sumsq=sumsq_host,
         k=k,
-        scaler=scaler,
         missing_data=missing_data,
     )
 
@@ -1089,10 +1100,36 @@ def _pick_dense_engine(matrix, window_params,
     return 'streaming-dense'
 
 
+def _sign_align_windows(eigvecs):
+    """Flip per-window eigenvector signs so adjacent windows are consistent.
+
+    ``eigvecs`` is (n_windows, k, n_samples); each eigenvector is defined only up
+    to sign, so the raw per-window PCs flip arbitrarily along the genome. For each
+    PC, walk the windows in order and negate a window's eigenvector when its dot
+    product with the last valid window's eigenvector is negative. Invalid (NaN)
+    windows are skipped. Operates in place on the host array and returns it. Only
+    the sign of the coordinates changes; eigenvalues and lostruct distances (which
+    are sign-invariant) are unaffected.
+    """
+    if eigvecs.size == 0:
+        return eigvecs
+    n_windows, k, _ = eigvecs.shape
+    for p in range(k):
+        prev = None
+        for w in range(n_windows):
+            v = eigvecs[w, p]
+            if np.isnan(v).any():
+                continue
+            if prev is not None and float(np.dot(v, prev)) < 0.0:
+                eigvecs[w, p] = -v
+                v = eigvecs[w, p]
+            prev = v
+    return eigvecs
+
+
 def local_pca(haplotype_matrix: "HaplotypeMatrix",
               window_params=None,
               k: int = 2,
-              scaler: Optional[str] = None,
               missing_data: str = 'include',
               population: Optional[Union[str, list]] = None,
               batch_size: Optional[int] = None,
@@ -1119,8 +1156,6 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
         Pre-built window spec. Required when ``window_size`` is not given.
     k : int
         Number of PCs to retain per window.
-    scaler : str or None
-        None (lostruct default), 'patterson', or 'standard'. See `pca()`.
     missing_data : str
         'include' (impute to per-site mean) or 'exclude' (drop missing sites).
         lostruct uses pairwise-complete; we approximate with mean imputation.
@@ -1174,7 +1209,6 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
             matrix=matrix,
             iterator=iterator,
             k=k,
-            scaler=scaler,
             missing_data=missing_data,
             engine=engine,
             tile_size=tile_size,
@@ -1200,9 +1234,8 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
             valid_flags.append(False)
             continue
 
-        X = _prepare_matrix(window.matrix, scaler, population=None,
-                            missing_data=missing_data)
-        X = _materialize_prepared(X)
+        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
+                                 need_segregating=False)
         C, sumsq = _window_gram(X, X.shape[1])
         gram_list.append(C)
         sumsq_list.append(sumsq)
@@ -1218,6 +1251,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     valid_mask = np.array(valid_flags, dtype=bool)
     eigvals_host[~valid_mask] = np.nan
     eigvecs_host[~valid_mask] = np.nan
+    _sign_align_windows(eigvecs_host)
     sumsq_host[~valid_mask] = np.nan
 
     windows_df = pd.DataFrame({
@@ -1235,7 +1269,6 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
         eigvecs=eigvecs_host,
         sumsq=sumsq_host,
         k=k,
-        scaler=scaler,
         missing_data=missing_data,
     )
 
@@ -1245,7 +1278,6 @@ def _local_pca_with_jackknife(
     window_params=None,
     k: int = 2,
     n_blocks: int = 10,
-    scaler: Optional[str] = None,
     missing_data: str = 'include',
     population: Optional[Union[str, list]] = None,
     aggregate: Optional[str] = 'mean',
@@ -1307,9 +1339,8 @@ def _local_pca_with_jackknife(
             valid_jk.append(False)
             continue
 
-        X = _prepare_matrix(window.matrix, scaler, population=None,
-                            missing_data=missing_data)
-        X = _materialize_prepared(X)
+        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
+                                 need_segregating=False)
         n_var_win = X.shape[1]
 
         # Full Gram for local_pca.
@@ -1350,6 +1381,7 @@ def _local_pca_with_jackknife(
     pca_mask = np.array(valid_pca, dtype=bool)
     eigvals_host[~pca_mask] = np.nan
     eigvecs_host[~pca_mask] = np.nan
+    _sign_align_windows(eigvecs_host)
     sumsq_host[~pca_mask] = np.nan
 
     # --- Jackknife eigendecomposition ---
@@ -1387,7 +1419,6 @@ def _local_pca_with_jackknife(
         eigvecs=eigvecs_host,
         sumsq=sumsq_host,
         k=k,
-        scaler=scaler,
         missing_data=missing_data,
         jackknife_se=jackknife_se,
     )
@@ -1706,7 +1737,6 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
              # local_pca params
              window_params=None,
              k: int = 2,
-             scaler: Optional[str] = None,
              missing_data: str = 'include',
              population: Optional[Union[str, list]] = None,
              batch_size: Optional[int] = None,
@@ -1754,7 +1784,7 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
         Pre-built window spec. Required when ``window_size`` is not given.
     k : int
         Number of PCs retained per window in the local PCA step.
-    scaler, missing_data, population, batch_size : see :func:`local_pca`.
+    missing_data, population, batch_size : see :func:`local_pca`.
     window_size, step_size, window_type, regions
         Short-hand for constructing a ``WindowParams``.
 
@@ -1811,14 +1841,14 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
         pca = _local_pca_with_jackknife(
             haplotype_matrix,
             window_params=window_params, k=k, n_blocks=n_blocks,
-            scaler=scaler, missing_data=missing_data,
+            missing_data=missing_data,
             population=population, aggregate=jackknife_aggregate,
             batch_size=batch_size, window_size=window_size,
             step_size=step_size, window_type=window_type, regions=regions)
     else:
         pca = local_pca(haplotype_matrix,
                         window_params=window_params, k=k,
-                        scaler=scaler, missing_data=missing_data,
+                        missing_data=missing_data,
                         population=population, batch_size=batch_size,
                         window_size=window_size, step_size=step_size,
                         window_type=window_type, regions=regions,
@@ -1873,7 +1903,6 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
                         window_params=None,
                         k: int = 2,
                         n_blocks: int = 10,
-                        scaler: Optional[str] = None,
                         missing_data: str = 'include',
                         population: Optional[Union[str, list]] = None,
                         aggregate: Optional[str] = 'mean',
@@ -1932,9 +1961,8 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
             valid_flags.append(False)
             continue
 
-        X = _prepare_matrix(window.matrix, scaler, population=None,
-                            missing_data=missing_data)
-        X = _materialize_prepared(X)
+        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
+                                 need_segregating=False)
         n_var_win = X.shape[1]
         # Block width truncates (matches R's `round(nrow/10)` in DPGP_jackknife_var.R).
         step = n_var_win // n_blocks

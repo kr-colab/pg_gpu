@@ -121,27 +121,40 @@ class TestLocalPCAShape:
 
 def _reference_local_pca_numpy(hm: HaplotypeMatrix, window_size: int, k: int,
                                step_size=None):
-    """Per-window numpy reference: row-center, col-center, (X X^T)/(n-1)."""
+    """Per-window numpy reference for the all-allele centered (tskit) local PCA.
+
+    Each window is the all-allele one-hot centered by allele frequency (all
+    alleles including the reference), then _window_gram's sample-centering and
+    (n_cols - 1) normalization -- matching _prepare_centered + _window_gram.
+    """
     step = step_size or window_size
-    if hm.device == 'GPU':
-        hap = hm.haplotypes.get().astype(np.float64)
-    else:
-        hap = hm.haplotypes.astype(np.float64)
+    hap = (hm.haplotypes.get() if hm.device == 'GPU'
+           else hm.haplotypes).astype(np.int64)
     n_hap, n_var = hap.shape
     out_vals, out_vecs, out_sumsq = [], [], []
     for start in range(0, n_var - window_size + 1, step):
-        X = hap[:, start:start + window_size].copy()
-        # Row-center (per variant)
-        X -= X.mean(axis=0, keepdims=True)
-        # Col-center (per sample) to match R's cov() double-centering
-        X -= X.mean(axis=1, keepdims=True)
-        C = (X @ X.T) / (window_size - 1)
-        sumsq = float((C ** 2).sum())
+        w = hap[:, start:start + window_size]
+        cols = []
+        for v in range(w.shape[1]):
+            c = w[:, v]
+            valid = c >= 0
+            nv = int(valid.sum())
+            if nv == 0:
+                continue
+            for a in range(int(c[valid].max()) + 1):
+                if not np.any((c == a) & valid):
+                    continue
+                p = int(((c == a) & valid).sum()) / nv
+                cols.append(np.where(valid, (c == a).astype(float), p) - p)
+        X = np.array(cols).T if cols else np.zeros((n_hap, 0))
+        n_cols = X.shape[1]
+        X = X - X.mean(axis=1, keepdims=True)          # sample-center (_window_gram)
+        C = (X @ X.T) / max(n_cols - 1, 1)
         evals, evecs = np.linalg.eigh(C)
         idx = np.argsort(evals)[::-1][:k]
         out_vals.append(evals[idx])
-        out_vecs.append(evecs[:, idx].T)  # shape (k, n_hap)
-        out_sumsq.append(sumsq)
+        out_vecs.append(evecs[:, idx].T)               # (k, n_hap)
+        out_sumsq.append(float((C ** 2).sum()))
     return (np.stack(out_vals), np.stack(out_vecs), np.array(out_sumsq))
 
 
@@ -168,6 +181,22 @@ class TestBatchedVsLoop:
                 sign = np.sign(np.dot(v_ref, v_ours))
                 np.testing.assert_allclose(
                     sign * v_ours, v_ref, rtol=1e-4, atol=1e-6)
+
+    def test_adjacent_windows_sign_aligned(self, small_hm):
+        # Per-window eigenvectors are sign-aligned to the previous valid window:
+        # where adjacent windows' PC is clearly the same direction, their dot is
+        # non-negative rather than flipping arbitrarily.
+        res = local_pca(small_hm, window_size=200, window_type='snp', k=3)
+        ev = res.eigvecs
+        for pc in range(3):
+            prev = None
+            for w in range(res.n_windows):
+                v = ev[w, pc]
+                if np.isnan(v).any():
+                    continue
+                if prev is not None and abs(float(np.dot(v, prev))) > 0.5:
+                    assert float(np.dot(v, prev)) > 0.0
+                prev = v
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +263,7 @@ class TestPcDist:
         res2 = LocalPCAResult(
             windows=res.windows, eigvals=res.eigvals * 2.0,
             eigvecs=res.eigvecs, sumsq=res.sumsq * 4.0,
-            k=res.k, scaler=res.scaler, missing_data=res.missing_data)
+            k=res.k, missing_data=res.missing_data)
         d2 = pc_dist(res2, npc=3, normalize='L1')
         np.testing.assert_allclose(d1, d2, rtol=1e-8, atol=1e-10)
 
@@ -244,7 +273,7 @@ class TestPcDist:
         res2 = LocalPCAResult(
             windows=res.windows, eigvals=res.eigvals * 3.0,
             eigvecs=res.eigvecs, sumsq=res.sumsq * 9.0,
-            k=res.k, scaler=res.scaler, missing_data=res.missing_data)
+            k=res.k, missing_data=res.missing_data)
         d2 = pc_dist(res2, npc=3, normalize='L2')
         np.testing.assert_allclose(d1, d2, rtol=1e-8, atol=1e-10)
 

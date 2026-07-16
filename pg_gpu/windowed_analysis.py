@@ -21,7 +21,7 @@ from . import diversity
 # Kwargs that the 'local_pca' / 'local_pca_jackknife' dispatch consumes but
 # scalar-stat paths don't accept. Filtered out before the recursive call.
 _LOCAL_PCA_ONLY_KWARGS = frozenset(
-    {'k', 'scaler', 'population', 'batch_size', 'window_type', 'regions',
+    {'k', 'population', 'batch_size', 'window_type', 'regions',
      'n_blocks', 'aggregate'})
 
 
@@ -1216,7 +1216,6 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         want_jackknife = 'local_pca_jackknife' in statistics
         local_pca_kwargs = {
             'k': kwargs.get('k', 2),
-            'scaler': kwargs.get('scaler', None),
             'missing_data': missing_data,
             'population': kwargs.get('population', None),
             'batch_size': kwargs.get('batch_size', None),
