@@ -168,6 +168,55 @@ def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'
     return _DeferredPCA(hap_bi, site_mean, scale, scaler, multi_cols)
 
 
+def _prepare_centered(haplotype_matrix, population=None, missing_data='include'):
+    """All-allele centered one-hot standardization (the tskit convention).
+
+    For each present (site, allele) pair -- ALL alleles including the reference --
+    the column is the indicator (hap == a) centered by the allele frequency p_a,
+    with missing rows imputed to p_a so they contribute 0. There is no variance
+    scaling. The Gram X @ X.T is then the site-mode genetic_relatedness matrix at
+    haplotype granularity (each haplotype is its own sample), which is what tskit's
+    PCA decomposes.
+
+    Returns (X, n_segregating), where X is (n_samples, n_cols) float64 and
+    n_segregating is the per-site sum of (present alleles - 1) -- tskit's
+    segregating-site count, used to normalize the Gram (proportion=True).
+    """
+    from ._memutil import allele_counts
+
+    matrix = (_get_population_matrix(haplotype_matrix, population)
+              if population is not None else haplotype_matrix)
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    hap = matrix.haplotypes
+    n_samples, n_var = hap.shape
+    if missing_data == 'exclude' and n_var:
+        complete = cp.sum(hap >= 0, axis=0) == n_samples
+        hap = hap[:, complete]
+
+    if hap.shape[1] == 0:
+        return cp.zeros((n_samples, 0), dtype=cp.float64), 0
+
+    K = int(hap.max()) + 1 if hap.size else 1
+    ac, n_valid = allele_counts(hap, n_alleles=K)     # (n_var, K), (n_var,)
+    pairs = cp.argwhere(ac > 0)                        # present (site, allele), all alleles
+    if pairs.shape[0] == 0:
+        return cp.zeros((n_samples, 0), dtype=cp.float64), 0
+
+    sites = pairs[:, 0]
+    alleles = pairs[:, 1]
+    g = hap[:, sites]                                  # (n_samples, n_cols)
+    valid = g >= 0
+    p = ac[sites, alleles].astype(cp.float64) / n_valid[sites].astype(cp.float64)
+    ind = (g == alleles[None, :]).astype(cp.float64)
+    X = cp.where(valid, ind, p[None, :]) - p[None, :]  # center; missing -> 0
+
+    # segregating sites = sum_site (present alleles - 1) = n_cols - n_present_sites.
+    n_segregating = int(pairs.shape[0] - cp.unique(sites).size)
+    return X, n_segregating
+
+
 def _biallelic_standardize_dense(hap_bi, site_mean, scale, scaler, has_missing):
     """Dense standardized biallelic block (the original standardization, verbatim).
 
@@ -307,10 +356,16 @@ def _pca_from_gram(C, n_samples, n_components):
 
 def pca(haplotype_matrix: HaplotypeMatrix,
         n_components: int = 10,
-        scaler: Optional[str] = 'patterson',
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include'):
-    """Principal Component Analysis on haplotype data.
+    """Principal Component Analysis on haplotype data (tskit convention).
+
+    Eigendecomposition of the site-mode genetic_relatedness matrix: the
+    haplotypes are centered per allele (all alleles including the reference, no
+    variance scaling), the Gram X @ X.T is that relatedness matrix, and it is
+    normalized by the number of segregating sites (proportion=True). This
+    matches tskit's PCA of the GRM. For the diploid biallelic Patterson/GCTA PCA
+    (EIGENSTRAT), use pca_dosage on a GenotypeMatrix.
 
     Parameters
     ----------
@@ -318,15 +373,10 @@ def pca(haplotype_matrix: HaplotypeMatrix,
         Haplotype data. Rows are haplotypes, columns are variants.
     n_components : int
         Number of principal components to compute.
-    scaler : str or None
-        Scaling method before PCA:
-        'patterson' - scale by sqrt(p*(1-p)), Patterson et al. (2006)
-        'standard' - standardize to unit variance per variant
-        None - center only (subtract mean)
     population : str or list, optional
         Population subset to use.
     missing_data : str
-        'include' - impute missing to per-site mean
+        'include' - impute missing to per-site allele frequency
         'exclude' - filter sites with any missing
 
     Returns
@@ -336,40 +386,21 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     explained_variance_ratio : ndarray, float64, shape (n_components,)
         Proportion of variance explained by each component.
     """
-    prepared = _prepare_matrix(haplotype_matrix, scaler, population, missing_data)
+    from .genotype_matrix import GenotypeMatrix
+    if isinstance(haplotype_matrix, GenotypeMatrix):
+        raise TypeError(
+            "pca is the tskit PCA of genetic_relatedness and requires a "
+            "HaplotypeMatrix; for the diploid biallelic Patterson/GCTA PCA use "
+            "pca_dosage on a GenotypeMatrix.")
 
-    if isinstance(prepared, _DeferredPCA):
-        n_samples = prepared.shape[0]
-        n_components = min(n_components, n_samples)
-        C = prepared.chunked_gram()
-        return _pca_from_gram(C, n_samples, n_components)
+    X, n_segregating = _prepare_centered(haplotype_matrix, population, missing_data)
+    n_samples, n_cols = X.shape
+    n_components = min(n_components, n_samples, max(n_cols, 1))
 
-    X = prepared
-    n_samples, n_variants = X.shape
-    n_components = min(n_components, min(n_samples, n_variants))
-
-    # When n_samples <= n_variants (typical for popgen), eigendecompose
-    # the n x n Gram matrix X @ X.T instead of full SVD on n x m.
-    if n_samples <= n_variants:
-        C = X @ X.T
-        return _pca_from_gram(C, n_samples, n_components)
-
-    # Fallback: full SVD when n_samples > n_variants
-    try:
-        U, S, Vt = cp.linalg.svd(X, full_matrices=False)
-    except Exception as e:
-        if 'CUSOLVER' in str(type(e).__name__) or 'CUSOLVER' in str(e):
-            raise RuntimeError(
-                f"Full SVD failed on matrix of shape ({n_samples}, {n_variants}). "
-                f"This dataset is too large for exact PCA. "
-                f"Use randomized_pca() instead, which handles large datasets efficiently."
-            ) from e
-        raise
-    coords = U[:, :n_components] * S[:n_components]
-    var = (S ** 2) / n_samples
-    explained_variance_ratio = var[:n_components] / cp.sum(var)
-
-    return coords.get(), explained_variance_ratio.get()
+    C = X @ X.T
+    if n_segregating > 0:
+        C = C / n_segregating
+    return _pca_from_gram(C, n_samples, n_components)
 
 
 def randomized_pca(haplotype_matrix: HaplotypeMatrix,

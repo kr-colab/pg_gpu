@@ -15,8 +15,8 @@ import allel
 from pg_gpu import HaplotypeMatrix
 from pg_gpu._memutil import allele_counts
 from pg_gpu.decomposition import (
-    _prepare_matrix, _multiallelic_onehot_dense, _DeferredPCA, _window_gram,
-    pca, randomized_pca, local_pca, local_pca_jackknife, lostruct,
+    _prepare_matrix, _prepare_centered, _multiallelic_onehot_dense, _DeferredPCA,
+    _window_gram, pca, randomized_pca, local_pca, local_pca_jackknife, lostruct,
 )
 
 
@@ -175,37 +175,40 @@ class TestDecompositionMultiallelic:
         np.testing.assert_allclose(cp.asnumpy(dp.T @ Y), cp.asnumpy(X.T @ Y),
                                    rtol=1e-9, atol=1e-9)
 
-    def test_randomized_pca_matches_pca_multiallelic(self):
-        hap = _multiallelic_hap(seed=8)
-        exact = pca(_hm(hap), n_components=4, scaler='patterson')[0]
-        approx = randomized_pca(_hm(hap), n_components=4, scaler='patterson',
-                                random_state=0)[0]
-        for k in range(4):
-            corr = abs(np.corrcoef(exact[:, k], approx[:, k])[0, 1])
-            assert corr > 0.99, f"PC{k} |corr|={corr:.4f}"
+    def test_pca_gram_matches_tskit_relatedness(self, multiallelic_hm):
+        # The centered all-allele Gram (proportion-normalized) is exactly the
+        # site-mode genetic_relatedness matrix -- the matrix tskit's PCA
+        # decomposes. This pins the whole tskit convention.
+        ts, hm = multiallelic_hm
+        X, n_seg = _prepare_centered(hm)
+        C = cp.asnumpy((X @ X.T) / n_seg)
+        n = ts.num_samples
+        sets = [[s] for s in ts.samples()]
+        idx = [(i, j) for i in range(n) for j in range(n)]
+        G = np.asarray(ts.genetic_relatedness(
+            sets, indexes=idx, mode='site', centre=True, polarised=False,
+            proportion=True)).reshape(n, n)
+        np.testing.assert_allclose(C, G, atol=1e-9, rtol=1e-6)
 
-    @pytest.mark.parametrize("scaler", ['standard', None])
-    def test_scaler_variants_match_allel_on_expanded(self, scaler):
-        hap = _multiallelic_hap(seed=9)
-        coords_ours = pca(_hm(hap), n_components=4, scaler=scaler)[0]
-        coords_allel, _ = allel.pca(_expand_alt_alleles(hap), n_components=4,
-                                    scaler=scaler, ploidy=1)
-        for k in range(4):
-            corr = abs(np.corrcoef(coords_ours[:, k], coords_allel[:, k])[0, 1])
-            assert corr > 0.9999, f"scaler={scaler} PC{k} |corr|={corr:.5f}"
+    def test_pca_explained_variance_matches_tskit(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        n = ts.num_samples
+        sets = [[s] for s in ts.samples()]
+        idx = [(i, j) for i in range(n) for j in range(n)]
+        G = np.asarray(ts.genetic_relatedness(
+            sets, indexes=idx, mode='site', centre=True, polarised=False,
+            proportion=True)).reshape(n, n)
+        evals = np.sort(np.linalg.eigvalsh(G))[::-1]
+        _, evr = pca(hm, n_components=4)
+        np.testing.assert_allclose(evr, evals[:4] / evals.sum(),
+                                   atol=1e-9, rtol=1e-6)
 
-    @pytest.mark.parametrize("hap_fn", [
-        lambda: np.random.RandomState(5).randint(0, 2, (24, 40)).astype(np.int8),  # biallelic
-        lambda: _multiallelic_hap(seed=6),                                          # multiallelic
-    ])
-    def test_pca_subspace_matches_allel_on_expanded(self, hap_fn):
-        hap = hap_fn()
-        coords_ours = pca(_hm(hap), n_components=4, scaler='patterson')[0]
-        coords_allel, _ = allel.pca(_expand_alt_alleles(hap), n_components=4,
-                                    scaler='patterson', ploidy=1)
-        for k in range(4):
-            corr = abs(np.corrcoef(coords_ours[:, k], coords_allel[:, k])[0, 1])
-            assert corr > 0.9999, f"PC{k} |corr|={corr:.5f}"
+    def test_pca_rejects_genotype_matrix(self):
+        from pg_gpu import GenotypeMatrix
+        gm = GenotypeMatrix(np.random.RandomState(0).randint(0, 3, (5, 20)).astype(np.int8),
+                            np.arange(20) * 100)
+        with pytest.raises(TypeError, match="pca_dosage"):
+            pca(gm)
 
 
 def _windowed_multiallelic_hm(seed=0, n=40, nv=120):

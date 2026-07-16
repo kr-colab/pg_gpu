@@ -104,33 +104,9 @@ class TestPCA:
         assert np.all(var_ratio >= 0)
         assert np.sum(var_ratio) <= 1.0 + 1e-10
 
-    def test_pca_vs_allel(self, pca_data):
-        """Verify PCA produces similar variance explained as allel."""
-        hap = pca_data.haplotypes
-        if hasattr(hap, 'get'):
-            hap = hap.get()
-
-        # pg_gpu
-        _, var_pg = decomposition.pca(pca_data, n_components=5,
-                                       scaler='patterson')
-
-        # allel: needs (n_variants, n_samples) genotype array
-        # use haplotypes directly as "genotypes" (0/1)
-        gn = hap.T.astype('i1')
-        _, model = allel.pca(gn, n_components=5, scaler='patterson')
-        var_allel = model.explained_variance_ratio_
-
-        # variance ratios should correlate highly
-        corr = np.corrcoef(var_pg, var_allel)[0, 1]
-        assert corr > 0.9, f"PCA variance correlation: {corr}"
-
-    def test_pca_scalers(self, pca_data):
-        """All scalers should produce valid output."""
-        for scaler in ['patterson', 'standard', None]:
-            coords, var_ratio = decomposition.pca(
-                pca_data, n_components=3, scaler=scaler)
-            assert coords.shape == (40, 3)
-            assert not np.any(np.isnan(coords))
+    # The Patterson-vs-scikit-allel comparison moved to pca_dosage (the diploid
+    # biallelic GCTA PCA on a GenotypeMatrix); pca is now the tskit PCA of
+    # genetic_relatedness, pinned in test_decomposition_multiallelic.py.
 
     def test_pca_with_population(self, pca_data):
         pca_data.sample_sets = {'sub': list(range(20))}
