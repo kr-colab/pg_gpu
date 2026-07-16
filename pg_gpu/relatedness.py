@@ -311,24 +311,30 @@ def grm(genotype_matrix,
     return A.get()
 
 
-def ibs(genotype_matrix_or_haplotype_matrix,
+def ibs(genotype_matrix,
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include') -> np.ndarray:
     """Compute pairwise IBS (Identity by State) proportions.
 
-    IBS measures the proportion of alleles shared identical by state
-    between all pairs of individuals. Equivalent to PLINK's --distance
-    ibs matrix.
+    IBS measures the proportion of alleles shared identical by state between
+    all pairs of individuals. Equivalent to PLINK's --distance ibs matrix. For
+    each site the shared count is (2 - abs(g_i - g_j)) and the matrix is the
+    summed shared count over jointly-called sites divided by twice that site
+    count.
 
-    For each site, IBS between individuals i and j is
-    ``IBS = (2 - abs(g_i - g_j)) / 2``.
-
-    The matrix contains the mean IBS across all jointly-called sites.
+    This is a diploid, biallelic estimator (the shared count is the diploid
+    max-matching of two genotypes), so it takes a GenotypeMatrix (or a streaming
+    genotype matrix), which is diploid and biallelic by construction. For the
+    general allele-sharing quantity between arbitrary sample sets (haplotypes,
+    individuals, or populations), and on multiallelic data, use
+    ``genetic_relatedness`` with ``centre=False``: the noncentred relatedness is
+    the allele-match probability between sample sets, the sample-set
+    generalization of allele sharing.
 
     Parameters
     ----------
-    genotype_matrix_or_haplotype_matrix : GenotypeMatrix or HaplotypeMatrix
-        Diploid genotypes (0/1/2) or haplotype data.
+    genotype_matrix : GenotypeMatrix or StreamingGenotypeMatrix
+        Diploid genotypes (0/1/2).
     population : str or list, optional
         Population subset.
     missing_data : str
@@ -342,14 +348,21 @@ def ibs(genotype_matrix_or_haplotype_matrix,
         Diagonal is always 1.
     """
     from ._memutil import estimate_variant_chunk_size
-    from .streaming_matrix import _StreamingMatrixBase
-    if isinstance(genotype_matrix_or_haplotype_matrix, _StreamingMatrixBase):
-        return _stream_ibs(genotype_matrix_or_haplotype_matrix,
+    from .streaming_matrix import _StreamingMatrixBase, StreamingHaplotypeMatrix
+    from .haplotype_matrix import HaplotypeMatrix
+    if isinstance(genotype_matrix, (HaplotypeMatrix, StreamingHaplotypeMatrix)):
+        raise TypeError(
+            "ibs is the diploid biallelic PLINK IBS and requires a "
+            "GenotypeMatrix. For allele sharing between haplotypes or arbitrary "
+            "sample sets (and multiallelic data) use genetic_relatedness with "
+            "centre=False; to run the diploid IBS on haplotype data convert it "
+            "with GenotypeMatrix.from_haplotype_matrix first.")
+    if isinstance(genotype_matrix, _StreamingMatrixBase):
+        return _stream_ibs(genotype_matrix,
                             population=population,
                             missing_data=missing_data)
 
-    geno, n_ind = _get_genotype_data(genotype_matrix_or_haplotype_matrix,
-                                      population)
+    geno, n_ind = _get_genotype_data(genotype_matrix, population)
     n_var = geno.shape[1]
     # Peak per-chunk: 1 float64 indicator + matmul workspace.
     chunk_size = estimate_variant_chunk_size(n_ind, bytes_per_element=8,
@@ -374,17 +387,17 @@ def ibs(genotype_matrix_or_haplotype_matrix,
 
         n_joint += valid @ valid.T
 
-        # Compute ibs2 and ibs1 one indicator at a time to avoid
-        # materializing i0, i1, i2 simultaneously.
+        # ibs2 (both alleles shared) and ibs1 (one shared) via genotype-state
+        # indicators, one at a time to avoid materializing all three together.
+        ind_curr = (g == 0) * valid
         for gval in (0, 1, 2):
-            ind = (g == gval) * valid
-            ibs2 += ind @ ind.T
             if gval < 2:
                 ind_next = (g == (gval + 1)) * valid
-                cross = ind @ ind_next.T
+            ibs2 += ind_curr @ ind_curr.T
+            if gval < 2:
+                cross = ind_curr @ ind_next.T
                 ibs1 += cross + cross.T
-                del ind_next
-            del ind
+                ind_curr = ind_next
 
         del g, valid
 
@@ -392,7 +405,6 @@ def ibs(genotype_matrix_or_haplotype_matrix,
                         (2.0 * ibs2 + ibs1) / (2.0 * n_joint),
                         0.0)
     cp.fill_diagonal(ibs_mat, 1.0)
-
     return ibs_mat.get()
 
 
@@ -629,8 +641,7 @@ def _stream_ibs(streaming_matrix, *, population, missing_data,
     for _, _, chunk in chunks:
         geno, _ = _get_genotype_data(chunk, population)
         _accumulate_ibs_chunk(geno, ibs2_host, ibs1_host, n_joint_host,
-                              block_size=block_size,
-                              missing_data=missing_data)
+                              block_size=block_size, missing_data=missing_data)
         del geno
 
     ibs_mat = np.where(n_joint_host > 0,
@@ -642,17 +653,12 @@ def _stream_ibs(streaming_matrix, *, population, missing_data,
 
 def _accumulate_ibs_chunk(geno, ibs2_host, ibs1_host, n_joint_host, *,
                           block_size, missing_data):
-    """Add one variant-chunk's contribution to the three host accumulators.
+    """Add one variant-chunk's contribution to the host accumulators.
 
-    ``geno`` is ``(n_ind, n_var_chunk)`` on GPU. The genotype-value loop
-    is outermost so each full-pop indicator ``ind_full`` is built once
-    per chunk rather than once per chunk per row block; the row-block
-    loop only does matmuls and host transfers.
-
-    In the eager kernel ``ibs1 += cross + cross.T`` where
-    ``cross = (g==gval) @ (g==gval+1).T``; here the row-block slice of
-    ``cross`` is ``ind_curr[r0:r1] @ ind_next.T`` and the row-block
-    slice of ``cross.T`` is ``ind_next[r0:r1] @ ind_curr.T``.
+    ``geno`` is (n_ind, n_var_chunk) on GPU. The genotype-state indicators are
+    built once per chunk; the row-block loop tiles the individual axis so only
+    one block's (block_size, n_ind) matmul output sits on the GPU at a time
+    before it is added to the host accumulators.
     """
     valid_full = (geno >= 0).astype(cp.float64)
     g = cp.where(geno >= 0, geno, 0).astype(cp.float64)
@@ -668,9 +674,6 @@ def _accumulate_ibs_chunk(geno, ibs2_host, ibs1_host, n_joint_host, *,
         r1 = min(r0 + block_size, n_ind)
         n_joint_host[r0:r1] += (valid_full[r0:r1] @ valid_full.T).get()
 
-    # Two indicator matrices live at a time: the current g==k and the
-    # next g==k+1 needed for the ibs1 cross. Reuse ``ind_next`` from
-    # the previous iter as the next ``ind_curr`` so g==1 is built once.
     ind_curr = (g == 0) * valid_full
     for gval in (0, 1, 2):
         if gval < 2:
@@ -679,12 +682,8 @@ def _accumulate_ibs_chunk(geno, ibs2_host, ibs1_host, n_joint_host, *,
             r1 = min(r0 + block_size, n_ind)
             ibs2_host[r0:r1] += (ind_curr[r0:r1] @ ind_curr.T).get()
             if gval < 2:
-                ibs1_host[r0:r1] += (
-                    ind_curr[r0:r1] @ ind_next.T
-                ).get()
-                ibs1_host[r0:r1] += (
-                    ind_next[r0:r1] @ ind_curr.T
-                ).get()
+                ibs1_host[r0:r1] += (ind_curr[r0:r1] @ ind_next.T).get()
+                ibs1_host[r0:r1] += (ind_next[r0:r1] @ ind_curr.T).get()
         del ind_curr
         if gval < 2:
             ind_curr = ind_next

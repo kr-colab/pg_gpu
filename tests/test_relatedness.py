@@ -36,17 +36,25 @@ def _reference_grm(g):
     return (std @ std.T) / poly.sum()
 
 
-def _reference_ibs(hap):
-    """Compute IBS from haplotypes using numpy (reference implementation)."""
-    n_ind = hap.shape[0] // 2
-    g = hap[:n_ind, :] + hap[n_ind:, :]
-    n_snps = g.shape[1]
+def _reference_ibs(g):
+    """Biallelic diploid IBS from a genotype array (0/1/2), numpy reference.
+
+    Per jointly-called site the shared-allele count is 2 - abs(g_i - g_j); IBS
+    is the summed shared count over jointly-called sites divided by twice that
+    site count.
+    """
+    n_ind = g.shape[0]
     ibs_mat = np.eye(n_ind)
     for i in range(n_ind):
         for j in range(i + 1, n_ind):
-            ibs_val = (2 - np.abs(g[i] - g[j])).sum() / (2 * n_snps)
-            ibs_mat[i, j] = ibs_val
-            ibs_mat[j, i] = ibs_val
+            valid = (g[i] >= 0) & (g[j] >= 0)
+            n_joint = int(valid.sum())
+            if n_joint == 0:
+                continue
+            shared = (2 - np.abs(g[i] - g[j]))[valid].sum()
+            val = shared / (2 * n_joint)
+            ibs_mat[i, j] = val
+            ibs_mat[j, i] = val
     return ibs_mat
 
 
@@ -88,54 +96,59 @@ class TestGRM:
 
 
 class TestIBS:
-    def test_shape(self, small_haplotype_matrix):
-        ibs_mat = relatedness.ibs(small_haplotype_matrix)
+    def test_shape(self, small_genotype_matrix):
+        ibs_mat = relatedness.ibs(small_genotype_matrix)
         assert ibs_mat.shape == (3, 3)
 
-    def test_diagonal_is_one(self, small_haplotype_matrix):
-        ibs_mat = relatedness.ibs(small_haplotype_matrix)
+    def test_diagonal_is_one(self, small_genotype_matrix):
+        ibs_mat = relatedness.ibs(small_genotype_matrix)
         np.testing.assert_allclose(ibs_mat.diagonal(), 1.0)
 
-    def test_symmetric(self, small_haplotype_matrix):
-        ibs_mat = relatedness.ibs(small_haplotype_matrix)
+    def test_symmetric(self, small_genotype_matrix):
+        ibs_mat = relatedness.ibs(small_genotype_matrix)
         np.testing.assert_allclose(ibs_mat, ibs_mat.T)
 
-    def test_range(self, small_haplotype_matrix):
-        ibs_mat = relatedness.ibs(small_haplotype_matrix)
+    def test_range(self, small_genotype_matrix):
+        ibs_mat = relatedness.ibs(small_genotype_matrix)
         assert np.all(ibs_mat >= 0)
         assert np.all(ibs_mat <= 1)
 
-    def test_matches_reference(self, small_haplotype_matrix):
-        ibs_pg = relatedness.ibs(small_haplotype_matrix)
-        hap = small_haplotype_matrix.haplotypes
-        if hasattr(hap, 'get'):
-            hap = hap.get()
-        ibs_ref = _reference_ibs(hap)
-        np.testing.assert_allclose(ibs_pg, ibs_ref, atol=1e-10)
+    def test_matches_reference(self, small_genotype_matrix):
+        ibs_pg = relatedness.ibs(small_genotype_matrix)
+        np.testing.assert_allclose(ibs_pg, _reference_ibs(_geno_of(small_genotype_matrix)),
+                                   atol=1e-10)
+
+    def test_missing_matches_reference(self):
+        rng = np.random.RandomState(4)
+        geno = rng.randint(0, 3, size=(5, 40)).astype(np.int8)
+        geno[rng.random(geno.shape) < 0.1] = -1
+        gm = GenotypeMatrix(geno, np.arange(40) * 100)
+        np.testing.assert_allclose(relatedness.ibs(gm), _reference_ibs(geno),
+                                   atol=1e-10)
 
     def test_identical_individuals(self):
-        # pg_gpu layout: [allele1_ind0, allele1_ind1, allele2_ind0, allele2_ind1]
-        hap = np.array([[0, 1, 0, 1, 0],   # ind0 allele1
-                         [0, 1, 0, 1, 0],   # ind1 allele1
-                         [1, 0, 1, 0, 1],   # ind0 allele2
-                         [1, 0, 1, 0, 1]], dtype=np.int8)  # ind1 allele2
-        hm = HaplotypeMatrix(hap, np.arange(5) * 100)
-        ibs_mat = relatedness.ibs(hm)
+        geno = np.array([[0, 1, 2, 1],
+                         [0, 1, 2, 1],   # identical to individual 0
+                         [2, 1, 0, 1]], dtype=np.int8)
+        gm = GenotypeMatrix(geno, np.arange(4) * 100)
+        ibs_mat = relatedness.ibs(gm)
         assert ibs_mat[0, 1] == 1.0
 
     def test_completely_different(self):
-        # ind0 = 0/0 at all sites, ind1 = 2/2 at all sites
-        hap = np.array([[0, 0, 0, 0, 0],   # ind0 allele1
-                         [1, 1, 1, 1, 1],   # ind1 allele1
-                         [0, 0, 0, 0, 0],   # ind0 allele2
-                         [1, 1, 1, 1, 1]], dtype=np.int8)  # ind1 allele2
-        hm = HaplotypeMatrix(hap, np.arange(5) * 100)
-        ibs_mat = relatedness.ibs(hm)
+        # individual 0 = 0/0 everywhere, individual 1 = 1/1 everywhere.
+        geno = np.array([[0, 0, 0],
+                         [2, 2, 2]], dtype=np.int8)
+        gm = GenotypeMatrix(geno, np.arange(3) * 100)
+        ibs_mat = relatedness.ibs(gm)
         assert ibs_mat[0, 1] == 0.0
 
-    def test_returns_numpy(self, small_haplotype_matrix):
-        ibs_mat = relatedness.ibs(small_haplotype_matrix)
+    def test_returns_numpy(self, small_genotype_matrix):
+        ibs_mat = relatedness.ibs(small_genotype_matrix)
         assert isinstance(ibs_mat, np.ndarray)
+
+    def test_rejects_haplotype_matrix(self, small_haplotype_matrix):
+        with pytest.raises(TypeError, match="genetic_relatedness"):
+            relatedness.ibs(small_haplotype_matrix)
 
 
 def _reference_relatedness_columns(hap, sample_sets, n_alleles):
