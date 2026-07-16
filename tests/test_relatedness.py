@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from pg_gpu import HaplotypeMatrix, relatedness
+from pg_gpu import GenotypeMatrix, HaplotypeMatrix, relatedness
 
 
 @pytest.fixture
@@ -14,10 +14,17 @@ def small_haplotype_matrix():
     return HaplotypeMatrix(hap, positions)
 
 
-def _reference_grm(hap):
-    """Compute GRM from haplotypes using numpy (reference implementation)."""
-    n_ind = hap.shape[0] // 2
-    g = hap[:n_ind, :] + hap[n_ind:, :]
+@pytest.fixture
+def small_genotype_matrix():
+    """Small diploid genotype dataset: 3 individuals, 20 variants (0/1/2)."""
+    rng = np.random.RandomState(42)
+    geno = rng.randint(0, 3, size=(3, 20)).astype(np.int8)
+    positions = np.arange(20) * 1000
+    return GenotypeMatrix(geno, positions)
+
+
+def _reference_grm(g):
+    """GCTA GRM from a diploid genotype array (0/1/2), numpy reference."""
     g = g.astype(float)
     p = g.mean(axis=0) / 2
     poly = (p > 0) & (p < 1)
@@ -43,37 +50,41 @@ def _reference_ibs(hap):
     return ibs_mat
 
 
+def _geno_of(gm):
+    g = gm.genotypes
+    return g.get() if hasattr(g, 'get') else g
+
+
 class TestGRM:
-    def test_shape(self, small_haplotype_matrix):
-        grm = relatedness.grm(small_haplotype_matrix)
+    def test_shape(self, small_genotype_matrix):
+        grm = relatedness.grm(small_genotype_matrix)
         assert grm.shape == (3, 3)
 
-    def test_symmetric(self, small_haplotype_matrix):
-        grm = relatedness.grm(small_haplotype_matrix)
+    def test_symmetric(self, small_genotype_matrix):
+        grm = relatedness.grm(small_genotype_matrix)
         np.testing.assert_allclose(grm, grm.T)
 
-    def test_matches_reference(self, small_haplotype_matrix):
-        grm_pg = relatedness.grm(small_haplotype_matrix)
-        hap = small_haplotype_matrix.haplotypes
-        if hasattr(hap, 'get'):
-            hap = hap.get()
-        grm_ref = _reference_grm(hap)
+    def test_matches_reference(self, small_genotype_matrix):
+        grm_pg = relatedness.grm(small_genotype_matrix)
+        grm_ref = _reference_grm(_geno_of(small_genotype_matrix))
         np.testing.assert_allclose(grm_pg, grm_ref, atol=1e-10)
 
     def test_identical_individuals(self):
         """Two identical individuals should have GRM off-diagonal = diagonal."""
-        # pg_gpu layout: [allele1_ind0, allele1_ind1, allele2_ind0, allele2_ind1]
-        hap = np.array([[0, 1, 0, 1, 0],   # ind0 allele1
-                         [0, 1, 0, 1, 0],   # ind1 allele1 (same as ind0)
-                         [1, 0, 1, 0, 1],   # ind0 allele2
-                         [1, 0, 1, 0, 1]], dtype=np.int8)  # ind1 allele2 (same)
-        hm = HaplotypeMatrix(hap, np.arange(5) * 100)
-        grm = relatedness.grm(hm)
+        geno = np.array([[0, 1, 2, 1, 0],
+                         [0, 1, 2, 1, 0],   # identical to individual 0
+                         [2, 1, 0, 1, 2]], dtype=np.int8)
+        gm = GenotypeMatrix(geno, np.arange(5) * 100)
+        grm = relatedness.grm(gm)
         np.testing.assert_allclose(grm[0, 1], grm[0, 0], atol=1e-10)
 
-    def test_returns_numpy(self, small_haplotype_matrix):
-        grm = relatedness.grm(small_haplotype_matrix)
+    def test_returns_numpy(self, small_genotype_matrix):
+        grm = relatedness.grm(small_genotype_matrix)
         assert isinstance(grm, np.ndarray)
+
+    def test_rejects_haplotype_matrix(self, small_haplotype_matrix):
+        with pytest.raises(TypeError, match="genetic_relatedness"):
+            relatedness.grm(small_haplotype_matrix)
 
 
 class TestIBS:

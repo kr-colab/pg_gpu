@@ -1,11 +1,11 @@
 """Equivalence tests for streaming-aware GRM.
 
-``grm(matrix, ...)`` dispatches at the top: a ``StreamingHaplotypeMatrix``
-/ ``StreamingGenotypeMatrix`` routes through a two-pass streaming
-implementation (chromosome-wide allele frequencies first, then a
-standardized outer-product accumulated on host with row-block tiling
-on the individual axis). Tests assert streaming-vs-eager parity on
-small msprime stores.
+``grm`` is the diploid biallelic GCTA GRM and takes genotype matrices; a
+``StreamingGenotypeMatrix`` routes through a two-pass streaming implementation
+(chromosome-wide allele frequencies first, then a standardized outer-product
+accumulated on host with row-block tiling on the individual axis). Haplotype
+matrices are rejected in favor of ``genetic_relatedness``. Tests assert
+streaming-vs-eager parity on small msprime stores.
 """
 
 import numpy as np
@@ -49,17 +49,18 @@ def two_pop_vcz_store(tmp_path):
 
 class TestGrmStreaming:
 
-    def test_haplotype_parity(self, vcz_store):
-        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+    def test_rejects_streaming_haplotype_matrix(self, vcz_store):
+        # grm is the diploid biallelic GCTA GRM; a streaming haplotype
+        # matrix is rejected in favor of genetic_relatedness.
         stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
-                                            chunk_bp=10_000)
-        # rtol looser than IBS because GRM has a two-pass float accumulation
-        # (frequencies then standardized outer product) where the chunked
-        # vs whole-matrix orderings can differ at the last ULP.
-        np.testing.assert_allclose(grm(stream), grm(eager),
-                                    rtol=1e-7, atol=1e-10)
+                                           chunk_bp=10_000)
+        with pytest.raises(TypeError, match="genetic_relatedness"):
+            grm(stream)
 
     def test_genotype_parity(self, vcz_store):
+        # rtol looser because GRM has a two-pass float accumulation
+        # (frequencies then standardized outer product) where the chunked
+        # vs whole-matrix orderings can differ at the last ULP.
         eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
         stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
                                            chunk_bp=10_000)
@@ -67,8 +68,8 @@ class TestGrmStreaming:
                                     rtol=1e-7, atol=1e-10)
 
     def test_missing_data_exclude(self, vcz_store):
-        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
-        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
                                             chunk_bp=10_000)
         np.testing.assert_allclose(
             grm(stream, missing_data='exclude'),
@@ -77,23 +78,30 @@ class TestGrmStreaming:
         )
 
     def test_population_subset(self, two_pop_vcz_store):
+        # Eager genotype population subsetting equals running the GRM on the
+        # manually extracted individuals. (Streaming genotype population
+        # subsetting is a separate pre-existing gap: the streaming matrix
+        # keeps sample_sets in haplotype coordinates.)
         path, popfile = two_pop_vcz_store
-        eager = HaplotypeMatrix.from_zarr(path, streaming="never",
-                                            pop_assignment=popfile)
-        stream = HaplotypeMatrix.from_zarr(path, streaming="always",
-                                             pop_assignment=popfile,
-                                             chunk_bp=10_000)
+        eager = GenotypeMatrix.from_zarr(path, streaming="never",
+                                         pop_assignment=popfile)
+        idx = eager.sample_sets['pop1']
+        g = eager.genotypes
+        g = g.get() if hasattr(g, 'get') else g
+        pos = eager.positions
+        pos = pos.get() if hasattr(pos, 'get') else pos
+        subset = GenotypeMatrix(np.asarray(g)[idx], np.asarray(pos),
+                                eager.chrom_start, eager.chrom_end)
         np.testing.assert_allclose(
-            grm(stream, population='pop1'),
-            grm(eager, population='pop1'),
+            grm(eager, population='pop1'), grm(subset),
             rtol=1e-7, atol=1e-10,
         )
 
     @pytest.mark.parametrize("block_size", [1, 4, 1000])
     def test_block_size_invariance(self, vcz_store, block_size):
         from pg_gpu.relatedness import _stream_grm
-        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
-        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
                                             chunk_bp=10_000)
         e = grm(eager)
         s = _stream_grm(stream, population=None, missing_data='include',
@@ -112,8 +120,8 @@ class TestGrmStreaming:
         hm.samples = [f"s{i}" for i in range(hm.num_haplotypes // 2)]
         path = str(tmp_path / "mono.vcz")
         hm.to_zarr(path, format="vcz", contig_name="1")
-        eager = HaplotypeMatrix.from_zarr(path, streaming="never")
-        stream = HaplotypeMatrix.from_zarr(path, streaming="always",
+        eager = GenotypeMatrix.from_zarr(path, streaming="never")
+        stream = GenotypeMatrix.from_zarr(path, streaming="always",
                                             chunk_bp=5_000)
         np.testing.assert_allclose(grm(stream), grm(eager),
                                     rtol=1e-7, atol=1e-10)

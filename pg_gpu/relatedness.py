@@ -201,7 +201,7 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
     return R[idx[:, 0], idx[:, 1]]
 
 
-def grm(genotype_matrix_or_haplotype_matrix,
+def grm(genotype_matrix,
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include') -> np.ndarray:
     """Compute the Genetic Relationship Matrix (GRM).
@@ -215,11 +215,15 @@ def grm(genotype_matrix_or_haplotype_matrix,
 
     where g is genotype (0/1/2), p is allele frequency, M is number of sites.
 
+    This is a diploid, biallelic estimator, so it takes a GenotypeMatrix (or
+    a streaming genotype matrix), which is diploid and biallelic by
+    construction. For relatedness between haplotypes or arbitrary sample sets,
+    or on multiallelic data, use ``genetic_relatedness``.
+
     Parameters
     ----------
-    genotype_matrix_or_haplotype_matrix : GenotypeMatrix or HaplotypeMatrix
-        Diploid genotypes (0/1/2) or haplotype data (auto-converted to
-        diploid by pairing consecutive haplotypes).
+    genotype_matrix : GenotypeMatrix or StreamingGenotypeMatrix
+        Diploid genotypes (0/1/2).
     population : str or list, optional
         Population subset.
     missing_data : str
@@ -233,14 +237,21 @@ def grm(genotype_matrix_or_haplotype_matrix,
         coefficients + 1. Off-diagonal entries are pairwise relatedness.
     """
     from ._memutil import estimate_variant_chunk_size
-    from .streaming_matrix import _StreamingMatrixBase
-    if isinstance(genotype_matrix_or_haplotype_matrix, _StreamingMatrixBase):
-        return _stream_grm(genotype_matrix_or_haplotype_matrix,
+    from .streaming_matrix import _StreamingMatrixBase, StreamingHaplotypeMatrix
+    from .haplotype_matrix import HaplotypeMatrix
+    if isinstance(genotype_matrix, (HaplotypeMatrix, StreamingHaplotypeMatrix)):
+        raise TypeError(
+            "grm is the diploid biallelic GCTA GRM and requires a "
+            "GenotypeMatrix. For haplotype or sample-set relatedness (and "
+            "multiallelic data) use genetic_relatedness; to run the GCTA GRM "
+            "on haplotype data convert it with "
+            "GenotypeMatrix.from_haplotype_matrix first.")
+    if isinstance(genotype_matrix, _StreamingMatrixBase):
+        return _stream_grm(genotype_matrix,
                             population=population,
                             missing_data=missing_data)
 
-    geno, n_ind = _get_genotype_data(genotype_matrix_or_haplotype_matrix,
-                                      population)
+    geno, n_ind = _get_genotype_data(genotype_matrix, population)
     n_var = geno.shape[1]
 
     # Allele frequency from genotypes, chunked to avoid large temporaries.
