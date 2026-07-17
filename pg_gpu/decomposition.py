@@ -226,6 +226,172 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     return coords.get(), explained_variance_ratio.get()
 
 
+def _prepare_dosage(genotype_matrix, population=None, missing_data='include'):
+    """Patterson/GCTA standardization of biallelic diploid dosages.
+
+    For each biallelic variant the alt-allele dosage (0/1/2) is centered by its
+    mean m across individuals and scaled by sqrt(p (1 - p)) with p = m / 2
+    (Patterson et al. 2006), missing imputed to m so it contributes 0 after
+    centering. Returns X (n_individuals, n_variants) float64. This is the
+    preprocessing scikit-allel applies in its diploid Patterson PCA (center by
+    the per-variant mean, scale by sqrt(p (1 - p)) with p the mean over the
+    ploidy).
+    """
+    matrix = genotype_matrix
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    geno = matrix.genotypes
+    # Subset individuals inline (the shared get_population_matrix is haplotype
+    # granularity; genotype/haplotype population subsetting is unified in the
+    # type-domain-consistency follow-up).
+    if population is not None:
+        if isinstance(population, str):
+            if matrix.sample_sets is None or population not in matrix.sample_sets:
+                raise ValueError(
+                    f"Population {population} not found in sample_sets")
+            idx = matrix.sample_sets[population]
+        else:
+            idx = list(population)
+        geno = geno[idx, :]
+
+    n_ind, n_var = geno.shape
+    if n_var and int(geno.max()) > 2:
+        raise ValueError(
+            "pca_dosage requires biallelic diploid dosages coded 0/1/2; found a "
+            "genotype > 2. Apply a biallelic filter first.")
+
+    if missing_data == 'exclude' and n_var:
+        complete = cp.sum(geno >= 0, axis=0) == n_ind
+        geno = geno[:, complete]
+    if geno.shape[1] == 0:
+        return cp.zeros((n_ind, 0), dtype=cp.float64)
+
+    valid = geno >= 0
+    n_valid = cp.sum(valid, axis=0).astype(cp.float64)          # per-variant
+    dsum = cp.sum(cp.where(valid, geno, 0), axis=0).astype(cp.float64)
+    m = cp.where(n_valid > 0, dsum / n_valid, 0.0)              # mean dosage
+    p = m / 2.0                                                 # ploidy 2
+    scale = cp.sqrt(p * (1.0 - p))
+    scale = cp.where(scale > 0, scale, 1.0)                     # monomorphic -> no scale
+    X = cp.where(valid, geno, m[None, :]).astype(cp.float64)    # impute missing -> m
+    X = (X - m[None, :]) / scale[None, :]                       # center + Patterson scale
+    return X
+
+
+def pca_dosage(genotype_matrix,
+               n_components: int = 10,
+               population: Optional[Union[str, list]] = None,
+               missing_data: str = 'include'):
+    """Patterson/GCTA PCA of biallelic diploid dosages (scikit-allel convention).
+
+    Standardizes each biallelic variant's alt-allele dosage (0/1/2) by centering
+    on its mean and scaling by sqrt(p (1 - p)), p = mean / 2, then eigendecomposes
+    the individual-by-individual Gram X @ X.T. This is the classical EIGENSTRAT /
+    GCTA PCA and matches scikit-allel's diploid Patterson PCA. For the tskit PCA of
+    genetic_relatedness (all-allele, multiallelic-correct) use pca on a
+    HaplotypeMatrix.
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix
+        Biallelic diploid dosages. Rows are individuals, columns are variants.
+    n_components : int
+        Number of principal components to compute.
+    population : str or list, optional
+        Population subset to use.
+    missing_data : str
+        'include' - impute missing to the per-variant mean dosage
+        'exclude' - filter variants with any missing genotype
+
+    Returns
+    -------
+    coords : ndarray, float64, shape (n_individuals, n_components)
+    explained_variance_ratio : ndarray, float64, shape (n_components,)
+    """
+    from .genotype_matrix import GenotypeMatrix
+    if not isinstance(genotype_matrix, GenotypeMatrix):
+        raise TypeError(
+            "pca_dosage is the Patterson/GCTA PCA of biallelic diploid dosages "
+            "and requires a GenotypeMatrix; for the tskit PCA of "
+            "genetic_relatedness use pca on a HaplotypeMatrix.")
+
+    X = _prepare_dosage(genotype_matrix, population, missing_data)
+    n_ind, n_var = X.shape
+    n_components = min(n_components, n_ind, max(n_var, 1))
+    return _pca_from_gram(X @ X.T, n_ind, n_components)
+
+
+def randomized_pca_dosage(genotype_matrix,
+                          n_components: int = 10,
+                          population: Optional[Union[str, list]] = None,
+                          n_iter: int = 3,
+                          random_state: Optional[int] = None,
+                          missing_data: str = 'include'):
+    """Randomized truncated-SVD approximation of pca_dosage (scikit-allel).
+
+    Same Patterson standardization as pca_dosage, approximating the top
+    components for large biallelic panels (the common biobank / SNP-array case).
+    For the tskit PCA of genetic_relatedness use randomized_pca on a
+    HaplotypeMatrix.
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix
+        Biallelic diploid dosages. Rows are individuals, columns are variants.
+    n_components : int
+        Number of components.
+    population : str or list, optional
+        Population subset.
+    n_iter : int
+        Number of power iterations for accuracy.
+    random_state : int, optional
+        Random seed for reproducibility.
+    missing_data : str
+        'include' - impute missing to the per-variant mean dosage
+        'exclude' - filter variants with any missing genotype
+
+    Returns
+    -------
+    coords : ndarray, float64, shape (n_individuals, n_components)
+    explained_variance_ratio : ndarray, float64, shape (n_components,)
+    """
+    from .genotype_matrix import GenotypeMatrix
+    if not isinstance(genotype_matrix, GenotypeMatrix):
+        raise TypeError(
+            "randomized_pca_dosage is the Patterson/GCTA PCA of biallelic diploid "
+            "dosages and requires a GenotypeMatrix; for the tskit PCA of "
+            "genetic_relatedness use randomized_pca on a HaplotypeMatrix.")
+
+    X = _prepare_dosage(genotype_matrix, population, missing_data)
+    n_samples, n_variants = X.shape
+    n_components = min(n_components, n_samples, max(n_variants, 1))
+
+    if random_state is not None:
+        cp.random.seed(random_state)
+
+    # random projection
+    k = min(n_components + 10, n_samples, max(n_variants, 1))
+    Omega = cp.random.randn(n_variants, k, dtype=cp.float64)
+    Y = X @ Omega
+
+    # power iteration for accuracy
+    for _ in range(n_iter):
+        Y = X @ (X.T @ Y)
+
+    Q, _ = cp.linalg.qr(Y)
+    B = Q.T @ X
+    Uhat, S, Vt = cp.linalg.svd(B, full_matrices=False)
+    U = Q @ Uhat
+
+    coords = U[:, :n_components] * S[:n_components]
+    total_var = cp.sum(cp.var(X, axis=0))
+    var = (S[:n_components] ** 2) / n_samples
+    explained_variance_ratio = var / total_var
+
+    return coords.get(), explained_variance_ratio.get()
+
+
 def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
                       metric: str = 'euclidean',
                       population: Optional[Union[str, list]] = None,

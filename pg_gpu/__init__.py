@@ -56,6 +56,10 @@ from .windowed_analysis import WindowedAnalyzer, windowed_analysis
 from .decomposition import (
     LocalPCAResult,
     LostructResult,
+    pca,
+    randomized_pca,
+    pca_dosage,
+    randomized_pca_dosage,
     local_pca,
     local_pca_jackknife,
     lostruct,
@@ -68,7 +72,7 @@ from ._warnings import (
     MultiallelicCapWarning,
 )
 
-__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'distance_stats', 'resampling', 'HaplotypeMatrix', 'GenotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis', 'AccessibleMask', 'bed_to_mask', 'parse_bed', 'LocalPCAResult', 'LostructResult', 'local_pca', 'local_pca_jackknife', 'lostruct', 'pc_dist', 'corners', 'block_jackknife', 'block_bootstrap', 'MemoryLimitedWarning', 'HaploidDataWarning', 'BadlyChunkedWarning', 'MultiallelicCapWarning']
+__all__ = ['ld_statistics', 'diversity', 'divergence', 'windowed_analysis', 'selection', 'sfs', 'admixture', 'decomposition', 'plotting', 'distance_stats', 'resampling', 'HaplotypeMatrix', 'GenotypeMatrix', 'WindowedAnalyzer', 'windowed_analysis', 'AccessibleMask', 'bed_to_mask', 'parse_bed', 'LocalPCAResult', 'LostructResult', 'pca', 'randomized_pca', 'pca_dosage', 'randomized_pca_dosage', 'local_pca', 'local_pca_jackknife', 'lostruct', 'pc_dist', 'corners', 'block_jackknife', 'block_bootstrap', 'MemoryLimitedWarning', 'HaploidDataWarning', 'BadlyChunkedWarning', 'MultiallelicCapWarning']
 
 # Version is derived from the git tag at build time (hatch-vcs) and read here
 # from the installed package metadata, so there is no hardcoded string to keep

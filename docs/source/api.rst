@@ -264,6 +264,8 @@ PCA
 
 .. autofunction:: pg_gpu.decomposition.pca
 .. autofunction:: pg_gpu.decomposition.randomized_pca
+.. autofunction:: pg_gpu.decomposition.pca_dosage
+.. autofunction:: pg_gpu.decomposition.randomized_pca_dosage
 
 Distance
 ~~~~~~~~
