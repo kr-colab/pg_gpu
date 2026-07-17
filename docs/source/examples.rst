@@ -190,8 +190,7 @@ PCA and Dimensionality Reduction
    from pg_gpu import decomposition
 
    # GPU-accelerated PCA (up to 56x faster than allel)
-   coords, var_ratio = decomposition.pca(h, n_components=10,
-                                          scaler='patterson')
+   coords, var_ratio = decomposition.pca(h, n_components=10)
 
    # Randomized PCA for very large datasets
    coords, var_ratio = decomposition.randomized_pca(

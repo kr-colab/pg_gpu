@@ -18,156 +18,6 @@ from ._utils import get_population_matrix as _get_population_matrix
 _GPU_MEM_BUDGET = 0.3
 
 
-def _multiallelic_onehot_dense(hap_multi, scaler):
-    """Standardized per-present-derived-allele one-hot columns for multiallelic sites.
-
-    ``hap_multi`` is (n_samples, n_sites) with allele indices (>= 2 present at some
-    site) and -1 for missing. Each site contributes one column per PRESENT derived
-    allele (index >= 1); the reference allele (index 0) is dropped. Columns are
-    compacted to present (site, allele) pairs -- never padded to the global allele
-    width -- so a site costs exactly its number of present derived alleles.
-
-    Each column is the indicator (hap == a), with missing rows imputed to p_a and
-    centered by the same p_a (so a missing haplotype contributes exactly 0 while a
-    reference carrier stays at -p_a), then scaled per ``scaler``. p_a = ac_a /
-    n_valid uses the per-site non-missing count. Returns (cols float64
-    (n_samples, n_pairs), n_pairs).
-    """
-    from ._memutil import allele_counts
-
-    n_samp = hap_multi.shape[0]
-    if hap_multi.shape[1] == 0:
-        return cp.zeros((n_samp, 0), dtype=cp.float64), 0
-
-    ac, n_valid = allele_counts(hap_multi)          # (n_sites, K), (n_sites,)
-    if ac.shape[1] < 2:
-        return cp.zeros((n_samp, 0), dtype=cp.float64), 0
-    nv = n_valid.astype(cp.float64)
-
-    present = ac[:, 1:] > 0                          # derived alleles present per site
-    pairs = cp.argwhere(present)                     # (n_pairs, 2): (site, allele-1)
-    n_pairs = int(pairs.shape[0])
-    if n_pairs == 0:
-        return cp.zeros((n_samp, 0), dtype=cp.float64), 0
-
-    sites = pairs[:, 0]
-    alleles = pairs[:, 1] + 1                         # actual allele index (>= 1)
-
-    g = hap_multi[:, sites]                           # (n_samp, n_pairs)
-    valid = g >= 0
-    ac_pairs = ac[sites, alleles].astype(cp.float64)  # count of allele a at the site
-    nvp = nv[sites]
-    p = cp.where(nvp > 0, ac_pairs / nvp, 0.0)        # p_a per column
-
-    ind = (g == alleles[None, :]).astype(cp.float64)
-    col = cp.where(valid, ind, p[None, :])            # missing -> p_a
-    col -= p[None, :]                                 # missing -> 0; ref carrier -> -p_a
-
-    if scaler == 'patterson':
-        scale = cp.sqrt(p * (1.0 - p))
-        scale = cp.where(scale > 0, scale, 1.0)
-        col /= scale[None, :]
-    elif scaler == 'standard':
-        std = cp.std(col, axis=0)
-        good = std > 0
-        col[:, good] /= std[good]
-        col[:, ~good] = 0.0
-    return col, n_pairs
-
-
-def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'):
-    """Center and scale haplotype matrix for PCA.
-
-    Multiallelic-correct via a split: sites coded {0,1} (max allele index <= 1) go
-    through the existing biallelic standardization unchanged; sites with an allele
-    index >= 2 go through the per-allele one-hot (``_multiallelic_onehot_dense``).
-    The two column blocks are concatenated, so X @ X.T sums their contributions
-    (Gram additivity), and any downstream normalization divides by the total column
-    count. Biallelic-only data is bit-identical to the previous implementation.
-
-    Uses chunked processing for large matrices to avoid OOM.
-    Returns the prepared matrix X on GPU (or a _DeferredPCA).
-    """
-    from ._memutil import allele_counts
-
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    hap = matrix.haplotypes
-    n_samples, n_var = hap.shape
-
-    max_allele = hap.max(axis=0)
-    # One host transfer for all branch flags, so the common biallelic path pays
-    # no per-window syncs beyond what the original code did (it already
-    # transferred has_missing). exclude-completeness is folded in too.
-    probes = [cp.any(hap < 0), cp.any(max_allele > 1)]
-    if missing_data == 'exclude':
-        complete_col = cp.sum(hap >= 0, axis=0) == n_samples
-        probes.append(cp.all(complete_col))
-    flags = cp.stack(probes).get()
-    has_missing = bool(flags[0])
-    has_multi = bool(flags[1])
-    if missing_data == 'exclude' and not bool(flags[2]):
-        hap = hap[:, complete_col]
-        max_allele = hap.max(axis=0)
-        has_missing = False  # incomplete sites dropped
-
-    # Partition sites: {0,1}-coded sites (max allele index <= 1) use the existing
-    # biallelic standardization unchanged; sites with an allele index >= 2 use the
-    # per-allele one-hot. The physical split (boolean column indexing, which syncs)
-    # only happens when a multiallelic site is actually present.
-    if has_multi:
-        bi_mask = max_allele <= 1
-        hap_bi = hap[:, bi_mask]
-        hap_multi = hap[:, ~bi_mask]
-        multi_cols, n_multi = _multiallelic_onehot_dense(hap_multi, scaler)
-    else:
-        hap_bi = hap
-        multi_cols, n_multi = None, 0
-    n_bi = hap_bi.shape[1]
-
-    # Biallelic block scaling metadata via the per-allele primitive. For {0,1}
-    # sites the summed derived count equals the old dac_and_n exactly (so this is
-    # bit-identical), and using allele_counts drops decomposition's last dependence
-    # on the collapsed dac_and_n. ac[:, 1:].sum handles the all-monomorphic (K == 1)
-    # case where there is no derived column.
-    # n_alleles=2 is exact for the biallelic block (partition guarantees max index
-    # <= 1) and avoids the int(hap.max()) reduction (a host sync) that the default
-    # would do -- keeping the per-window sync footprint at the original level.
-    ac_bi, nv = allele_counts(hap_bi, n_alleles=2)
-    dac = ac_bi[:, 1:].sum(axis=1)
-    site_mean = cp.where(nv > 0, dac.astype(cp.float64) / nv.astype(cp.float64), 0.0)
-    if scaler == 'patterson':
-        scale = cp.sqrt(site_mean * (1 - site_mean))
-        scale = cp.where(scale > 0, scale, 1.0)
-    else:
-        scale = None  # 'standard' handled at materialization; None -> center only
-
-    n_cols_total = n_bi + n_multi
-
-    free = cp.cuda.Device().mem_info[0]
-    needed = n_samples * n_cols_total * 8  # float64
-    if needed < free * 0.4:
-        # Dense path: build the biallelic block (existing logic on hap_bi) and
-        # concatenate the multiallelic columns.
-        X_bi = _biallelic_standardize_dense(hap_bi, site_mean, scale, scaler,
-                                            has_missing)
-        if not n_multi:
-            return X_bi
-        if n_bi == 0:
-            return multi_cols
-        return cp.concatenate([X_bi, multi_cols], axis=1)
-
-    # Memory-constrained path: chunk the (large) biallelic block; the small
-    # multiallelic block rides along densely.
-    return _DeferredPCA(hap_bi, site_mean, scale, scaler, multi_cols)
-
-
 def _prepare_centered(haplotype_matrix, population=None, missing_data='include',
                       need_segregating=True, n_alleles=None):
     """All-allele centered one-hot standardization (the tskit convention).
@@ -225,127 +75,6 @@ def _prepare_centered(haplotype_matrix, population=None, missing_data='include',
     else:
         n_segregating = 0
     return X, n_segregating
-
-
-def _biallelic_standardize_dense(hap_bi, site_mean, scale, scaler, has_missing):
-    """Dense standardized biallelic block (the original standardization, verbatim).
-
-    Bit-identical to the previous _prepare_matrix fast path when all sites are
-    {0,1}-coded. ``has_missing`` is passed in (computed once in _prepare_matrix)
-    to avoid a per-call host sync.
-    """
-    if has_missing:
-        valid_mask = hap_bi >= 0
-        X = cp.where(valid_mask, hap_bi, 0).astype(cp.float64)
-        X = cp.where(valid_mask, X, site_mean[None, :])
-    else:
-        X = hap_bi.astype(cp.float64)
-    X -= site_mean
-    if scaler == 'patterson':
-        X /= scale
-    elif scaler == 'standard':
-        std = cp.std(X, axis=0)
-        valid = std > 0
-        X[:, valid] /= std[valid]
-        X[:, ~valid] = 0
-    return X
-
-
-class _DeferredPCA:
-    """Wrapper for memory-constrained PCA: stores the biallelic hap block +
-    scaling metadata (chunked lazily) plus a dense standardized multiallelic
-    one-hot block, so the caller can compute X @ X.T (and X @ Y, X.T @ Y) over
-    the concatenated columns [biallelic | multiallelic] without materializing
-    the full biallelic float64 matrix. Column order is biallelic first."""
-
-    def __init__(self, hap, site_mean, scale, scaler, multi_cols=None):
-        self.hap = hap                       # biallelic sites only
-        self.site_mean = site_mean
-        self.scale = scale
-        self.scaler = scaler
-        self.n_bi = hap.shape[1]
-        # multi_cols is None when there are no multiallelic sites; otherwise it is
-        # built from a site with an allele index >= 2, which always yields at least
-        # one present-derived-allele column. An empty non-None array is a caller bug.
-        if multi_cols is not None:
-            assert multi_cols.shape[1] > 0, "multi_cols must be None, not empty"
-        self.multi_cols = multi_cols
-        self.n_multi = 0 if multi_cols is None else multi_cols.shape[1]
-        self.shape = (hap.shape[0], self.n_bi + self.n_multi)
-
-    def _scale_chunk(self, start, end):
-        """Prepare a scaled float64 chunk of the biallelic block [start, end)."""
-        chunk = self.hap[:, start:end]
-        # Check this chunk for missing (avoids full-matrix boolean allocation)
-        has_missing_chunk = bool(cp.any(chunk < 0).get())
-        if has_missing_chunk:
-            valid = chunk >= 0
-            x = cp.where(valid, chunk, 0).astype(cp.float64)
-            x = cp.where(valid, x, self.site_mean[start:end])
-        else:
-            x = chunk.astype(cp.float64)
-        x -= self.site_mean[start:end]
-        if self.scaler == 'patterson' and self.scale is not None:
-            x /= self.scale[start:end]
-        return x
-
-    @property
-    def _chunk_size(self):
-        from ._memutil import estimate_variant_chunk_size
-        return estimate_variant_chunk_size(self.shape[0], bytes_per_element=8,
-                                           n_intermediates=2)
-
-    def chunked_gram(self):
-        """Compute X @ X.T via chunked processing (biallelic block + multiallelic)."""
-        n_samples = self.shape[0]
-        C = cp.zeros((n_samples, n_samples), dtype=cp.float64)
-        for start in range(0, self.n_bi, self._chunk_size):
-            end = min(start + self._chunk_size, self.n_bi)
-            x = self._scale_chunk(start, end)
-            C += x @ x.T
-            del x
-        if self.multi_cols is not None:
-            C += self.multi_cols @ self.multi_cols.T
-        return C
-
-    def __matmul__(self, other):
-        """Compute X @ other over concatenated [biallelic | multiallelic] columns."""
-        n_samples = self.shape[0]
-        result = cp.zeros((n_samples, other.shape[1]), dtype=cp.float64)
-        for start in range(0, self.n_bi, self._chunk_size):
-            end = min(start + self._chunk_size, self.n_bi)
-            x = self._scale_chunk(start, end)
-            result += x @ other[start:end, :]
-            del x
-        if self.multi_cols is not None:
-            result += self.multi_cols @ other[self.n_bi:, :]
-        return result
-
-    @property
-    def T(self):
-        """Return a transposed view for X.T @ Y operations."""
-        return _DeferredPCATranspose(self)
-
-
-class _DeferredPCATranspose:
-    """Transpose view of _DeferredPCA for X.T @ Y operations."""
-
-    def __init__(self, parent):
-        self.parent = parent
-        self.shape = (parent.shape[1], parent.shape[0])
-
-    def __matmul__(self, other):
-        """Compute X.T @ other, returning rows [biallelic; multiallelic]."""
-        p = self.parent
-        result = cp.zeros((p.shape[1], other.shape[1]), dtype=cp.float64)
-        for start in range(0, p.n_bi, p._chunk_size):
-            end = min(start + p._chunk_size, p.n_bi)
-            x = p._scale_chunk(start, end)
-            result[start:end, :] = x.T @ other
-            del x
-        if p.multi_cols is not None:
-            result[p.n_bi:, :] = p.multi_cols.T @ other
-        return result
 
 
 def _pca_from_gram(C, n_samples, n_components):
@@ -415,39 +144,50 @@ def pca(haplotype_matrix: HaplotypeMatrix,
 
 def randomized_pca(haplotype_matrix: HaplotypeMatrix,
                    n_components: int = 10,
-                   scaler: Optional[str] = 'patterson',
                    population: Optional[Union[str, list]] = None,
                    n_iter: int = 3,
                    random_state: Optional[int] = None,
                    missing_data: str = 'include'):
-    """Randomized PCA using truncated SVD approximation.
+    """Randomized truncated-SVD approximation of pca (tskit convention).
 
-    Faster than full PCA for large datasets where only a few
-    components are needed.
+    Same standardization as pca: haplotypes centered per allele (all alleles
+    including the reference, no variance scaling), so this approximates the top
+    components of the site-mode genetic_relatedness matrix normalized by the
+    number of segregating sites. Faster than full pca when only a few components
+    are needed. For the diploid biallelic Patterson/GCTA PCA use
+    randomized_pca_dosage on a GenotypeMatrix.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
-        Haplotype data.
+        Haplotype data. Rows are haplotypes, columns are variants.
     n_components : int
         Number of components.
-    scaler : str or None
-        'patterson', 'standard', or None.
     population : str or list, optional
         Population subset.
     n_iter : int
         Number of power iterations for accuracy.
     random_state : int, optional
         Random seed for reproducibility.
+    missing_data : str
+        'include' - impute missing to per-site allele frequency
+        'exclude' - filter sites with any missing
 
     Returns
     -------
     coords : ndarray, float64, shape (n_samples, n_components)
     explained_variance_ratio : ndarray, float64, shape (n_components,)
     """
-    X = _prepare_matrix(haplotype_matrix, scaler, population, missing_data)
+    from .genotype_matrix import GenotypeMatrix
+    if isinstance(haplotype_matrix, GenotypeMatrix):
+        raise TypeError(
+            "randomized_pca is the tskit PCA of genetic_relatedness and requires "
+            "a HaplotypeMatrix; for the diploid biallelic Patterson/GCTA PCA use "
+            "randomized_pca_dosage on a GenotypeMatrix.")
+
+    X, n_segregating = _prepare_centered(haplotype_matrix, population, missing_data)
     n_samples, n_variants = X.shape
-    n_components = min(n_components, min(n_samples, n_variants))
+    n_components = min(n_components, n_samples, max(n_variants, 1))
 
     # randomized SVD on GPU
     if random_state is not None:
@@ -455,7 +195,7 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
 
     # random projection
     k = n_components + 10  # oversampling
-    k = min(k, min(n_samples, n_variants))
+    k = min(k, min(n_samples, max(n_variants, 1)))
     Omega = cp.random.randn(n_variants, k, dtype=cp.float64)
     Y = X @ Omega
 
@@ -467,31 +207,19 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     Q, _ = cp.linalg.qr(Y)
 
     # project and SVD in reduced space
-    if isinstance(X, _DeferredPCA):
-        # B = Q.T @ X has shape (k, n_var) — too wide for cuSOLVER SVD.
-        # Instead compute B @ B.T = Q.T @ (X @ X.T) @ Q = Q.T @ gram @ Q
-        # and eigendecompose the small (k, k) matrix.
-        gram = X.chunked_gram()  # (n_samples, n_samples)
-        M = Q.T @ gram @ Q  # (k, k)
-        eigvals, eigvecs = cp.linalg.eigh(M)
-        idx = cp.argsort(eigvals)[::-1]
-        eigvals = eigvals[idx]
-        eigvecs = eigvecs[:, idx]
-        S = cp.sqrt(cp.maximum(eigvals, 0))
-        Uhat = eigvecs
-    else:
-        B = Q.T @ X
-        Uhat, S, Vt = cp.linalg.svd(B, full_matrices=False)
+    B = Q.T @ X
+    Uhat, S, Vt = cp.linalg.svd(B, full_matrices=False)
     U = Q @ Uhat
 
+    # S are singular values of X; the pca Gram is X @ X.T / n_segregating
+    # (proportion=True), so coords scale by 1 / sqrt(n_segregating).
     coords = U[:, :n_components] * S[:n_components]
+    if n_segregating > 0:
+        coords = coords / cp.sqrt(n_segregating)
 
-    # explained variance
-    if isinstance(X, _DeferredPCA):
-        # Reuse gram from above (already computed for eigendecomposition)
-        total_var = cp.trace(gram) / n_samples
-    else:
-        total_var = cp.sum(cp.var(X, axis=0))
+    # explained variance ratio is scale-invariant, so the n_segregating and
+    # n_samples factors cancel: it equals S**2 / trace(X @ X.T).
+    total_var = cp.sum(cp.var(X, axis=0))
     var = (S[:n_components] ** 2) / n_samples
     explained_variance_ratio = var / total_var
 
@@ -742,8 +470,8 @@ def _local_pca_window_dense(X: "cp.ndarray", n_var: int, k: int
     Parameters
     ----------
     X : cupy.ndarray, shape (n_hap, n_var_w)
-        Variant-centred haplotype block (the caller has already
-        applied per-variant centering / scaling via ``_prepare_matrix``).
+        All-allele centered haplotype block (the caller has already
+        applied the per-allele centering via ``_prepare_centered``).
     n_var : int
         Span normaliser (matches ``_window_gram`` -- usually
         ``X.shape[1]`` but exposed so the caller can pass the original
@@ -1022,20 +750,6 @@ def _resolve_window_params(window_params, window_size, step_size, window_type,
     )
 
 
-def _materialize_prepared(X):
-    """If `_prepare_matrix` returned a deferred chunked view, concatenate it.
-
-    Per-window matrices are small enough that a single contiguous copy is fine
-    and it lets us apply additional in-place centering downstream.
-    """
-    if isinstance(X, _DeferredPCA):
-        n_var = X.shape[1]
-        return cp.concatenate(
-            [X._scale_chunk(s, min(s + X._chunk_size, n_var))
-             for s in range(0, n_var, X._chunk_size)], axis=1)
-    return X
-
-
 def _estimate_n_windows(matrix, window_params) -> int:
     """Upper bound on the number of windows ``WindowIterator`` will yield.
 
@@ -1289,8 +1003,8 @@ def _local_pca_with_jackknife(
 ) -> LocalPCAResult:
     """Local PCA with fused jackknife SE, sharing per-window matrix preparation.
 
-    Iterates windows once; for each valid window calls ``_prepare_matrix`` once
-    and from the same materialized ``X`` computes both the full Gram matrix (for
+    Iterates windows once; for each valid window calls ``_prepare_centered`` once
+    and from the same ``X`` computes both the full Gram matrix (for
     eigvals/eigvecs) and the leave-one-block-out Gram matrices (for jackknife).
 
     Two-tier validity: windows with enough variants for PCA (``>= max(k, 2)``)
