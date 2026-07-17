@@ -1,10 +1,11 @@
-"""Parity tests for the diploid Patterson/GCTA PCA (pca_dosage).
+"""Parity tests for the diploid dosage PCA standardized by binomial variance
+(pca_dosage).
 
-pca_dosage / randomized_pca_dosage standardize biallelic diploid dosages the way
-scikit-allel does (center by the per-variant mean, scale by sqrt(p (1 - p)) with
-p = mean / 2), then eigendecompose the individual-by-individual Gram. These tests
-pin that against allel.pca, check the randomized approximation, the ploidy-1/2
-type split (GenotypeMatrix only), and the biallelic requirement.
+pca_dosage / randomized_pca_dosage center each biallelic variant's alt-allele
+dosage on its mean and scale by the binomial standard deviation sqrt(p (1 - p)),
+p = mean / 2, then eigendecompose the individual-by-individual Gram. These tests
+pin the result against allel.pca as an external oracle, check the randomized
+approximation, the GenotypeMatrix-only type split, and the biallelic requirement.
 """
 import numpy as np
 import pytest

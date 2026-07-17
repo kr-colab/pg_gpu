@@ -189,16 +189,17 @@ PCA and Dimensionality Reduction
 
    from pg_gpu import decomposition
 
-   # tskit PCA: eigendecomposition of the genetic_relatedness matrix
-   # (all alleles kept, multiallelic-correct). Takes a HaplotypeMatrix.
+   # Multi-allele haploid PCA: eigendecomposition of the genetic relatedness
+   # matrix, keeping all alleles (multiallelic-correct). Takes a HaplotypeMatrix.
    coords, var_ratio = decomposition.pca(h, n_components=10)
 
    # Randomized approximation for very large datasets
    coords, var_ratio = decomposition.randomized_pca(
        h, n_components=10, random_state=42)
 
-   # Patterson/GCTA PCA of biallelic diploid dosages (EIGENSTRAT, matches
-   # scikit-allel). Takes a GenotypeMatrix; has a randomized counterpart.
+   # Diploid dosage PCA standardized by binomial variance (center each biallelic
+   # variant's dosage, scale by sqrt(p(1-p))). Takes a GenotypeMatrix; has a
+   # randomized counterpart.
    from pg_gpu import GenotypeMatrix
    g = GenotypeMatrix.from_haplotype_matrix(h)  # pair haplotypes as diploids
    coords, var_ratio = decomposition.pca_dosage(g, n_components=10)

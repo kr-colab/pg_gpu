@@ -20,21 +20,20 @@ _GPU_MEM_BUDGET = 0.3
 
 def _prepare_centered(haplotype_matrix, population=None, missing_data='include',
                       need_segregating=True, n_alleles=None):
-    """All-allele centered one-hot standardization (the tskit convention).
+    """All-allele centered one-hot standardization for the multi-allele PCA.
 
     For each present (site, allele) pair -- ALL alleles including the reference --
     the column is the indicator (hap == a) centered by the allele frequency p_a,
     with missing rows imputed to p_a so they contribute 0. There is no variance
-    scaling. The Gram X @ X.T is then the site-mode genetic_relatedness matrix at
-    haplotype granularity (each haplotype is its own sample), which is what tskit's
-    PCA decomposes.
+    scaling. The Gram X @ X.T is then the genetic relatedness matrix (the centered
+    per-allele covariance between samples) at haplotype granularity, with each
+    haplotype treated as its own sample.
 
     Returns (X, n_segregating), where X is (n_samples, n_cols) float64 and
-    n_segregating is the per-site sum of (present alleles - 1) -- tskit's
-    segregating-site count, used to normalize the Gram (proportion=True). When
-    ``need_segregating`` is False the count is not computed (returned as 0),
-    avoiding its host sync on the per-window path (lostruct normalizes by ncol,
-    not segregating sites).
+    n_segregating is the per-site sum of (present alleles - 1), the number of
+    segregating sites, used to normalize the Gram. When ``need_segregating`` is
+    False the count is not computed (returned as 0), avoiding its host sync on the
+    per-window path (local PCA normalizes by ncol, not segregating sites).
     """
     from ._memutil import allele_counts
 
@@ -97,14 +96,15 @@ def pca(haplotype_matrix: HaplotypeMatrix,
         n_components: int = 10,
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include'):
-    """Principal Component Analysis on haplotype data (tskit convention).
+    """Multi-allele haploid PCA.
 
-    Eigendecomposition of the site-mode genetic_relatedness matrix: the
-    haplotypes are centered per allele (all alleles including the reference, no
-    variance scaling), the Gram X @ X.T is that relatedness matrix, and it is
-    normalized by the number of segregating sites (proportion=True). This
-    matches tskit's PCA of the GRM. For the diploid biallelic Patterson/GCTA PCA
-    (EIGENSTRAT), use pca_dosage on a GenotypeMatrix.
+    Eigendecomposition of the genetic relatedness matrix: the haplotypes are
+    one-hot encoded keeping all alleles (including the reference), each column is
+    centered by its allele frequency with no variance scaling, and the
+    sample-by-sample Gram X @ X.T is normalized by the number of segregating
+    sites. Every haplotype is treated as its own sample, so this is
+    multiallelic-correct at any ploidy. For the diploid dosage PCA standardized by
+    binomial variance, use pca_dosage on a GenotypeMatrix.
 
     Parameters
     ----------
@@ -128,8 +128,8 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     from .genotype_matrix import GenotypeMatrix
     if isinstance(haplotype_matrix, GenotypeMatrix):
         raise TypeError(
-            "pca is the tskit PCA of genetic_relatedness and requires a "
-            "HaplotypeMatrix; for the diploid biallelic Patterson/GCTA PCA use "
+            "pca is the multi-allele haploid PCA and requires a HaplotypeMatrix; "
+            "for the diploid dosage PCA standardized by binomial variance use "
             "pca_dosage on a GenotypeMatrix.")
 
     X, n_segregating = _prepare_centered(haplotype_matrix, population, missing_data)
@@ -148,13 +148,13 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
                    n_iter: int = 3,
                    random_state: Optional[int] = None,
                    missing_data: str = 'include'):
-    """Randomized truncated-SVD approximation of pca (tskit convention).
+    """Randomized truncated-SVD approximation of the multi-allele haploid PCA.
 
     Same standardization as pca: haplotypes centered per allele (all alleles
     including the reference, no variance scaling), so this approximates the top
-    components of the site-mode genetic_relatedness matrix normalized by the
-    number of segregating sites. Faster than full pca when only a few components
-    are needed. For the diploid biallelic Patterson/GCTA PCA use
+    components of the genetic relatedness matrix normalized by the number of
+    segregating sites. Faster than full pca when only a few components are needed.
+    For the diploid dosage PCA standardized by binomial variance use
     randomized_pca_dosage on a GenotypeMatrix.
 
     Parameters
@@ -181,9 +181,9 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     from .genotype_matrix import GenotypeMatrix
     if isinstance(haplotype_matrix, GenotypeMatrix):
         raise TypeError(
-            "randomized_pca is the tskit PCA of genetic_relatedness and requires "
-            "a HaplotypeMatrix; for the diploid biallelic Patterson/GCTA PCA use "
-            "randomized_pca_dosage on a GenotypeMatrix.")
+            "randomized_pca is the multi-allele haploid PCA and requires a "
+            "HaplotypeMatrix; for the diploid dosage PCA standardized by binomial "
+            "variance use randomized_pca_dosage on a GenotypeMatrix.")
 
     X, n_segregating = _prepare_centered(haplotype_matrix, population, missing_data)
     n_samples, n_variants = X.shape
@@ -227,15 +227,13 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
 
 
 def _prepare_dosage(genotype_matrix, population=None, missing_data='include'):
-    """Patterson/GCTA standardization of biallelic diploid dosages.
+    """Binomial-variance standardization of biallelic diploid dosages.
 
     For each biallelic variant the alt-allele dosage (0/1/2) is centered by its
-    mean m across individuals and scaled by sqrt(p (1 - p)) with p = m / 2
-    (Patterson et al. 2006), missing imputed to m so it contributes 0 after
-    centering. Returns X (n_individuals, n_variants) float64. This is the
-    preprocessing scikit-allel applies in its diploid Patterson PCA (center by
-    the per-variant mean, scale by sqrt(p (1 - p)) with p the mean over the
-    ploidy).
+    mean m across individuals and scaled by the binomial standard deviation
+    sqrt(p (1 - p)), where p = m / 2 is the alt-allele frequency, with missing
+    imputed to m so it contributes 0 after centering. Returns X (n_individuals,
+    n_variants) float64.
     """
     matrix = genotype_matrix
     if matrix.device == 'CPU':
@@ -275,7 +273,7 @@ def _prepare_dosage(genotype_matrix, population=None, missing_data='include'):
     scale = cp.sqrt(p * (1.0 - p))
     scale = cp.where(scale > 0, scale, 1.0)                     # monomorphic -> no scale
     X = cp.where(valid, geno, m[None, :]).astype(cp.float64)    # impute missing -> m
-    X = (X - m[None, :]) / scale[None, :]                       # center + Patterson scale
+    X = (X - m[None, :]) / scale[None, :]                       # center + binomial-sd scale
     return X
 
 
@@ -283,14 +281,13 @@ def pca_dosage(genotype_matrix,
                n_components: int = 10,
                population: Optional[Union[str, list]] = None,
                missing_data: str = 'include'):
-    """Patterson/GCTA PCA of biallelic diploid dosages (scikit-allel convention).
+    """Diploid dosage PCA standardized by binomial variance.
 
     Standardizes each biallelic variant's alt-allele dosage (0/1/2) by centering
-    on its mean and scaling by sqrt(p (1 - p)), p = mean / 2, then eigendecomposes
-    the individual-by-individual Gram X @ X.T. This is the classical EIGENSTRAT /
-    GCTA PCA and matches scikit-allel's diploid Patterson PCA. For the tskit PCA of
-    genetic_relatedness (all-allele, multiallelic-correct) use pca on a
-    HaplotypeMatrix.
+    on its mean and scaling by the binomial standard deviation sqrt(p (1 - p)),
+    p = mean / 2, then eigendecomposes the individual-by-individual Gram X @ X.T.
+    For the multi-allele haploid PCA (all alleles kept, multiallelic-correct) use
+    pca on a HaplotypeMatrix.
 
     Parameters
     ----------
@@ -312,9 +309,9 @@ def pca_dosage(genotype_matrix,
     from .genotype_matrix import GenotypeMatrix
     if not isinstance(genotype_matrix, GenotypeMatrix):
         raise TypeError(
-            "pca_dosage is the Patterson/GCTA PCA of biallelic diploid dosages "
-            "and requires a GenotypeMatrix; for the tskit PCA of "
-            "genetic_relatedness use pca on a HaplotypeMatrix.")
+            "pca_dosage is the diploid dosage PCA standardized by binomial "
+            "variance and requires a GenotypeMatrix; for the multi-allele haploid "
+            "PCA use pca on a HaplotypeMatrix.")
 
     X = _prepare_dosage(genotype_matrix, population, missing_data)
     n_ind, n_var = X.shape
@@ -328,12 +325,11 @@ def randomized_pca_dosage(genotype_matrix,
                           n_iter: int = 3,
                           random_state: Optional[int] = None,
                           missing_data: str = 'include'):
-    """Randomized truncated-SVD approximation of pca_dosage (scikit-allel).
+    """Randomized truncated-SVD approximation of pca_dosage.
 
-    Same Patterson standardization as pca_dosage, approximating the top
+    Same binomial-variance standardization as pca_dosage, approximating the top
     components for large biallelic panels (the common biobank / SNP-array case).
-    For the tskit PCA of genetic_relatedness use randomized_pca on a
-    HaplotypeMatrix.
+    For the multi-allele haploid PCA use randomized_pca on a HaplotypeMatrix.
 
     Parameters
     ----------
@@ -359,9 +355,9 @@ def randomized_pca_dosage(genotype_matrix,
     from .genotype_matrix import GenotypeMatrix
     if not isinstance(genotype_matrix, GenotypeMatrix):
         raise TypeError(
-            "randomized_pca_dosage is the Patterson/GCTA PCA of biallelic diploid "
-            "dosages and requires a GenotypeMatrix; for the tskit PCA of "
-            "genetic_relatedness use randomized_pca on a HaplotypeMatrix.")
+            "randomized_pca_dosage is the diploid dosage PCA standardized by "
+            "binomial variance and requires a GenotypeMatrix; for the multi-allele "
+            "haploid PCA use randomized_pca on a HaplotypeMatrix.")
 
     X = _prepare_dosage(genotype_matrix, population, missing_data)
     n_samples, n_variants = X.shape
@@ -1655,6 +1651,15 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
     when requested the SE is computed in the same window pass as the
     base eigendecomposition (shared matrix prep), and is exposed via
     ``LostructResult.jackknife_se``.
+
+    Each window uses the same all-allele centered standardization as
+    :func:`pca` (all present alleles kept, centered by frequency, no
+    variance scaling), but its own per-window covariance ``X @ X.T /
+    (ncol - 1)`` rather than the segregating-site normalization. So the
+    per-window PC directions agree with :func:`pca` while the eigenvalue
+    and coordinate scale do not. Because all alleles are kept and only the
+    variant axis is centered, the per-window covariance differs from a
+    dosage-per-site, doubly-centered local PCA on biallelic data.
 
     Parameters
     ----------

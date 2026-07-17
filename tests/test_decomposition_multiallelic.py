@@ -1,12 +1,13 @@
-"""Multiallelic-correctness tests for decomposition PCA.
+"""Multiallelic-correctness tests for the multi-allele haploid PCA.
 
 pca / randomized_pca use the all-allele centered standardization (every present
 allele including the reference, centered by its frequency, no variance scaling),
-so the Gram X @ X.T normalized by the number of segregating sites is exactly the
-site-mode genetic_relatedness matrix that tskit's PCA decomposes. These tests pin
-that convention: the Gram and explained variance against tskit, the randomized
-approximation against full pca, the GenotypeMatrix rejection, and the per-window
-all-allele path used by local_pca / lostruct / jackknife.
+so the Gram X @ X.T normalized by the number of segregating sites is the genetic
+relatedness matrix (the centered per-allele covariance between samples). These
+tests pin it against the tree sequence's genetic_relatedness output as an external
+oracle: the Gram and explained variance, the randomized approximation against full
+pca, the GenotypeMatrix rejection, and the per-window all-allele path used by
+local_pca / lostruct / jackknife.
 """
 import numpy as np
 import cupy as cp
@@ -21,10 +22,10 @@ from pg_gpu.decomposition import (
 
 class TestDecompositionMultiallelic:
 
-    def test_pca_gram_matches_tskit_relatedness(self, multiallelic_hm):
-        # The centered all-allele Gram (proportion-normalized) is exactly the
-        # site-mode genetic_relatedness matrix -- the matrix tskit's PCA
-        # decomposes. This pins the whole tskit convention.
+    def test_pca_gram_matches_tree_sequence_relatedness(self, multiallelic_hm):
+        # The centered all-allele Gram (normalized by segregating sites) is the
+        # genetic relatedness matrix; pin it against the tree sequence's
+        # genetic_relatedness output as an external oracle.
         ts, hm = multiallelic_hm
         X, n_seg = _prepare_centered(hm)
         C = cp.asnumpy((X @ X.T) / n_seg)
@@ -36,7 +37,7 @@ class TestDecompositionMultiallelic:
             proportion=True)).reshape(n, n)
         np.testing.assert_allclose(C, G, atol=1e-9, rtol=1e-6)
 
-    def test_pca_explained_variance_matches_tskit(self, multiallelic_hm):
+    def test_pca_explained_variance_matches_tree_sequence(self, multiallelic_hm):
         ts, hm = multiallelic_hm
         n = ts.num_samples
         sets = [[s] for s in ts.samples()]
