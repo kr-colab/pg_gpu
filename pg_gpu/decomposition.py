@@ -18,152 +18,62 @@ from ._utils import get_population_matrix as _get_population_matrix
 _GPU_MEM_BUDGET = 0.3
 
 
-def _prepare_matrix(haplotype_matrix, scaler, population, missing_data='include'):
-    """Center and scale haplotype matrix for PCA.
+def _prepare_centered(haplotype_matrix, population=None, missing_data='include',
+                      need_segregating=True, n_alleles=None):
+    """All-allele centered one-hot standardization for the multi-allele PCA.
 
-    Uses chunked processing for large matrices to avoid OOM.
-    Returns the prepared matrix X on GPU.
+    For each present (site, allele) pair -- ALL alleles including the reference --
+    the column is the indicator (hap == a) centered by the allele frequency p_a,
+    with missing rows imputed to p_a so they contribute 0. There is no variance
+    scaling. The Gram X @ X.T is then the genetic relatedness matrix (the centered
+    per-allele covariance between samples) at haplotype granularity, with each
+    haplotype treated as its own sample.
+
+    Returns (X, n_segregating), where X is (n_samples, n_cols) float64 and
+    n_segregating is the per-site sum of (present alleles - 1), the number of
+    segregating sites, used to normalize the Gram. When ``need_segregating`` is
+    False the count is not computed (returned as 0), avoiding its host sync on the
+    per-window path (local PCA normalizes by ncol, not segregating sites).
     """
-    from ._memutil import dac_and_n, estimate_variant_chunk_size
+    from ._memutil import allele_counts
 
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
+    matrix = (_get_population_matrix(haplotype_matrix, population)
+              if population is not None else haplotype_matrix)
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
     hap = matrix.haplotypes
     n_samples, n_var = hap.shape
+    if missing_data == 'exclude' and n_var:
+        complete = cp.sum(hap >= 0, axis=0) == n_samples
+        hap = hap[:, complete]
 
-    if missing_data == 'exclude':
-        dac, nv = dac_and_n(hap)
-        complete = nv == n_samples
-        if not cp.all(complete):
-            hap = hap[:, complete]
-            n_var = hap.shape[1]
+    if hap.shape[1] == 0:
+        return cp.zeros((n_samples, 0), dtype=cp.float64), 0
 
-    # Compute per-site mean and scale from allele counts (memory-safe)
-    dac, nv = dac_and_n(hap)
-    site_mean = cp.where(nv > 0, dac.astype(cp.float64) / nv.astype(cp.float64), 0.0)
-
-    if scaler == 'patterson':
-        p = site_mean
-        scale = cp.sqrt(p * (1 - p))
-        scale = cp.where(scale > 0, scale, 1.0)
-    elif scaler == 'standard':
-        # Need variance -- compute via second pass or approximate
-        scale = None  # handled below
+    if n_alleles is not None:
+        K = int(n_alleles)                             # hoisted (avoids a per-call max sync)
     else:
-        scale = None
+        K = int(hap.max()) + 1 if hap.size else 1
+    ac, n_valid = allele_counts(hap, n_alleles=K)     # (n_var, K), (n_var,)
+    pairs = cp.argwhere(ac > 0)                        # present (site, allele), all alleles
+    if pairs.shape[0] == 0:
+        return cp.zeros((n_samples, 0), dtype=cp.float64), 0
 
-    # Check if full float64 matrix fits in memory
-    free = cp.cuda.Device().mem_info[0]
-    needed = n_samples * n_var * 8  # float64
-    if needed < free * 0.4:
-        # Fast path: materialize full matrix
-        has_missing = bool(cp.any(hap < 0).get())
-        if has_missing:
-            valid_mask = hap >= 0
-            X = cp.where(valid_mask, hap, 0).astype(cp.float64)
-            X = cp.where(valid_mask, X, site_mean[None, :])
-        else:
-            X = hap.astype(cp.float64)
-        X -= site_mean
-        if scaler == 'patterson':
-            X /= scale
-        elif scaler == 'standard':
-            std = cp.std(X, axis=0)
-            valid = std > 0
-            X[:, valid] /= std[valid]
-            X[:, ~valid] = 0
-        return X
+    sites = pairs[:, 0]
+    alleles = pairs[:, 1]
+    g = hap[:, sites]                                  # (n_samples, n_cols)
+    valid = g >= 0
+    p = ac[sites, alleles].astype(cp.float64) / n_valid[sites].astype(cp.float64)
+    ind = (g == alleles[None, :]).astype(cp.float64)
+    X = cp.where(valid, ind, p[None, :]) - p[None, :]  # center; missing -> 0
 
-    # Memory-constrained path: return hap + metadata for chunked PCA
-    # Store scaling info so pca() can chunk the matmul
-    return _DeferredPCA(hap, site_mean, scale, scaler)
-
-
-class _DeferredPCA:
-    """Wrapper for memory-constrained PCA: stores hap + scaling metadata
-    so the caller can compute X @ X.T via chunked matmul without
-    materializing the full float64 matrix."""
-
-    def __init__(self, hap, site_mean, scale, scaler):
-        self.hap = hap
-        self.site_mean = site_mean
-        self.scale = scale
-        self.scaler = scaler
-        self.shape = hap.shape
-
-    def _scale_chunk(self, start, end):
-        """Prepare a scaled float64 chunk of the matrix."""
-        chunk = self.hap[:, start:end]
-        # Check this chunk for missing (avoids full-matrix boolean allocation)
-        has_missing_chunk = bool(cp.any(chunk < 0).get())
-        if has_missing_chunk:
-            valid = chunk >= 0
-            x = cp.where(valid, chunk, 0).astype(cp.float64)
-            x = cp.where(valid, x, self.site_mean[start:end])
-        else:
-            x = chunk.astype(cp.float64)
-        x -= self.site_mean[start:end]
-        if self.scaler == 'patterson' and self.scale is not None:
-            x /= self.scale[start:end]
-        return x
-
-    @property
-    def _chunk_size(self):
-        from ._memutil import estimate_variant_chunk_size
-        return estimate_variant_chunk_size(self.shape[0], bytes_per_element=8,
-                                           n_intermediates=2)
-
-    def chunked_gram(self):
-        """Compute X @ X.T via chunked processing."""
-        n_samples, n_var = self.shape
-        C = cp.zeros((n_samples, n_samples), dtype=cp.float64)
-        for start in range(0, n_var, self._chunk_size):
-            end = min(start + self._chunk_size, n_var)
-            x = self._scale_chunk(start, end)
-            C += x @ x.T
-            del x
-        return C
-
-    def __matmul__(self, other):
-        """Compute X @ other via chunked processing."""
-        n_samples, n_var = self.shape
-        result = cp.zeros((n_samples, other.shape[1]), dtype=cp.float64)
-        for start in range(0, n_var, self._chunk_size):
-            end = min(start + self._chunk_size, n_var)
-            x = self._scale_chunk(start, end)
-            result += x @ other[start:end, :]
-            del x
-        return result
-
-    @property
-    def T(self):
-        """Return a transposed view for X.T @ Y operations."""
-        return _DeferredPCATranspose(self)
-
-
-class _DeferredPCATranspose:
-    """Transpose view of _DeferredPCA for X.T @ Y operations."""
-
-    def __init__(self, parent):
-        self.parent = parent
-        self.shape = (parent.shape[1], parent.shape[0])
-
-    def __matmul__(self, other):
-        """Compute X.T @ other via chunked processing."""
-        n_samples, n_var = self.parent.shape
-        result = cp.zeros((n_var, other.shape[1]), dtype=cp.float64)
-        for start in range(0, n_var, self.parent._chunk_size):
-            end = min(start + self.parent._chunk_size, n_var)
-            x = self.parent._scale_chunk(start, end)
-            result[start:end, :] = x.T @ other
-            del x
-        return result
+    # segregating sites = sum_site (present alleles - 1) = n_cols - n_present_sites.
+    if need_segregating:
+        n_segregating = int(pairs.shape[0] - cp.unique(sites).size)
+    else:
+        n_segregating = 0
+    return X, n_segregating
 
 
 def _pca_from_gram(C, n_samples, n_components):
@@ -184,10 +94,17 @@ def _pca_from_gram(C, n_samples, n_components):
 
 def pca(haplotype_matrix: HaplotypeMatrix,
         n_components: int = 10,
-        scaler: Optional[str] = 'patterson',
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include'):
-    """Principal Component Analysis on haplotype data.
+    """Multi-allele haploid PCA.
+
+    Eigendecomposition of the genetic relatedness matrix: the haplotypes are
+    one-hot encoded keeping all alleles (including the reference), each column is
+    centered by its allele frequency with no variance scaling, and the
+    sample-by-sample Gram X @ X.T is normalized by the number of segregating
+    sites. Every haplotype is treated as its own sample, so this is
+    multiallelic-correct at any ploidy. For the diploid dosage PCA standardized by
+    binomial variance, use pca_dosage on a GenotypeMatrix.
 
     Parameters
     ----------
@@ -195,15 +112,10 @@ def pca(haplotype_matrix: HaplotypeMatrix,
         Haplotype data. Rows are haplotypes, columns are variants.
     n_components : int
         Number of principal components to compute.
-    scaler : str or None
-        Scaling method before PCA:
-        'patterson' - scale by sqrt(p*(1-p)), Patterson et al. (2006)
-        'standard' - standardize to unit variance per variant
-        None - center only (subtract mean)
     population : str or list, optional
         Population subset to use.
     missing_data : str
-        'include' - impute missing to per-site mean
+        'include' - impute missing to per-site allele frequency
         'exclude' - filter sites with any missing
 
     Returns
@@ -213,77 +125,69 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     explained_variance_ratio : ndarray, float64, shape (n_components,)
         Proportion of variance explained by each component.
     """
-    prepared = _prepare_matrix(haplotype_matrix, scaler, population, missing_data)
+    from .genotype_matrix import GenotypeMatrix
+    if isinstance(haplotype_matrix, GenotypeMatrix):
+        raise TypeError(
+            "pca is the multi-allele haploid PCA and requires a HaplotypeMatrix; "
+            "for the diploid dosage PCA standardized by binomial variance use "
+            "pca_dosage on a GenotypeMatrix.")
 
-    if isinstance(prepared, _DeferredPCA):
-        n_samples = prepared.shape[0]
-        n_components = min(n_components, n_samples)
-        C = prepared.chunked_gram()
-        return _pca_from_gram(C, n_samples, n_components)
+    X, n_segregating = _prepare_centered(haplotype_matrix, population, missing_data)
+    n_samples, n_cols = X.shape
+    n_components = min(n_components, n_samples, max(n_cols, 1))
 
-    X = prepared
-    n_samples, n_variants = X.shape
-    n_components = min(n_components, min(n_samples, n_variants))
-
-    # When n_samples <= n_variants (typical for popgen), eigendecompose
-    # the n x n Gram matrix X @ X.T instead of full SVD on n x m.
-    if n_samples <= n_variants:
-        C = X @ X.T
-        return _pca_from_gram(C, n_samples, n_components)
-
-    # Fallback: full SVD when n_samples > n_variants
-    try:
-        U, S, Vt = cp.linalg.svd(X, full_matrices=False)
-    except Exception as e:
-        if 'CUSOLVER' in str(type(e).__name__) or 'CUSOLVER' in str(e):
-            raise RuntimeError(
-                f"Full SVD failed on matrix of shape ({n_samples}, {n_variants}). "
-                f"This dataset is too large for exact PCA. "
-                f"Use randomized_pca() instead, which handles large datasets efficiently."
-            ) from e
-        raise
-    coords = U[:, :n_components] * S[:n_components]
-    var = (S ** 2) / n_samples
-    explained_variance_ratio = var[:n_components] / cp.sum(var)
-
-    return coords.get(), explained_variance_ratio.get()
+    C = X @ X.T
+    if n_segregating > 0:
+        C = C / n_segregating
+    return _pca_from_gram(C, n_samples, n_components)
 
 
 def randomized_pca(haplotype_matrix: HaplotypeMatrix,
                    n_components: int = 10,
-                   scaler: Optional[str] = 'patterson',
                    population: Optional[Union[str, list]] = None,
                    n_iter: int = 3,
                    random_state: Optional[int] = None,
                    missing_data: str = 'include'):
-    """Randomized PCA using truncated SVD approximation.
+    """Randomized truncated-SVD approximation of the multi-allele haploid PCA.
 
-    Faster than full PCA for large datasets where only a few
-    components are needed.
+    Same standardization as pca: haplotypes centered per allele (all alleles
+    including the reference, no variance scaling), so this approximates the top
+    components of the genetic relatedness matrix normalized by the number of
+    segregating sites. Faster than full pca when only a few components are needed.
+    For the diploid dosage PCA standardized by binomial variance use
+    randomized_pca_dosage on a GenotypeMatrix.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
-        Haplotype data.
+        Haplotype data. Rows are haplotypes, columns are variants.
     n_components : int
         Number of components.
-    scaler : str or None
-        'patterson', 'standard', or None.
     population : str or list, optional
         Population subset.
     n_iter : int
         Number of power iterations for accuracy.
     random_state : int, optional
         Random seed for reproducibility.
+    missing_data : str
+        'include' - impute missing to per-site allele frequency
+        'exclude' - filter sites with any missing
 
     Returns
     -------
     coords : ndarray, float64, shape (n_samples, n_components)
     explained_variance_ratio : ndarray, float64, shape (n_components,)
     """
-    X = _prepare_matrix(haplotype_matrix, scaler, population, missing_data)
+    from .genotype_matrix import GenotypeMatrix
+    if isinstance(haplotype_matrix, GenotypeMatrix):
+        raise TypeError(
+            "randomized_pca is the multi-allele haploid PCA and requires a "
+            "HaplotypeMatrix; for the diploid dosage PCA standardized by binomial "
+            "variance use randomized_pca_dosage on a GenotypeMatrix.")
+
+    X, n_segregating = _prepare_centered(haplotype_matrix, population, missing_data)
     n_samples, n_variants = X.shape
-    n_components = min(n_components, min(n_samples, n_variants))
+    n_components = min(n_components, n_samples, max(n_variants, 1))
 
     # randomized SVD on GPU
     if random_state is not None:
@@ -291,7 +195,7 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
 
     # random projection
     k = n_components + 10  # oversampling
-    k = min(k, min(n_samples, n_variants))
+    k = min(k, min(n_samples, max(n_variants, 1)))
     Omega = cp.random.randn(n_variants, k, dtype=cp.float64)
     Y = X @ Omega
 
@@ -303,31 +207,181 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     Q, _ = cp.linalg.qr(Y)
 
     # project and SVD in reduced space
-    if isinstance(X, _DeferredPCA):
-        # B = Q.T @ X has shape (k, n_var) — too wide for cuSOLVER SVD.
-        # Instead compute B @ B.T = Q.T @ (X @ X.T) @ Q = Q.T @ gram @ Q
-        # and eigendecompose the small (k, k) matrix.
-        gram = X.chunked_gram()  # (n_samples, n_samples)
-        M = Q.T @ gram @ Q  # (k, k)
-        eigvals, eigvecs = cp.linalg.eigh(M)
-        idx = cp.argsort(eigvals)[::-1]
-        eigvals = eigvals[idx]
-        eigvecs = eigvecs[:, idx]
-        S = cp.sqrt(cp.maximum(eigvals, 0))
-        Uhat = eigvecs
-    else:
-        B = Q.T @ X
-        Uhat, S, Vt = cp.linalg.svd(B, full_matrices=False)
+    B = Q.T @ X
+    Uhat, S, Vt = cp.linalg.svd(B, full_matrices=False)
+    U = Q @ Uhat
+
+    # S are singular values of X; the pca Gram is X @ X.T / n_segregating
+    # (proportion=True), so coords scale by 1 / sqrt(n_segregating).
+    coords = U[:, :n_components] * S[:n_components]
+    if n_segregating > 0:
+        coords = coords / cp.sqrt(n_segregating)
+
+    # explained variance ratio is scale-invariant, so the n_segregating and
+    # n_samples factors cancel: it equals S**2 / trace(X @ X.T).
+    total_var = cp.sum(cp.var(X, axis=0))
+    var = (S[:n_components] ** 2) / n_samples
+    explained_variance_ratio = var / total_var
+
+    return coords.get(), explained_variance_ratio.get()
+
+
+def _prepare_dosage(genotype_matrix, population=None, missing_data='include'):
+    """Binomial-variance standardization of biallelic diploid dosages.
+
+    For each biallelic variant the alt-allele dosage (0/1/2) is centered by its
+    mean m across individuals and scaled by the binomial standard deviation
+    sqrt(p (1 - p)), where p = m / 2 is the alt-allele frequency, with missing
+    imputed to m so it contributes 0 after centering. Returns X (n_individuals,
+    n_variants) float64.
+    """
+    matrix = genotype_matrix
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+
+    geno = matrix.genotypes
+    # Subset individuals inline (the shared get_population_matrix is haplotype
+    # granularity; genotype/haplotype population subsetting is unified in the
+    # type-domain-consistency follow-up).
+    if population is not None:
+        if isinstance(population, str):
+            if matrix.sample_sets is None or population not in matrix.sample_sets:
+                raise ValueError(
+                    f"Population {population} not found in sample_sets")
+            idx = matrix.sample_sets[population]
+        else:
+            idx = list(population)
+        geno = geno[idx, :]
+
+    n_ind, n_var = geno.shape
+    if n_var and int(geno.max()) > 2:
+        raise ValueError(
+            "pca_dosage requires biallelic diploid dosages coded 0/1/2; found a "
+            "genotype > 2. Apply a biallelic filter first.")
+
+    if missing_data == 'exclude' and n_var:
+        complete = cp.sum(geno >= 0, axis=0) == n_ind
+        geno = geno[:, complete]
+    if geno.shape[1] == 0:
+        return cp.zeros((n_ind, 0), dtype=cp.float64)
+
+    valid = geno >= 0
+    n_valid = cp.sum(valid, axis=0).astype(cp.float64)          # per-variant
+    dsum = cp.sum(cp.where(valid, geno, 0), axis=0).astype(cp.float64)
+    m = cp.where(n_valid > 0, dsum / n_valid, 0.0)              # mean dosage
+    p = m / 2.0                                                 # ploidy 2
+    scale = cp.sqrt(p * (1.0 - p))
+    scale = cp.where(scale > 0, scale, 1.0)                     # monomorphic -> no scale
+    X = cp.where(valid, geno, m[None, :]).astype(cp.float64)    # impute missing -> m
+    X = (X - m[None, :]) / scale[None, :]                       # center + binomial-sd scale
+    return X
+
+
+def pca_dosage(genotype_matrix,
+               n_components: int = 10,
+               population: Optional[Union[str, list]] = None,
+               missing_data: str = 'include'):
+    """Diploid dosage PCA standardized by binomial variance.
+
+    Standardizes each biallelic variant's alt-allele dosage (0/1/2) by centering
+    on its mean and scaling by the binomial standard deviation sqrt(p (1 - p)),
+    p = mean / 2, then eigendecomposes the individual-by-individual Gram X @ X.T.
+    For the multi-allele haploid PCA (all alleles kept, multiallelic-correct) use
+    pca on a HaplotypeMatrix.
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix
+        Biallelic diploid dosages. Rows are individuals, columns are variants.
+    n_components : int
+        Number of principal components to compute.
+    population : str or list, optional
+        Population subset to use.
+    missing_data : str
+        'include' - impute missing to the per-variant mean dosage
+        'exclude' - filter variants with any missing genotype
+
+    Returns
+    -------
+    coords : ndarray, float64, shape (n_individuals, n_components)
+    explained_variance_ratio : ndarray, float64, shape (n_components,)
+    """
+    from .genotype_matrix import GenotypeMatrix
+    if not isinstance(genotype_matrix, GenotypeMatrix):
+        raise TypeError(
+            "pca_dosage is the diploid dosage PCA standardized by binomial "
+            "variance and requires a GenotypeMatrix; for the multi-allele haploid "
+            "PCA use pca on a HaplotypeMatrix.")
+
+    X = _prepare_dosage(genotype_matrix, population, missing_data)
+    n_ind, n_var = X.shape
+    n_components = min(n_components, n_ind, max(n_var, 1))
+    return _pca_from_gram(X @ X.T, n_ind, n_components)
+
+
+def randomized_pca_dosage(genotype_matrix,
+                          n_components: int = 10,
+                          population: Optional[Union[str, list]] = None,
+                          n_iter: int = 3,
+                          random_state: Optional[int] = None,
+                          missing_data: str = 'include'):
+    """Randomized truncated-SVD approximation of pca_dosage.
+
+    Same binomial-variance standardization as pca_dosage, approximating the top
+    components for large biallelic panels (the common biobank / SNP-array case).
+    For the multi-allele haploid PCA use randomized_pca on a HaplotypeMatrix.
+
+    Parameters
+    ----------
+    genotype_matrix : GenotypeMatrix
+        Biallelic diploid dosages. Rows are individuals, columns are variants.
+    n_components : int
+        Number of components.
+    population : str or list, optional
+        Population subset.
+    n_iter : int
+        Number of power iterations for accuracy.
+    random_state : int, optional
+        Random seed for reproducibility.
+    missing_data : str
+        'include' - impute missing to the per-variant mean dosage
+        'exclude' - filter variants with any missing genotype
+
+    Returns
+    -------
+    coords : ndarray, float64, shape (n_individuals, n_components)
+    explained_variance_ratio : ndarray, float64, shape (n_components,)
+    """
+    from .genotype_matrix import GenotypeMatrix
+    if not isinstance(genotype_matrix, GenotypeMatrix):
+        raise TypeError(
+            "randomized_pca_dosage is the diploid dosage PCA standardized by "
+            "binomial variance and requires a GenotypeMatrix; for the multi-allele "
+            "haploid PCA use randomized_pca on a HaplotypeMatrix.")
+
+    X = _prepare_dosage(genotype_matrix, population, missing_data)
+    n_samples, n_variants = X.shape
+    n_components = min(n_components, n_samples, max(n_variants, 1))
+
+    if random_state is not None:
+        cp.random.seed(random_state)
+
+    # random projection
+    k = min(n_components + 10, n_samples, max(n_variants, 1))
+    Omega = cp.random.randn(n_variants, k, dtype=cp.float64)
+    Y = X @ Omega
+
+    # power iteration for accuracy
+    for _ in range(n_iter):
+        Y = X @ (X.T @ Y)
+
+    Q, _ = cp.linalg.qr(Y)
+    B = Q.T @ X
+    Uhat, S, Vt = cp.linalg.svd(B, full_matrices=False)
     U = Q @ Uhat
 
     coords = U[:, :n_components] * S[:n_components]
-
-    # explained variance
-    if isinstance(X, _DeferredPCA):
-        # Reuse gram from above (already computed for eigendecomposition)
-        total_var = cp.trace(gram) / n_samples
-    else:
-        total_var = cp.sum(cp.var(X, axis=0))
+    total_var = cp.sum(cp.var(X, axis=0))
     var = (S[:n_components] ** 2) / n_samples
     explained_variance_ratio = var / total_var
 
@@ -512,7 +566,6 @@ class LocalPCAResult:
         `pc_dist` for the proportion-of-variance denominator.
     k : int
         Number of PCs retained.
-    scaler : str or None
     missing_data : str
     jackknife_se : numpy.ndarray or None
         Delete-1 block jackknife SE of the top-k eigenvectors. Shape
@@ -526,7 +579,6 @@ class LocalPCAResult:
     eigvecs: np.ndarray
     sumsq: np.ndarray
     k: int
-    scaler: Optional[str]
     missing_data: str
     jackknife_se: Optional[np.ndarray] = None
 
@@ -580,8 +632,8 @@ def _local_pca_window_dense(X: "cp.ndarray", n_var: int, k: int
     Parameters
     ----------
     X : cupy.ndarray, shape (n_hap, n_var_w)
-        Variant-centred haplotype block (the caller has already
-        applied per-variant centering / scaling via ``_prepare_matrix``).
+        All-allele centered haplotype block (the caller has already
+        applied the per-allele centering via ``_prepare_centered``).
     n_var : int
         Span normaliser (matches ``_window_gram`` -- usually
         ``X.shape[1]`` but exposed so the caller can pass the original
@@ -675,7 +727,7 @@ def _local_pca_window_rsvd(X: "cp.ndarray", n_var: int, k: int,
     return eigvals, eigvecs, sumsq
 
 
-def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
+def _local_pca_streaming(matrix, iterator, k, missing_data,
                           engine, tile_size, oversample,
                           n_subspace_iter, random_state, window_params):
     """Streaming local PCA dispatcher (engine='streaming-dense' or
@@ -694,6 +746,10 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
     peak fragmentation at a small per-call cost.
     """
     n_samples = matrix.num_haplotypes
+    # Global allele width, computed once, so the per-window standardization does
+    # not pay an int(hap.max()) host sync per window (keeps the streaming sync
+    # footprint at the pre-reframe level).
+    n_alleles_all = int(matrix.haplotypes.max()) + 1 if matrix.num_variants else 1
 
     if tile_size is None:
         tile_size = 16
@@ -732,9 +788,8 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
             del window
             continue
 
-        X = _prepare_matrix(window.matrix, scaler, population=None,
-                            missing_data=missing_data)
-        X = _materialize_prepared(X)
+        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
+                                 need_segregating=False, n_alleles=n_alleles_all)
 
         if engine == 'streaming-dense':
             evals, evecs, sumsq = _local_pca_window_dense(
@@ -773,6 +828,7 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
 
     eigvals_host[~valid_mask] = np.nan
     eigvecs_host[~valid_mask] = np.nan
+    _sign_align_windows(eigvecs_host)
     sumsq_host[~valid_mask] = np.nan
 
     chrom_col, start_col, end_col, center_col, nvar_col, wid_col, _ = zip(
@@ -792,7 +848,6 @@ def _local_pca_streaming(matrix, iterator, k, scaler, missing_data,
         eigvecs=eigvecs_host,
         sumsq=sumsq_host,
         k=k,
-        scaler=scaler,
         missing_data=missing_data,
     )
 
@@ -855,20 +910,6 @@ def _resolve_window_params(window_params, window_size, step_size, window_type,
         step_size=step_size if step_size is not None else window_size,
         regions=regions,
     )
-
-
-def _materialize_prepared(X):
-    """If `_prepare_matrix` returned a deferred chunked view, concatenate it.
-
-    Per-window matrices are small enough that a single contiguous copy is fine
-    and it lets us apply additional in-place centering downstream.
-    """
-    if isinstance(X, _DeferredPCA):
-        n_var = X.shape[1]
-        return cp.concatenate(
-            [X._scale_chunk(s, min(s + X._chunk_size, n_var))
-             for s in range(0, n_var, X._chunk_size)], axis=1)
-    return X
 
 
 def _estimate_n_windows(matrix, window_params) -> int:
@@ -935,10 +976,36 @@ def _pick_dense_engine(matrix, window_params,
     return 'streaming-dense'
 
 
+def _sign_align_windows(eigvecs):
+    """Flip per-window eigenvector signs so adjacent windows are consistent.
+
+    ``eigvecs`` is (n_windows, k, n_samples); each eigenvector is defined only up
+    to sign, so the raw per-window PCs flip arbitrarily along the genome. For each
+    PC, walk the windows in order and negate a window's eigenvector when its dot
+    product with the last valid window's eigenvector is negative. Invalid (NaN)
+    windows are skipped. Operates in place on the host array and returns it. Only
+    the sign of the coordinates changes; eigenvalues and lostruct distances (which
+    are sign-invariant) are unaffected.
+    """
+    if eigvecs.size == 0:
+        return eigvecs
+    n_windows, k, _ = eigvecs.shape
+    for p in range(k):
+        prev = None
+        for w in range(n_windows):
+            v = eigvecs[w, p]
+            if np.isnan(v).any():
+                continue
+            if prev is not None and float(np.dot(v, prev)) < 0.0:
+                eigvecs[w, p] = -v
+                v = eigvecs[w, p]
+            prev = v
+    return eigvecs
+
+
 def local_pca(haplotype_matrix: "HaplotypeMatrix",
               window_params=None,
               k: int = 2,
-              scaler: Optional[str] = None,
               missing_data: str = 'include',
               population: Optional[Union[str, list]] = None,
               batch_size: Optional[int] = None,
@@ -965,8 +1032,6 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
         Pre-built window spec. Required when ``window_size`` is not given.
     k : int
         Number of PCs to retain per window.
-    scaler : str or None
-        None (lostruct default), 'patterson', or 'standard'. See `pca()`.
     missing_data : str
         'include' (impute to per-site mean) or 'exclude' (drop missing sites).
         lostruct uses pairwise-complete; we approximate with mean imputation.
@@ -1020,7 +1085,6 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
             matrix=matrix,
             iterator=iterator,
             k=k,
-            scaler=scaler,
             missing_data=missing_data,
             engine=engine,
             tile_size=tile_size,
@@ -1046,9 +1110,8 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
             valid_flags.append(False)
             continue
 
-        X = _prepare_matrix(window.matrix, scaler, population=None,
-                            missing_data=missing_data)
-        X = _materialize_prepared(X)
+        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
+                                 need_segregating=False)
         C, sumsq = _window_gram(X, X.shape[1])
         gram_list.append(C)
         sumsq_list.append(sumsq)
@@ -1064,6 +1127,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     valid_mask = np.array(valid_flags, dtype=bool)
     eigvals_host[~valid_mask] = np.nan
     eigvecs_host[~valid_mask] = np.nan
+    _sign_align_windows(eigvecs_host)
     sumsq_host[~valid_mask] = np.nan
 
     windows_df = pd.DataFrame({
@@ -1081,7 +1145,6 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
         eigvecs=eigvecs_host,
         sumsq=sumsq_host,
         k=k,
-        scaler=scaler,
         missing_data=missing_data,
     )
 
@@ -1091,7 +1154,6 @@ def _local_pca_with_jackknife(
     window_params=None,
     k: int = 2,
     n_blocks: int = 10,
-    scaler: Optional[str] = None,
     missing_data: str = 'include',
     population: Optional[Union[str, list]] = None,
     aggregate: Optional[str] = 'mean',
@@ -1103,8 +1165,8 @@ def _local_pca_with_jackknife(
 ) -> LocalPCAResult:
     """Local PCA with fused jackknife SE, sharing per-window matrix preparation.
 
-    Iterates windows once; for each valid window calls ``_prepare_matrix`` once
-    and from the same materialized ``X`` computes both the full Gram matrix (for
+    Iterates windows once; for each valid window calls ``_prepare_centered`` once
+    and from the same ``X`` computes both the full Gram matrix (for
     eigvals/eigvecs) and the leave-one-block-out Gram matrices (for jackknife).
 
     Two-tier validity: windows with enough variants for PCA (``>= max(k, 2)``)
@@ -1153,9 +1215,8 @@ def _local_pca_with_jackknife(
             valid_jk.append(False)
             continue
 
-        X = _prepare_matrix(window.matrix, scaler, population=None,
-                            missing_data=missing_data)
-        X = _materialize_prepared(X)
+        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
+                                 need_segregating=False)
         n_var_win = X.shape[1]
 
         # Full Gram for local_pca.
@@ -1196,6 +1257,7 @@ def _local_pca_with_jackknife(
     pca_mask = np.array(valid_pca, dtype=bool)
     eigvals_host[~pca_mask] = np.nan
     eigvecs_host[~pca_mask] = np.nan
+    _sign_align_windows(eigvecs_host)
     sumsq_host[~pca_mask] = np.nan
 
     # --- Jackknife eigendecomposition ---
@@ -1233,7 +1295,6 @@ def _local_pca_with_jackknife(
         eigvecs=eigvecs_host,
         sumsq=sumsq_host,
         k=k,
-        scaler=scaler,
         missing_data=missing_data,
         jackknife_se=jackknife_se,
     )
@@ -1552,7 +1613,6 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
              # local_pca params
              window_params=None,
              k: int = 2,
-             scaler: Optional[str] = None,
              missing_data: str = 'include',
              population: Optional[Union[str, list]] = None,
              batch_size: Optional[int] = None,
@@ -1592,6 +1652,15 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
     base eigendecomposition (shared matrix prep), and is exposed via
     ``LostructResult.jackknife_se``.
 
+    Each window uses the same all-allele centered standardization as
+    :func:`pca` (all present alleles kept, centered by frequency, no
+    variance scaling), but its own per-window covariance ``X @ X.T /
+    (ncol - 1)`` rather than the segregating-site normalization. So the
+    per-window PC directions agree with :func:`pca` while the eigenvalue
+    and coordinate scale do not. Because all alleles are kept and only the
+    variant axis is centered, the per-window covariance differs from a
+    dosage-per-site, doubly-centered local PCA on biallelic data.
+
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
@@ -1600,7 +1669,7 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
         Pre-built window spec. Required when ``window_size`` is not given.
     k : int
         Number of PCs retained per window in the local PCA step.
-    scaler, missing_data, population, batch_size : see :func:`local_pca`.
+    missing_data, population, batch_size : see :func:`local_pca`.
     window_size, step_size, window_type, regions
         Short-hand for constructing a ``WindowParams``.
 
@@ -1657,14 +1726,14 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
         pca = _local_pca_with_jackknife(
             haplotype_matrix,
             window_params=window_params, k=k, n_blocks=n_blocks,
-            scaler=scaler, missing_data=missing_data,
+            missing_data=missing_data,
             population=population, aggregate=jackknife_aggregate,
             batch_size=batch_size, window_size=window_size,
             step_size=step_size, window_type=window_type, regions=regions)
     else:
         pca = local_pca(haplotype_matrix,
                         window_params=window_params, k=k,
-                        scaler=scaler, missing_data=missing_data,
+                        missing_data=missing_data,
                         population=population, batch_size=batch_size,
                         window_size=window_size, step_size=step_size,
                         window_type=window_type, regions=regions,
@@ -1719,7 +1788,6 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
                         window_params=None,
                         k: int = 2,
                         n_blocks: int = 10,
-                        scaler: Optional[str] = None,
                         missing_data: str = 'include',
                         population: Optional[Union[str, list]] = None,
                         aggregate: Optional[str] = 'mean',
@@ -1778,9 +1846,8 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
             valid_flags.append(False)
             continue
 
-        X = _prepare_matrix(window.matrix, scaler, population=None,
-                            missing_data=missing_data)
-        X = _materialize_prepared(X)
+        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
+                                 need_segregating=False)
         n_var_win = X.shape[1]
         # Block width truncates (matches R's `round(nrow/10)` in DPGP_jackknife_var.R).
         step = n_var_win // n_blocks
