@@ -1,12 +1,12 @@
 """Equivalence tests for streaming-aware IBS.
 
-``ibs(matrix, ...)`` dispatches at the top: if the argument is a
-``StreamingHaplotypeMatrix`` / ``StreamingGenotypeMatrix``, the variant
-axis is streamed chunk-by-chunk and the individual axis is tiled into
-row blocks so the (n_ind, n_ind) accumulators never have to fit on the
-GPU. Per-chunk contributions sum on the host; the final ratio is
-applied once. Tests assert that streaming and eager produce the same
-matrix on small msprime stores.
+``ibs`` is the diploid biallelic PLINK IBS and takes genotype matrices; a
+``StreamingGenotypeMatrix`` streams the variant axis chunk-by-chunk and tiles
+the individual axis into row blocks so the (n_ind, n_ind) accumulators never
+have to fit on the GPU. Per-chunk contributions sum on the host; the final
+ratio is applied once. Haplotype matrices are rejected in favor of
+``genetic_relatedness``. Tests assert streaming-vs-eager parity on small
+msprime stores.
 """
 
 import numpy as np
@@ -50,13 +50,11 @@ def two_pop_vcz_store(tmp_path):
 
 class TestIbsStreaming:
 
-    def test_haplotype_parity(self, vcz_store):
-        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+    def test_rejects_streaming_haplotype_matrix(self, vcz_store):
         stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
-                                            chunk_bp=10_000)
-        e = ibs(eager)
-        s = ibs(stream)
-        np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)
+                                           chunk_bp=10_000)
+        with pytest.raises(TypeError, match="genetic_relatedness"):
+            ibs(stream)
 
     def test_genotype_parity(self, vcz_store):
         eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
@@ -67,32 +65,38 @@ class TestIbsStreaming:
         np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)
 
     def test_missing_data_exclude(self, vcz_store):
-        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
-        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
                                             chunk_bp=10_000)
         e = ibs(eager, missing_data='exclude')
         s = ibs(stream, missing_data='exclude')
         np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)
 
     def test_population_subset(self, two_pop_vcz_store):
+        # Eager genotype population subsetting equals ibs on the manually
+        # extracted individuals. (Streaming genotype population subsetting is a
+        # separate pre-existing gap: sample_sets stay in haplotype coordinates.)
         path, popfile = two_pop_vcz_store
-        eager = HaplotypeMatrix.from_zarr(path, streaming="never",
-                                            pop_assignment=popfile)
-        stream = HaplotypeMatrix.from_zarr(path, streaming="always",
-                                             pop_assignment=popfile,
-                                             chunk_bp=10_000)
-        e = ibs(eager, population='pop1')
-        s = ibs(stream, population='pop1')
-        np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)
+        eager = GenotypeMatrix.from_zarr(path, streaming="never",
+                                         pop_assignment=popfile)
+        idx = eager.sample_sets['pop1']
+        g = eager.genotypes
+        g = g.get() if hasattr(g, 'get') else g
+        pos = eager.positions
+        pos = pos.get() if hasattr(pos, 'get') else pos
+        subset = GenotypeMatrix(np.asarray(g)[idx], np.asarray(pos),
+                                eager.chrom_start, eager.chrom_end)
+        np.testing.assert_allclose(ibs(eager, population='pop1'), ibs(subset),
+                                   rtol=1e-9, atol=1e-12)
 
     @pytest.mark.parametrize("block_size", [1, 4, 1000])
     def test_block_size_invariance(self, vcz_store, block_size):
         # Streaming output must not depend on the row-block tile size
         # -- only the (block_size, n_ind) working memory does.
         from pg_gpu.relatedness import _stream_ibs
-        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
                                             chunk_bp=10_000)
-        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
         e = ibs(eager)
         s = _stream_ibs(stream, population=None, missing_data='include',
                         block_size=block_size)
@@ -101,7 +105,7 @@ class TestIbsStreaming:
     def test_diagonal_is_one(self, vcz_store):
         # Eager and streaming both pin the diagonal at 1.0 -- check the
         # streaming path keeps that invariant.
-        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
                                             chunk_bp=10_000)
         s = ibs(stream)
         np.testing.assert_allclose(np.diag(s), 1.0)
