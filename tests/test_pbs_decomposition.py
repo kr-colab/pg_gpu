@@ -5,6 +5,7 @@ Validates against scikit-allel where applicable.
 
 import pytest
 import numpy as np
+import cupy as cp
 import allel
 from pg_gpu import HaplotypeMatrix
 from pg_gpu import divergence, decomposition
@@ -189,6 +190,124 @@ class TestPairwiseDistance:
             dist_scipy = pdist(hap.astype(float), metric=metric)
             np.testing.assert_allclose(dist_pg, dist_scipy, rtol=1e-10,
                                       err_msg=f"{metric} mismatch")
+
+    @pytest.mark.parametrize("metric", ['euclidean', 'cityblock', 'sqeuclidean'])
+    @pytest.mark.parametrize("missing_data", ['include', 'exclude'])
+    def test_biallelic_bit_identical_to_premultiallelic(self, metric, missing_data):
+        # The mismatch-count rewrite must not change biallelic output, including
+        # the missing-data normalization path (which scipy cannot oracle since it
+        # treats -1 as a value). Pin bit-for-bit against the pre-multiallelic
+        # per-pair formula reproduced here.
+        def premultiallelic(hap):
+            hap = cp.asarray(hap)
+            if missing_data == 'exclude':
+                hap = hap[:, cp.sum(hap < 0, axis=0) == 0]
+            X = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+            valid = (hap >= 0).astype(cp.float64)
+            has_missing = bool(cp.any(hap < 0))
+            n, nv = X.shape
+            ii, jj = cp.triu_indices(n, k=1)
+            if has_missing:
+                joint = valid[ii] * valid[jj]
+                njoint = cp.sum(joint, axis=1)
+            if metric == 'cityblock':
+                raw = cp.sum(cp.abs(X[ii] - X[jj]) * (joint if has_missing else 1.0), axis=1)
+            else:
+                raw = cp.sum(((X[ii] - X[jj]) ** 2) * (joint if has_missing else 1.0), axis=1)
+            d = cp.where(njoint > 0, raw * nv / njoint, 0.0) if has_missing else raw
+            if metric == 'euclidean':
+                d = cp.sqrt(d)
+            return d.get()
+
+        rng = np.random.RandomState(7)
+        hap = rng.randint(0, 2, (16, 60)).astype(np.int8)
+        hap[rng.random(hap.shape) < 0.15] = -1
+        matrix = HaplotypeMatrix(hap, np.arange(60) * 10, 0, 600)
+        new = decomposition.pairwise_distance(
+            matrix, metric=metric, missing_data=missing_data)
+        np.testing.assert_array_equal(new, premultiallelic(hap))
+
+
+def _host_pairwise(hap, metric, missing_data='include'):
+    """Independent host reference: the allele-mismatch count m per pair, scaled to
+    the full variant span over jointly non-missing sites. euclidean = sqrt(m)."""
+    hap = np.asarray(hap)
+    if missing_data == 'exclude':
+        hap = hap[:, (hap >= 0).all(axis=0)]
+    n, nv = hap.shape
+    out = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            valid = (hap[i] >= 0) & (hap[j] >= 0)
+            njoint = int(valid.sum())
+            m = int(((hap[i] != hap[j]) & valid).sum())
+            d = (m * nv / njoint) if njoint > 0 else 0.0
+            out.append(np.sqrt(d) if metric == 'euclidean' else d)
+    return np.array(out)
+
+
+class TestPairwiseDistanceMultiallelic:
+    """pairwise_distance is a label-independent allele-mismatch distance, correct
+    on multiallelic sites and unchanged on biallelic data."""
+
+    def _hm(self, hap):
+        return HaplotypeMatrix(hap, np.arange(hap.shape[1]) * 10, 0,
+                               hap.shape[1] * 10)
+
+    @pytest.mark.parametrize("metric", ['euclidean', 'cityblock', 'sqeuclidean'])
+    @pytest.mark.parametrize("missing_data", ['include', 'exclude'])
+    def test_matches_host_reference(self, metric, missing_data):
+        rng = np.random.RandomState(1)
+        hap = rng.randint(0, 4, (14, 50)).astype(np.int8)
+        hap[rng.random(hap.shape) < 0.12] = -1
+        dist = decomposition.pairwise_distance(
+            self._hm(hap), metric=metric, missing_data=missing_data)
+        np.testing.assert_allclose(
+            dist, _host_pairwise(hap, metric, missing_data), rtol=1e-12)
+
+    @pytest.mark.parametrize("metric", ['euclidean', 'cityblock', 'sqeuclidean'])
+    def test_label_independence(self, metric):
+        rng = np.random.RandomState(2)
+        hap = rng.randint(0, 4, (12, 40)).astype(np.int8)
+        perm = np.array([2, 0, 3, 1], dtype=np.int8)   # relabel alleles 0..3
+        d0 = decomposition.pairwise_distance(self._hm(hap), metric=metric)
+        d1 = decomposition.pairwise_distance(self._hm(perm[hap]), metric=metric)
+        np.testing.assert_array_equal(d0, d1)
+
+    @pytest.mark.parametrize("metric", ['euclidean', 'cityblock', 'sqeuclidean'])
+    def test_biallelic_index_reduction(self, metric):
+        # A 2-allele site coded {0,2} gives the same distances as {0,1}.
+        rng = np.random.RandomState(3)
+        h2 = rng.choice([0, 2], (10, 30)).astype(np.int8)
+        h1 = np.where(h2 == 2, 1, 0).astype(np.int8)
+        d2 = decomposition.pairwise_distance(self._hm(h2), metric=metric)
+        d1 = decomposition.pairwise_distance(self._hm(h1), metric=metric)
+        np.testing.assert_array_equal(d2, d1)
+
+    def test_metrics_collapse_on_categorical(self):
+        # On allele-index data cityblock == sqeuclidean == m and euclidean == sqrt(m).
+        rng = np.random.RandomState(4)
+        hap = rng.randint(0, 4, (10, 45)).astype(np.int8)
+        hm = self._hm(hap)
+        cb = decomposition.pairwise_distance(hm, metric='cityblock')
+        sq = decomposition.pairwise_distance(hm, metric='sqeuclidean')
+        eu = decomposition.pairwise_distance(hm, metric='euclidean')
+        np.testing.assert_array_equal(cb, sq)
+        np.testing.assert_allclose(eu, np.sqrt(sq), rtol=1e-12)
+
+    def test_unsupported_metric_raises(self):
+        rng = np.random.RandomState(5)
+        hm = self._hm(rng.randint(0, 3, (6, 20)).astype(np.int8))
+        with pytest.raises(NotImplementedError, match="euclidean"):
+            decomposition.pairwise_distance(hm, metric='correlation')
+
+    def test_rejects_genotype_matrix(self):
+        from pg_gpu import GenotypeMatrix
+        gm = GenotypeMatrix(
+            np.random.RandomState(6).randint(0, 3, (6, 20)).astype(np.int8),
+            np.arange(20) * 10)
+        with pytest.raises(TypeError, match="HaplotypeMatrix"):
+            decomposition.pairwise_distance(gm)
 
 
 # ---------------------------------------------------------------------------

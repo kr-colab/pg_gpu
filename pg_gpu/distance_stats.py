@@ -21,7 +21,8 @@ def _extract_upper_triangle(mat):
     return result.get() if hasattr(result, 'get') else result
 
 
-def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
+def _pairwise_diffs_matrix_gpu(hap, missing_data='include',
+                               return_joint_valid=False):
     """Compute full pairwise Hamming distance matrix on GPU.
 
     Internal helper returning the raw cupy distance matrix. Used by
@@ -48,11 +49,17 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     missing_data : str
         'include' - raw counts at jointly non-missing sites
         'normalize' - per-site average (divide by jointly valid count)
+    return_joint_valid : bool
+        When True, also return the (n_hap, n_hap) count of jointly non-missing
+        sites per pair, so a caller can apply its own normalization with the
+        same counts. Default False (existing callers are unchanged).
 
     Returns
     -------
     diffs_mat : cupy.ndarray, float64, shape (n_hap, n_hap)
         Pairwise distance matrix on GPU.
+    joint_valid : cupy.ndarray, float64, shape (n_hap, n_hap)
+        Only returned when ``return_joint_valid`` is True.
     """
     from ._memutil import estimate_variant_chunk_size
 
@@ -86,6 +93,8 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     if missing_data == 'normalize':
         diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
 
+    if return_joint_valid:
+        return diffs_mat, joint_valid
     return diffs_mat
 
 
