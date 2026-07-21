@@ -482,7 +482,7 @@ class GenotypeMatrix:
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
-                backend=backend,
+                backend=backend, accessible_bed=accessible_bed,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits;
@@ -504,7 +504,7 @@ class GenotypeMatrix:
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
-                backend=backend, source=source,
+                backend=backend, source=source, accessible_bed=accessible_bed,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
@@ -564,7 +564,8 @@ class GenotypeMatrix:
 
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
-                         prefetch, backend="auto", source=None):
+                         prefetch, backend="auto", source=None,
+                         accessible_bed=None):
         from .streaming_matrix import (
             StreamingGenotypeMatrix, _pick_chunk_fetcher,
         )
@@ -576,9 +577,19 @@ class GenotypeMatrix:
         else:
             source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
+
+        # Resolve the accessible BED once over the source's variant-position
+        # bounds so every chunk is filtered to accessible variants, matching
+        # the eager path's mask-filtered .genotypes view (grm/ibs read that
+        # view, so streaming and eager see the same variant set).
+        from .accessible import resolve_streaming_accessible_mask
+        accessible_mask = resolve_streaming_accessible_mask(
+            accessible_bed, source, region)
+
         return StreamingGenotypeMatrix(
             source, fetcher,
             chunk_bp=chunk_bp, prefetch=prefetch,
+            accessible_mask=accessible_mask,
         )
 
     def filter(self, variants=None, genotypes=None,

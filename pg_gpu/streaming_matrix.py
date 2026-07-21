@@ -713,9 +713,10 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
 
     Returned by ``GenotypeMatrix.from_zarr`` when the requested matrix
     does not fit eagerly on the GPU. Sample sets index the diploid
-    axis (``0..num_individuals-1``), not the haplotype axis. ``ibs``
-    accepts this class directly; ``grm`` still needs an eager
-    sub-region via ``.materialize(region=...)``.
+    axis (``0..num_individuals-1``), not the haplotype axis. ``grm`` and
+    ``ibs`` accept this class directly, streaming variant chunks; kernels
+    that need every variant in scope at once call
+    ``.materialize(region=(lo, hi))`` for an eager sub-region.
     """
 
     @property
@@ -728,11 +729,11 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
             "StreamingGenotypeMatrix has no materialized .genotypes "
             "array; the matrix is too big to fit eagerly, which is why "
             "from_zarr returned this class instead of GenotypeMatrix. "
-            "For grm or any other kernel that needs every variant in "
-            "scope at once, call .materialize(region=(lo, hi)) to get "
-            "an eager GenotypeMatrix over a sub-region. For per-window "
-            "streaming stats and ibs, pass this object directly to the "
-            "kernel."
+            "For per-window streaming stats, grm, and ibs, pass this "
+            "object directly to the kernel. For a kernel that needs "
+            "every variant in scope at once, call "
+            ".materialize(region=(lo, hi)) to get an eager "
+            "GenotypeMatrix over a sub-region."
         )
 
     def _sample_axis_size(self):
