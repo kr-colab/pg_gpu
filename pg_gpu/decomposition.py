@@ -394,18 +394,27 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
                       missing_data: str = 'include'):
     """Compute pairwise distances between samples.
 
+    Distances are built from the allele-mismatch count m: the number of sites at
+    which two haplotypes carry different alleles (over jointly non-missing sites).
+    This is label-independent, so it does not depend on how alleles are numbered
+    and is correct at multiallelic sites. cityblock and sqeuclidean are both m;
+    euclidean is sqrt(m). On categorical data these coincide up to that transform,
+    and on biallelic data m equals the usual per-site difference count, so the
+    values match the standard distances there.
+
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
         Haplotype data.
     metric : str
-        Distance metric. Supported on GPU: 'euclidean', 'cityblock',
-        'sqeuclidean'. Falls back to scipy for other metrics.
+        Distance metric: 'euclidean' (default), 'cityblock', or 'sqeuclidean'.
+        Other metrics raise NotImplementedError.
     population : str or list, optional
         Population subset.
     missing_data : str
-        'include' - mask missing, normalize per pair
-        'exclude' - filter sites with any missing
+        'include' - count mismatches over jointly non-missing sites, scaled to
+        the full variant span per pair
+        'exclude' - filter sites with any missing first
 
     Returns
     -------
@@ -421,6 +430,14 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
+    if metric not in ('euclidean', 'sqeuclidean', 'cityblock'):
+        raise NotImplementedError(
+            "pairwise_distance supports metric in "
+            "{'euclidean', 'sqeuclidean', 'cityblock'}; got %r" % (metric,))
+
+    from .distance_stats import (_pairwise_diffs_matrix_gpu,
+                                 _extract_upper_triangle)
+
     hap = matrix.haplotypes
 
     if missing_data == 'exclude':
@@ -428,55 +445,21 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
         complete = missing_per_var == 0
         hap = hap[:, complete]
 
-    X = cp.where(hap >= 0, hap, 0).astype(cp.float64)
-    valid_mask = (hap >= 0).astype(cp.float64)
-    has_missing = cp.any(hap < 0)
-    n = X.shape[0]
+    n_var = hap.shape[1]
+    # m = number of differing jointly-valid sites per pair (multiallelic-correct,
+    # label-independent one-hot Hamming); joint_valid = jointly non-missing site
+    # count per pair. cityblock and sqeuclidean are both m; euclidean is sqrt(m).
+    m, joint_valid = _pairwise_diffs_matrix_gpu(
+        hap, missing_data='include', return_joint_valid=True)
 
-    if metric in ('euclidean', 'sqeuclidean', 'cityblock'):
-        idx_i, idx_j = cp.triu_indices(n, k=1)
-        n_pairs = len(idx_i)
-
-        # Estimate batch size from available GPU memory
-        n_variants = X.shape[1]
-        free_mem = cp.cuda.Device().mem_info[0]
-        # Each pair needs ~3 float64 arrays of n_variants (diff, joint, result)
-        bytes_per_pair = n_variants * 8 * 3
-        batch_size = max(1, min(n_pairs, int(free_mem * 0.3 / bytes_per_pair)))
-        dist_parts = []
-
-        for start in range(0, n_pairs, batch_size):
-            end = min(start + batch_size, n_pairs)
-            bi = idx_i[start:end]
-            bj = idx_j[start:end]
-
-            if has_missing:
-                # only compare at jointly-valid sites
-                joint = valid_mask[bi] * valid_mask[bj]
-                n_joint = cp.sum(joint, axis=1)
-            else:
-                n_joint = cp.float64(X.shape[1])
-
-            if metric == 'cityblock':
-                raw = cp.sum(cp.abs(X[bi] - X[bj]) * (joint if has_missing else 1.0), axis=1)
-            else:
-                raw = cp.sum(((X[bi] - X[bj]) ** 2) * (joint if has_missing else 1.0), axis=1)
-
-            # normalize by jointly-valid sites
-            if has_missing:
-                d = cp.where(n_joint > 0, raw * X.shape[1] / n_joint, 0.0)
-            else:
-                d = raw
-
-            if metric == 'euclidean':
-                d = cp.sqrt(d)
-            dist_parts.append(d)
-
-        return cp.concatenate(dist_parts).get()
-    else:
-        from scipy.spatial.distance import pdist
-        X_cpu = X.get()
-        return pdist(X_cpu, metric=metric)
+    # Scale the mismatch count to the full variant span when missing sites reduce
+    # the jointly-valid count (raw * n_var / n_joint). With no missing data
+    # joint_valid == n_var, so d == m. On biallelic {0,1} data m equals the old
+    # raw sum, so this is bit-identical to the previous per-metric formula.
+    d = cp.where(joint_valid > 0, m * n_var / joint_valid, 0.0)
+    if metric == 'euclidean':
+        d = cp.sqrt(d)
+    return _extract_upper_triangle(d)
 
 
 def pcoa(dist, n_components: Optional[int] = None):
