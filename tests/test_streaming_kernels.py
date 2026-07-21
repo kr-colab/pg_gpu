@@ -239,6 +239,35 @@ class TestAccessibleBedDispatch:
             seen += chunk.num_variants
         assert seen > 0
 
+    def test_load_time_mask_windowed_equivalent(self, vcz_store, tmp_path):
+        # A LOAD-TIME mask must reach windowed_analysis without re-passing
+        # accessible_bed: iter_gpu_chunks attaches it, and the per-chunk
+        # eager call honors the already-attached mask. This is a distinct
+        # path from test_accessible_bed_equivalent, which passes the BED as
+        # an argument. Both eager and streaming carry the mask from load.
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                          accessible_bed=bed)
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000, accessible_bed=bed)
+        eager.chrom_start = stream.chrom_start
+        eager.chrom_end = stream.chrom_end
+        stats = ["pi", "theta_w", "segregating_sites"]
+        df_e = windowed_analysis(eager, window_size=5_000, statistics=stats)
+        df_s = windowed_analysis(stream, window_size=5_000, statistics=stats)
+        _assert_frames_equivalent(df_e, df_s)
+
+        # Guard that the mask actually bit: an unmasked streaming run must
+        # differ, else the test would pass even if the mask were dropped.
+        unmasked = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                             chunk_bp=10_000)
+        df_u = windowed_analysis(unmasked, window_size=5_000,
+                                 statistics=["segregating_sites"])
+        df_u = df_u.sort_values("start").reset_index(drop=True)
+        df_s2 = df_s.sort_values("start").reset_index(drop=True)
+        assert not np.allclose(df_u["segregating_sites"].to_numpy(),
+                               df_s2["segregating_sites"].to_numpy())
+
 
 class TestGarudStreamingDispatch:
     """Per-window scatter-reduce assembles each window's hash from the
