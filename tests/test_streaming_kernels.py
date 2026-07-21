@@ -223,6 +223,22 @@ class TestAccessibleBedDispatch:
                                  accessible_bed=bed, chrom="1")
         _assert_frames_equivalent(df_e, df_s)
 
+    def test_load_time_mask_filters_chunks(self, vcz_store, tmp_path):
+        # A mask supplied at LOAD time (from_zarr(accessible_bed=)) is attached
+        # to every chunk by iter_gpu_chunks, so every streaming consumer sees
+        # accessible-filtered variants -- not just genetic_relatedness. #151
+        bed = self._write_bed(str(tmp_path / "acc.bed"))   # accessible: [25000, 75000)
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000, accessible_bed=bed)
+        seen = 0
+        for _, _, chunk in stream.iter_gpu_chunks():
+            assert chunk.has_accessible_mask
+            pos = chunk.positions
+            pos = pos.get() if hasattr(pos, "get") else np.asarray(pos)
+            assert ((pos >= 25000) & (pos < 75000)).all()
+            seen += chunk.num_variants
+        assert seen > 0
+
 
 class TestGarudStreamingDispatch:
     """Per-window scatter-reduce assembles each window's hash from the
@@ -453,3 +469,50 @@ class TestGeneticRelatednessDispatch:
         a = relatedness.genetic_relatedness(s_a, span_normalize=False)
         b = relatedness.genetic_relatedness(s_b, span_normalize=False)
         np.testing.assert_allclose(a, b, rtol=1e-9, atol=1e-12)
+
+    def test_span_normalize_no_mask_equivalent(self, vcz_store):
+        # Default span_normalize=True with no accessible mask: streaming must
+        # normalize by the same variant-position span as the eager path
+        # (both use mappable_lo/hi, not the chunk-grid edges). #151
+        from pg_gpu import relatedness
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000)
+        e = relatedness.genetic_relatedness(eager, span_normalize=True)
+        s = relatedness.genetic_relatedness(stream, span_normalize=True)
+        np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)
+
+    def test_accessible_bed_span_and_filter_equivalent(self, vcz_store, tmp_path):
+        # accessible_bed both restricts variants to accessible sites and sets
+        # the accessible-base span; streaming must match eager on both. #151
+        from pg_gpu import relatedness
+        bed = str(tmp_path / "acc.bed")
+        with open(bed, "w") as f:
+            f.write("1\t25000\t75000\n")   # only the middle 50 kb accessible
+        full = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                          accessible_bed=bed)
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000, accessible_bed=bed)
+        assert eager.num_variants < full.num_variants   # mask really filters
+        e = relatedness.genetic_relatedness(eager, span_normalize=True)
+        s = relatedness.genetic_relatedness(stream, span_normalize=True)
+        np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)
+
+    @pytest.mark.parametrize("mode", ["per_variant", "sites", "callable", "per_base"])
+    def test_span_mode_matches_eager_with_mask(self, vcz_store, tmp_path, mode):
+        # Non-default span modes: per_variant/sites/callable count over the
+        # accessible-FILTERED variant set (eager does the same via its filtered
+        # view); per_base is the raw span. All must agree eager vs streaming.
+        from pg_gpu import relatedness
+        bed = str(tmp_path / "acc.bed")
+        with open(bed, "w") as f:
+            f.write("1\t25000\t75000\n")
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                          accessible_bed=bed)
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000, accessible_bed=bed)
+        assert eager.get_span(mode) == stream.get_span(mode)
+        e = relatedness.genetic_relatedness(eager, span_normalize=mode)
+        s = relatedness.genetic_relatedness(stream, span_normalize=mode)
+        np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)

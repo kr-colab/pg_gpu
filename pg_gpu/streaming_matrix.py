@@ -422,7 +422,7 @@ class _StreamingMatrixBase:
     """
 
     def __init__(self, source, fetcher, chunk_bp, prefetch, *,
-                 align_bp=None):
+                 align_bp=None, accessible_mask=None, n_total_sites=None):
         self._source = source
         self._fetcher = fetcher
         self._chunk_bp = int(chunk_bp)
@@ -435,6 +435,10 @@ class _StreamingMatrixBase:
         # (or None) and let the property fall back to a default 'all'
         # set when no pop file resolved at source construction.
         self._sample_sets = source.pop_cols
+        # Span-normalization metadata, mirroring the eager HaplotypeMatrix.
+        # None when no accessible BED was supplied at load; see get_span.
+        self.accessible_mask = accessible_mask
+        self.n_total_sites = n_total_sites
 
     @property
     def num_variants(self):
@@ -472,6 +476,45 @@ class _StreamingMatrixBase:
         convention."""
         return self._chunks[-1][1] if self._chunks else 0
 
+    def get_span(self, mode='auto'):
+        """Genomic span for normalization, mirroring HaplotypeMatrix.get_span.
+
+        Spans use the *variant-position* bounds (``mappable_lo``/``mappable_hi``)
+        rather than the chunk-grid ``chrom_start``/``chrom_end``, so the value
+        matches an eager matrix built from the same store. ``mappable_hi`` is one
+        past the last variant, so the raw span is ``mappable_hi - mappable_lo``
+        and the accessible count is over the half-open ``[lo, hi)``.
+
+        'auto' priority: accessible-mask count > n_total_sites > raw per-base span.
+
+        ``per_variant``/``sites`` and ``callable`` are computed over the
+        accessible-filtered variant set (as the eager path does through its
+        mask-filtered variant view), so they agree with eager under a mask;
+        ``per_base``/``total`` is the raw variant span, mask-independent.
+        """
+        lo = self._source.mappable_lo
+        hi = self._source.mappable_hi          # one past the last variant
+        if mode == 'auto':
+            if self.accessible_mask is not None:
+                return self.accessible_mask.count_accessible(lo, hi)
+            if self.n_total_sites is not None:
+                return self.n_total_sites
+            return hi - lo
+        if mode == 'accessible':
+            if self.accessible_mask is None:
+                raise ValueError("mode='accessible' requires an accessible mask")
+            return self.accessible_mask.count_accessible(lo, hi)
+        if mode in ('per_base', 'total'):
+            return hi - lo
+        if mode in ('per_variant', 'sites', 'callable'):
+            pos = self._source.site_pos
+            if self.accessible_mask is not None:
+                pos = pos[self.accessible_mask.is_accessible_at(pos)]
+            if mode == 'callable':
+                return int(pos[-1] - pos[0] + 1) if pos.size else 0
+            return int(pos.size)
+        raise ValueError(f"Invalid span mode: {mode}")
+
     @property
     def sample_sets(self):
         """Population -> sample-axis indices. Falls back to a single
@@ -504,6 +547,12 @@ class _StreamingMatrixBase:
                 chrom_start=int(left), chrom_end=int(right),
                 sample_sets=self._sample_sets,
             )
+            # A load-time accessible mask filters variants to accessible sites,
+            # exactly as it does on an eager matrix -- attach it here, at the
+            # single chunk-production point, so every streaming consumer sees
+            # accessible-filtered chunks by construction.
+            if self.accessible_mask is not None:
+                m.accessible_mask = self.accessible_mask
             yield int(left), int(right), m
 
     def materialize(self, *, region=None, sample_subset=None):
