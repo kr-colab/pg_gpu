@@ -48,7 +48,11 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         between the covariance and the segregating-site count).
     span_normalize : bool or str
         True (default) divides by the analysis span (see ``get_span``); False
-        returns the raw sum. Matches tskit's ``span_normalise``.
+        returns the raw sum. Like tskit's ``span_normalise``, except that when
+        the matrix carries an accessible mask the span is the accessible-base
+        count over the analyzed region rather than the raw sequence length. The
+        eager and streaming paths use the same span source (an ``accessible_bed``
+        supplied at load).
     missing_data : str
         'include' (default) uses per-site, per-set valid counts; 'exclude'
         restricts to sites with no missing data among the analyzed samples.
@@ -138,8 +142,9 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
     centering is local to its site, so one pass over the chunks suffices. The
     (D, D) output is accumulated on host with the set (row) axis tiled into
     blocks, the same scheme as the streaming GRM/IBS, so it holds when D is
-    large (the per-haplotype default). span_normalise for streaming supports
-    True/False only.
+    large (the per-haplotype default). Span normalization uses the streaming
+    matrix's get_span (accessible mask / n_total_sites / raw span), matching
+    the eager path.
     """
     from ._memutil import estimate_indiv_block_size
 
@@ -163,6 +168,8 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
     if block_size is None:
         block_size = estimate_indiv_block_size(D, n_intermediates=3)
 
+    # iter_gpu_chunks already attaches any load-time accessible mask, so the
+    # chunks here are variant-filtered to accessible sites (matching eager).
     for _, _, chunk in streaming_matrix.iter_gpu_chunks():
         hap = chunk.haplotypes
         if covered is not None:
@@ -187,11 +194,12 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
         if denom > 0:
             R = R / denom
     elif span_normalize is not False:
-        if span_normalize is not True:
-            raise NotImplementedError(
-                "streaming genetic_relatedness supports span_normalize "
-                "True or False only")
-        span = streaming_matrix.chrom_end - streaming_matrix.chrom_start + 1
+        # Same span source as the eager path: get_span('auto') prefers the
+        # accessible mask / n_total_sites (set at load via accessible_bed) over
+        # the raw per-base span, and uses variant-position bounds so it matches
+        # the eager matrix built from the same store.
+        mode = 'auto' if span_normalize is True else span_normalize
+        span = streaming_matrix.get_span(mode)
         if span > 0:
             R = R / span
 

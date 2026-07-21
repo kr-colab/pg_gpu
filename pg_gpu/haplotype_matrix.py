@@ -626,7 +626,7 @@ class HaplotypeMatrix:
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
-                backend=backend,
+                backend=backend, accessible_bed=accessible_bed,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits; 'auto'
@@ -649,7 +649,7 @@ class HaplotypeMatrix:
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
-                source=source, backend=backend,
+                source=source, backend=backend, accessible_bed=accessible_bed,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
@@ -716,7 +716,8 @@ class HaplotypeMatrix:
 
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
-                         prefetch, source=None, backend="auto"):
+                         prefetch, source=None, backend="auto",
+                         accessible_bed=None):
         from .streaming_matrix import (
             HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
             _pick_chunk_fetcher,
@@ -733,9 +734,24 @@ class HaplotypeMatrix:
             # zarr store.
             source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
+
+        # Resolve an accessible BED once over the source's variant-position
+        # bounds and hand it to the streaming matrix, so span-normalized
+        # reductions (genetic_relatedness) divide by accessible bases the same
+        # way the eager path does. ``mappable_hi`` is one past the last variant,
+        # so the inclusive last position is ``mappable_hi - 1``.
+        accessible_mask = None
+        if accessible_bed is not None:
+            from .accessible import resolve_accessible_mask
+            chrom = region.split(':')[0] if region else source.chrom
+            lo, hi = source.mappable_lo, source.mappable_hi
+            accessible_mask = resolve_accessible_mask(
+                accessible_bed, lo, hi - 1, chrom)
+
         return StreamingHaplotypeMatrix(
             source, fetcher,
             chunk_bp=chunk_bp, prefetch=prefetch,
+            accessible_mask=accessible_mask,
         )
 
     def to_zarr(self, zarr_path: str, format: str = 'vcz',
