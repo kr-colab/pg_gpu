@@ -613,3 +613,34 @@ class TestGrmIbsAccessibleBed:
             assert ((pos >= 25000) & (pos < 75000)).all()
             seen += chunk.num_variants
         assert seen > 0
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    def test_auto_fallback_forwards_accessible_bed(self, vcz_store, tmp_path,
+                                                   monkeypatch, stat):
+        # streaming='auto' forwards accessible_bed on its streaming-fallback
+        # branch too, not just streaming='always'. The tiny fixture fits
+        # eagerly so 'auto' never falls back on its own; force the fallback
+        # by making the size decision return 'streaming' with a real source,
+        # which drives the actual _build_streaming(source=..., accessible_bed=)
+        # call. Guards against dropping accessible_bed from only that branch.
+        import pg_gpu.haplotype_matrix as hm_mod
+        from pg_gpu.zarr_source import ZarrGenotypeSource
+        from pg_gpu.streaming_matrix import StreamingGenotypeMatrix
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+
+        def force_streaming(zarr_path, region, streaming, pop_assignment, **kw):
+            src = ZarrGenotypeSource(zarr_path, region=region,
+                                     pop_assignment=False)
+            return "streaming", src
+        monkeypatch.setattr(hm_mod, "_decide_streaming_mode", force_streaming)
+
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="auto",
+                                          chunk_bp=10_000, accessible_bed=bed)
+        assert isinstance(stream, StreamingGenotypeMatrix)  # fallback taken
+        assert stream.accessible_mask is not None            # bed forwarded
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                         accessible_bed=bed)
+        np.testing.assert_allclose(fn(stream), fn(eager),
+                                   rtol=1e-6, atol=1e-9)
