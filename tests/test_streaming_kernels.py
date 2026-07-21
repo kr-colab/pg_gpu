@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pg_gpu import HaplotypeMatrix, windowed_analysis
+from pg_gpu import GenotypeMatrix, HaplotypeMatrix, windowed_analysis
 from pg_gpu import sfs as sfs_module
 
 from .conftest import simulate_hm
@@ -516,3 +516,71 @@ class TestGeneticRelatednessDispatch:
         e = relatedness.genetic_relatedness(eager, span_normalize=mode)
         s = relatedness.genetic_relatedness(stream, span_normalize=mode)
         np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)
+
+
+class TestGrmIbsAccessibleBed:
+    """Streaming grm/ibs match eager row-for-row, and a load-time
+    accessible_bed filters variants identically on both paths. grm/ibs are
+    per-site averages (not span-normalized), so the mask matters here purely
+    as variant filtering. #152"""
+
+    # Accessible: [25000, 75000). Excluding the flanks forces the mask to be
+    # applied at chunk boundaries, not just the matrix edges.
+    def _write_bed(self, path):
+        with open(path, "w") as f:
+            f.write("1\t25000\t75000\n")
+        return path
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    def test_no_mask_equivalent(self, vcz_store, stat):
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=10_000)
+        np.testing.assert_allclose(fn(stream), fn(eager),
+                                   rtol=1e-6, atol=1e-9)
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    def test_accessible_bed_equivalent(self, vcz_store, tmp_path, stat):
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+        full = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                         accessible_bed=bed)
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=10_000, accessible_bed=bed)
+        assert eager.num_variants < full.num_variants   # mask really filters
+        np.testing.assert_allclose(fn(stream), fn(eager),
+                                   rtol=1e-6, atol=1e-9)
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    def test_load_time_mask_changes_streaming_result(self, vcz_store, tmp_path,
+                                                     stat):
+        # Guard against a no-op mask trivially "matching" eager: the masked
+        # streaming result must differ from the unmasked one. Without the
+        # #152 fix the streaming matrix carries no mask and these are equal.
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+        unmasked = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                            chunk_bp=10_000)
+        masked = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=10_000, accessible_bed=bed)
+        assert not np.allclose(fn(masked), fn(unmasked))
+
+    def test_load_time_mask_filters_chunks(self, vcz_store, tmp_path):
+        # The mask is attached to every chunk iter_gpu_chunks yields, so each
+        # chunk's genotypes are restricted to accessible positions.
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=10_000, accessible_bed=bed)
+        seen = 0
+        for _, _, chunk in stream.iter_gpu_chunks():
+            assert chunk.has_accessible_mask
+            pos = chunk.positions
+            pos = pos.get() if hasattr(pos, "get") else np.asarray(pos)
+            assert ((pos >= 25000) & (pos < 75000)).all()
+            seen += chunk.num_variants
+        assert seen > 0
