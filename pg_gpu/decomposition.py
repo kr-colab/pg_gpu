@@ -421,6 +421,14 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     dist : ndarray, float64, shape (n_samples * (n_samples - 1) // 2,)
         Condensed distance matrix.
     """
+    from .genotype_matrix import GenotypeMatrix
+    if isinstance(haplotype_matrix, GenotypeMatrix):
+        raise TypeError(
+            "pairwise_distance is an allele-mismatch distance over haplotypes and "
+            "requires a HaplotypeMatrix; a GenotypeMatrix holds 0/1/2 dosages, for "
+            "which allele mismatch is not the right distance. Use "
+            "distance_stats.pairwise_diffs_diploid for a diploid genotype distance, "
+            "or to_haplotype_matrix() first.")
 
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)

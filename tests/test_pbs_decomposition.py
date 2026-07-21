@@ -301,6 +301,14 @@ class TestPairwiseDistanceMultiallelic:
         with pytest.raises(NotImplementedError, match="euclidean"):
             decomposition.pairwise_distance(hm, metric='correlation')
 
+    def test_rejects_genotype_matrix(self):
+        from pg_gpu import GenotypeMatrix
+        gm = GenotypeMatrix(
+            np.random.RandomState(6).randint(0, 3, (6, 20)).astype(np.int8),
+            np.arange(20) * 10)
+        with pytest.raises(TypeError, match="HaplotypeMatrix"):
+            decomposition.pairwise_distance(gm)
+
 
 # ---------------------------------------------------------------------------
 # PCoA tests
