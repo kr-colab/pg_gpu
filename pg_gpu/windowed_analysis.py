@@ -2126,10 +2126,13 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     bin_idx = cp.searchsorted(we_gpu, positions)
     in_range = (bin_idx >= 0) & (bin_idx < n_windows)
 
-    # Shared DAC computation (used by daf_hist and mu_sfs)
-    dac_gpu = None
+    # Shared per-allele counts (used by daf_hist and mu_sfs). Per-derived-allele,
+    # per-site n_valid -- the same convention as diversity.daf_histogram / mu_sfs,
+    # so the windowed values equal the scalar over each window (include mode).
+    ac_daf = nv_daf = None
     if any(s in statistics for s in ('daf_hist', 'mu_sfs')):
-        dac_gpu = cp.sum(cp.maximum(matrix.haplotypes, 0).astype(cp.int32), axis=0)
+        from ._memutil import allele_counts
+        ac_daf, nv_daf = allele_counts(matrix.haplotypes)   # (n_var, K), (n_var,)
 
     if 'mean_nsl' in statistics:
         from . import selection as sel
@@ -2189,29 +2192,51 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             if stat in statistics:
                 results[stat] = arr
 
-    # DAF histogram per window (GPU scatter)
+    # DAF histogram per window (GPU scatter). One entry per present derived
+    # allele (freq = count / n_valid), scattered into (window, bin) and
+    # normalized per window -- matching diversity.daf_histogram.
     if 'daf_hist' in statistics:
+        from .diversity import _daf_bin_index
         n_daf_bins = 20
-        daf = dac_gpu.astype(cp.float64) / n_hap
-        daf_bin = cp.minimum((daf * n_daf_bins).astype(cp.int32), n_daf_bins - 1)
-        # Composite index: window * n_daf_bins + daf_bin
-        composite = bin_idx * n_daf_bins + daf_bin
-        valid_daf = in_range
-        flat = _scatter_sum(cp.ones_like(composite[valid_daf], dtype=cp.float64),
-                            composite[valid_daf], n_windows * n_daf_bins)
+        derived = ac_daf[:, 1:]                                  # (n_var, K-1)
+        n_der = derived.shape[1]
+        nv = cp.maximum(nv_daf.astype(cp.float64), 1.0)[:, None]
+        freq = (derived.astype(cp.float64) / nv).reshape(-1)     # per (site, allele)
+        # keep present derived alleles at in-range, non-missing sites
+        keep = ((derived > 0) & (nv_daf[:, None] > 0)
+                & in_range[:, None]).reshape(-1)
+        bin_rep = cp.repeat(bin_idx, n_der)                      # site's window
+        composite = cp.where(keep, bin_rep * n_daf_bins
+                             + _daf_bin_index(freq, n_daf_bins), 0)
+        flat = _scatter_sum(keep.astype(cp.float64), composite,
+                            n_windows * n_daf_bins)
         hist_matrix = flat.get().reshape(n_windows, n_daf_bins)
+        row_sum = hist_matrix.sum(axis=1, keepdims=True)
+        hist_matrix = np.divide(hist_matrix, row_sum,
+                                out=np.zeros_like(hist_matrix),
+                                where=row_sum > 0)
         for b in range(n_daf_bins):
             results[f'daf_bin_{b}'] = hist_matrix[:, b]
 
-    # muSFS: fraction of SNPs at SFS edges
+    # muSFS: fraction of segregating (site, allele) entries at the SFS edges
+    # (singleton or n_valid-1), per-site n_valid -- matching diversity.mu_sfs.
     if 'mu_sfs' in statistics:
-        is_edge = ((dac_gpu == 1) | (dac_gpu == n_hap - 1)).astype(cp.float64)
-        edge_sum = _scatter_sum(is_edge[in_range], bin_idx[in_range], n_windows)
-        total_count = _bin_counts(bin_idx[in_range], n_windows)
-        edge_cpu = edge_sum.get()
-        count_cpu = total_count.get()
-        mu_sfs = np.where(count_cpu > 0, edge_cpu / count_cpu, np.nan)
-        results['mu_sfs'] = mu_sfs
+        derived = ac_daf[:, 1:]
+        n_der = derived.shape[1]
+        nvc = nv_daf[:, None]
+        is_seg = (derived > 0) & (derived < nvc) & in_range[:, None]
+        is_edge = is_seg & ((derived == 1) | (derived == nvc - 1))
+        keep = cp.repeat(in_range, n_der)
+        bin_safe = cp.where(keep, cp.repeat(bin_idx, n_der), 0)
+        seg_sum = _scatter_sum(is_seg.reshape(-1).astype(cp.float64),
+                               bin_safe, n_windows).get()
+        edge_sum = _scatter_sum(is_edge.reshape(-1).astype(cp.float64),
+                                bin_safe, n_windows).get()
+        # matches diversity.mu_sfs, which returns 0.0 when a window has no
+        # segregating (site, allele) entries (rather than NaN)
+        results['mu_sfs'] = np.divide(edge_sum, seg_sum,
+                                      out=np.zeros_like(edge_sum),
+                                      where=seg_sum > 0)
 
     # Per-window pairwise stats (LD, distance moments)
     ld_pairwise = {'zns', 'omega', 'mu_ld'}
