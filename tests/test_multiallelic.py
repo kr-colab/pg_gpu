@@ -792,6 +792,41 @@ class TestWindowedDafMuSfsIncludeMatchesScalar:
             np.testing.assert_allclose(w_mu, sc_mu, atol=1e-12)
         np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
 
+    def test_multi_window_boundary_matches_scalar(self):
+        # Multiple windows with variants sitting exactly on interior window
+        # boundaries (pos == a window end == the next window's start). Each
+        # window's daf_hist / mu_sfs must equal the scalar over that window's
+        # right-open [start, end) slice, and the window membership must agree with
+        # n_variants. The parity harness uses one whole-region window, so it never
+        # exercises an interior boundary -- this is the case that catches the
+        # bin_idx window-assignment convention.
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.RandomState(4)
+        nv = 120
+        hap = rng.randint(0, 2, (24, nv)).astype(np.int8)
+        for j in range(0, nv, 7):
+            hap[:, j] = rng.randint(0, 3, 24)
+        hap[rng.random(hap.shape) < 0.05] = -1
+        pos = np.arange(nv) * 100          # 3000, 6000, 9000 are interior boundaries
+        hm = HaplotypeMatrix(hap, pos, 0, nv * 100)
+        wa = windowed_analysis(hm, window_size=3000, step_size=3000,
+                               statistics=['mu_sfs', 'daf_hist'],
+                               missing_data='include')
+        assert len(wa) > 1
+        for _, row in wa.iterrows():
+            s, e = row['start'], row['end']
+            m = (pos >= s) & (pos < e)
+            assert int(m.sum()) == int(row['n_variants'])
+            if not m.any():
+                continue
+            sub = HaplotypeMatrix(hap[:, m], pos[m], int(s), int(e))
+            sc_mu = diversity.mu_sfs(sub, missing_data='include')
+            sc_hist, _ = diversity.daf_histogram(sub, n_bins=20,
+                                                 missing_data='include')
+            w_hist = np.array([row[f'daf_bin_{b}'] for b in range(20)])
+            np.testing.assert_allclose(row['mu_sfs'], sc_mu, atol=1e-12)
+            np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
+
     def test_monomorphic_derived_with_missing_not_edge(self):
         # A site that is monomorphic for the derived allele but has one missing
         # haplotype must not count as an SFS edge (the old fixed-n_hap bug).

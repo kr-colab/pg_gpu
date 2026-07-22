@@ -2122,9 +2122,16 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                                win_start, win_stop, n_windows, statistics,
                                results)
 
-    # Per-site stats binned into windows via scatter_add
-    bin_idx = cp.searchsorted(we_gpu, positions)
-    in_range = (bin_idx >= 0) & (bin_idx < n_windows)
+    # Per-site stats binned into windows via scatter_add. Assign each variant to
+    # the window whose right-open [start, end) contains it, matching win_start /
+    # win_stop, n_variants and the dedicated scatter engines: pick the last window
+    # whose start is <= pos, then require pos < that window's end. Searching the
+    # window ENDS instead would put a variant sitting exactly on a boundary
+    # (pos == a window end == the next window's start) in the lower window,
+    # disagreeing with n_variants.
+    bin_idx = cp.searchsorted(ws_gpu, positions, side='right') - 1
+    safe = cp.clip(bin_idx, 0, n_windows - 1)
+    in_range = (bin_idx >= 0) & (bin_idx < n_windows) & (positions < we_gpu[safe])
 
     # Shared per-allele counts (used by daf_hist and mu_sfs). Per-derived-allele,
     # per-site n_valid -- the same convention as diversity.daf_histogram / mu_sfs,
