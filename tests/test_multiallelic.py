@@ -745,10 +745,11 @@ class TestMultiallelicConsumers:
         assert len(edges) == len(hist) + 1
 
 
-class TestWindowedDafMuSfsIncludeMatchesScalar:
-    """0013 Option A: the windowed daf_hist / mu_sfs (include mode, fused engine)
-    equal the scalar diversity.daf_histogram / diversity.mu_sfs over the same
-    variants. Checked on a single whole-region window (the parity convention),
+class TestWindowedDafMuSfsMatchesScalar:
+    """0013 Option A: the windowed daf_hist / mu_sfs equal the scalar
+    diversity.daf_histogram / diversity.mu_sfs over the same variants -- in both
+    engines that compute them (include -> fused, exclude -> WindowedAnalyzer
+    fallback). Checked on a single whole-region window (the parity convention),
     across biallelic / multiallelic and clean / missing data."""
 
     def _hap(self, kind, missing, seed=3, n=24, nv=90):
@@ -826,6 +827,27 @@ class TestWindowedDafMuSfsIncludeMatchesScalar:
             w_hist = np.array([row[f'daf_bin_{b}'] for b in range(20)])
             np.testing.assert_allclose(row['mu_sfs'], sc_mu, atol=1e-12)
             np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
+
+    @pytest.mark.parametrize("kind", ["biallelic", "multiallelic"])
+    def test_whole_region_exclude_matches_scalar(self, kind):
+        # exclude mode routes to the WindowedAnalyzer fallback (which calls the
+        # scalar functions per window); previously it raised "Unknown statistic".
+        from pg_gpu.windowed_analysis import windowed_analysis
+        hap = self._hap(kind, missing=True)
+        nv = hap.shape[1]
+        pos = np.arange(nv) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, nv * 100)
+        wa = windowed_analysis(hm, window_size=nv * 100 + 1000,
+                               step_size=nv * 100 + 1000,
+                               statistics=['mu_sfs', 'daf_hist'],
+                               missing_data='exclude')
+        assert len(wa) == 1
+        w_mu = wa['mu_sfs'].values[0]
+        w_hist = np.array([wa[f'daf_bin_{b}'].values[0] for b in range(20)])
+        sc_mu = diversity.mu_sfs(hm, missing_data='exclude')
+        sc_hist, _ = diversity.daf_histogram(hm, n_bins=20, missing_data='exclude')
+        np.testing.assert_allclose(w_mu, sc_mu, atol=1e-12)
+        np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
 
     def test_monomorphic_derived_with_missing_not_edge(self):
         # A site that is monomorphic for the derived allele but has one missing
