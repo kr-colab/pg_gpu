@@ -42,6 +42,7 @@ from pg_gpu.windowed_analysis import (
     _windowed_thetas_scatter,
     _windowed_twopop_scatter,
     windowed_statistics_fused,
+    _DAF_N_BINS,
 )
 
 from .conftest import simulate_hm
@@ -267,6 +268,10 @@ _STATS = {
         False, "value",
         lambda hm, md: diversity.max_daf(hm, missing_data=md),
         None, "max_daf", "max_daf", None),
+    "mu_sfs": _Stat(
+        False, "value",
+        lambda hm, md: diversity.mu_sfs(hm, missing_data=md),
+        None, None, "mu_sfs", "mu_sfs"),
     "fst_hudson": _Stat(
         True, "value",
         lambda hm, md: divergence.fst_hudson(hm, POP1, POP2, missing_data=md),
@@ -461,3 +466,36 @@ def test_path_matches_scalar(request, condition, stat, path):
     reference = _path_scalar(hm, stat, cond.missing_data)
     value = _PATHS[path](hm, stat, cond.missing_data)
     _assert_agrees(stat, reference, value)
+
+
+@pytest.mark.parametrize("condition", list(_CONDITIONS))
+def test_daf_hist_matches_scalar(request, condition):
+    """daf_hist is vector-valued (daf_bin_0 .. daf_bin_{_DAF_N_BINS - 1}), so it
+    sits outside the scalar _STATS matrix. Check its whole-region histogram
+    against diversity.daf_histogram for every engine that computes it: the fused
+    engine (include only) and the WindowedAnalyzer fallback (include and exclude).
+
+    Multi-window / boundary coverage for daf_hist (and mean_nsl) is deferred to the
+    parity-coverage followup (0006-issue-parity-coverage-gaps.md addendum)."""
+    cond = _CONDITIONS[condition]
+    hm = request.getfixturevalue(cond.fixture)
+    md = cond.missing_data
+    ref, _ = diversity.daf_histogram(hm, n_bins=_DAF_N_BINS, missing_data=md)
+
+    # fallback (pyloop) computes daf_hist for every missing mode
+    W = _whole_window_size(hm)
+    an = WindowedAnalyzer(window_type="bp", window_size=W, step_size=W,
+                          statistics=["daf_hist"], missing_data=md,
+                          span_normalize=False)
+    df = an.compute(hm)
+    got_pyloop = np.array([_one_row(df, f"daf_bin_{b}") for b in range(_DAF_N_BINS)])
+    np.testing.assert_allclose(got_pyloop, ref, rtol=RTOL, atol=ATOL)
+
+    # fused engine computes daf_hist only under missing_data='include'
+    if md == "include":
+        out = windowed_statistics_fused(hm, _whole_bp_bins(hm),
+                                        statistics=("daf_hist",), per_base=False,
+                                        missing_data=md, population=None)
+        got_fused = np.array([np.asarray(out[f"daf_bin_{b}"])[0]
+                              for b in range(_DAF_N_BINS)])
+        np.testing.assert_allclose(got_fused, ref, rtol=RTOL, atol=ATOL)
