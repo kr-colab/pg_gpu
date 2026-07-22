@@ -62,6 +62,11 @@ def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
 CANONICAL_WINDOW_PREFIX = (
     'chrom', 'start', 'end', 'center', 'n_variants', 'window_id')
 
+# Number of bins in the windowed daf_hist feature (columns daf_bin_0 ..
+# daf_bin_{_DAF_N_BINS - 1}). Fixed for now, shared by the fused engine and the
+# fallback so they emit the same columns; making it a caller parameter is deferred.
+_DAF_N_BINS = 20
+
 
 def _init_window_results(chrom, win_starts_bp, win_stops_bp, n_variants):
     """Canonical window prefix columns, shared by every dispatch path.
@@ -327,7 +332,7 @@ class StatisticsComputer:
         return results
 
     def _freq_stat_results(self, matrix, n_variants):
-        """daf_hist (as daf_bin_0 .. daf_bin_19) and mu_sfs columns for one window.
+        """daf_hist (as daf_bin_0 .. daf_bin_{_DAF_N_BINS - 1}) and mu_sfs columns.
 
         Defers to diversity.mu_sfs / diversity.daf_histogram (the include/exclude
         scalar reference), so the windowed value equals the scalar over the same
@@ -335,7 +340,7 @@ class StatisticsComputer:
         scalar on an empty slice and the fused engine's empty-window output.
         """
         res = {}
-        n_bins = 20
+        n_bins = _DAF_N_BINS
         if 'mu_sfs' in self.freq_stats:
             res['mu_sfs'] = (0.0 if n_variants == 0 else
                              float(diversity.mu_sfs(matrix, missing_data=self.missing_data)))
@@ -2245,7 +2250,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # normalized per window -- matching diversity.daf_histogram.
     if 'daf_hist' in statistics:
         from .diversity import _daf_bin_index
-        n_daf_bins = 20
+        n_daf_bins = _DAF_N_BINS
         derived = ac_daf[:, 1:]                                  # (n_var, K-1)
         n_der = derived.shape[1]
         nv = cp.maximum(nv_daf.astype(cp.float64), 1.0)[:, None]

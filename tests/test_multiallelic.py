@@ -770,7 +770,7 @@ class TestWindowedDafMuSfsMatchesScalar:
     @pytest.mark.parametrize("kind", ["biallelic", "multiallelic"])
     @pytest.mark.parametrize("missing", [False, True])
     def test_whole_region_matches_scalar(self, kind, missing):
-        from pg_gpu.windowed_analysis import windowed_analysis
+        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
         hap = self._hap(kind, missing)
         nv = hap.shape[1]
         pos = np.arange(nv) * 100
@@ -782,10 +782,10 @@ class TestWindowedDafMuSfsMatchesScalar:
                                missing_data='include')
         assert len(wa) == 1
         w_mu = wa['mu_sfs'].values[0]
-        w_hist = np.array([wa[f'daf_bin_{b}'].values[0] for b in range(20)])
+        w_hist = np.array([wa[f'daf_bin_{b}'].values[0] for b in range(_DAF_N_BINS)])
 
         sc_mu = diversity.mu_sfs(hm, missing_data='include')
-        sc_hist, _ = diversity.daf_histogram(hm, n_bins=20, missing_data='include')
+        sc_hist, _ = diversity.daf_histogram(hm, n_bins=_DAF_N_BINS, missing_data='include')
 
         if np.isnan(sc_mu):
             assert np.isnan(w_mu)
@@ -801,7 +801,7 @@ class TestWindowedDafMuSfsMatchesScalar:
         # n_variants. The parity harness uses one whole-region window, so it never
         # exercises an interior boundary -- this is the case that catches the
         # bin_idx window-assignment convention.
-        from pg_gpu.windowed_analysis import windowed_analysis
+        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
         rng = np.random.RandomState(4)
         nv = 120
         hap = rng.randint(0, 2, (24, nv)).astype(np.int8)
@@ -822,9 +822,9 @@ class TestWindowedDafMuSfsMatchesScalar:
                 continue
             sub = HaplotypeMatrix(hap[:, m], pos[m], int(s), int(e))
             sc_mu = diversity.mu_sfs(sub, missing_data='include')
-            sc_hist, _ = diversity.daf_histogram(sub, n_bins=20,
+            sc_hist, _ = diversity.daf_histogram(sub, n_bins=_DAF_N_BINS,
                                                  missing_data='include')
-            w_hist = np.array([row[f'daf_bin_{b}'] for b in range(20)])
+            w_hist = np.array([row[f'daf_bin_{b}'] for b in range(_DAF_N_BINS)])
             np.testing.assert_allclose(row['mu_sfs'], sc_mu, atol=1e-12)
             np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
 
@@ -832,7 +832,7 @@ class TestWindowedDafMuSfsMatchesScalar:
     def test_whole_region_exclude_matches_scalar(self, kind):
         # exclude mode routes to the WindowedAnalyzer fallback (which calls the
         # scalar functions per window); previously it raised "Unknown statistic".
-        from pg_gpu.windowed_analysis import windowed_analysis
+        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
         hap = self._hap(kind, missing=True)
         nv = hap.shape[1]
         pos = np.arange(nv) * 100
@@ -843,16 +843,16 @@ class TestWindowedDafMuSfsMatchesScalar:
                                missing_data='exclude')
         assert len(wa) == 1
         w_mu = wa['mu_sfs'].values[0]
-        w_hist = np.array([wa[f'daf_bin_{b}'].values[0] for b in range(20)])
+        w_hist = np.array([wa[f'daf_bin_{b}'].values[0] for b in range(_DAF_N_BINS)])
         sc_mu = diversity.mu_sfs(hm, missing_data='exclude')
-        sc_hist, _ = diversity.daf_histogram(hm, n_bins=20, missing_data='exclude')
+        sc_hist, _ = diversity.daf_histogram(hm, n_bins=_DAF_N_BINS, missing_data='exclude')
         np.testing.assert_allclose(w_mu, sc_mu, atol=1e-12)
         np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
 
     def test_monomorphic_derived_with_missing_not_edge(self):
         # A site that is monomorphic for the derived allele but has one missing
         # haplotype must not count as an SFS edge (the old fixed-n_hap bug).
-        from pg_gpu.windowed_analysis import windowed_analysis
+        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
         n = 20
         hap = np.zeros((n, 4), dtype=np.int8)
         hap[:, :] = np.array([0, 1, 1, 1])  # sites 1..3 monomorphic-derived
