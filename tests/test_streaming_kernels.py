@@ -117,6 +117,19 @@ class TestWindowedAnalysisDispatch:
                                   statistics=stats)
         _assert_frames_equivalent(df_e, df_s)
 
+    @pytest.mark.parametrize("chunk_bp,window_size", CHUNK_WINDOW_COMBOS)
+    def test_daf_hist_mu_sfs_equivalent(self, vcz_store, chunk_bp, window_size):
+        # daf_hist (normalized histogram) and mu_sfs (edge/segregating ratio) are
+        # not plain sums, so a naive per-chunk normalize-then-concatenate would be
+        # wrong. It is correct here only because the streaming grid aligns windows
+        # to chunk boundaries (a window never straddles two chunks), so each
+        # window is computed whole within one chunk. This pins that.
+        eager, stream = _aligned_pair(vcz_store, chunk_bp=chunk_bp)
+        stats = ["daf_hist", "mu_sfs"]
+        df_e = windowed_analysis(eager, window_size=window_size, statistics=stats)
+        df_s = windowed_analysis(stream, window_size=window_size, statistics=stats)
+        _assert_frames_equivalent(df_e, df_s)
+
     def test_two_pop_divergence_equivalent(self, vcz_store, tmp_path):
         # Build a two-population pop file so divergence stats have something
         # to compute. Split samples 50/50.
