@@ -6,7 +6,7 @@ This directory contains the documentation for pg_gpu.
 
 ```bash
 cd docs
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 make html
 ```
 
