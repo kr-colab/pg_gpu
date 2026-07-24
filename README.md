@@ -28,7 +28,7 @@ To use pg_gpu from your own workflow (Snakemake, Jupyter, an existing conda
 env), install it from PyPI with pip:
 
 ```bash
-pip install pg_gpu
+python -m pip install pg_gpu
 ```
 
 This pulls the full runtime stack (cupy-cuda12x with toolkit headers, bio2zarr,
@@ -36,7 +36,7 @@ kvikio, nvcomp) as declared in `pyproject.toml`. For development against a local
 checkout, use an editable install:
 
 ```bash
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 ```
 
 ## Quick Start
