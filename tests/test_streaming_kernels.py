@@ -28,6 +28,24 @@ def vcz_store(tmp_path):
     return path
 
 
+@pytest.fixture
+def vcz_store_missing(tmp_path):
+    """Like vcz_store but with ~15% missing genotypes, so streaming vs eager can
+    be checked on the missing-data path (the accumulate-then-normalize logic in
+    grm/ibs and its interaction with an accessible mask)."""
+    hm = _simulate_hm()
+    hap = hm.haplotypes
+    hap = (hap.get() if hasattr(hap, "get") else np.asarray(hap)).copy()
+    rng = np.random.RandomState(0)
+    hap[rng.random(hap.shape) < 0.15] = -1
+    pos = hm.positions.get() if hasattr(hm.positions, "get") else hm.positions
+    hm2 = HaplotypeMatrix(hap, pos, hm.chrom_start, hm.chrom_end)
+    hm2.samples = [f"s{i}" for i in range(hap.shape[0] // 2)]
+    path = str(tmp_path / "kern_missing.vcz")
+    hm2.to_zarr(path, format="vcz", contig_name="1")
+    return path
+
+
 def _assert_frames_equivalent(a, b):
     """Compare two windowed_analysis DataFrames, sorted by start, with
     numeric tolerance suitable for float32-ish stats."""
@@ -546,6 +564,37 @@ class TestGeneticRelatednessDispatch:
         s = relatedness.genetic_relatedness(stream, span_normalize=mode)
         np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)
 
+    @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+    @pytest.mark.parametrize("use_mask", [False, True])
+    def test_missing_data_equivalent(self, vcz_store_missing, tmp_path,
+                                     missing_data, use_mask):
+        # genetic_relatedness on missing genotypes: per-site per-set frequencies
+        # and both denominators -- the accessible span (span_normalize) and the
+        # segregating-site count (proportion) -- must match eager, including with
+        # an accessible mask. Every other streaming fixture is missing-free, so
+        # this is the only test exercising the missing-data path for the
+        # streaming accessible-mask handling on the haplotype side.
+        from pg_gpu import relatedness
+        kw = {}
+        if use_mask:
+            bed = str(tmp_path / "acc.bed")
+            with open(bed, "w") as f:
+                f.write("1\t25000\t75000\n")
+            kw["accessible_bed"] = bed
+        eager = HaplotypeMatrix.from_zarr(vcz_store_missing, streaming="never",
+                                          **kw)
+        assert bool((eager.haplotypes < 0).any())   # guard: missing present
+        stream = HaplotypeMatrix.from_zarr(vcz_store_missing, streaming="always",
+                                           chunk_bp=10_000, **kw)
+        for extra in ({"span_normalize": True}, {"proportion": True}):
+            e = relatedness.genetic_relatedness(eager, missing_data=missing_data,
+                                                **extra)
+            s = relatedness.genetic_relatedness(stream, missing_data=missing_data,
+                                                **extra)
+            np.testing.assert_allclose(
+                s, e, rtol=1e-6, atol=1e-9,
+                err_msg=f"{extra} missing={missing_data} mask={use_mask}")
+
 
 class TestGrmIbsAccessibleBed:
     """Streaming grm/ibs match eager row-for-row, and a load-time
@@ -581,6 +630,30 @@ class TestGrmIbsAccessibleBed:
         stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
                                           chunk_bp=10_000, accessible_bed=bed)
         assert eager.num_variants < full.num_variants   # mask really filters
+        np.testing.assert_allclose(fn(stream), fn(eager),
+                                   rtol=1e-6, atol=1e-9)
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    @pytest.mark.parametrize("use_mask", [False, True])
+    def test_missing_data_equivalent(self, vcz_store_missing, tmp_path, stat,
+                                     use_mask):
+        # grm/ibs on missing genotypes: the per-pair valid-site normalization
+        # (ibs's n_joint; grm's per-site p and n_snps_used) must accumulate
+        # across streaming chunks and normalize once, matching eager -- and that
+        # must still hold with an accessible mask filtering variants. Every other
+        # fixture is missing-free, so this is the only test exercising the
+        # accumulate-then-normalize path under missing data.
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        kw = {}
+        if use_mask:
+            kw["accessible_bed"] = self._write_bed(str(tmp_path / "acc.bed"))
+        eager = GenotypeMatrix.from_zarr(vcz_store_missing, streaming="never",
+                                         **kw)
+        # guard against a missing-free fixture silently making this vacuous
+        assert bool((eager.genotypes < 0).any())
+        stream = GenotypeMatrix.from_zarr(vcz_store_missing, streaming="always",
+                                          chunk_bp=10_000, **kw)
         np.testing.assert_allclose(fn(stream), fn(eager),
                                    rtol=1e-6, atol=1e-9)
 
