@@ -84,6 +84,42 @@ class MultiallelicCapWarning(UserWarning):
     """
 
 
+class BiallelicOnlyWarning(UserWarning):
+    """Emitted when a biallelic-only statistic or loader drops multiallelic sites.
+
+    Some statistics and loaders are defined only on biallelic sites and otherwise
+    exclude multiallelic ones silently. This warning reports how many sites were
+    dropped, so a partial result is not mistaken for a whole-data one. It marks a
+    statistical-domain restriction, distinct from ``MultiallelicCapWarning``,
+    which caps a multiallelic-capable windowed kernel at its fixed per-allele
+    capacity. Silence with::
+
+        import warnings
+        from pg_gpu import BiallelicOnlyWarning
+        warnings.filterwarnings("ignore", category=BiallelicOnlyWarning)
+    """
+
+
+def _warn_biallelic_only(n_dropped, *, context, stacklevel=3):
+    """Emit ``BiallelicOnlyWarning`` that ``context`` dropped ``n_dropped`` sites.
+
+    A no-op when ``n_dropped`` is 0, so callers can pass a raw count
+    unconditionally. ``context`` names the operation that restricted to biallelic
+    (e.g. ``"GenotypeMatrix.from_vcf"``, ``"patterson_d"``) and leads the message.
+    """
+    n_dropped = int(n_dropped)
+    if n_dropped <= 0:
+        return
+    warnings.warn(
+        f"{context} is defined on biallelic sites; dropped {n_dropped} "
+        f"multiallelic site(s). To silence:\n"
+        "    import warnings\n"
+        "    from pg_gpu import BiallelicOnlyWarning\n"
+        "    warnings.filterwarnings('ignore', category=BiallelicOnlyWarning)",
+        BiallelicOnlyWarning, stacklevel=stacklevel,
+    )
+
+
 # ── VCF size heuristic ──────────────────────────────────────────────────────
 #
 # VCF text parsing is single-threaded in htslib and the whole genotype matrix

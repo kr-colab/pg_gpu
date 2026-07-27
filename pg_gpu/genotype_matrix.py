@@ -18,10 +18,11 @@ class GenotypeMatrix:
     Shape: (n_individuals, n_variants). Missing data encoded as -1.
 
     Biallelic by construction: values are alt-allele dosage (0/1/2), so this
-    structure cannot represent multiallelic genotypes -- ``from_vcf`` filters
-    multiallelic sites out and ``from_haplotype_matrix`` sums paired haplotypes
-    (well-defined only for {0,1} alleles). For multiallelic data use the
-    allele-index ``HaplotypeMatrix``.
+    structure cannot represent multiallelic genotypes. ``from_vcf`` filters
+    multiallelic sites out and ``from_haplotype_matrix`` drops sites with an
+    allele index >= 2 (the dosage is well-defined only for {0,1} alleles); both
+    emit a ``BiallelicOnlyWarning`` with the dropped-site count. For multiallelic
+    data use the allele-index ``HaplotypeMatrix``.
 
     Parameters
     ----------
@@ -274,7 +275,22 @@ class GenotypeMatrix:
                 f"Need even number of haplotypes for diploid conversion, got {n_hap}")
 
         hap = hap_matrix.haplotypes
+        positions = hap_matrix.positions
         xp = cp if isinstance(hap, cp.ndarray) else np
+
+        # A 0/1/2 dosage can only represent {0,1}-coded sites; an allele index
+        # >= 2 would make the paired-haplotype sum a bogus dosage (2+2 -> 4).
+        # Drop those sites (and their positions) and warn with the count, rather
+        # than silently producing garbage. positions shares hap's array
+        # namespace, so the same boolean mask indexes both.
+        biallelic = hap.max(axis=0) <= 1
+        n_dropped = int((~biallelic).sum())
+        if n_dropped:
+            from ._warnings import _warn_biallelic_only
+            _warn_biallelic_only(
+                n_dropped, context="GenotypeMatrix.from_haplotype_matrix")
+            hap = hap[:, biallelic]
+            positions = positions[biallelic]
 
         h1 = hap[0::2]  # even indices
         h2 = hap[1::2]  # odd indices
@@ -307,7 +323,7 @@ class GenotypeMatrix:
                 ind_indices = sorted(set(i // 2 for i in indices))
                 new_sample_sets[name] = ind_indices
 
-        return cls(geno, hap_matrix.positions, hap_matrix.chrom_start,
+        return cls(geno, positions, hap_matrix.chrom_start,
                    hap_matrix.chrom_end, sample_sets=new_sample_sets,
                    n_total_sites=hap_matrix.n_total_sites,
                    accessible_mask=hap_matrix.accessible_mask)
@@ -389,7 +405,7 @@ class GenotypeMatrix:
         pos = callset['variants/POS']
         samples = list(callset['samples'])
 
-        from ._warnings import check_diploid_encoding
+        from ._warnings import check_diploid_encoding, _warn_biallelic_only
         check_diploid_encoding(gt, sample_names=samples, source=f"VCF '{path}'")
 
         # Filter to biallelic sites (max allele index <= 1)
@@ -397,6 +413,8 @@ class GenotypeMatrix:
         gt_array = allel.GenotypeArray(gt)
         ac = gt_array.count_alleles()
         is_biallelic = ac.is_biallelic_01()
+        _warn_biallelic_only(int(np.sum(~is_biallelic)),
+                             context="GenotypeMatrix.from_vcf")
         gt = gt[is_biallelic]
         pos = pos[is_biallelic]
 

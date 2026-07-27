@@ -11,6 +11,7 @@ import allel
 import pytest
 
 from pg_gpu import HaplotypeMatrix
+from pg_gpu import BiallelicOnlyWarning
 from pg_gpu import diversity
 from pg_gpu import sfs
 from pg_gpu.diversity import FrequencySpectrum
@@ -645,12 +646,13 @@ class TestFStatisticsVsTskit:
         np.testing.assert_allclose(f4_pg, f4_ts, rtol=1e-9)
 
     def test_patterson_d_is_biallelic_restricted(self, multiallelic_ts):
-        # D silently excludes >2-allele sites (num=den=0) and stays in [-1, 1];
-        # exclusion is silent, matching the package's biallelic filtering.
+        # D excludes >2-allele sites (num=den=0) and stays in [-1, 1]; the
+        # exclusion now emits a BiallelicOnlyWarning with the dropped-site count.
         from pg_gpu import admixture
         ts = multiallelic_ts
         hm = self._hm(ts)
-        num, den = admixture.patterson_d(hm, 'A', 'B', 'C', 'D')
+        with pytest.warns(BiallelicOnlyWarning, match="multiallelic"):
+            num, den = admixture.patterson_d(hm, 'A', 'B', 'C', 'D')
         d_val = np.nansum(num) / np.nansum(den)
         assert -1.0 <= d_val <= 1.0
         # reference: strictly-biallelic subset ({0,1} across all four pops) gives
@@ -664,6 +666,8 @@ class TestFStatisticsVsTskit:
         d_all = num[n_alleles <= 2]
         assert np.allclose(num[n_alleles > 2], 0.0)   # multiallelic sites zeroed
 
+    @pytest.mark.filterwarnings(
+        "ignore::pg_gpu._warnings.BiallelicOnlyWarning")
     def test_moving_and_jackknife_inherit_per_allele_fix(self, multiallelic_ts):
         # moving_* / average_* build on the corrected _patterson_*_gpu helpers,
         # so they inherit the per-allele fix. A single all-variant window
