@@ -738,15 +738,11 @@ class HaplotypeMatrix:
         # Resolve an accessible BED once over the source's variant-position
         # bounds and hand it to the streaming matrix, so span-normalized
         # reductions (genetic_relatedness) divide by accessible bases the same
-        # way the eager path does. ``mappable_hi`` is one past the last variant,
-        # so the inclusive last position is ``mappable_hi - 1``.
-        accessible_mask = None
-        if accessible_bed is not None:
-            from .accessible import resolve_accessible_mask
-            chrom = region.split(':')[0] if region else source.chrom
-            lo, hi = source.mappable_lo, source.mappable_hi
-            accessible_mask = resolve_accessible_mask(
-                accessible_bed, lo, hi - 1, chrom)
+        # way the eager path does, and every chunk is filtered to accessible
+        # variants.
+        from .accessible import resolve_streaming_accessible_mask
+        accessible_mask = resolve_streaming_accessible_mask(
+            accessible_bed, source, region)
 
         return StreamingHaplotypeMatrix(
             source, fetcher,

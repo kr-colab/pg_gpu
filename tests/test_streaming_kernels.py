@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pg_gpu import HaplotypeMatrix, windowed_analysis
+from pg_gpu import GenotypeMatrix, HaplotypeMatrix, windowed_analysis
 from pg_gpu import sfs as sfs_module
 
 from .conftest import simulate_hm
@@ -25,6 +25,24 @@ def vcz_store(tmp_path):
     hm.samples = [f"s{i}" for i in range(hm.num_haplotypes // 2)]
     path = str(tmp_path / "kern.vcz")
     hm.to_zarr(path, format="vcz", contig_name="1")
+    return path
+
+
+@pytest.fixture
+def vcz_store_missing(tmp_path):
+    """Like vcz_store but with ~15% missing genotypes, so streaming vs eager can
+    be checked on the missing-data path (the accumulate-then-normalize logic in
+    grm/ibs and its interaction with an accessible mask)."""
+    hm = _simulate_hm()
+    hap = hm.haplotypes
+    hap = (hap.get() if hasattr(hap, "get") else np.asarray(hap)).copy()
+    rng = np.random.RandomState(0)
+    hap[rng.random(hap.shape) < 0.15] = -1
+    pos = hm.positions.get() if hasattr(hm.positions, "get") else hm.positions
+    hm2 = HaplotypeMatrix(hap, pos, hm.chrom_start, hm.chrom_end)
+    hm2.samples = [f"s{i}" for i in range(hap.shape[0] // 2)]
+    path = str(tmp_path / "kern_missing.vcz")
+    hm2.to_zarr(path, format="vcz", contig_name="1")
     return path
 
 
@@ -238,6 +256,35 @@ class TestAccessibleBedDispatch:
             assert ((pos >= 25000) & (pos < 75000)).all()
             seen += chunk.num_variants
         assert seen > 0
+
+    def test_load_time_mask_windowed_equivalent(self, vcz_store, tmp_path):
+        # A LOAD-TIME mask must reach windowed_analysis without re-passing
+        # accessible_bed: iter_gpu_chunks attaches it, and the per-chunk
+        # eager call honors the already-attached mask. This is a distinct
+        # path from test_accessible_bed_equivalent, which passes the BED as
+        # an argument. Both eager and streaming carry the mask from load.
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                          accessible_bed=bed)
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000, accessible_bed=bed)
+        eager.chrom_start = stream.chrom_start
+        eager.chrom_end = stream.chrom_end
+        stats = ["pi", "theta_w", "segregating_sites"]
+        df_e = windowed_analysis(eager, window_size=5_000, statistics=stats)
+        df_s = windowed_analysis(stream, window_size=5_000, statistics=stats)
+        _assert_frames_equivalent(df_e, df_s)
+
+        # Guard that the mask actually bit: an unmasked streaming run must
+        # differ, else the test would pass even if the mask were dropped.
+        unmasked = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                             chunk_bp=10_000)
+        df_u = windowed_analysis(unmasked, window_size=5_000,
+                                 statistics=["segregating_sites"])
+        df_u = df_u.sort_values("start").reset_index(drop=True)
+        df_s2 = df_s.sort_values("start").reset_index(drop=True)
+        assert not np.allclose(df_u["segregating_sites"].to_numpy(),
+                               df_s2["segregating_sites"].to_numpy())
 
 
 class TestGarudStreamingDispatch:
@@ -516,3 +563,157 @@ class TestGeneticRelatednessDispatch:
         e = relatedness.genetic_relatedness(eager, span_normalize=mode)
         s = relatedness.genetic_relatedness(stream, span_normalize=mode)
         np.testing.assert_allclose(s, e, rtol=1e-9, atol=1e-12)
+
+    @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+    @pytest.mark.parametrize("use_mask", [False, True])
+    def test_missing_data_equivalent(self, vcz_store_missing, tmp_path,
+                                     missing_data, use_mask):
+        # genetic_relatedness on missing genotypes: per-site per-set frequencies
+        # and both denominators -- the accessible span (span_normalize) and the
+        # segregating-site count (proportion) -- must match eager, including with
+        # an accessible mask. Every other streaming fixture is missing-free, so
+        # this is the only test exercising the missing-data path for the
+        # streaming accessible-mask handling on the haplotype side.
+        from pg_gpu import relatedness
+        kw = {}
+        if use_mask:
+            bed = str(tmp_path / "acc.bed")
+            with open(bed, "w") as f:
+                f.write("1\t25000\t75000\n")
+            kw["accessible_bed"] = bed
+        eager = HaplotypeMatrix.from_zarr(vcz_store_missing, streaming="never",
+                                          **kw)
+        assert bool((eager.haplotypes < 0).any())   # guard: missing present
+        stream = HaplotypeMatrix.from_zarr(vcz_store_missing, streaming="always",
+                                           chunk_bp=10_000, **kw)
+        for extra in ({"span_normalize": True}, {"proportion": True}):
+            e = relatedness.genetic_relatedness(eager, missing_data=missing_data,
+                                                **extra)
+            s = relatedness.genetic_relatedness(stream, missing_data=missing_data,
+                                                **extra)
+            np.testing.assert_allclose(
+                s, e, rtol=1e-6, atol=1e-9,
+                err_msg=f"{extra} missing={missing_data} mask={use_mask}")
+
+
+class TestGrmIbsAccessibleBed:
+    """Streaming grm/ibs match eager row-for-row, and a load-time
+    accessible_bed filters variants identically on both paths. grm/ibs are
+    per-site averages (not span-normalized), so the mask matters here purely
+    as variant filtering. #152"""
+
+    # Accessible: [25000, 75000). Excluding the flanks forces the mask to be
+    # applied at chunk boundaries, not just the matrix edges.
+    def _write_bed(self, path):
+        with open(path, "w") as f:
+            f.write("1\t25000\t75000\n")
+        return path
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    def test_no_mask_equivalent(self, vcz_store, stat):
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=10_000)
+        np.testing.assert_allclose(fn(stream), fn(eager),
+                                   rtol=1e-6, atol=1e-9)
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    def test_accessible_bed_equivalent(self, vcz_store, tmp_path, stat):
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+        full = GenotypeMatrix.from_zarr(vcz_store, streaming="never")
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                         accessible_bed=bed)
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=10_000, accessible_bed=bed)
+        assert eager.num_variants < full.num_variants   # mask really filters
+        np.testing.assert_allclose(fn(stream), fn(eager),
+                                   rtol=1e-6, atol=1e-9)
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    @pytest.mark.parametrize("use_mask", [False, True])
+    def test_missing_data_equivalent(self, vcz_store_missing, tmp_path, stat,
+                                     use_mask):
+        # grm/ibs on missing genotypes: the per-pair valid-site normalization
+        # (ibs's n_joint; grm's per-site p and n_snps_used) must accumulate
+        # across streaming chunks and normalize once, matching eager -- and that
+        # must still hold with an accessible mask filtering variants. Every other
+        # fixture is missing-free, so this is the only test exercising the
+        # accumulate-then-normalize path under missing data.
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        kw = {}
+        if use_mask:
+            kw["accessible_bed"] = self._write_bed(str(tmp_path / "acc.bed"))
+        eager = GenotypeMatrix.from_zarr(vcz_store_missing, streaming="never",
+                                         **kw)
+        # guard against a missing-free fixture silently making this vacuous
+        assert bool((eager.genotypes < 0).any())
+        stream = GenotypeMatrix.from_zarr(vcz_store_missing, streaming="always",
+                                          chunk_bp=10_000, **kw)
+        np.testing.assert_allclose(fn(stream), fn(eager),
+                                   rtol=1e-6, atol=1e-9)
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    def test_load_time_mask_changes_streaming_result(self, vcz_store, tmp_path,
+                                                     stat):
+        # Guard against a no-op mask trivially "matching" eager: the masked
+        # streaming result must differ from the unmasked one. Without the
+        # #152 fix the streaming matrix carries no mask and these are equal.
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+        unmasked = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                            chunk_bp=10_000)
+        masked = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=10_000, accessible_bed=bed)
+        assert not np.allclose(fn(masked), fn(unmasked))
+
+    def test_load_time_mask_filters_chunks(self, vcz_store, tmp_path):
+        # The mask is attached to every chunk iter_gpu_chunks yields, so each
+        # chunk's genotypes are restricted to accessible positions.
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                          chunk_bp=10_000, accessible_bed=bed)
+        seen = 0
+        for _, _, chunk in stream.iter_gpu_chunks():
+            assert chunk.has_accessible_mask
+            pos = chunk.positions
+            pos = pos.get() if hasattr(pos, "get") else np.asarray(pos)
+            assert ((pos >= 25000) & (pos < 75000)).all()
+            seen += chunk.num_variants
+        assert seen > 0
+
+    @pytest.mark.parametrize("stat", ["grm", "ibs"])
+    def test_auto_fallback_forwards_accessible_bed(self, vcz_store, tmp_path,
+                                                   monkeypatch, stat):
+        # streaming='auto' forwards accessible_bed on its streaming-fallback
+        # branch too, not just streaming='always'. The tiny fixture fits
+        # eagerly so 'auto' never falls back on its own; force the fallback
+        # by making the size decision return 'streaming' with a real source,
+        # which drives the actual _build_streaming(source=..., accessible_bed=)
+        # call. Guards against dropping accessible_bed from only that branch.
+        import pg_gpu.haplotype_matrix as hm_mod
+        from pg_gpu.zarr_source import ZarrGenotypeSource
+        from pg_gpu.streaming_matrix import StreamingGenotypeMatrix
+        from pg_gpu import relatedness
+        fn = getattr(relatedness, stat)
+        bed = self._write_bed(str(tmp_path / "acc.bed"))
+
+        def force_streaming(zarr_path, region, streaming, pop_assignment, **kw):
+            src = ZarrGenotypeSource(zarr_path, region=region,
+                                     pop_assignment=False)
+            return "streaming", src
+        monkeypatch.setattr(hm_mod, "_decide_streaming_mode", force_streaming)
+
+        stream = GenotypeMatrix.from_zarr(vcz_store, streaming="auto",
+                                          chunk_bp=10_000, accessible_bed=bed)
+        assert isinstance(stream, StreamingGenotypeMatrix)  # fallback taken
+        assert stream.accessible_mask is not None            # bed forwarded
+        eager = GenotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                         accessible_bed=bed)
+        np.testing.assert_allclose(fn(stream), fn(eager),
+                                   rtol=1e-6, atol=1e-9)
