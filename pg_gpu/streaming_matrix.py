@@ -439,6 +439,9 @@ class _StreamingMatrixBase:
         # None when no accessible BED was supplied at load; see get_span.
         self.accessible_mask = accessible_mask
         self.n_total_sites = n_total_sites
+        # Emit the multiallelic->missing BiallelicOnlyWarning at most once per
+        # streaming load, on the first chunk that recodes any site.
+        self._biallelic_warned = False
 
     @property
     def num_variants(self):
@@ -740,7 +743,13 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
         return self.num_individuals
 
     def _build_chunk(self, gt, pos, **kwargs):
-        return build_genotype_matrix(gt, pos, **kwargs)
+        m = build_genotype_matrix(gt, pos, **kwargs)
+        if m._n_multiallelic_recoded and not self._biallelic_warned:
+            from ._warnings import _warn_biallelic_only
+            _warn_biallelic_only(m._n_multiallelic_recoded,
+                                 context="GenotypeMatrix.from_zarr (streaming)")
+            self._biallelic_warned = True
+        return m
 
     def _repr_sample_axis(self):
         return f"num_individuals={self.num_individuals}"
