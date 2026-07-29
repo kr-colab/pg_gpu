@@ -41,8 +41,21 @@ from pg_gpu.windowed_analysis import windowed_analysis
 # Two datasets ship in examples/data/. The full X-chromosome (~25 Mb,
 # 5.3M variants) is the default; --small picks a 4 Mb subset for fast
 # iteration during development.
+#
+# The full store is VCF Zarr written by bio2zarr, carrying only the
+# fields pg_gpu reads. It is regenerated from the VCF alongside it with:
+#
+#     vcf2zarr explode gamb.X.phased.n100.derived.vcf.gz gamb.icf
+#     vcf2zarr mkschema gamb.icf > schema.json
+#     # keep call_genotype, call_genotype_mask, call_genotype_phased,
+#     # variant_{contig,position,allele,length,filter,id,id_mask};
+#     # set dimensions.variants.chunk_size to 100000
+#     vcf2zarr encode -s schema.json gamb.icf gamb.X.phased.n100.vcz
+#
+# The 100k-variant chunking matters: at bio2zarr's 1000-variant default
+# this store is 90k files and 55 MB, versus 411 files and 15 MB here.
 DATA_DIR = Path(__file__).resolve().parent / "data"
-ZARR_FULL = DATA_DIR / "gamb.X.phased.n100.zarr"
+ZARR_FULL = DATA_DIR / "gamb.X.phased.n100.vcz"
 ZARR_SMALL = DATA_DIR / "gamb.X.8-12Mb.n100.derived.zarr"
 
 # Plot palette: scikit-allel is warm grey, pg_gpu Rogers-Huff is blue,
@@ -91,8 +104,10 @@ def _load_data(small):
         raise FileNotFoundError(
             f"Required dataset not found: {path}\n"
             f"The data fixtures live under examples/data/ and are tracked "
-            f"in the repo. If you cloned without LFS or otherwise lack the "
-            f"file, try `git lfs pull` or refetch from the project root.")
+            f"directly in the repo (no Git LFS), so a plain clone should "
+            f"have them. If this one is missing, regenerate it from the "
+            f"VCF beside it using the vcf2zarr commands at the top of "
+            f"this file.")
     print(f"Loading {path.name} ...", flush=True)
     t0 = time.perf_counter()
     hm = HaplotypeMatrix.from_zarr(str(path))
