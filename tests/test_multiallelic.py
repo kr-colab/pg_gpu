@@ -746,11 +746,11 @@ class TestMultiallelicConsumers:
 
 
 class TestWindowedDafMuSfsMatchesScalar:
-    """0013 Option A: the windowed daf_hist / mu_sfs equal the scalar
-    diversity.daf_histogram / diversity.mu_sfs over the same variants -- in both
-    engines that compute them (include -> fused, exclude -> WindowedAnalyzer
-    fallback). Checked on a single whole-region window (the parity convention),
-    across biallelic / multiallelic and clean / missing data."""
+    """The windowed daf_hist / mu_sfs equal the scalar diversity.daf_histogram /
+    diversity.mu_sfs over the same variants -- in both engines that compute them
+    (include -> fused, exclude -> WindowedAnalyzer fallback). Checked on a single
+    whole-region window, across biallelic / multiallelic and clean / missing
+    data."""
 
     def _hap(self, kind, missing, seed=3, n=24, nv=90):
         rng = np.random.RandomState(seed)
@@ -760,8 +760,9 @@ class TestWindowedDafMuSfsMatchesScalar:
                 hap[:, j] = rng.randint(0, 3, n)
             for j in range(0, nv, 13):
                 hap[:, j] = rng.randint(0, 4, n)
-        # a monomorphic-derived site: with missing it is the case the old fixed
-        # n_hap edge test misclassified as a near-fixed SFS edge.
+        # a site fixed for the derived allele; with missing data present it checks
+        # that SFS-edge classification uses each site's own valid-sample count (a
+        # global count would misread it as a near-fixed edge).
         hap[:, 5] = 1
         if missing:
             hap[rng.random(hap.shape) < 0.08] = -1
@@ -798,7 +799,7 @@ class TestWindowedDafMuSfsMatchesScalar:
         # boundaries (pos == a window end == the next window's start). Each
         # window's daf_hist / mu_sfs must equal the scalar over that window's
         # right-open [start, end) slice, and the window membership must agree with
-        # n_variants. The parity harness uses one whole-region window, so it never
+        # n_variants. The whole-region test above uses a single window, so it never
         # exercises an interior boundary -- this is the case that catches the
         # bin_idx window-assignment convention.
         from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
@@ -831,7 +832,7 @@ class TestWindowedDafMuSfsMatchesScalar:
     @pytest.mark.parametrize("kind", ["biallelic", "multiallelic"])
     def test_whole_region_exclude_matches_scalar(self, kind):
         # exclude mode routes to the WindowedAnalyzer fallback (which calls the
-        # scalar functions per window); previously it raised "Unknown statistic".
+        # scalar functions per window) rather than the fused GPU engine.
         from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
         hap = self._hap(kind, missing=True)
         nv = hap.shape[1]
@@ -851,7 +852,8 @@ class TestWindowedDafMuSfsMatchesScalar:
 
     def test_monomorphic_derived_with_missing_not_edge(self):
         # A site that is monomorphic for the derived allele but has one missing
-        # haplotype must not count as an SFS edge (the old fixed-n_hap bug).
+        # haplotype must not count as an SFS edge: classification uses the site's
+        # own valid-sample count, not a global haplotype count.
         from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
         n = 20
         hap = np.zeros((n, 4), dtype=np.int8)

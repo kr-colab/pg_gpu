@@ -475,8 +475,8 @@ def test_daf_hist_matches_scalar(request, condition):
     against diversity.daf_histogram for every engine that computes it: the fused
     engine (include only) and the WindowedAnalyzer fallback (include and exclude).
 
-    Multi-window / boundary coverage for daf_hist (and mean_nsl) is deferred to the
-    parity-coverage followup (0006-issue-parity-coverage-gaps.md addendum)."""
+    This checks the whole-region histogram; multi-window and window-boundary
+    coverage for daf_hist (and mean_nsl) lives in dedicated windowed tests."""
     cond = _CONDITIONS[condition]
     hm = request.getfixturevalue(cond.fixture)
     md = cond.missing_data

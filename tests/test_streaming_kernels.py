@@ -144,7 +144,7 @@ class TestWindowedAnalysisDispatch:
     @pytest.mark.xfail(reason="streaming + missing_data='exclude' diverges from "
                               "eager at chunk boundaries for ALL windowed stats "
                               "(pi included), a pre-existing streaming window-grid "
-                              "issue; see issue-streaming-exclude-window-grid.md",
+                              "issue",
                        strict=False)
     def test_daf_hist_mu_sfs_missing_exclude_equivalent(self, vcz_store_missing):
         eager, stream = _aligned_pair(vcz_store_missing, chunk_bp=25_000)

@@ -274,7 +274,11 @@ class StatisticsComputer:
 
         # Skip if no variants
         if window.n_variants == 0:
-            # Fill with NaN for all statistics
+            # Empty window: scalar stats are undefined -> NaN. The frequency-
+            # spectrum features are vector-valued (their own daf_bin_* / mu_sfs
+            # columns) and must still emit those columns, filled with the value
+            # the scalar and fused paths give for no data (0.0 / all-zero
+            # histogram) -- handled below by _freq_stat_results.
             for stat in self.statistics:
                 name = stat if isinstance(stat, str) else stat.__name__
                 if name in self.FREQ_STATS:
