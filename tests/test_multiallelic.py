@@ -745,6 +745,75 @@ class TestMultiallelicConsumers:
         assert len(edges) == len(hist) + 1
 
 
+class TestWindowedDafMuSfsMatchesScalar:
+    """The windowed daf_hist / mu_sfs (fused engine, missing_data='include')
+    equal the scalar diversity.daf_histogram / diversity.mu_sfs over the same
+    variants. Checked on a single whole-region window, across biallelic /
+    multiallelic and clean / missing data."""
+
+    def _hap(self, kind, missing, seed=3, n=24, nv=90):
+        rng = np.random.RandomState(seed)
+        hap = rng.randint(0, 2, (n, nv)).astype(np.int8)
+        if kind == 'multiallelic':
+            for j in range(0, nv, 7):
+                hap[:, j] = rng.randint(0, 3, n)
+            for j in range(0, nv, 13):
+                hap[:, j] = rng.randint(0, 4, n)
+        # a site fixed for the derived allele; with missing data present it checks
+        # that SFS-edge classification uses each site's own valid-sample count (a
+        # global count would misread it as a near-fixed edge).
+        hap[:, 5] = 1
+        if missing:
+            hap[rng.random(hap.shape) < 0.08] = -1
+        return hap
+
+    @pytest.mark.parametrize("kind", ["biallelic", "multiallelic"])
+    @pytest.mark.parametrize("missing", [False, True])
+    def test_whole_region_matches_scalar(self, kind, missing):
+        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
+        hap = self._hap(kind, missing)
+        nv = hap.shape[1]
+        pos = np.arange(nv) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, nv * 100)
+        # one window covering the whole region
+        wa = windowed_analysis(hm, window_size=nv * 100 + 1000,
+                               step_size=nv * 100 + 1000,
+                               statistics=['mu_sfs', 'daf_hist'],
+                               missing_data='include')
+        assert len(wa) == 1
+        w_mu = wa['mu_sfs'].values[0]
+        w_hist = np.array([wa[f'daf_bin_{b}'].values[0] for b in range(_DAF_N_BINS)])
+
+        sc_mu = diversity.mu_sfs(hm, missing_data='include')
+        sc_hist, _ = diversity.daf_histogram(hm, n_bins=_DAF_N_BINS, missing_data='include')
+
+        if np.isnan(sc_mu):
+            assert np.isnan(w_mu)
+        else:
+            np.testing.assert_allclose(w_mu, sc_mu, atol=1e-12)
+        np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
+
+    def test_monomorphic_derived_with_missing_not_edge(self):
+        # A site that is monomorphic for the derived allele but has one missing
+        # haplotype must not count as an SFS edge: classification uses the site's
+        # own valid-sample count, not a global haplotype count.
+        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
+        n = 20
+        hap = np.zeros((n, 4), dtype=np.int8)
+        hap[:, :] = np.array([0, 1, 1, 1])  # sites 1..3 monomorphic-derived
+        hap[0, 1] = -1                       # one missing at the monomorphic site
+        pos = np.arange(4) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, 400)
+        wa = windowed_analysis(hm, window_size=5000, step_size=5000,
+                               statistics=['mu_sfs'], missing_data='include')
+        w_mu = wa['mu_sfs'].values[0]
+        sc_mu = diversity.mu_sfs(hm, missing_data='include')
+        # no segregating sites -> mu_sfs is 0.0 (matching the scalar), and in
+        # particular the monomorphic-derived-plus-missing site is not a spurious edge
+        np.testing.assert_allclose(w_mu, sc_mu, atol=1e-12)
+        np.testing.assert_allclose(w_mu, 0.0, atol=1e-12)
+
+
 class TestMultiallelicEdgeCases:
     """Hand-built sites: per-allele pi and mutation-count segregating."""
 

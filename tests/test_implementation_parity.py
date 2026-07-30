@@ -42,6 +42,7 @@ from pg_gpu.windowed_analysis import (
     _windowed_thetas_scatter,
     _windowed_twopop_scatter,
     windowed_statistics_fused,
+    _DAF_N_BINS,
 )
 
 from .conftest import simulate_hm
@@ -267,6 +268,10 @@ _STATS = {
         False, "value",
         lambda hm, md: diversity.max_daf(hm, missing_data=md),
         None, "max_daf", "max_daf", None),
+    "mu_sfs": _Stat(
+        False, "value",
+        lambda hm, md: diversity.mu_sfs(hm, missing_data=md),
+        None, None, "mu_sfs", None),
     "fst_hudson": _Stat(
         True, "value",
         lambda hm, md: divergence.fst_hudson(hm, POP1, POP2, missing_data=md),
@@ -461,3 +466,27 @@ def test_path_matches_scalar(request, condition, stat, path):
     reference = _path_scalar(hm, stat, cond.missing_data)
     value = _PATHS[path](hm, stat, cond.missing_data)
     _assert_agrees(stat, reference, value)
+
+
+@pytest.mark.parametrize("condition", list(_CONDITIONS))
+def test_daf_hist_matches_scalar(request, condition):
+    """daf_hist is vector-valued (daf_bin_0 .. daf_bin_{_DAF_N_BINS - 1}), so it
+    sits outside the scalar _STATS matrix. The fused engine computes it under
+    missing_data='include'; check its whole-region histogram against
+    diversity.daf_histogram.
+
+    This checks the whole-region histogram; multi-window and window-boundary
+    coverage for daf_hist (and mean_nsl) lives in dedicated windowed tests."""
+    cond = _CONDITIONS[condition]
+    if cond.missing_data != "include":
+        pytest.skip("windowed daf_hist is computed by the fused engine "
+                    "(missing_data='include') only")
+    hm = request.getfixturevalue(cond.fixture)
+    ref, _ = diversity.daf_histogram(hm, n_bins=_DAF_N_BINS, missing_data="include")
+
+    out = windowed_statistics_fused(hm, _whole_bp_bins(hm),
+                                    statistics=("daf_hist",), per_base=False,
+                                    missing_data="include", population=None)
+    got_fused = np.array([np.asarray(out[f"daf_bin_{b}"])[0]
+                          for b in range(_DAF_N_BINS)])
+    np.testing.assert_allclose(got_fused, ref, rtol=RTOL, atol=ATOL)

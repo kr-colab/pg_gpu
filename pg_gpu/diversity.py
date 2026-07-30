@@ -1693,10 +1693,26 @@ def diplotype_frequency_spectrum(genotype_matrix,
     return freqs, len(counts)
 
 
+def _daf_bin_index(dafs, n_bins):
+    """Bin index in [0, n_bins - 1] for derived-allele frequencies in [0, 1].
+
+    Left-closed bins of width 1/n_bins; a frequency of 1.0 falls in the top bin.
+    Shared by daf_histogram and the windowed daf_hist so the two assign bins
+    identically (the windowed path scatters these indices into per-window
+    histograms; here they feed a single bincount).
+    """
+    idx = cp.floor(dafs * n_bins).astype(cp.int32)
+    return cp.clip(idx, 0, n_bins - 1)
+
+
 def _histogram_from_dafs(dafs, n_bins):
     """Shared: compute normalized histogram from DAF CuPy array."""
     bin_edges = cp.linspace(0, 1, n_bins + 1)
-    hist = cp.histogram(dafs, bins=bin_edges)[0].astype(cp.float64)
+    if dafs.size:
+        idx = _daf_bin_index(dafs, n_bins)
+        hist = cp.bincount(idx, minlength=n_bins)[:n_bins].astype(cp.float64)
+    else:
+        hist = cp.zeros(n_bins, dtype=cp.float64)
     total = cp.sum(hist)
     if total > 0:
         hist = hist / total

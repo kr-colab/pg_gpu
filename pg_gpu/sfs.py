@@ -206,9 +206,8 @@ def _joint_global_k(m1, m2):
     """Global allele-index width K spanning both population matrices.
 
     The joint SFS counts each population on a *shared* K so that allele
-    column ``a`` denotes the same allele in both per-allele count matrices
-    (the alignment discipline from 0001). ``K = max allele index over both
-    pops + 1``.
+    column ``a`` denotes the same allele in both per-allele count matrices.
+    ``K = max allele index over both pops + 1``.
     """
     k1 = int(m1.haplotypes.max()) if m1.num_variants > 0 else 0
     k2 = int(m2.haplotypes.max()) if m2.num_variants > 0 else 0

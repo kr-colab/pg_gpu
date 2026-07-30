@@ -30,14 +30,13 @@ def vcz_store(tmp_path):
 
 @pytest.fixture
 def vcz_store_missing(tmp_path):
-    """Like vcz_store but with ~15% missing genotypes, so streaming vs eager can
-    be checked on the missing-data path (the accumulate-then-normalize logic in
-    grm/ibs and its interaction with an accessible mask)."""
+    """Like vcz_store but with ~10% missing genotypes, to exercise the
+    missing-data paths (include and exclude) over the streaming dispatch."""
     hm = _simulate_hm()
     hap = hm.haplotypes
     hap = (hap.get() if hasattr(hap, "get") else np.asarray(hap)).copy()
     rng = np.random.RandomState(0)
-    hap[rng.random(hap.shape) < 0.15] = -1
+    hap[rng.random(hap.shape) < 0.1] = -1
     pos = hm.positions.get() if hasattr(hm.positions, "get") else hm.positions
     hm2 = HaplotypeMatrix(hap, pos, hm.chrom_start, hm.chrom_end)
     hm2.samples = [f"s{i}" for i in range(hap.shape[0] // 2)]
@@ -115,6 +114,31 @@ class TestWindowedAnalysisDispatch:
                                   statistics=stats)
         df_s = windowed_analysis(stream, window_size=window_size,
                                   statistics=stats)
+        _assert_frames_equivalent(df_e, df_s)
+
+    @pytest.mark.parametrize("chunk_bp,window_size", CHUNK_WINDOW_COMBOS)
+    def test_daf_hist_mu_sfs_equivalent(self, vcz_store, chunk_bp, window_size):
+        # daf_hist (normalized histogram) and mu_sfs (edge/segregating ratio) are
+        # not plain sums, so a naive per-chunk normalize-then-concatenate would be
+        # wrong. It is correct here only because the streaming grid aligns windows
+        # to chunk boundaries (a window never straddles two chunks), so each
+        # window is computed whole within one chunk. This pins that.
+        eager, stream = _aligned_pair(vcz_store, chunk_bp=chunk_bp)
+        stats = ["daf_hist", "mu_sfs"]
+        df_e = windowed_analysis(eager, window_size=window_size, statistics=stats)
+        df_s = windowed_analysis(stream, window_size=window_size, statistics=stats)
+        _assert_frames_equivalent(df_e, df_s)
+
+    def test_daf_hist_mu_sfs_missing_include_equivalent(self, vcz_store_missing):
+        # daf_hist / mu_sfs over missing data, include mode: per-site n_valid is
+        # chunk-invariant (a site's non-missing count does not depend on other
+        # sites), so streaming must match eager.
+        eager, stream = _aligned_pair(vcz_store_missing, chunk_bp=25_000)
+        stats = ["daf_hist", "mu_sfs"]
+        df_e = windowed_analysis(eager, window_size=5_000, statistics=stats,
+                                 missing_data="include")
+        df_s = windowed_analysis(stream, window_size=5_000, statistics=stats,
+                                 missing_data="include")
         _assert_frames_equivalent(df_e, df_s)
 
     def test_two_pop_divergence_equivalent(self, vcz_store, tmp_path):
