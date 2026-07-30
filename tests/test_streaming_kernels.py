@@ -141,20 +141,6 @@ class TestWindowedAnalysisDispatch:
                                  missing_data="include")
         _assert_frames_equivalent(df_e, df_s)
 
-    @pytest.mark.xfail(reason="streaming + missing_data='exclude' diverges from "
-                              "eager at chunk boundaries for ALL windowed stats "
-                              "(pi included), a pre-existing streaming window-grid "
-                              "issue",
-                       strict=False)
-    def test_daf_hist_mu_sfs_missing_exclude_equivalent(self, vcz_store_missing):
-        eager, stream = _aligned_pair(vcz_store_missing, chunk_bp=25_000)
-        stats = ["daf_hist", "mu_sfs"]
-        df_e = windowed_analysis(eager, window_size=5_000, statistics=stats,
-                                 missing_data="exclude")
-        df_s = windowed_analysis(stream, window_size=5_000, statistics=stats,
-                                 missing_data="exclude")
-        _assert_frames_equivalent(df_e, df_s)
-
     def test_two_pop_divergence_equivalent(self, vcz_store, tmp_path):
         # Build a two-population pop file so divergence stats have something
         # to compute. Split samples 50/50.

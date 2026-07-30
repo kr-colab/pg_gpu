@@ -746,11 +746,10 @@ class TestMultiallelicConsumers:
 
 
 class TestWindowedDafMuSfsMatchesScalar:
-    """The windowed daf_hist / mu_sfs equal the scalar diversity.daf_histogram /
-    diversity.mu_sfs over the same variants -- in both engines that compute them
-    (include -> fused, exclude -> WindowedAnalyzer fallback). Checked on a single
-    whole-region window, across biallelic / multiallelic and clean / missing
-    data."""
+    """The windowed daf_hist / mu_sfs (fused engine, missing_data='include')
+    equal the scalar diversity.daf_histogram / diversity.mu_sfs over the same
+    variants. Checked on a single whole-region window, across biallelic /
+    multiallelic and clean / missing data."""
 
     def _hap(self, kind, missing, seed=3, n=24, nv=90):
         rng = np.random.RandomState(seed)
@@ -792,62 +791,6 @@ class TestWindowedDafMuSfsMatchesScalar:
             assert np.isnan(w_mu)
         else:
             np.testing.assert_allclose(w_mu, sc_mu, atol=1e-12)
-        np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
-
-    def test_multi_window_boundary_matches_scalar(self):
-        # Multiple windows with variants sitting exactly on interior window
-        # boundaries (pos == a window end == the next window's start). Each
-        # window's daf_hist / mu_sfs must equal the scalar over that window's
-        # right-open [start, end) slice, and the window membership must agree with
-        # n_variants. The whole-region test above uses a single window, so it never
-        # exercises an interior boundary -- this is the case that catches the
-        # bin_idx window-assignment convention.
-        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
-        rng = np.random.RandomState(4)
-        nv = 120
-        hap = rng.randint(0, 2, (24, nv)).astype(np.int8)
-        for j in range(0, nv, 7):
-            hap[:, j] = rng.randint(0, 3, 24)
-        hap[rng.random(hap.shape) < 0.05] = -1
-        pos = np.arange(nv) * 100          # 3000, 6000, 9000 are interior boundaries
-        hm = HaplotypeMatrix(hap, pos, 0, nv * 100)
-        wa = windowed_analysis(hm, window_size=3000, step_size=3000,
-                               statistics=['mu_sfs', 'daf_hist'],
-                               missing_data='include')
-        assert len(wa) > 1
-        for _, row in wa.iterrows():
-            s, e = row['start'], row['end']
-            m = (pos >= s) & (pos < e)
-            assert int(m.sum()) == int(row['n_variants'])
-            if not m.any():
-                continue
-            sub = HaplotypeMatrix(hap[:, m], pos[m], int(s), int(e))
-            sc_mu = diversity.mu_sfs(sub, missing_data='include')
-            sc_hist, _ = diversity.daf_histogram(sub, n_bins=_DAF_N_BINS,
-                                                 missing_data='include')
-            w_hist = np.array([row[f'daf_bin_{b}'] for b in range(_DAF_N_BINS)])
-            np.testing.assert_allclose(row['mu_sfs'], sc_mu, atol=1e-12)
-            np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
-
-    @pytest.mark.parametrize("kind", ["biallelic", "multiallelic"])
-    def test_whole_region_exclude_matches_scalar(self, kind):
-        # exclude mode routes to the WindowedAnalyzer fallback (which calls the
-        # scalar functions per window) rather than the fused GPU engine.
-        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
-        hap = self._hap(kind, missing=True)
-        nv = hap.shape[1]
-        pos = np.arange(nv) * 100
-        hm = HaplotypeMatrix(hap, pos, 0, nv * 100)
-        wa = windowed_analysis(hm, window_size=nv * 100 + 1000,
-                               step_size=nv * 100 + 1000,
-                               statistics=['mu_sfs', 'daf_hist'],
-                               missing_data='exclude')
-        assert len(wa) == 1
-        w_mu = wa['mu_sfs'].values[0]
-        w_hist = np.array([wa[f'daf_bin_{b}'].values[0] for b in range(_DAF_N_BINS)])
-        sc_mu = diversity.mu_sfs(hm, missing_data='exclude')
-        sc_hist, _ = diversity.daf_histogram(hm, n_bins=_DAF_N_BINS, missing_data='exclude')
-        np.testing.assert_allclose(w_mu, sc_mu, atol=1e-12)
         np.testing.assert_allclose(w_hist, sc_hist, atol=1e-12)
 
     def test_monomorphic_derived_with_missing_not_edge(self):

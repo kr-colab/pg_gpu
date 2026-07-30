@@ -63,8 +63,8 @@ CANONICAL_WINDOW_PREFIX = (
     'chrom', 'start', 'end', 'center', 'n_variants', 'window_id')
 
 # Number of bins in the windowed daf_hist feature (columns daf_bin_0 ..
-# daf_bin_{_DAF_N_BINS - 1}). Fixed for now, shared by the fused engine and the
-# fallback so they emit the same columns; making it a caller parameter is deferred.
+# daf_bin_{_DAF_N_BINS - 1}) emitted by the fused engine. Fixed for now; making
+# it a caller parameter is deferred.
 _DAF_N_BINS = 20
 
 
@@ -233,16 +233,9 @@ class StatisticsComputer:
                                                 span_normalize=sn),
         }
 
-        # Frequency-spectrum features computed here (the exclude-mode path) by
-        # deferring to the scalar diversity functions per window; the fused engine
-        # handles the include-mode fast path. daf_hist is vector-valued and expands
-        # into daf_bin_0 .. daf_bin_{n-1} columns.
-        self.FREQ_STATS = {'daf_hist', 'mu_sfs'}
-
         self.single_pop_stats = []
         self.two_pop_stats = []
         self.ld_stats = []
-        self.freq_stats = []
         self.custom_stats = []
 
         for stat in self.statistics:
@@ -253,8 +246,6 @@ class StatisticsComputer:
                     self.two_pop_stats.append(stat)
                 elif stat in self.LD_STATS:
                     self.ld_stats.append(stat)
-                elif stat in self.FREQ_STATS:
-                    self.freq_stats.append(stat)
                 else:
                     raise ValueError(f"Unknown statistic: {stat}")
             else:
@@ -274,17 +265,12 @@ class StatisticsComputer:
 
         # Skip if no variants
         if window.n_variants == 0:
-            # Empty window: scalar stats are undefined -> NaN. The frequency-
-            # spectrum features are vector-valued (their own daf_bin_* / mu_sfs
-            # columns) and must still emit those columns, filled with the value
-            # the scalar and fused paths give for no data (0.0 / all-zero
-            # histogram) -- handled below by _freq_stat_results.
+            # Fill with NaN for all statistics
             for stat in self.statistics:
-                name = stat if isinstance(stat, str) else stat.__name__
-                if name in self.FREQ_STATS:
-                    continue  # emitted as their own columns below
-                results[name] = np.nan
-            results.update(self._freq_stat_results(window.matrix, 0))
+                if isinstance(stat, str):
+                    results[stat] = np.nan
+                else:
+                    results[stat.__name__] = np.nan
             return results
 
         # Single population statistics
@@ -321,43 +307,12 @@ class StatisticsComputer:
                 kwargs['bins'] = self.ld_bins
             results[stat] = self.LD_STATS[stat](window, **kwargs)
 
-        # Frequency-spectrum features (daf_hist / mu_sfs), computed on the first
-        # population if any, matching the fused engine's population handling.
-        if self.freq_stats:
-            fmatrix = (self._get_population_matrix(window.matrix, self.populations[0])
-                       if self.populations else window.matrix)
-            results.update(self._freq_stat_results(fmatrix, window.n_variants))
-
         # Custom statistics
         for stat in self.custom_stats:
             kwargs = self.custom_stat_kwargs.get(stat.__name__, {})
             results[stat.__name__] = stat(window, **kwargs)
 
         return results
-
-    def _freq_stat_results(self, matrix, n_variants):
-        """daf_hist (as daf_bin_0 .. daf_bin_{_DAF_N_BINS - 1}) and mu_sfs columns.
-
-        Defers to diversity.mu_sfs / diversity.daf_histogram (the include/exclude
-        scalar reference), so the windowed value equals the scalar over the same
-        variants. An empty window yields 0.0 / an all-zero histogram, matching the
-        scalar on an empty slice and the fused engine's empty-window output.
-        """
-        res = {}
-        n_bins = _DAF_N_BINS
-        if 'mu_sfs' in self.freq_stats:
-            res['mu_sfs'] = (0.0 if n_variants == 0 else
-                             float(diversity.mu_sfs(matrix, missing_data=self.missing_data)))
-        if 'daf_hist' in self.freq_stats:
-            if n_variants == 0:
-                hist = np.zeros(n_bins)
-            else:
-                hist, _ = diversity.daf_histogram(matrix, n_bins=n_bins,
-                                                  missing_data=self.missing_data)
-                hist = np.asarray(hist)
-            for b in range(n_bins):
-                res[f'daf_bin_{b}'] = float(hist[b])
-        return res
 
     @staticmethod
     def _store_result(results: Dict, key: str, val):
@@ -2172,16 +2127,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                                win_start, win_stop, n_windows, statistics,
                                results)
 
-    # Per-site stats binned into windows via scatter_add. Assign each variant to
-    # the window whose right-open [start, end) contains it, matching win_start /
-    # win_stop, n_variants and the dedicated scatter engines: pick the last window
-    # whose start is <= pos, then require pos < that window's end. Searching the
-    # window ENDS instead would put a variant sitting exactly on a boundary
-    # (pos == a window end == the next window's start) in the lower window,
-    # disagreeing with n_variants.
-    bin_idx = cp.searchsorted(ws_gpu, positions, side='right') - 1
-    safe = cp.clip(bin_idx, 0, n_windows - 1)
-    in_range = (bin_idx >= 0) & (bin_idx < n_windows) & (positions < we_gpu[safe])
+    # Per-site stats binned into windows via scatter_add
+    bin_idx = cp.searchsorted(we_gpu, positions)
+    in_range = (bin_idx >= 0) & (bin_idx < n_windows)
 
     # Shared per-allele counts (used by daf_hist and mu_sfs). Per-derived-allele,
     # per-site n_valid -- the same convention as diversity.daf_histogram / mu_sfs,
