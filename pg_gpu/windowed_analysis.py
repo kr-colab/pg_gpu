@@ -2201,7 +2201,6 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # allele (freq = count / n_valid), scattered into (window, bin) and
     # normalized per window -- matching diversity.daf_histogram.
     if 'daf_hist' in statistics:
-        from .diversity import _daf_bin_index
         n_daf_bins = _DAF_N_BINS
         derived = ac_daf[:, 1:]                                  # (n_var, K-1)
         n_der = derived.shape[1]
@@ -2212,7 +2211,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 & in_range[:, None]).reshape(-1)
         bin_rep = cp.repeat(bin_idx, n_der)                      # site's window
         composite = cp.where(keep, bin_rep * n_daf_bins
-                             + _daf_bin_index(freq, n_daf_bins), 0)
+                             + diversity._daf_bin_index(freq, n_daf_bins), 0)
         flat = _scatter_sum(keep.astype(cp.float64), composite,
                             n_windows * n_daf_bins)
         hist_matrix = flat.get().reshape(n_windows, n_daf_bins)
