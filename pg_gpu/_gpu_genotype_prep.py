@@ -23,8 +23,8 @@ handle them via the ``'include'`` / ``'exclude'`` missing-data modes.
 ``build_haplotype_matrix`` keeps raw allele indices (the per-allele haplotype
 statistics are multiallelic-capable). ``build_genotype_matrix`` needs a 0/1/2
 dosage, so it classifies each site by the shared biallelic definition and
-recodes any >= 3-allele site to a fully-missing row (no valid dosage exists),
-matching the eager from_vcf loader.
+recodes any site with three or more distinct alleles present in the sample to a
+fully-missing row (no valid dosage exists), matching the eager from_vcf loader.
 """
 
 import cupy as cp
@@ -108,10 +108,11 @@ def build_genotype_matrix(gt, pos, *,
     GenotypeMatrix
         With genotypes on the GPU in ``(n_indiv, n_var)`` int8 layout.
         Each cell is ``0/1/2`` (count of the site's alt allele) or ``-1``
-        when either ploidy on that variant was missing. A ``>= 3``-allele
-        site cannot be a 0/1/2 dosage, so its whole row is set to ``-1``
-        (present but fully missing), keeping the row/chunk alignment the
-        streaming path relies on. The number of such recoded sites is
+        when either ploidy on that variant was missing. A site with three or
+        more distinct alleles present in the sample cannot be a 0/1/2 dosage,
+        so its whole row is set to ``-1`` (present but fully missing), keeping
+        the row/chunk alignment the streaming path relies on. The number of
+        such recoded sites is
         stashed on the result as ``_n_multiallelic_recoded`` for the caller
         to surface as a BiallelicOnlyWarning (once per load).
     """
@@ -142,7 +143,8 @@ def build_genotype_matrix(gt, pos, *,
     missing = (gt_gpu < 0).any(axis=2)
     geno = (gt_gpu == alt[:, None, None]).sum(axis=2).astype(cp.int8)
     geno = cp.where(missing, cp.int8(-1), geno)
-    # A >= 3-allele site has no valid 0/1/2 dosage -> the whole row is missing.
+    # A site with three or more distinct present alleles has no valid 0/1/2
+    # dosage -> the whole row is missing.
     n_multiallelic = int((~biallelic).sum())
     if n_multiallelic:
         geno[~biallelic, :] = cp.int8(-1)

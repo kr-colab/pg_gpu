@@ -42,11 +42,13 @@ class GenotypeMatrix:
     Shape: (n_individuals, n_variants). Missing data encoded as -1.
 
     Biallelic by construction: values are alt-allele dosage (0/1/2), so this
-    structure cannot represent multiallelic genotypes. ``from_vcf`` filters
-    multiallelic sites out and ``from_haplotype_matrix`` drops sites with an
-    allele index >= 2 (the dosage is well-defined only for {0,1} alleles); both
-    emit a ``BiallelicOnlyWarning`` with the dropped-site count. For multiallelic
-    data use the allele-index ``HaplotypeMatrix``.
+    structure cannot represent multiallelic genotypes. ``from_vcf`` and
+    ``from_haplotype_matrix`` keep sites with at most two distinct present
+    alleles -- so {0,1}, {0,2}, and reference-absent {1,2} are all kept, with the
+    dosage counting the alt allele -- and drop sites with three or more distinct
+    present alleles, emitting a ``BiallelicOnlyWarning`` with the dropped-site
+    count. For
+    multiallelic data use the allele-index ``HaplotypeMatrix``.
 
     Parameters
     ----------
@@ -282,7 +284,11 @@ class GenotypeMatrix:
         """Convert a HaplotypeMatrix to a GenotypeMatrix.
 
         Pairs consecutive haplotypes (0,1), (2,3), ... as diploid individuals.
-        Genotype = sum of paired haplotypes (0, 1, or 2).
+        Each genotype is the count of the site's alt allele in the pair (0, 1, or
+        2); a pair with any missing haplotype is -1. Only biallelic sites (at most
+        two distinct present alleles) are kept -- sites with three or more
+        distinct present alleles cannot be a 0/1/2 dosage and are dropped with a
+        BiallelicOnlyWarning.
 
         Parameters
         ----------
@@ -298,21 +304,18 @@ class GenotypeMatrix:
             raise ValueError(
                 f"Need even number of haplotypes for diploid conversion, got {n_hap}")
 
+        if hap_matrix.device == 'CPU':
+            hap_matrix.transfer_to_gpu()
         hap = hap_matrix.haplotypes
         positions = hap_matrix.positions
-        xp = cp if isinstance(hap, cp.ndarray) else np
 
         # Biallelic = at most two distinct present alleles; the dosage counts the
         # alt (highest present allele > 0), so {0,2} and reference-absent {1,2}
         # sites are handled correctly and {0,1} is unchanged. Sites with >= 3
         # alleles cannot be a dosage and are dropped with a warning; positions
         # shares hap's array namespace, so the same mask indexes both.
-        if xp is cp:
-            from ._memutil import allele_counts
-            ac, _ = allele_counts(hap)
-        else:
-            n_a = (int(hap.max()) + 1) if hap.size else 1
-            ac = np.stack([(hap == a).sum(axis=0) for a in range(n_a)], axis=1)
+        from ._memutil import allele_counts
+        ac, _ = allele_counts(hap)
         biallelic, alt = _biallelic_and_alt(ac)
         n_dropped = int((~biallelic).sum())
         if n_dropped:
@@ -329,13 +332,10 @@ class GenotypeMatrix:
         n_var = h1.shape[1]
 
         # Dosage = per-individual count of the alt allele (0/1/2); a pair with any
-        # missing haplotype -> -1. Chunk over variants to bound memory.
-        geno = xp.empty((n_ind, n_var), dtype=xp.int8)
-        if xp is cp:
-            free_mem = cp.cuda.Device().mem_info[0]
-            chunk = max(1, int(free_mem * 0.3 / (n_ind * 4)))
-        else:
-            chunk = n_var
+        # missing haplotype -> -1. Chunk over variants to bound GPU memory.
+        geno = cp.empty((n_ind, n_var), dtype=cp.int8)
+        free_mem = cp.cuda.Device().mem_info[0]
+        chunk = max(1, int(free_mem * 0.3 / (n_ind * 4)))
 
         for vs in range(0, n_var, chunk):
             ve = min(vs + chunk, n_var)
@@ -343,7 +343,7 @@ class GenotypeMatrix:
             c2 = h2[:, vs:ve]
             a = alt[vs:ve][None, :]
             missing = (c1 < 0) | (c2 < 0)
-            geno[:, vs:ve] = ((c1 == a).astype(xp.int8) + (c2 == a).astype(xp.int8))
+            geno[:, vs:ve] = ((c1 == a).astype(cp.int8) + (c2 == a).astype(cp.int8))
             geno[:, vs:ve][missing] = -1
 
         # remap sample_sets: haplotype indices -> individual indices
@@ -443,14 +443,11 @@ class GenotypeMatrix:
         # Biallelic = at most two distinct present alleles; the dosage counts the
         # alt (highest present allele > 0), so {0,2} and reference-absent {1,2}
         # sites are handled correctly and {0,1} is unchanged. Only sites with
-        # >= 3 alleles are dropped (with a warning); monomorphic and all-missing
-        # sites are retained, matching from_haplotype_matrix. The allele-count
-        # matrix is built with numpy -- allel is used only to parse the VCF --
-        # and missing (-1) is never counted, so it matches allel.count_alleles().
-        gt_max = int(gt.max()) if gt.size else -1
-        n_alleles = gt_max + 1 if gt_max >= 0 else 1
-        ac = np.stack([(gt == a).sum(axis=(1, 2)) for a in range(n_alleles)],
-                      axis=1)
+        # three or more distinct present alleles are dropped (with a warning);
+        # monomorphic and all-missing sites are retained, matching
+        # from_haplotype_matrix. count_alleles ignores missing (-1), giving an
+        # (n_variants, n_alleles) count matrix.
+        ac = np.asarray(allel.GenotypeArray(gt).count_alleles())
         is_biallelic, alt = _biallelic_and_alt(ac)
         _warn_biallelic_only(int(np.sum(~is_biallelic)),
                              context="GenotypeMatrix.from_vcf")
@@ -840,7 +837,7 @@ class GenotypeMatrix:
         does not classify alleles. It keeps only sites still segregating among the
         non-missing individuals: the alt allele is present but not fixed
         (0 < total alt dosage < 2 * n_called) and at least two individuals are
-        called. The name is kept for backwards compatibility.
+        called.
 
         Returns
         -------

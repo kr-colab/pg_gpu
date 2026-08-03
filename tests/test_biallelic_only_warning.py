@@ -1,7 +1,5 @@
-"""BiallelicOnlyWarning: the shared warning class and its emit helper (0014).
-
-Site-specific tests (from_vcf, from_haplotype_matrix, patterson_d) are added
-alongside their conversions in later tasks.
+"""Tests for BiallelicOnlyWarning: the shared warning class and its emit helper,
+and the sites that raise it (from_vcf, from_haplotype_matrix, patterson_d).
 """
 import warnings
 
