@@ -238,9 +238,9 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
     Notes
     -----
     D is a biallelic-SNP statistic: sites with more than two alleles across the
-    four populations are excluded (num = den = 0), silently, as biallelic
-    filtering is handled elsewhere in the package. A multiallelic generalization
-    is a possible future extension.
+    four populations are excluded (num = den = 0) and a ``BiallelicOnlyWarning``
+    is emitted with the dropped-site count. A multiallelic generalization is a
+    possible future extension.
     """
     return tuple(v.get() for v in
                  _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
@@ -268,10 +268,14 @@ def _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
         haplotype_matrix, [pop_a, pop_b, pop_c, pop_d])
 
     # Sites with >2 alleles across the four pops are dropped (num=den=0),
-    # silently -- consistent with the package's biallelic filtering elsewhere
-    # (e.g. GenotypeMatrix.from_vcf); the biallelic-only contract is documented.
+    # consistent with the package's biallelic filtering elsewhere (e.g.
+    # GenotypeMatrix.from_vcf). Called once per top-level D computation
+    # (patterson_d / moving_patterson_d / average_patterson_d all take the full
+    # num/den arrays and window afterward), so the warning fires once per call.
     present = (xa + xb + xc + xd) > 0
     biallelic = present.sum(axis=1) <= 2
+    from ._warnings import _warn_biallelic_only
+    _warn_biallelic_only(int((~biallelic).sum()), context="patterson_d")
 
     # Alt allele = highest-index present allele (== allele 1 for a {0,1} site,
     # so this reduces to the previous behaviour on standard biallelic data);
