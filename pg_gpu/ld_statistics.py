@@ -364,47 +364,29 @@ def _resolve_ld_estimator(estimator: str, is_hap_matrix: bool) -> str:
 
 
 def _dosage_from_matrix(matrix) -> "cp.ndarray":
-    """Return a ``(n_samples, n_variants)`` float64 dosage array.
+    """Return the ``(n_samples, n_variants)`` float64 alt-dosage of a GenotypeMatrix.
 
-    For a ``HaplotypeMatrix`` (n_haplotypes, n_variants) of 0/1, adjacent
-    haplotypes are paired into 0/1/2 dosages
-    (sample 0 = haplotypes 0,1; sample 1 = haplotypes 2,3; ...).
-    For a ``GenotypeMatrix`` (n_samples, n_variants), the genotypes are
-    used directly. Raises ``ValueError`` if missing values (-1) are
-    present, matching the convention of
-    ``scikit-allel.rogers_huff_r``.
+    Rogers-Huff r is a diploid-dosage correlation, so it requires a
+    ``GenotypeMatrix`` (0/1/2, biallelic by construction). Raises ``TypeError``
+    for any other input and ``ValueError`` if missing values (-1) are present,
+    matching the convention of ``scikit-allel.rogers_huff_r``.
     """
-    from .haplotype_matrix import HaplotypeMatrix
     from .genotype_matrix import GenotypeMatrix
 
-    if isinstance(matrix, HaplotypeMatrix):
-        if matrix.device == 'CPU':
-            matrix.transfer_to_gpu()
-        hap = matrix.haplotypes
-        if (hap < 0).any():
-            raise ValueError(
-                "rogers_huff_r: input HaplotypeMatrix contains missing "
-                "values (-1). Rogers-Huff r expects strict 0/1/2 dosage "
-                "input; drop or impute missing sites first.")
-        n_hap = hap.shape[0]
-        if n_hap % 2 != 0:
-            raise ValueError(
-                f"rogers_huff_r: HaplotypeMatrix has an odd number of "
-                f"haplotypes ({n_hap}); cannot pair into diploids.")
-        return (hap[0::2, :] + hap[1::2, :]).astype(cp.float64)
-    if isinstance(matrix, GenotypeMatrix):
-        if matrix.device == 'CPU':
-            matrix.transfer_to_gpu()
-        g = matrix.genotypes
-        if (g < 0).any():
-            raise ValueError(
-                "rogers_huff_r: input GenotypeMatrix contains missing "
-                "values (-1). Rogers-Huff r expects strict 0/1/2 dosage "
-                "input; drop or impute missing sites first.")
-        return g.astype(cp.float64)
-    raise TypeError(
-        f"rogers_huff_r: expected HaplotypeMatrix or GenotypeMatrix; "
-        f"got {type(matrix).__name__}")
+    if not isinstance(matrix, GenotypeMatrix):
+        raise TypeError(
+            "rogers_huff_r is the diploid dosage correlation and requires a "
+            "GenotypeMatrix; convert a HaplotypeMatrix first with "
+            "GenotypeMatrix.from_haplotype_matrix.")
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    g = matrix.genotypes
+    if (g < 0).any():
+        raise ValueError(
+            "rogers_huff_r: input GenotypeMatrix contains missing values (-1). "
+            "Rogers-Huff r expects strict 0/1/2 dosage input; drop or impute "
+            "missing sites first.")
+    return g.astype(cp.float64)
 
 
 def _tile_rogers_huff_r(g_i: "cp.ndarray", g_j: "cp.ndarray",
@@ -453,7 +435,7 @@ def _rogers_huff_pairwise_r(matrix, tile_size: Optional[int] = None
 
     Parameters
     ----------
-    matrix : HaplotypeMatrix or GenotypeMatrix
+    matrix : GenotypeMatrix
     tile_size : int, optional
         Block size B. Defaults to ``min(n_variants, 1024)`` which
         keeps each tile <= 8 MB at float64 for typical sample sizes.
@@ -498,10 +480,10 @@ def rogers_huff_r(matrix, tile_size: Optional[int] = None) -> "cp.ndarray":
 
     Parameters
     ----------
-    matrix : HaplotypeMatrix or GenotypeMatrix
-        Diploid input. ``HaplotypeMatrix`` rows are paired into 0/1/2
-        dosages; ``GenotypeMatrix`` genotypes are used directly. Both
-        must be free of -1 missing sentinels (raise otherwise).
+    matrix : GenotypeMatrix
+        Diploid 0/1/2 dosage (biallelic by construction). Must be free of
+        -1 missing sentinels (raises otherwise). Convert a HaplotypeMatrix
+        with ``GenotypeMatrix.from_haplotype_matrix`` first.
     tile_size : int, optional
         GPU tile size. Defaults to ``min(n_variants, 1024)``.
 
