@@ -544,10 +544,17 @@ class TestHaplotypeMatrixGenotypePath:
     through ``GenotypeMatrix.from_haplotype_matrix``, so the conversion has to
     recover the same individuals the VCF loader would have built.
 
-    ``HaplotypeMatrix`` stores ploidy 0 in rows ``0..n-1`` and ploidy 1 in rows
-    ``n..2n-1``; pairing rows the other way builds each "individual" from two
-    different people's chromosomes and scrambles the population assignment with
-    it, which no downstream statistic can detect.
+    pg_gpu pairs haplotypes into diploids two contradictory ways (issue #148):
+    consecutive rows ``(2i, 2i+1)``, which ``from_haplotype_matrix`` uses, and
+    split-half rows ``(i, i + n_ind)``, which the VCF/zarr loaders produce and
+    ``load_pop_file`` documents. Whichever order is eventually made canonical,
+    one VCF loaded two ways has to yield the same individuals -- so these
+    comparisons hold either way, and the fixture is VCF-loaded to keep them
+    independent of that decision.
+
+    Getting it wrong builds each "individual" from two different people's
+    chromosomes and scrambles the population assignment with it, which no
+    downstream statistic can detect.
     """
 
     def test_conversion_matches_vcf_genotypes(self, plain_vcf):
