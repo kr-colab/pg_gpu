@@ -469,12 +469,6 @@ def joint_sfs_folded(haplotype_matrix: HaplotypeMatrix,
                      missing_data: str = 'include'):
     """Compute the folded joint site frequency spectrum.
 
-    Parameters
-    ----------
-    haplotype_matrix : HaplotypeMatrix
-    pop1, pop2 : str or list
-    missing_data : str
-
     Per-allele and conforming to tskit's ``allele_frequency_spectrum([popA,
     popB], polarised=False)``: each allele (ancestral included) is folded as a
     unit by the global minor and contributes weight 1/2 to the kept cell. The
@@ -482,6 +476,12 @@ def joint_sfs_folded(haplotype_matrix: HaplotypeMatrix,
     lower-total triangle; the rest is zero), with half-integer weights on
     multiallelic data. **This departs from scikit-allel's per-axis fold even on
     biallelic data** -- we pin to tskit here.
+
+    Parameters
+    ----------
+    haplotype_matrix : HaplotypeMatrix
+    pop1, pop2 : str or list
+    missing_data : str
 
     Returns
     -------

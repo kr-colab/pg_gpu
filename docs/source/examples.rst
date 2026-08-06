@@ -141,7 +141,10 @@ Selection Scan Pipeline
    # iHS with standardization by allele count
    ihs_raw = selection.ihs(h)
 
-   # Get allele counts for binned standardization
+   # Get allele counts for binned standardization. Adding up the
+   # matrix only counts alternate alleles if your data uses 0 and 1.
+   # If a site has a third allele stored as 2, that 2 gets added as a
+   # 2. Run h.apply_biallelic_filter() first if you are unsure.
    dac = np.sum(h.haplotypes.get(), axis=0)
    ihs_std, bins = selection.standardize_by_allele_count(ihs_raw, dac)
 

@@ -1,8 +1,116 @@
 Changelog
 =========
 
-v0.1.0 (Current)
------------------
+Unreleased
+----------
+
+Sites with more than two alleles are now handled correctly
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Statistics used to lump every alternate allele into one "non-reference"
+group. That is fine when a site has two alleles and wrong when it has
+three or four. Each allele is now counted on its own, which is what
+``tskit`` does. See :doc:`missing_data` for what this means in
+practice.
+
+**If your data only has two alleles per site, nothing here changes your
+results**, except where the next section says so.
+
+* Diversity and frequency spectra: :math:`\pi`, ``theta_w`` /
+  ``theta_h`` / ``theta_l``, ``tajimas_d``, ``fay_wus_h``, ``zeng_e``,
+  ``segregating_sites``, ``singleton_count``,
+  ``heterozygosity_expected``, and every SFS function.
+  ``segregating_sites`` now counts mutations rather than variable
+  sites, so a site with three alleles counts as 2. ``theta_w`` and
+  Tajima's D use that count too.
+* Divergence: ``dxy``, ``da``, ``fst_hudson``, ``fst_nei``,
+  ``fst_weir_cockerham``, and ``pbs``. Added ``fst_tskit``, also
+  available as ``fst(method='tskit')``.
+* Admixture: ``patterson_f2`` and ``patterson_f3``. Added
+  ``patterson_f4``. ``patterson_d`` only works on two-allele sites and
+  now says so.
+* Selection: ``ihs`` and ``nsl`` score each alternate allele against
+  the reference separately, so they return one column per alternate
+  allele when a site has more than two. ``min_maf`` now applies to each
+  allele's own frequency.
+* Distances: pairwise distances count how many sites two haplotypes
+  differ at, instead of doing arithmetic on the allele numbers.
+  ``decomposition.pairwise_distance`` uses the same count.
+* Relatedness: added ``genetic_relatedness``, which matches
+  ``tskit``'s function of the same name.
+* Windowed analysis: every windowed statistic now gives the same answer
+  as running the plain function on that window's variants.
+
+Results that change even for two-allele data
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Read this section if you are comparing against older pg_gpu results.
+
+* Frequency spectra: sites where nothing varies no longer contribute,
+  folded spectra are returned as ``float64`` rather than integers, and
+  ``joint_sfs_folded`` returns a full ``(n1 + 1, n2 + 1)`` grid folded
+  by the site's overall minor allele.
+* ``pca`` and ``randomized_pca`` now take haplotypes and give every
+  allele its own column. The old diploid behavior is now
+  ``pca_dosage`` / ``randomized_pca_dosage``, which take a
+  ``GenotypeMatrix``. The ``scaler`` argument is gone, and each
+  function raises a ``TypeError`` on the wrong matrix type.
+  ``local_pca`` and ``lostruct`` changed the same way. They no longer
+  match the R ``lostruct`` package number for number -- the eigenvalue
+  scale differs -- though the component directions still agree closely,
+  so plots and outlier detection are unaffected.
+* ``grm`` and ``ibs`` now require a ``GenotypeMatrix`` and reject
+  haplotypes. ``grm(GenotypeMatrix, population=...)`` used to raise an
+  error and now works.
+* Windowed ``daf_hist`` is now a histogram normalized to sum to 1, and
+  windowed ``mu_sfs`` divides by the number of variable sites and
+  returns 0.0 instead of NaN for an empty window.
+* In ``windowed_statistics``, ``singletons`` now counts only alternate
+  alleles seen once (it used to also count reference alleles seen
+  once), and ``segregating_sites`` counts mutations.
+* ``dxy(span_normalize=False)`` and ``da(span_normalize=False)`` return
+  the raw sum, matching every other statistic. They used to divide by
+  the number of sites.
+* ``decomposition.pairwise_distance`` supports ``euclidean``,
+  ``sqeuclidean``, and ``cityblock``. Other metrics now raise
+  ``NotImplementedError``, and passing a ``GenotypeMatrix`` raises a
+  ``TypeError``.
+
+Bug fixes
+~~~~~~~~~
+
+* Pairwise distances treated a missing genotype as if it were a
+  reference homozygote, so a missing call could count as a difference.
+  Missing data is now skipped on both sides of the calculation.
+* ``GenotypeMatrix.from_zarr`` ignored ``accessible_bed`` when
+  streaming, so streaming ``grm`` and ``ibs`` silently used every
+  variant while the non-streaming path filtered correctly. Both now
+  apply the mask, and results agree exactly.
+* The three ``GenotypeMatrix`` loaders disagreed about which sites to
+  keep and how to build genotype values, so the same data could give
+  different matrices. They now share one definition. Sites showing only
+  alleles ``0`` and ``2``, or only ``1`` and ``2``, are kept rather
+  than dropped, and sites where nothing varies are kept too.
+
+New warnings
+~~~~~~~~~~~~
+
+* ``BiallelicOnlyWarning`` -- something that only works on two-allele
+  sites threw multiallelic sites away, and tells you how many. Comes
+  from ``patterson_d`` and the ``GenotypeMatrix`` loaders.
+* ``MultiallelicCapWarning`` -- a windowed calculation skipped sites
+  with more than 8 alleles. You will not see this with DNA.
+
+Removed
+~~~~~~~
+
+* ``diversity.allele_frequency_spectrum`` and
+  ``HaplotypeMatrix.allele_frequency_spectrum``. Use the ``sfs`` module
+  instead.
+* The ``scaler`` argument on the PCA functions.
+
+v0.1.0
+------
 
 First public release of pg_gpu.
 

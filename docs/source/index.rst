@@ -30,7 +30,7 @@ Key Features
 ~~~~~~~~~~~~
 
 * **Fast GPU computation** using CuPy with fused CUDA kernels for compute-intensive operations
-* **Comprehensive statistics**: LD (D, D-squared, Dz, pi2, r/r-squared), diversity (pi, theta, Tajima's D, heterozygosity, Fay & Wu's H), divergence (FST Hudson/Weir-Cockerham/Nei, Dxy, Da, Snn, Gmin, dd, dd_rank, Zx), selection scans (iHS, XP-EHH, nSL, XP-nSL, Garud's H, EHH decay), SFS (unfolded, folded, joint, scaled), admixture (Patterson's F2, F3, D)
+* **Comprehensive statistics**: LD (D, D-squared, Dz, pi2, r/r-squared), diversity (pi, theta, Tajima's D, heterozygosity, Fay & Wu's H), divergence (FST Hudson/tskit/Weir-Cockerham/Nei, Dxy, Da, Snn, Gmin, dd, dd_rank, Zx), selection scans (iHS, XP-EHH, nSL, XP-nSL, Garud's H, EHH decay), SFS (unfolded, folded, joint, scaled), admixture (Patterson's F2, F3, F4, D)
 * **Fused windowed analysis**: compute all statistics across all genomic windows in a single GPU pass -- up to 60x faster than scikit-allel
 * **Automatic missing data handling** across all modules
 * **Quality-aware filtering** -- load VCF FORMAT / INFO arrays (``GQ``, ``DP``, ``MQ``, ...) with ``fields=``, mask variants and genotypes from them, and round-trip the survivors into a clean VCZ. See :doc:`tutorials/qc_fields`.
