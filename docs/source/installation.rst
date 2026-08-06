@@ -89,7 +89,7 @@ adopting pixi:
 
 .. code-block:: bash
 
-   pip install pg_gpu
+   python -m pip install pg_gpu
 
 This pulls the full runtime stack declared in ``pyproject.toml``:
 ``cupy-cuda12x[ctk]``, ``kvikio`` / ``nvcomp``,
@@ -105,11 +105,11 @@ For development against a local checkout, use an editable install with the
 
    git clone https://github.com/kr-colab/pg_gpu.git
    cd pg_gpu
-   pip install -e ".[dev]"
+   python -m pip install -e ".[dev]"
 
 The optional extras mirror the pixi environments: ``docs`` for the
 documentation toolchain and ``moments`` for the moments LD integration
-(e.g. ``pip install -e ".[dev,moments]"``).
+(e.g. ``python -m pip install -e ".[dev,moments]"``).
 
 Pixi remains the recommended, fully pinned environment (see above); the
 pip path trades that reproducibility for fitting into an environment you
