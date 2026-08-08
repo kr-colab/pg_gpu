@@ -229,6 +229,21 @@ def test_get_subset_from_range(sample_vcf):
     assert isinstance(subset, HaplotypeMatrix)
     assert subset.shape == (20, count)
 
+
+def test_get_subset_from_range_uses_genomic_coordinates():
+    """Ranges use genomic coordinates rather than variant counts."""
+    haplotypes = np.array([[0, 1, 0], [1, 0, 1]], dtype=np.int8)
+    positions = np.array([100, 250, 900], dtype=np.int64)
+    hap_matrix = HaplotypeMatrix(haplotypes, positions)
+
+    subset = hap_matrix.get_subset_from_range(200, 1000)
+
+    np.testing.assert_array_equal(subset.positions, [250, 900])
+    np.testing.assert_array_equal(subset.haplotypes, haplotypes[:, 1:])
+    assert subset.chrom_start == 200
+    assert subset.chrom_end == 1000
+
+
 def test_get_subset(sample_vcf):
     """Test get_subset method."""
     hap_matrix = HaplotypeMatrix.from_vcf(sample_vcf)

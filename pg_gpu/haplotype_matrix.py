@@ -1058,7 +1058,7 @@ class HaplotypeMatrix:
             HaplotypeMatrix: A new instance containing the subset of the haplotype matrix.
         """
         # Validate range
-        if low < 0 or high > self.positions.size or low >= high:
+        if low < 0 or low >= high:
             raise ValueError("Invalid range specified")
 
         # Check device and find indices of positions within the specified range

@@ -367,15 +367,12 @@ class TestHaplotypeMatrixAccessibleMask:
         mask = np.ones(1000, dtype=bool)
         mask[40:60] = False  # 20 inaccessible
         hm.set_accessible_mask(mask)
-        # get_subset_from_range checks high <= positions.size
-        # so use a range within the number of positions
-        low, high = 30, 80
+        low, high = 30, 800
         subset = hm.get_subset_from_range(low, high)
         assert subset.has_accessible_mask
         assert subset.accessible_mask.offset == low
         assert len(subset.accessible_mask) == (high - low)
-        # 40-60 is inaccessible; within [30,80) that's 20 inaccessible
-        assert subset.accessible_mask.total_accessible == 30
+        assert subset.accessible_mask.total_accessible == 750
 
 
 # ---- GenotypeMatrix integration tests ----
