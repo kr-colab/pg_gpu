@@ -1638,7 +1638,7 @@ class HaplotypeMatrix:
         """Pairwise linkage disequilibrium (D statistic) via matrix multiply.
 
         NaN for any pair involving a multiallelic (>2 distinct present alleles)
-        site; D is defined only on biallelic sites.
+        site; D is computed on biallelic sites only.
         """
         from ._warnings import _warn_biallelic_only
         bmask = self._biallelic_mask()
@@ -1667,8 +1667,8 @@ class HaplotypeMatrix:
         -------
         cupy.ndarray, float64, shape (n_variants, n_variants)
             NaN for any pair involving a monomorphic or multiallelic
-            (>2 distinct present alleles) site; LD is defined only on
-            biallelic sites.
+            (>2 distinct present alleles) site; r-squared is computed on
+            biallelic sites only.
         """
         if estimator == 'rogers_huff':
             from .ld_statistics import _rogers_huff_pairwise_r
@@ -1713,7 +1713,7 @@ class HaplotypeMatrix:
         ndarray, bool, shape (n_variants,)
             True for variants in approximate linkage equilibrium. Multiallelic
             (>2 distinct present alleles) sites are returned False and excluded
-            from the r^2 computation, since LD is defined only on biallelic sites.
+            from the r^2 computation, which is restricted to biallelic sites.
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
@@ -1791,12 +1791,6 @@ class HaplotypeMatrix:
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
-        pos = self.positions
-        if not isinstance(pos, cp.ndarray):
-            pos = cp.array(pos)
-
-        m = self.num_variants
-
         if estimator == 'rogers_huff':
             if pop is not None:
                 raise NotImplementedError(
@@ -1804,18 +1798,37 @@ class HaplotypeMatrix:
                     "is not yet implemented; pass the full matrix or "
                     "subset to the desired haplotypes first.")
             from pg_gpu.ld_statistics import _rogers_huff_pairwise_r
+            m = self.num_variants
+            pos = self.positions
             r_full = _rogers_huff_pairwise_r(self)
             iu = cp.triu_indices(m, k=1)
             r2_vals = (r_full[iu]) ** 2
         elif estimator == 'r2':
-            # compute counts and r² via tally
-            counts_arr, n_valid = self.tally_gpu_haplotypes(pop=pop)
+            # Biallelic-restrict (drop >=3-allele, warn once) and count on the
+            # 0/1 indicator so {0,2}/{1,2} codings are handled; per-bin output
+            # makes the site drop invisible.
+            from ._warnings import _warn_biallelic_only
+            from .ld_pipeline import compute_counts_for_pairs
             from pg_gpu import ld_statistics
+            biallelic = self.restrict_to_biallelic()
+            _warn_biallelic_only(
+                self.num_variants - biallelic.num_variants,
+                context="windowed_r_squared")
+            m = biallelic.num_variants
+            pos = biallelic.positions
+            ind = biallelic._biallelic_indicator()
+            idx_i, idx_j = cp.triu_indices(m, k=1)
+            pop_idx = biallelic.sample_sets[pop] if pop is not None else None
+            counts_arr, n_valid = compute_counts_for_pairs(
+                ind, idx_i, idx_j, pop_idx)
             r2_vals = ld_statistics.r_squared(counts_arr, n_valid=n_valid)
         else:
             raise ValueError(
                 f"Unknown estimator: {estimator!r} "
                 f"(expected 'r2' or 'rogers_huff')")
+
+        if not isinstance(pos, cp.ndarray):
+            pos = cp.array(pos)
 
         # pair distances
         idx_i, idx_j = cp.triu_indices(m, k=1)

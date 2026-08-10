@@ -2259,9 +2259,17 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         # Precompute for fused ZnS path
         if 'zns' in stat_arrays:
-            hap = matrix.haplotypes
-            hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
-            valid_mask = (hap >= 0).astype(cp.float64)
+            # Count on the 0/1 biallelic indicator so {0,2}/{1,2} codings are
+            # handled; multiallelic (>2-allele) sites are zeroed so the
+            # per-window segregating filter drops them.
+            from ._warnings import _warn_biallelic_only
+            ind = matrix._biallelic_indicator()
+            bmask = matrix._biallelic_mask()
+            _warn_biallelic_only(int((~bmask).sum()),
+                                 context="windowed_analysis (zns)")
+            hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
+            valid_mask = (ind >= 0).astype(cp.float64)
+            hap_clean[:, ~bmask] = 0.0
 
         for wi in range(n_windows):
             s, e = int(ws_np[wi]), int(we_np[wi])
