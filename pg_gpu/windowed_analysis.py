@@ -368,6 +368,11 @@ class WindowIterator:
 
     def _iter_bp_windows(self) -> Iterator[WindowData]:
         """Iterate over fixed base pair windows."""
+        # Window bounds come from the first and last variant, so a matrix with
+        # no variants -- a region that covers none, for example -- has no
+        # windows to yield.
+        if len(self.positions_np) == 0:
+            return
         chrom_start = int(self.positions_np[0])
         chrom_end = int(self.positions_np[-1])
 
@@ -469,6 +474,8 @@ class WindowIterator:
     def count_windows(self) -> int:
         """Count total number of windows."""
         if self.params.window_type == 'bp':
+            if len(self.positions_np) == 0:
+                return 0
             chrom_start = int(self.positions_np[0])
             chrom_end = int(self.positions_np[-1])
             return max(1, (chrom_end - chrom_start - self.params.window_size) //
