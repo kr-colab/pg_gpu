@@ -1167,6 +1167,14 @@ class HaplotypeMatrix:
         ind[hap < 0] = -1
         return ind
 
+    def _biallelic_mask(self) -> cp.ndarray:
+        """Boolean ``(n_variants,)`` mask, True where <=2 distinct alleles present."""
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        from ._memutil import allele_counts
+        ac, _ = allele_counts(self.haplotypes)
+        return (ac > 0).sum(axis=1) <= 2
+
     ####### Missing data methods #######
     def is_missing(self, axis=None):
         """
@@ -1596,7 +1604,7 @@ class HaplotypeMatrix:
         ----------
         hap_clean : cupy.ndarray, optional
             Pre-cleaned haplotype submatrix (missing set to 0). If None,
-            uses self.haplotypes.
+            derived from this matrix's 0/1 biallelic indicator.
         valid_mask : cupy.ndarray, optional
             Validity mask (1 where not missing). Must be provided iff
             hap_clean is provided.
@@ -1612,9 +1620,9 @@ class HaplotypeMatrix:
             self.transfer_to_gpu()
 
         if hap_clean is None:
-            hap = self.haplotypes
-            valid_mask = (hap >= 0).astype(cp.float64)
-            hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+            ind = self._biallelic_indicator()
+            valid_mask = (ind >= 0).astype(cp.float64)
+            hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
 
         n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
         p = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
@@ -1627,8 +1635,18 @@ class HaplotypeMatrix:
         return D, p
 
     def pairwise_LD_v(self) -> cp.ndarray:
-        """Pairwise linkage disequilibrium (D statistic) via matrix multiply."""
+        """Pairwise linkage disequilibrium (D statistic) via matrix multiply.
+
+        NaN for any pair involving a multiallelic (>2 distinct present alleles)
+        site; D is defined only on biallelic sites.
+        """
+        from ._warnings import _warn_biallelic_only
+        bmask = self._biallelic_mask()
+        _warn_biallelic_only(int((~bmask).sum()), context="pairwise_LD_v")
         D, _ = self._pairwise_ld_core()
+        bad = ~bmask
+        D[bad, :] = cp.nan
+        D[:, bad] = cp.nan
         cp.fill_diagonal(D, 0)
         return D
 
@@ -1648,6 +1666,9 @@ class HaplotypeMatrix:
         Returns
         -------
         cupy.ndarray, float64, shape (n_variants, n_variants)
+            NaN for any pair involving a monomorphic or multiallelic
+            (>2 distinct present alleles) site; LD is defined only on
+            biallelic sites.
         """
         if estimator == 'rogers_huff':
             from .ld_statistics import _rogers_huff_pairwise_r
@@ -1660,9 +1681,15 @@ class HaplotypeMatrix:
             raise ValueError(
                 f"Unknown estimator: {estimator!r} "
                 f"(expected 'r2' or 'rogers_huff')")
+        from ._warnings import _warn_biallelic_only
+        bmask = self._biallelic_mask()
+        _warn_biallelic_only(int((~bmask).sum()), context="pairwise_r2")
         D, p = self._pairwise_ld_core()
         denom_squared = cp.outer(p * (1 - p), p * (1 - p))
-        r2 = cp.where(denom_squared > 0, (D ** 2) / denom_squared, 0)
+        r2 = cp.where(denom_squared > 0, (D ** 2) / denom_squared, cp.nan)
+        bad = ~bmask
+        r2[bad, :] = cp.nan
+        r2[:, bad] = cp.nan
         cp.fill_diagonal(r2, 0)
         return r2
 
@@ -1684,18 +1711,25 @@ class HaplotypeMatrix:
         Returns
         -------
         ndarray, bool, shape (n_variants,)
-            True for variants in approximate linkage equilibrium.
+            True for variants in approximate linkage equilibrium. Multiallelic
+            (>2 distinct present alleles) sites are returned False and excluded
+            from the r^2 computation, since LD is defined only on biallelic sites.
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
+        from ._warnings import _warn_biallelic_only
         m = self.num_variants
-        hap = self.haplotypes
-        valid_mask = (hap >= 0).astype(cp.float64)
-        hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+        bmask = self._biallelic_mask().get()
+        _warn_biallelic_only(int((~bmask).sum()), context="locate_unlinked")
+        ind = self._biallelic_indicator()
+        valid_mask = (ind >= 0).astype(cp.float64)
+        hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
 
-        # pruning state kept on CPU to avoid per-scalar GPU transfers
-        loc = np.ones(m, dtype=bool)
+        # pruning state kept on CPU to avoid per-scalar GPU transfers.
+        # Multiallelic sites start False: excluded from every active window
+        # (so they never contaminate r^2) and returned as not-unlinked.
+        loc = bmask.copy()
 
         for w_start in range(0, m, step):
             w_end = min(w_start + size, m)
