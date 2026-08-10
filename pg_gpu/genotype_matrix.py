@@ -830,7 +830,7 @@ class GenotypeMatrix:
 
         self.sample_sets = pop_sets
 
-    def apply_biallelic_filter(self):
+    def restrict_to_segregating(self):
         """Drop monomorphic (non-segregating) sites.
 
         The matrix is already biallelic by construction (0/1/2 dosage), so this

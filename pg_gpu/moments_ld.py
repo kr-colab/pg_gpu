@@ -164,7 +164,7 @@ def compute_ld_statistics(
             gm = GenotypeMatrix.from_vcf(vcf_file)
             gm.load_pop_file(pop_file, pops=pops)
             if ac_filter:
-                gm = gm.apply_biallelic_filter()
+                gm = gm.restrict_to_segregating()
             if accessible_bed is not None and not gm.has_accessible_mask:
                 gm.set_accessible_mask(accessible_bed)
             gm.transfer_to_gpu()
@@ -187,7 +187,7 @@ def compute_ld_statistics(
             hm = HaplotypeMatrix.from_vcf(vcf_file)
             hm.load_pop_file(pop_file, pops=pops)
             if ac_filter:
-                hm = hm.apply_biallelic_filter()
+                hm = _moments_is_biallelic_01(hm)
             if accessible_bed is not None and not hm.has_accessible_mask:
                 hm.set_accessible_mask(accessible_bed)
             hm.transfer_to_gpu()
@@ -238,6 +238,43 @@ def compute_ld_statistics(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+def _moments_is_biallelic_01(hm):
+    """Keep only sites biallelic for the reference (0) and first alternate (1).
+
+    This module is a drop-in for ``moments.LD.Parsing.compute_ld_statistics``,
+    and moments filters its input through scikit-allel's ``is_biallelic_01``:
+    it keeps a variant only if allele 0 and allele 1 are both present and no
+    allele with index >= 2 is observed. That test is keyed on the VCF allele
+    index, not biology -- so a SNP whose only alternate is the second one listed
+    (coded {0,2}), or a reference-absent {1,2} site, is discarded even though it
+    is biologically biallelic. We reproduce it exactly here, rather than use
+    ``HaplotypeMatrix.restrict_to_biallelic`` (which admits arbitrary two-allele
+    codings for pg_gpu's native LD), so this path stays site-for-site identical
+    to moments.
+    """
+    if hm.device == 'CPU':
+        hm.transfer_to_gpu()
+    haps = hm.haplotypes
+    keep = cp.where(
+        cp.any(haps == 0, axis=0)
+        & cp.any(haps == 1, axis=0)
+        & ~cp.any(haps >= 2, axis=0)
+    )[0]
+    positions = hm.positions[keep]
+    if keep.shape[0] > 0:
+        chrom_start = int(positions[0].get())
+        chrom_end = int(positions[-1].get())
+    else:
+        chrom_start, chrom_end = hm.chrom_start, hm.chrom_end
+    return HaplotypeMatrix(
+        haps[:, keep], positions,
+        chrom_start=chrom_start, chrom_end=chrom_end,
+        sample_sets=hm.sample_sets,
+        n_total_sites=hm.n_total_sites,
+        accessible_mask=hm.accessible_mask,
+    )
 
 
 def _interpolate_genetic_distances(positions, rec_map_file):

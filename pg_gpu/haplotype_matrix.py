@@ -1090,72 +1090,82 @@ class HaplotypeMatrix:
             accessible_mask=sliced_mask,
         )
 
-    def apply_biallelic_filter(self) -> "HaplotypeMatrix":
+    def restrict_to_biallelic(self) -> "HaplotypeMatrix":
+        """Restrict to biallelic sites (drop >=3-allele), preserving allele codes.
+
+        Keeps sites with at most two distinct present alleles, allele codes
+        unchanged, so {0,1}, {0,2}, and reference-absent {1,2} are all retained;
+        sites with three or more distinct present alleles are dropped.
         """
-        Apply biallelic filter to remove variants that are not strictly biallelic.
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        from ._memutil import allele_counts
+        from .genotype_matrix import _biallelic_and_alt
 
-        This filter matches the behavior of moments' get_genotypes function, which uses
-        is_biallelic_01() to remove variants that:
-        1. Have more than 2 alleles present in the data
-        2. Don't have both reference (0) and alternate (1) alleles present
-
-        This is the actual filtering that moments does by default, not an AC filter.
-
-        Returns:
-            HaplotypeMatrix: A new HaplotypeMatrix instance with filtered variants.
-
-        Note:
-            This replicates moments' is_biallelic_01() filtering behavior.
-        """
-        if self.device == 'GPU':
-            xp = cp
+        ac, _ = allele_counts(self.haplotypes)
+        biallelic, _ = _biallelic_and_alt(ac)
+        keep = cp.where(biallelic)[0]
+        hap = self.haplotypes[:, keep]
+        positions = self.positions[keep]
+        if keep.shape[0] > 0:
+            chrom_start = int(positions[0].get())
+            chrom_end = int(positions[-1].get())
         else:
-            xp = np
+            chrom_start, chrom_end = self.chrom_start, self.chrom_end
 
-        # For biallelic filtering, we need to check across ALL haplotypes
-        # Count alleles for each variant across all samples
-        n_variants = self.num_variants
-
-        # Count occurrences of each allele value (ignoring missing = -1)
-        alt_count = xp.sum(self.haplotypes == 1, axis=0)
-        ref_count = xp.sum(self.haplotypes == 0, axis=0)
-        multiallelic_count = xp.sum(self.haplotypes >= 2, axis=0)
-
-        # A variant is biallelic if:
-        # 1. No multiallelic alleles (2+) are present
-        # 2. Both reference (0) and alternate (1) alleles are present
-        # Missing data (-1) is ignored — a site with only 0, 1, and -1 is biallelic
-        is_biallelic = (multiallelic_count == 0) & (ref_count > 0) & (alt_count > 0)
-
-        keep_mask = is_biallelic
-
-        # Get indices of variants to keep
-        keep_indices = xp.where(keep_mask)[0]
-
-        # Create filtered HaplotypeMatrix
-        filtered_haplotypes = self.haplotypes[:, keep_indices]
-        filtered_positions = self.positions[keep_indices]
-
-        # Update chromosome boundaries if needed
-        if len(keep_indices) > 0:
-            new_chrom_start = int(filtered_positions[0].get()) if self.device == 'GPU' else int(filtered_positions[0])
-            new_chrom_end = int(filtered_positions[-1].get()) if self.device == 'GPU' else int(filtered_positions[-1])
-        else:
-            new_chrom_start = self.chrom_start
-            new_chrom_end = self.chrom_end
-
-        # Create new instance with same sample sets
-        filtered_matrix = HaplotypeMatrix(
-            filtered_haplotypes,
-            filtered_positions,
-            chrom_start=new_chrom_start,
-            chrom_end=new_chrom_end,
+        return HaplotypeMatrix(
+            hap, positions,
+            chrom_start=chrom_start, chrom_end=chrom_end,
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
             accessible_mask=self.accessible_mask,
         )
 
-        return filtered_matrix
+    def restrict_to_segregating(self) -> "HaplotypeMatrix":
+        """Drop non-segregating (monomorphic) sites.
+
+        Keeps sites with at least two distinct alleles present among the
+        non-missing haplotypes (any coding).
+        """
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        from ._memutil import allele_counts
+
+        ac, _ = allele_counts(self.haplotypes)
+        keep = cp.where((ac > 0).sum(axis=1) >= 2)[0]
+        hap = self.haplotypes[:, keep]
+        positions = self.positions[keep]
+        if keep.shape[0] > 0:
+            chrom_start = int(positions[0].get())
+            chrom_end = int(positions[-1].get())
+        else:
+            chrom_start, chrom_end = self.chrom_start, self.chrom_end
+
+        return HaplotypeMatrix(
+            hap, positions,
+            chrom_start=chrom_start, chrom_end=chrom_end,
+            sample_sets=self._sample_sets,
+            n_total_sites=self.n_total_sites,
+            accessible_mask=self.accessible_mask,
+        )
+
+    def _biallelic_indicator(self) -> cp.ndarray:
+        """0/1 alt-indicator array for the current sites; -1 for missing.
+
+        ``1`` where a haplotype carries the alt allele (highest present allele),
+        ``0`` for the other allele. On {0,1} data this is the identity.
+        """
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        from ._memutil import allele_counts
+        from .genotype_matrix import _biallelic_and_alt
+
+        hap = self.haplotypes
+        ac, _ = allele_counts(hap)
+        _, alt = _biallelic_and_alt(ac)
+        ind = (hap == alt[None, :]).astype(cp.int8)
+        ind[hap < 0] = -1
+        return ind
 
     ####### Missing data methods #######
     def is_missing(self, axis=None):
@@ -2117,8 +2127,13 @@ class HaplotypeMatrix:
         >>> stats[(0.0, 10000.0)]  # (DD, Dz, pi2) for first bin
         """
         if ac_filter:
-            filtered_self = self.apply_biallelic_filter()
-            return filtered_self.compute_ld_statistics_gpu_single_pop(
+            from ._warnings import _warn_biallelic_only
+            biallelic = self.restrict_to_biallelic()
+            _warn_biallelic_only(
+                self.num_variants - biallelic.num_variants,
+                context="compute_ld_statistics_gpu_single_pop")
+            seg = biallelic.restrict_to_segregating()
+            return seg.compute_ld_statistics_gpu_single_pop(
                 bp_bins=bp_bins, raw=raw, ac_filter=False, chunk_size=chunk_size
             )
         if self.device == 'CPU':
@@ -2137,7 +2152,7 @@ class HaplotypeMatrix:
         bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
         _accumulate_pair_bins(
-            self.haplotypes, pos, bp_bins_cp, n_bins,
+            self._biallelic_indicator(), pos, bp_bins_cp, n_bins,
             max_dist, int(chunk_size), n_tail=0,
             bin_sums=bin_sums, bin_counts=bin_counts,
             pop1_indices=None, pop2_indices=None,
@@ -2195,8 +2210,13 @@ class HaplotypeMatrix:
         >>> stats[(0.0, 10000.0)]['DD_0_0']  # D^2 for pop1 in first bin
         """
         if ac_filter:
-            filtered_self = self.apply_biallelic_filter()
-            return filtered_self.compute_ld_statistics_gpu_two_pops(
+            from ._warnings import _warn_biallelic_only
+            biallelic = self.restrict_to_biallelic()
+            _warn_biallelic_only(
+                self.num_variants - biallelic.num_variants,
+                context="compute_ld_statistics_gpu_two_pops")
+            seg = biallelic.restrict_to_segregating()
+            return seg.compute_ld_statistics_gpu_two_pops(
                 bp_bins=bp_bins, pop1=pop1, pop2=pop2, raw=raw,
                 ac_filter=False, chunk_size=chunk_size
             )
@@ -2220,7 +2240,7 @@ class HaplotypeMatrix:
         bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
         _accumulate_pair_bins(
-            self.haplotypes, pos, bp_bins_cp, n_bins,
+            self._biallelic_indicator(), pos, bp_bins_cp, n_bins,
             max_dist, int(chunk_size), n_tail=0,
             bin_sums=bin_sums, bin_counts=bin_counts,
             pop1_indices=pop1_indices, pop2_indices=pop2_indices,
@@ -2344,11 +2364,14 @@ def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
     bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
     bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
+    n_dropped = 0
     tail_haps, tail_pos = None, None
     for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
         if ac_filter:
-            chunk_hm = chunk_hm.apply_biallelic_filter()
-        chunk_haps = chunk_hm.haplotypes
+            biallelic = chunk_hm.restrict_to_biallelic()
+            n_dropped += chunk_hm.num_variants - biallelic.num_variants
+            chunk_hm = biallelic.restrict_to_segregating()
+        chunk_haps = chunk_hm._biallelic_indicator()
         chunk_pos = chunk_hm.positions
         if not isinstance(chunk_pos, cp.ndarray):
             chunk_pos = cp.array(chunk_pos)
@@ -2366,6 +2389,10 @@ def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
         tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
         del stitched_haps, stitched_pos, chunk_haps, chunk_pos
 
+    if ac_filter:
+        from ._warnings import _warn_biallelic_only
+        _warn_biallelic_only(
+            n_dropped, context="compute_ld_statistics_gpu_single_pop")
     return _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw)
 
 
@@ -2387,11 +2414,14 @@ def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
     bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
     bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
+    n_dropped = 0
     tail_haps, tail_pos = None, None
     for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
         if ac_filter:
-            chunk_hm = chunk_hm.apply_biallelic_filter()
-        chunk_haps = chunk_hm.haplotypes
+            biallelic = chunk_hm.restrict_to_biallelic()
+            n_dropped += chunk_hm.num_variants - biallelic.num_variants
+            chunk_hm = biallelic.restrict_to_segregating()
+        chunk_haps = chunk_hm._biallelic_indicator()
         chunk_pos = chunk_hm.positions
         if not isinstance(chunk_pos, cp.ndarray):
             chunk_pos = cp.array(chunk_pos)
@@ -2409,6 +2439,10 @@ def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
         tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
         del stitched_haps, stitched_pos, chunk_haps, chunk_pos
 
+    if ac_filter:
+        from ._warnings import _warn_biallelic_only
+        _warn_biallelic_only(
+            n_dropped, context="compute_ld_statistics_gpu_two_pops")
     return _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw)
 
 
