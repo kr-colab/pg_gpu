@@ -103,7 +103,7 @@ Most sites in a real dataset have two alleles: the reference base and
 one alternate. A few have three or four. Those are called
 **multiallelic** sites, and they need a little care.
 
-pg_gpu stores each haplotype's allele as a small whole number. ``0``
+pg_gpu stores each haplotype's allele as an integer. ``0``
 means the reference base, ``1`` the first alternate, ``2`` the second,
 and so on. Missing data is ``-1``.
 
@@ -160,8 +160,8 @@ against older results or against another tool.
   ``daf_histogram`` whenever invariant sites are in your matrix. No
   theta estimator changes, because none of them uses those two bins.
 
-* **Folded spectra are returned as decimals** (``float64``) rather than
-  whole numbers. On two-allele data the values still come out whole, so
+* **Folded spectra are returned as floating point numbers** (``float64``) rather than
+  integers. On two-allele data the values still come out whole, so
   only the array's type changes. On a multiallelic site each allele is
   folded on its own and contributes one half, so you will see genuine
   half-counts there. For example, a site with three alleles at counts
@@ -196,11 +196,11 @@ of them throws multiallelic sites away, it tells you how many with a
 ``BiallelicOnlyWarning``, so you do not mistake a partial answer for a
 complete one.
 
-Right now that means ``admixture.patterson_d`` and the
+That means ``admixture.patterson_d`` and the
 ``GenotypeMatrix`` loaders described below. If you want a statistic like
 Patterson's D that does handle multiallelic sites, use
 ``admixture.patterson_f4``, which measures the same thing without the
-restriction.
+restriction, at the expense of normalization (it is not bounded in [-1, 1]).
 
 To turn the warning off:
 
@@ -214,7 +214,7 @@ To turn the warning off:
 There is a second, unrelated warning called ``MultiallelicCapWarning``.
 It does *not* mean a statistic is two-allele-only. It means a windowed
 calculation that normally handles multiallelic sites just fine hit its
-internal limit of 8 alleles at one site. DNA has 4 bases, so you will
+internal limit of 8 alleles at one site and discarded the site. DNA has 4 bases, so you will
 almost certainly never see it.
 
 Some other statistics are two-allele-only but never have to drop
@@ -249,7 +249,7 @@ which one you use.
   which keeps the rows lined up for the streaming reader. Either way
   you get a ``BiallelicOnlyWarning`` with the count.
 
-* **Sites where nothing varies are kept.** Loaders load your data as it
+* **Sites with no variation (a single present allele) are kept.** Loaders load your data as it
   is; throwing away uninformative sites is
   ``apply_biallelic_filter``'s job, not theirs.
 
