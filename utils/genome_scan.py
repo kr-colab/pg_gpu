@@ -267,9 +267,10 @@ def plot_genome_scan(windowed, sfs_results, hm, args):
         else:
             ax.set_xlabel(f"{region_label} position (Mb)", fontsize=8)
 
-    # right column: SFS
+    # right column: SFS. The spectrum omits fixed classes, so bins 0 and n
+    # are always empty; trim them so the bars fill the axes.
     sfs_arr = sfs_results["sfs"]
-    sfs_arr = sfs_arr[1:-1]  # exclude fixed classes
+    sfs_arr = sfs_arr[1:-1]
     rows_sfs = n_panels // 2
 
     ax_sfs = fig.add_subplot(gs[:rows_sfs, 1])
