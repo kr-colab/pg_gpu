@@ -247,34 +247,34 @@ def d_prime(counts: cp.ndarray,
 
 
 def _prepare_segregating(mat, missing_data='include'):
-    """Filter to segregating sites and return cleaned arrays.
+    """Filter to segregating sites and return cleaned 0/1 arrays.
 
     Returns (hap_clean, valid_mask, m) or (None, None, 0) if < 2 sites.
+    Operates on the biallelic 0/1 indicator, so {0,2} / reference-absent {1,2}
+    codings are handled; callers restrict to biallelic first.
     """
     if hasattr(mat, 'device') and mat.device == 'CPU':
         mat.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        hap = mat.haplotypes
-        missing_per_var = cp.sum(hap < 0, axis=0)
+        missing_per_var = cp.sum(mat.haplotypes < 0, axis=0)
         valid = cp.where(missing_per_var == 0)[0]
         mat = mat.get_subset(valid)
 
-    hap = mat.haplotypes
-    dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0)
-    n_valid_per_site = cp.sum((hap >= 0).astype(cp.int32), axis=0)
+    ind = mat._biallelic_indicator()
+    dac = cp.sum(ind == 1, axis=0)
+    n_valid_per_site = cp.sum(ind >= 0, axis=0)
     seg = (dac > 0) & (dac < n_valid_per_site)
     seg_idx = cp.where(seg)[0]
-    if len(seg_idx) < mat.num_variants:
-        mat = mat.get_subset(seg_idx)
+    if len(seg_idx) < ind.shape[1]:
+        ind = ind[:, seg_idx]
 
-    hap = mat.haplotypes
-    m = hap.shape[1]
+    m = ind.shape[1]
     if m < 2:
         return None, None, 0
 
-    valid_mask = (hap >= 0).astype(cp.float64)
-    hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+    valid_mask = (ind >= 0).astype(cp.float64)
+    hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
     return hap_clean, valid_mask, m
 
 
@@ -697,7 +697,12 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
 
     # Streaming path for HaplotypeMatrix: O(B²) memory instead of O(m²)
     if is_hm:
-        return _zns_tiled(r2_matrix_or_matrix, _md)
+        from ._warnings import _warn_biallelic_only
+        biallelic = r2_matrix_or_matrix.restrict_to_biallelic()
+        _warn_biallelic_only(
+            r2_matrix_or_matrix.num_variants - biallelic.num_variants,
+            context="zns")
+        return _zns_tiled(biallelic, _md)
 
     if estimator == 'sigma_d2':
         raise ValueError(
@@ -709,8 +714,15 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     m = r2_matrix.shape[0]
     if m < 2:
         return 0.0
-    total = cp.sum(r2_matrix) - cp.trace(r2_matrix)
-    return float((total / (m * (m - 1))).get())
+    # mean over off-diagonal pairs, skipping undefined (NaN) pairs; on a fully
+    # finite matrix this is the plain off-diagonal mean.
+    mask = ~cp.isnan(r2_matrix)
+    cp.fill_diagonal(mask, False)
+    count = int(cp.sum(mask).get())
+    if count == 0:
+        return 0.0
+    total = cp.sum(cp.where(mask, r2_matrix, 0.0))
+    return float((total / count).get())
 
 
 def _build_sigma_d2_matrix(mat, missing_data='include'):
@@ -780,6 +792,14 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     is_hm = isinstance(r2_matrix_or_matrix, HaplotypeMatrix)
     estimator = _resolve_ld_estimator(estimator, is_hm)
 
+    if is_hm:
+        from ._warnings import _warn_biallelic_only
+        biallelic = r2_matrix_or_matrix.restrict_to_biallelic()
+        _warn_biallelic_only(
+            r2_matrix_or_matrix.num_variants - biallelic.num_variants,
+            context="omega")
+        r2_matrix_or_matrix = biallelic
+
     if estimator == 'sigma_d2':
         if not is_hm:
             raise ValueError(
@@ -793,46 +813,38 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     if m < 5:
         return 0.0
 
-    # work with upper triangle only (i < j), matching diploSHIC
-    r2 = cp.triu(r2_matrix, k=1)
+    # Upper triangle only (i < j), matching diploSHIC. Undefined (NaN) pairs
+    # contribute nothing and are not counted, so block means are over defined
+    # pairs; on a fully finite matrix the valid counts equal the combinatorial
+    # pair counts, so this reduces to the plain diploSHIC computation.
+    nan_mask = cp.isnan(r2_matrix)
+    r2 = cp.triu(cp.where(nan_mask, 0.0, r2_matrix), k=1)
+    valid_pairs = cp.triu(cp.where(nan_mask, 0.0, 1.0), k=1)
 
-    # 2D prefix sums on upper triangle
+    # 2D prefix sums of r2 and of the valid-pair mask
     S = cp.cumsum(cp.cumsum(r2, axis=0), axis=1)
-
-    def block_sum(r_start, r_end, c_start, c_end):
-        """Sum of S[r_start:r_end, c_start:c_end] via inclusion-exclusion."""
-        val = S[r_end - 1, c_end - 1]
-        if r_start > 0:
-            val -= S[r_start - 1, c_end - 1]
-        if c_start > 0:
-            val -= S[r_end - 1, c_start - 1]
-        if r_start > 0 and c_start > 0:
-            val += S[r_start - 1, c_start - 1]
-        return val
+    C = cp.cumsum(cp.cumsum(valid_pairs, axis=0), axis=1)
 
     # partition points l = 3..m-2 (matching diploSHIC)
     l_vals = cp.arange(3, m - 1)
 
-    # left block: upper triangle pairs (i,j) with i < j < l
-    # = sum of r2[0:l, 0:l] upper triangle = block_sum(0, l, 0, l)
+    # left block: upper-triangle pairs (i,j) with i < j < l
     left_sum = S[l_vals - 1, l_vals - 1]
+    left_cnt = C[l_vals - 1, l_vals - 1]
 
-    # total upper triangle sum
-    total_upper = S[m - 1, m - 1]
+    total_sum = S[m - 1, m - 1]
+    total_cnt = C[m - 1, m - 1]
 
     # cross block: pairs (i,j) with i < l and j >= l
-    # = block_sum(0, l, l, m)
     cross_sum = S[l_vals - 1, m - 1] - left_sum
+    cross_cnt = C[l_vals - 1, m - 1] - left_cnt
 
-    # right block: pairs (i,j) with i >= l and j > i (upper triangle of right block)
-    right_sum = total_upper - left_sum - cross_sum
+    # right block: pairs (i,j) with l <= i < j
+    right_sum = total_sum - left_sum - cross_sum
+    right_cnt = total_cnt - left_cnt - cross_cnt
 
-    # pair counts (upper triangle only)
-    n_left = l_vals * (l_vals - 1) // 2
-    n_right = (m - l_vals) * (m - l_vals - 1) // 2
-    n_cross = l_vals * (m - l_vals)
-
-    n_within = n_left + n_right
+    n_within = left_cnt + right_cnt
+    n_cross = cross_cnt
     within_sum = left_sum + right_sum
 
     valid = (n_within > 0) & (n_cross > 0) & (cross_sum > 0)
@@ -936,9 +948,9 @@ def _resolve_r2_matrix(r2_matrix_or_matrix, missing_data='include'):
         # diploSHIC marks monomorphic pairs as -1 and skips them in ZnS/Omega.
         # We match this by excluding monomorphic sites entirely.
         if isinstance(mat, HaplotypeMatrix):
-            hap = mat.haplotypes
-            dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0)
-            n_valid = cp.sum((hap >= 0).astype(cp.int32), axis=0)
+            ind = mat._biallelic_indicator()
+            dac = cp.sum(ind == 1, axis=0)
+            n_valid = cp.sum(ind >= 0, axis=0)
             seg = (dac > 0) & (dac < n_valid)
             seg_idx = cp.where(seg)[0]
             if len(seg_idx) < mat.num_variants:
