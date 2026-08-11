@@ -87,10 +87,10 @@ class MultiallelicCapWarning(UserWarning):
 class BiallelicOnlyWarning(UserWarning):
     """Emitted when a biallelic-only statistic or loader drops multiallelic sites.
 
-    Some statistics and loaders are defined only on biallelic sites and otherwise
-    exclude multiallelic ones silently. This warning reports how many sites were
-    dropped, so a partial result is not mistaken for a whole-data one. It marks a
-    statistical-domain restriction, distinct from ``MultiallelicCapWarning``,
+    Some pg_gpu statistics and loaders are computed on biallelic sites only and
+    otherwise exclude multiallelic ones silently. This warning reports how many
+    sites were dropped, so a partial result is not mistaken for a whole-data one.
+    It marks an implementation-scope restriction, distinct from ``MultiallelicCapWarning``,
     which caps a multiallelic-capable windowed kernel at its fixed per-allele
     capacity. Silence with::
 

@@ -251,34 +251,32 @@ which one you use.
 
 * **Sites with no variation (a single present allele) are kept.** Loaders load your data as it
   is; throwing away uninformative sites is
-  ``apply_biallelic_filter``'s job, not theirs.
+  ``restrict_to_segregating``'s job, not theirs.
 
 Ordinary data using only alleles ``0`` and ``1`` is unaffected by all of
 this and loads without any warning.
 
-Filtering down to two-allele sites yourself
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Restricting to biallelic or segregating sites yourself
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``apply_biallelic_filter()`` does two different jobs depending on which
-matrix you call it on. The name is the same for backwards
-compatibility, but the behavior is not.
-
-On a ``HaplotypeMatrix`` it keeps only the sites that show exactly
-alleles ``0`` and ``1`` and nothing else. This is the filter ``moments``
-uses, and what the LD statistics expect:
-
-.. code-block:: python
-
-   h = h.apply_biallelic_filter()   # keep only 0/1 sites
-
-On a ``GenotypeMatrix`` there is nothing to filter -- it only ever holds
-two-allele sites already. So instead it drops sites where nothing
-varies, keeping those where the alternate allele is present but not
-fixed and at least two individuals were called:
+Two orthogonal filters are available. ``restrict_to_biallelic()`` (on a
+``HaplotypeMatrix``) keeps sites with at most two distinct present alleles,
+leaving the allele codes unchanged -- so ``{0,1}``, ``{0,2}`` and
+reference-absent ``{1,2}`` sites are all retained -- and drops sites with three
+or more alleles with a ``BiallelicOnlyWarning``. The LD statistics are defined on
+biallelic sites and apply this themselves, so you rarely need to call it directly:
 
 .. code-block:: python
 
-   gm = gm.apply_biallelic_filter()  # drop sites that aren't variable
+   h = h.restrict_to_biallelic()      # drop >=3-allele sites, codes unchanged
+
+``restrict_to_segregating()`` (on either matrix) is unrelated to allele count: it
+drops sites where nothing varies, keeping those with at least two distinct
+alleles present:
+
+.. code-block:: python
+
+   gm = gm.restrict_to_segregating()  # drop sites that aren't variable
 
 LD Estimator Choice
 -------------------
