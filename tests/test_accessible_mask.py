@@ -401,7 +401,7 @@ class TestGenotypeMatrixAccessibleMask:
         assert hm.has_accessible_mask
         assert hm.accessible_mask is am
 
-    def test_apply_biallelic_filter_propagates(self):
+    def test_restrict_to_segregating_propagates(self):
         rng = np.random.RandomState(42)
         geno = rng.randint(0, 3, size=(5, 20)).astype(np.int8)
         pos = np.sort(rng.choice(np.arange(1, 1000), 20, replace=False))
@@ -409,7 +409,7 @@ class TestGenotypeMatrixAccessibleMask:
         am = AccessibleMask(mask, offset=0)
         gm = GenotypeMatrix(geno, pos, chrom_start=0, chrom_end=1000,
                             accessible_mask=am)
-        filtered = gm.apply_biallelic_filter()
+        filtered = gm.restrict_to_segregating()
         assert filtered.has_accessible_mask
         assert filtered.accessible_mask is am
 
@@ -448,14 +448,14 @@ class TestBackwardCompatibility:
         with pytest.raises(ValueError, match="requires an accessible mask"):
             hm.get_span('accessible')
 
-    def test_apply_biallelic_filter_propagates_mask(self):
-        """HaplotypeMatrix.apply_biallelic_filter preserves mask."""
+    def test_restrict_to_biallelic_propagates_mask(self):
+        """HaplotypeMatrix.restrict_to_biallelic preserves mask."""
         hm = _make_haplotype_matrix()
         mask = np.ones(1000, dtype=bool)
         am = AccessibleMask(mask, offset=0)
         hm.set_accessible_mask(am)
         hm.n_total_sites = 5000
-        filtered = hm.apply_biallelic_filter()
+        filtered = hm.restrict_to_biallelic()
         assert filtered.has_accessible_mask
         assert filtered.accessible_mask is am
         assert filtered.n_total_sites == 5000

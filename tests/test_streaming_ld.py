@@ -140,7 +140,7 @@ class TestSinglePopParity:
         _assert_single_pop_equivalent(e, s)
 
     def test_ac_filter_parity(self, vcz_store):
-        # Per-chunk apply_biallelic_filter must produce the same kept
+        # Per-chunk biallelic restriction must produce the same kept
         # variants as the global filter on the eager matrix, because
         # the filter looks only at allele counts at each variant.
         eager, stream = _aligned_single_pop_pair(vcz_store, chunk_bp=10_000)

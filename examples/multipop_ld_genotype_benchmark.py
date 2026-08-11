@@ -117,7 +117,7 @@ def run_pg_gpu(vcf_paths, pop_path, pops):
     # Warmup on first rep
     gm = GenotypeMatrix.from_vcf(vcf_paths[0])
     gm.load_pop_file(pop_path, pops=pops)
-    gm = gm.apply_biallelic_filter()
+    gm = gm.restrict_to_segregating()
     gm.transfer_to_gpu()
     _ = compute_ld_statistics(
         pops=pops, bp_bins=BP_BINS, report=False,
@@ -127,7 +127,7 @@ def run_pg_gpu(vcf_paths, pop_path, pops):
     for vcf in vcf_paths:
         gm = GenotypeMatrix.from_vcf(vcf)
         gm.load_pop_file(pop_path, pops=pops)
-        gm = gm.apply_biallelic_filter()
+        gm = gm.restrict_to_segregating()
         gm.transfer_to_gpu()
         gpu_stats = compute_ld_statistics(
             pops=pops, bp_bins=BP_BINS, report=False,

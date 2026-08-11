@@ -137,9 +137,11 @@ class TestBiallelicControl:
     def test_biallelic_pi_and_segregating(self, multiallelic_hm):
         ts, hm = multiallelic_hm
         G = ts.genotype_matrix()
-        nonbi = np.where(~_strict_biallelic_mask(G))[0].astype(np.int32)
+        bi = _strict_biallelic_mask(G)
+        nonbi = np.where(~bi)[0].astype(np.int32)
         ts_bi = ts.delete_sites(nonbi)
-        hm_bi = hm.apply_biallelic_filter()
+        # subset the hm to the same strict-{0,1} sites as the tskit oracle
+        hm_bi = hm.get_subset(np.where(bi)[0])
 
         # tskit oracle
         np.testing.assert_allclose(
@@ -265,8 +267,9 @@ class TestPerAlleleSFS:
 
     def test_freqspec_matches_scalar_biallelic(self, multiallelic_hm):
         # On biallelic data every estimator agrees between the two paths.
-        _, hm = multiallelic_hm
-        hm_bi = hm.apply_biallelic_filter()
+        ts, hm = multiallelic_hm
+        G = ts.genotype_matrix()
+        hm_bi = hm.get_subset(np.where(_strict_biallelic_mask(G))[0])
         fs = FrequencySpectrum(hm_bi)
         for name, fn in [('pi', diversity.pi), ('watterson', diversity.theta_w),
                          ('theta_h', diversity.theta_h), ('theta_l', diversity.theta_l)]:
