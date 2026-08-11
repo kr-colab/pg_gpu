@@ -161,10 +161,11 @@ def compute_ld_statistics(
                 raise ValueError("pop_file is required when loading from VCF")
             if report:
                 print(f"Loading {vcf_file} (genotypes) ...")
-            gm = GenotypeMatrix.from_vcf(vcf_file)
+            # Match moments' input filter (is_biallelic_01) so the two accumulate
+            # LD over the same site set; it also drops monomorphic {0,1} sites,
+            # so no separate segregating filter is needed.
+            gm = GenotypeMatrix.from_vcf(vcf_file, biallelic_01_only=ac_filter)
             gm.load_pop_file(pop_file, pops=pops)
-            if ac_filter:
-                gm = gm.restrict_to_segregating()
             if accessible_bed is not None and not gm.has_accessible_mask:
                 gm.set_accessible_mask(accessible_bed)
             gm.transfer_to_gpu()

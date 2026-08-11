@@ -516,7 +516,12 @@ class TestAltCodedSiteParity:
 
     def test_pg_gpu_keeps_the_same_sites_as_moments(self, alt_coded_vcf):
         vcf, pop_file = alt_coded_vcf
-        gm = GenotypeMatrix.from_vcf(vcf)
+        # The default loader keeps the {0,2} site (it is biallelic in the
+        # sample); the moments-LD shim loads with biallelic_01_only=True to
+        # match moments' is_biallelic_01, which drops it.
+        assert ALT_CODED_POSITION in set(
+            _to_numpy(GenotypeMatrix.from_vcf(vcf).positions).tolist())
+        gm = GenotypeMatrix.from_vcf(vcf, biallelic_01_only=True)
         assert ALT_CODED_POSITION not in set(_to_numpy(gm.positions).tolist())
         assert gm.num_variants == len(SMALL_VCF_POSITIONS) - 1
 
