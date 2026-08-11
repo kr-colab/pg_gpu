@@ -240,15 +240,33 @@ def _compute_allel_ld_decay(pos_sub, gn_sub, bp_bins):
 
 
 def _compute_pg_gpu_ld_decay(hm_sub, bp_bins):
-    """LD-decay curve via pg_gpu: one call does pairs + binning + median.
+    """LD-decay curve via pg_gpu's Rogers-Huff r^2 on diploid dosages.
 
-    estimator='rogers_huff' makes this match scikit-allel's path
-    (vs. the pg_gpu default sigma_d^2 estimator).
+    Rogers-Huff is the diploid-dosage correlation, so it takes a
+    ``GenotypeMatrix``; convert the haplotype block (pairing adjacent
+    haplotypes into individuals, the same dosages scikit-allel uses), then
+    bin the pairwise r^2 by physical distance and median-aggregate -- the
+    same steps ``_compute_allel_ld_decay`` runs, so the two curves match.
     """
-    result, _ = hm_sub.windowed_r_squared(
-        bp_bins, percentile=50, estimator='rogers_huff')
-    cp.cuda.Device().synchronize()
-    return np.asarray(result)
+    from pg_gpu import GenotypeMatrix, ld_statistics
+    gm = GenotypeMatrix.from_haplotype_matrix(hm_sub)
+    r_sq = np.asarray(ld_statistics.rogers_huff_r_squared(gm).get())
+    pos = gm.positions
+    pos = np.asarray(pos.get() if hasattr(pos, "get") else pos)
+    n = gm.num_variants
+    i, j = np.triu_indices(n, k=1)
+    distances = (pos[j] - pos[i]).astype(np.int64)
+
+    finite = np.isfinite(r_sq)
+    distances, r_sq = distances[finite], r_sq[finite]
+    bin_idx = np.digitize(distances, bp_bins) - 1
+
+    out = np.full(len(bp_bins) - 1, np.nan)
+    for b in range(len(out)):
+        in_bin = bin_idx == b
+        if in_bin.any():
+            out[b] = float(np.median(r_sq[in_bin]))
+    return out
 
 
 def _compute_pg_gpu_sigma_d2_decay(hm_sub, pos_sub, bp_bins):

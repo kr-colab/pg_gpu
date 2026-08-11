@@ -251,14 +251,12 @@ class TestMaterialize:
 
     def test_pairwise_r2_via_materialize(self, vcz_store):
         # The intended user pattern: streaming hm -> .materialize(region=)
-        # -> pairwise_r2(). Asserts the composition produces a finite
-        # (n_var x n_var) matrix with the kernel's diagonal zeroed.
-        # r2 values are not bounded to [0, 1] in this test because the
-        # msprime fixture uses the default Jukes-Cantor mutation model;
-        # pg_gpu's binary-allele assumptions in pairwise_r2 inflate the
-        # numerator at triallelic sites (tracked in kr-colab/pg_gpu#100).
-        # The streaming -> materialize -> pairwise_r2 composition is what
-        # this test is for; the r2 numerics are validated elsewhere.
+        # -> pairwise_r2(). Asserts the composition produces an (n_var x n_var)
+        # matrix with the kernel's diagonal zeroed. The msprime fixture uses the
+        # default Jukes-Cantor model, so it has multiallelic sites: pairwise_r2 is
+        # biallelic-only and returns NaN for their rows/cols, while the biallelic
+        # pairs stay finite. The composition is what this test is for; the r2
+        # numerics are validated elsewhere.
         path, _ = vcz_store
         stream = HaplotypeMatrix.from_zarr(path, streaming="always",
                                             chunk_bp=5_000)
@@ -266,7 +264,7 @@ class TestMaterialize:
         r2 = sub.pairwise_r2()
         n_var = sub.haplotypes.shape[1]
         assert r2.shape == (n_var, n_var)
-        assert bool(cp.isfinite(r2).all()), "pairwise_r2 returned NaN / inf"
+        assert bool(cp.isfinite(r2).any()), "no finite biallelic r2 values"
         assert float(cp.abs(cp.diag(r2)).sum()) == 0.0
 
     def test_sample_subset_requires_even(self, vcz_store):
