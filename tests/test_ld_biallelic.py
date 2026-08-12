@@ -69,6 +69,20 @@ class TestRestrictMethods:
         gm = GenotypeMatrix(cp.asarray(g), np.arange(3) * 100, 0, 300)
         assert gm.restrict_to_segregating().num_variants == 2
 
+    def test_restrict_empty_result_is_valid_not_crash(self):
+        # every site multiallelic (>=3 alleles) -> nothing biallelic survives
+        multi = [[0, 0], [1, 1], [2, 2], [0, 0], [1, 1], [2, 2]]
+        assert _hm(multi).restrict_to_biallelic().num_variants == 0
+        # every site monomorphic -> nothing segregating survives
+        mono = [[0, 0], [0, 0], [0, 0]]
+        assert _hm(mono).restrict_to_segregating().num_variants == 0
+        # an all-multiallelic matrix has no biallelic sites: zns/omega return
+        # their too-few-sites value (0.0) instead of raising "genotypes cannot
+        # be empty" on the empty filter output
+        for est in ('auto', 'r2'):
+            assert zns(_hm(multi), estimator=est) == 0.0
+            assert omega(_hm(multi), estimator=est) == 0.0
+
     def test_indicator_identity_and_recode(self):
         base = [[0, 0, 1], [1, 2, 2], [0, 0, 1], [1, 2, 2]]  # {0,1},{0,2},{1,2}
         ind = _hm(base)._biallelic_indicator().get()

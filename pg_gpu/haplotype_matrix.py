@@ -1105,17 +1105,15 @@ class HaplotypeMatrix:
         ac, _ = allele_counts(self.haplotypes)
         biallelic, _ = _biallelic_and_alt(ac)
         keep = cp.where(biallelic)[0]
+        if keep.shape[0] == 0:
+            # get_subset builds a valid 0-variant matrix; the constructor rejects empty
+            return self.get_subset(keep)
         hap = self.haplotypes[:, keep]
         positions = self.positions[keep]
-        if keep.shape[0] > 0:
-            chrom_start = int(positions[0].get())
-            chrom_end = int(positions[-1].get())
-        else:
-            chrom_start, chrom_end = self.chrom_start, self.chrom_end
-
         return HaplotypeMatrix(
             hap, positions,
-            chrom_start=chrom_start, chrom_end=chrom_end,
+            chrom_start=int(positions[0].get()),
+            chrom_end=int(positions[-1].get()),
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
             accessible_mask=self.accessible_mask,
@@ -1133,17 +1131,15 @@ class HaplotypeMatrix:
 
         ac, _ = allele_counts(self.haplotypes)
         keep = cp.where((ac > 0).sum(axis=1) >= 2)[0]
+        if keep.shape[0] == 0:
+            # get_subset builds a valid 0-variant matrix; the constructor rejects empty
+            return self.get_subset(keep)
         hap = self.haplotypes[:, keep]
         positions = self.positions[keep]
-        if keep.shape[0] > 0:
-            chrom_start = int(positions[0].get())
-            chrom_end = int(positions[-1].get())
-        else:
-            chrom_start, chrom_end = self.chrom_start, self.chrom_end
-
         return HaplotypeMatrix(
             hap, positions,
-            chrom_start=chrom_start, chrom_end=chrom_end,
+            chrom_start=int(positions[0].get()),
+            chrom_end=int(positions[-1].get()),
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
             accessible_mask=self.accessible_mask,
