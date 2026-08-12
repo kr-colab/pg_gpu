@@ -1912,62 +1912,36 @@ class HaplotypeMatrix:
         return counts, None
 
     def _tally_gpu_haplotypes_with_missing_impl(self, X):
+        """Missing-aware pairwise ``[n11, n10, n01, n00]`` tallies and n_valid.
+
+        Only haplotypes non-missing (``!= -1``) at both loci are counted. Each
+        count is a sample-contracting matmul of 0/1 indicator planes: e.g.
+        ``n11 = (X==1).T @ (X==1)``, so peak memory is O(m^2) and there is no
+        per-pair loop. ``n01`` is the transpose of the ``n10`` matrix.
         """
-        Internal implementation of computing pairwise haplotype tallies with missing data support.
+        m = X.shape[1]
+        A1 = (X == 1).astype(cp.float64)
+        A0 = (X == 0).astype(cp.float64)
+        Vd = (X != -1).astype(cp.float64)
 
-        For each variant pair, only counts haplotypes where both variants are non-missing.
-        Missing data is encoded as -1 in the haplotype matrix.
+        M11 = A1.T @ A1
+        M10 = A1.T @ A0
+        M00 = A0.T @ A0
+        MV = Vd.T @ Vd
+        del A1, A0, Vd
 
-        Parameters:
-            X (cp.ndarray): Haplotype matrix to process
-
-        Returns:
-            tuple: (counts, n_valid) where:
-                - counts: Array of shape (#pairs, 4) containing [n11, n10, n01, n00] for each variant pair
-                - n_valid: Array of shape (#pairs,) containing the number of valid haplotypes for each pair
-        """
-
-        m = X.shape[1]  # number of variants
-        n_haps = X.shape[0]  # number of haplotypes
-
-        # Create missing mask for each variant (True where data is missing)
-        missing_mask = (X == -1)
-
-        # Get indices for upper triangle
         idx_i, idx_j = cp.triu_indices(m, k=1)
-        n_pairs = len(idx_i)
+        n11_pairs = M11[idx_i, idx_j]
+        n10_pairs = M10[idx_i, idx_j]
+        n01_pairs = M10[idx_j, idx_i]          # (X==0)_i & (X==1)_j
+        n00_pairs = M00[idx_i, idx_j]
+        n_valid = MV[idx_i, idx_j]
+        del M11, M10, M00, MV
 
-        # Initialize arrays for results
-        n11_pairs = cp.zeros(n_pairs, dtype=cp.int32)
-        n10_pairs = cp.zeros(n_pairs, dtype=cp.int32)
-        n01_pairs = cp.zeros(n_pairs, dtype=cp.int32)
-        n00_pairs = cp.zeros(n_pairs, dtype=cp.int32)
-        n_valid = cp.zeros(n_pairs, dtype=cp.int32)
-
-        # Process pairs (this could be optimized with custom kernels)
-        for pair_idx in range(n_pairs):
-            i = idx_i[pair_idx]
-            j = idx_j[pair_idx]
-
-            # Create valid mask for this pair (where both variants are non-missing)
-            valid_mask = ~(missing_mask[:, i] | missing_mask[:, j])
-            n_valid[pair_idx] = cp.sum(valid_mask)
-
-            if n_valid[pair_idx] > 0:
-                # Extract valid haplotypes for this pair
-                valid_haps_i = X[valid_mask, i]
-                valid_haps_j = X[valid_mask, j]
-
-                # Count haplotype combinations
-                n11_pairs[pair_idx] = cp.sum((valid_haps_i == 1) & (valid_haps_j == 1))
-                n10_pairs[pair_idx] = cp.sum((valid_haps_i == 1) & (valid_haps_j == 0))
-                n01_pairs[pair_idx] = cp.sum((valid_haps_i == 0) & (valid_haps_j == 1))
-                n00_pairs[pair_idx] = cp.sum((valid_haps_i == 0) & (valid_haps_j == 0))
-
-        # Stack all results
-        counts = cp.stack([n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1)
-
-        return counts, n_valid
+        counts = cp.stack(
+            [n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1
+        ).astype(cp.int32)
+        return counts, n_valid.astype(cp.int32)
 
     def tally_gpu_haplotypes_two_pops_with_missing(self, pop1: str, pop2: str):
         """
