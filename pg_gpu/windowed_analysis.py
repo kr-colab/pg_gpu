@@ -2259,16 +2259,22 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         need_winmat = ('omega' in stat_arrays or 'mu_ld' in stat_arrays
                        or need_dist)
 
+        # zns/omega restrict to biallelic; the excluded multiallelic sites are
+        # the same across the scan, so warn once here rather than once per
+        # window (per-window omega is fed already-biallelic input below, so its
+        # own restriction drops nothing and stays silent).
+        from ._warnings import _warn_biallelic_only
+        if {'zns', 'omega'} & stat_arrays.keys():
+            bmask = matrix._biallelic_mask()
+            _warn_biallelic_only(int((~bmask).sum()),
+                                 context="windowed_analysis")
+
         # Precompute for fused ZnS path
         if 'zns' in stat_arrays:
             # Count on the 0/1 biallelic indicator so {0,2}/{1,2} codings are
             # handled; multiallelic (>2-allele) sites are zeroed so the
             # per-window segregating filter drops them.
-            from ._warnings import _warn_biallelic_only
             ind = matrix._biallelic_indicator()
-            bmask = matrix._biallelic_mask()
-            _warn_biallelic_only(int((~bmask).sum()),
-                                 context="windowed_analysis (zns)")
             hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
             valid_mask = (ind >= 0).astype(cp.float64)
             hap_clean[:, ~bmask] = 0.0
@@ -2291,8 +2297,12 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 win_mat = HaplotypeMatrix(matrix.haplotypes[:, s:e],
                                            matrix.positions[s:e])
                 if 'omega' in stat_arrays:
+                    # Feed already-biallelic input so omega's own restriction
+                    # drops nothing and stays silent; warned once for the scan
+                    # above (_warn_biallelic_only is a no-op at 0).
                     stat_arrays['omega'][wi] = ld_statistics.omega(
-                        win_mat, missing_data=missing_data)
+                        win_mat.restrict_to_biallelic(),
+                        missing_data=missing_data)
                 if 'mu_ld' in stat_arrays:
                     stat_arrays['mu_ld'][wi] = ld_statistics.mu_ld(win_mat)
                 if need_dist:
