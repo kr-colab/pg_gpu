@@ -1411,7 +1411,9 @@ def _compute_mean_r2(matrix: HaplotypeMatrix, max_distance: int,
 
     pos_i, pos_j = cp.meshgrid(positions, positions, indexing='ij')
     distances = cp.abs(pos_j - pos_i)
-    mask = (distances > 0) & (distances <= max_distance)
+    # Exclude undefined (monomorphic/multiallelic) pairs, which pairwise_r2
+    # marks NaN, so a single such site in the window doesn't poison the mean.
+    mask = (distances > 0) & (distances <= max_distance) & ~cp.isnan(r2_matrix)
     if cp.any(mask):
         return float(cp.mean(r2_matrix[mask]).get())
     return np.nan

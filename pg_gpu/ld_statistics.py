@@ -658,6 +658,23 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
     return total / (m * (m - 1))
 
 
+def _drop_undefined_sites(r2_matrix):
+    """Drop sites whose r2 is undefined for every pair.
+
+    ``pairwise_r2`` marks a monomorphic or multiallelic site by NaN-ing its
+    whole row and column, so excluding undefined pairs is the same as dropping
+    those sites -- what the object-input path already does before reducing.
+    No-op on a finite matrix. Assumes undefined entries arrive as whole
+    rows/cols (all this package produces); a scattered NaN would propagate.
+    """
+    finite = ~cp.isnan(r2_matrix)
+    cp.fill_diagonal(finite, False)
+    good = cp.where(cp.any(finite, axis=1))[0]
+    if int(good.shape[0]) == r2_matrix.shape[0]:
+        return r2_matrix
+    return r2_matrix[cp.ix_(good, good)]
+
+
 def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     """Kelly's ZnS: mean pairwise r-squared across all SNP pairs.
 
@@ -710,19 +727,15 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
             "not a pre-computed r² array")
 
     r2_matrix = _resolve_r2_matrix(r2_matrix_or_matrix, missing_data)
+    # Undefined (monomorphic/multiallelic) sites carry NaN rows/cols; drop them
+    # so the mean is over defined pairs, matching the object-input path.
+    r2_matrix = _drop_undefined_sites(r2_matrix)
 
     m = r2_matrix.shape[0]
     if m < 2:
         return 0.0
-    # mean over off-diagonal pairs, skipping undefined (NaN) pairs; on a fully
-    # finite matrix this is the plain off-diagonal mean.
-    mask = ~cp.isnan(r2_matrix)
-    cp.fill_diagonal(mask, False)
-    count = int(cp.sum(mask).get())
-    if count == 0:
-        return 0.0
-    total = cp.sum(cp.where(mask, r2_matrix, 0.0))
-    return float((total / count).get())
+    total = cp.sum(r2_matrix) - cp.trace(r2_matrix)
+    return float((total / (m * (m - 1))).get())
 
 
 def _build_sigma_d2_matrix(mat, missing_data='include'):
@@ -809,42 +822,41 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     else:
         r2_matrix = _resolve_r2_matrix(r2_matrix_or_matrix, missing_data)
 
+    # Undefined (monomorphic/multiallelic) sites carry NaN rows/cols; drop them
+    # so the block means are over defined pairs, matching the object-input path.
+    r2_matrix = _drop_undefined_sites(r2_matrix)
+
     m = r2_matrix.shape[0]
     if m < 5:
         return 0.0
 
-    # Upper triangle only (i < j), matching diploSHIC. Undefined (NaN) pairs
-    # contribute nothing and are not counted, so block means are over defined
-    # pairs; on a fully finite matrix the valid counts equal the combinatorial
-    # pair counts, so this reduces to the plain diploSHIC computation.
-    nan_mask = cp.isnan(r2_matrix)
-    r2 = cp.triu(cp.where(nan_mask, 0.0, r2_matrix), k=1)
-    valid_pairs = cp.triu(cp.where(nan_mask, 0.0, 1.0), k=1)
+    # work with upper triangle only (i < j), matching diploSHIC
+    r2 = cp.triu(r2_matrix, k=1)
 
-    # 2D prefix sums of r2 and of the valid-pair mask
+    # 2D prefix sums on upper triangle
     S = cp.cumsum(cp.cumsum(r2, axis=0), axis=1)
-    C = cp.cumsum(cp.cumsum(valid_pairs, axis=0), axis=1)
 
     # partition points l = 3..m-2 (matching diploSHIC)
     l_vals = cp.arange(3, m - 1)
 
-    # left block: upper-triangle pairs (i,j) with i < j < l
+    # left block: upper triangle pairs (i,j) with i < j < l
     left_sum = S[l_vals - 1, l_vals - 1]
-    left_cnt = C[l_vals - 1, l_vals - 1]
 
-    total_sum = S[m - 1, m - 1]
-    total_cnt = C[m - 1, m - 1]
+    # total upper triangle sum
+    total_upper = S[m - 1, m - 1]
 
     # cross block: pairs (i,j) with i < l and j >= l
     cross_sum = S[l_vals - 1, m - 1] - left_sum
-    cross_cnt = C[l_vals - 1, m - 1] - left_cnt
 
-    # right block: pairs (i,j) with l <= i < j
-    right_sum = total_sum - left_sum - cross_sum
-    right_cnt = total_cnt - left_cnt - cross_cnt
+    # right block: pairs (i,j) with i >= l and j > i (upper triangle of right block)
+    right_sum = total_upper - left_sum - cross_sum
 
-    n_within = left_cnt + right_cnt
-    n_cross = cross_cnt
+    # pair counts (upper triangle only)
+    n_left = l_vals * (l_vals - 1) // 2
+    n_right = (m - l_vals) * (m - l_vals - 1) // 2
+    n_cross = l_vals * (m - l_vals)
+
+    n_within = n_left + n_right
     within_sum = left_sum + right_sum
 
     valid = (n_within > 0) & (n_cross > 0) & (cross_sum > 0)
