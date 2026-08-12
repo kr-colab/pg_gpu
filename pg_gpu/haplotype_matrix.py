@@ -1804,11 +1804,11 @@ class HaplotypeMatrix:
             iu = cp.triu_indices(m, k=1)
             r2_vals = (r_full[iu]) ** 2
         elif estimator == 'r2':
-            # Biallelic-restrict (drop >=3-allele, warn once) and count on the
+            # Biallelic-restrict (drop >=3-allele, warn once) and tally on the
             # 0/1 indicator so {0,2}/{1,2} codings are handled; per-bin output
-            # makes the site drop invisible.
+            # makes the site drop invisible. The tally contracts the sample
+            # axis (X.T @ X), so peak memory is O(m^2) rather than O(n_hap*m^2).
             from ._warnings import _warn_biallelic_only
-            from .ld_pipeline import compute_counts_for_pairs
             from pg_gpu import ld_statistics
             biallelic = self.restrict_to_biallelic()
             _warn_biallelic_only(
@@ -1817,10 +1817,9 @@ class HaplotypeMatrix:
             m = biallelic.num_variants
             pos = biallelic.positions
             ind = biallelic._biallelic_indicator()
-            idx_i, idx_j = cp.triu_indices(m, k=1)
-            pop_idx = biallelic.sample_sets[pop] if pop is not None else None
-            counts_arr, n_valid = compute_counts_for_pairs(
-                ind, idx_i, idx_j, pop_idx)
+            if pop is not None:
+                ind = ind[biallelic.sample_sets[pop], :]
+            counts_arr, n_valid = biallelic._tally_pairs_impl(ind)
             r2_vals = ld_statistics.r_squared(counts_arr, n_valid=n_valid)
         else:
             raise ValueError(
@@ -1889,35 +1888,28 @@ class HaplotypeMatrix:
         else:
             X = self.haplotypes
 
-        # Check if there's any missing data
+        return self._tally_pairs_impl(X)
+
+    def _tally_pairs_impl(self, X):
+        """Pairwise ``[n11, n10, n01, n00]`` tallies over all upper-triangle
+        pairs of a 0/1 array (``-1`` missing). Contracts the sample axis via
+        ``X.T @ X`` when no data is missing (peak memory O(m^2)); falls back to
+        the per-pair reduction otherwise.
+        """
         has_missing = cp.any(X == -1)
-
         if has_missing:
-            # Use the missing data implementation
             return self._tally_gpu_haplotypes_with_missing_impl(X)
-        else:
-            # Use the faster non-missing implementation
-            m = X.shape[1]  # number of variants
 
-            # Count ones per variant
-            ones_per_variant = cp.sum(X, axis=0)
-
-            # Compute n11 matrix
-            n11_mat = X.T @ X
-
-            # Get indices for upper triangle
-            idx_i, idx_j = cp.triu_indices(m, k=1)
-
-            # Compute counts
-            n11_pairs = n11_mat[idx_i, idx_j]
-            n10_pairs = ones_per_variant[idx_i] - n11_pairs
-            n01_pairs = ones_per_variant[idx_j] - n11_pairs
-            n00_pairs = X.shape[0] - (n11_pairs + n10_pairs + n01_pairs)
-
-            # Stack all results
-            counts = cp.stack([n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1)
-
-            return counts, None
+        m = X.shape[1]
+        ones_per_variant = cp.sum(X, axis=0)
+        n11_mat = X.T @ X
+        idx_i, idx_j = cp.triu_indices(m, k=1)
+        n11_pairs = n11_mat[idx_i, idx_j]
+        n10_pairs = ones_per_variant[idx_i] - n11_pairs
+        n01_pairs = ones_per_variant[idx_j] - n11_pairs
+        n00_pairs = X.shape[0] - (n11_pairs + n10_pairs + n01_pairs)
+        counts = cp.stack([n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1)
+        return counts, None
 
     def _tally_gpu_haplotypes_with_missing_impl(self, X):
         """
