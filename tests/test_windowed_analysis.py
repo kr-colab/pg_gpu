@@ -759,6 +759,19 @@ class TestFusedMissingData:
         self._compare_fused_vs_scatter(hm)
 
 
+def _leading_gap_hm(seq_len=100_000, first_pos=243):
+    """Haplotype matrix with chrom_start=0 and a first variant > 0."""
+    rng = np.random.RandomState(7)
+    positions = np.concatenate([
+        [first_pos],
+        np.sort(rng.choice(
+            np.arange(first_pos + 1, seq_len), size=499, replace=False)),
+    ])
+    hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+    return HaplotypeMatrix(hap, positions,
+                           chrom_start=0, chrom_end=seq_len)
+
+
 class TestChromStartZero:
     """Windows must be anchored at chrom_start=0, not the first variant position.
 
@@ -770,16 +783,7 @@ class TestChromStartZero:
     """
 
     def _simple_hm(self, seq_len=100_000, first_pos=243):
-        """Haplotype matrix with chrom_start=0 and a first variant > 0."""
-        rng = np.random.RandomState(7)
-        positions = np.concatenate([
-            [first_pos],
-            np.sort(rng.choice(
-                np.arange(first_pos + 1, seq_len), size=499, replace=False)),
-        ])
-        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
-        return HaplotypeMatrix(hap, positions,
-                               chrom_start=0, chrom_end=seq_len)
+        return _leading_gap_hm(seq_len, first_pos)
 
     def test_single_pop_windows_start_at_zero(self):
         hm = self._simple_hm()
@@ -1556,36 +1560,56 @@ class TestWindowedGarudCorrectness:
 
 
 class TestFusedPerSiteWindowMembership:
-    """Window assignment of the per-site scatter stats in the fused engine.
-
-    A variant belongs to the right-open [start, end) window -- the same rule
-    n_variants and the theta / divergence stats use -- so a variant sitting
-    exactly on an interior boundary (pos == a window end == the next
-    window's start) belongs to the upper window. When windows overlap
-    (step < window), a variant belongs to every window that covers it, not
-    just one. Each window's daf_hist / mu_sfs / mean_nsl must equal the
-    value recomputed from that window's own variant slice.
-    """
+    """Per-site scatter stats land in the right-open [start, end) window
+    that n_variants uses, and in every window covering them when windows
+    overlap. Each window must equal the value recomputed from its own
+    variant slice."""
 
     n_hap = 24
     n_var = 120
 
     @pytest.fixture
     def data(self):
+        from pg_gpu.windowed_analysis import N_DAF_BINS
         rng = np.random.RandomState(4)
         hap = rng.randint(0, 2, (self.n_hap, self.n_var)).astype(np.int8)
         # Evenly spaced positions put variants exactly on window boundaries
         # (3000, 6000, 9000 for 3 kb windows).
         pos = np.arange(self.n_var) * 100
         hm = HaplotypeMatrix(hap, pos, 0, self.n_var * 100)
-        return hm, hap, pos
-
-    def _check_windows(self, hm, hap, pos, window, step):
-        from pg_gpu import selection
         dac = hap.sum(axis=0)
-        # The fused engine's own binning formula; the subject here is
-        # membership, not binning.
-        daf_bin = np.minimum((dac / self.n_hap * 20).astype(int), 19)
+        # The engine's own binning formula; the subject here is membership,
+        # not binning.
+        daf_bin = np.minimum((dac / self.n_hap * N_DAF_BINS).astype(int),
+                             N_DAF_BINS - 1)
+        return hm, pos, dac, daf_bin
+
+    def _check_window(self, row_hist, row_mu, row_nsl, member,
+                      dac, daf_bin, nsl_all, label):
+        from pg_gpu.windowed_analysis import N_DAF_BINS
+        exp_hist = np.bincount(daf_bin[member],
+                               minlength=N_DAF_BINS).astype(float)
+        np.testing.assert_allclose(row_hist, exp_hist,
+                                   err_msg=f"daf_hist mismatch in {label}")
+        is_edge = (dac[member] == 1) | (dac[member] == self.n_hap - 1)
+        np.testing.assert_allclose(row_mu, is_edge.mean(), atol=1e-12,
+                                   err_msg=f"mu_sfs mismatch in {label}")
+        v = nsl_all[member]
+        v = v[np.isfinite(v)]
+        if len(v):
+            np.testing.assert_allclose(row_nsl, v.mean(), atol=1e-9,
+                                       err_msg=f"mean_nsl mismatch in {label}")
+
+    @pytest.mark.parametrize("window,step", [
+        pytest.param(3000, 3000, id="boundary-non-overlapping"),
+        pytest.param(100, 100, id="every-variant-on-a-boundary"),
+        pytest.param(2000, 1000, id="overlap-two-deep"),
+        pytest.param(3000, 1000, id="overlap-three-deep"),
+    ])
+    def test_window_matches_own_slice(self, data, window, step):
+        from pg_gpu import selection
+        from pg_gpu.windowed_analysis import N_DAF_BINS
+        hm, pos, dac, daf_bin = data
         nsl_all = np.asarray(selection.nsl(hm))
         wa = windowed_analysis(hm, window_size=window, step_size=step,
                                statistics=['mu_sfs', 'daf_hist',
@@ -1597,55 +1621,27 @@ class TestFusedPerSiteWindowMembership:
             assert int(member.sum()) == int(row['n_variants'])
             if not member.any():
                 continue
-            exp_hist = np.bincount(daf_bin[member], minlength=20).astype(float)
-            got_hist = np.array([row[f'daf_bin_{b}'] for b in range(20)])
-            np.testing.assert_allclose(
-                got_hist, exp_hist,
-                err_msg=f"daf_hist mismatch in [{s}, {e})")
-            is_edge = (dac[member] == 1) | (dac[member] == self.n_hap - 1)
-            np.testing.assert_allclose(
-                row['mu_sfs'], is_edge.mean(), atol=1e-12,
-                err_msg=f"mu_sfs mismatch in [{s}, {e})")
-            v = nsl_all[member]
-            v = v[np.isfinite(v)]
-            if len(v):
-                np.testing.assert_allclose(
-                    row['mean_nsl'], v.mean(), atol=1e-9,
-                    err_msg=f"mean_nsl mismatch in [{s}, {e})")
-
-    def test_boundary_variants_non_overlapping(self, data):
-        hm, hap, pos = data
-        self._check_windows(hm, hap, pos, 3000, 3000)
-
-    def test_every_variant_on_a_boundary(self, data):
-        # window == step == the position spacing: every variant sits
-        # exactly on a window start.
-        hm, hap, pos = data
-        self._check_windows(hm, hap, pos, 100, 100)
-
-    def test_overlapping_windows_two_deep(self, data):
-        hm, hap, pos = data
-        self._check_windows(hm, hap, pos, 2000, 1000)
-
-    def test_overlapping_windows_three_deep(self, data):
-        hm, hap, pos = data
-        self._check_windows(hm, hap, pos, 3000, 1000)
+            hist = np.array([row[f'daf_bin_{b}'] for b in range(N_DAF_BINS)])
+            self._check_window(hist, row['mu_sfs'], row['mean_nsl'],
+                               member, dac, daf_bin, nsl_all,
+                               f"[{s}, {e})")
 
     def test_direct_bp_bins_branch(self, data):
         # Calling the fused function with explicit contiguous bp_bins
         # exercises the branch without _win_starts/_win_stops.
-        from pg_gpu.windowed_analysis import windowed_statistics_fused
-        hm, hap, pos = data
-        dac = hap.sum(axis=0)
-        daf_bin = np.minimum((dac / self.n_hap * 20).astype(int), 19)
+        from pg_gpu.windowed_analysis import (windowed_statistics_fused,
+                                              N_DAF_BINS)
+        hm, pos, dac, daf_bin = data
         bp = np.array([0., 3000., 6000., 9000., 12000.])
         res = windowed_statistics_fused(
             hm, bp_bins=bp, statistics=('daf_hist', 'mu_sfs'),
             per_base=False)
         for wi in range(4):
             member = (pos >= bp[wi]) & (pos < bp[wi + 1])
-            exp_hist = np.bincount(daf_bin[member], minlength=20).astype(float)
-            got_hist = np.array([res[f'daf_bin_{b}'][wi] for b in range(20)])
+            exp_hist = np.bincount(daf_bin[member],
+                                   minlength=N_DAF_BINS).astype(float)
+            got_hist = np.array([res[f'daf_bin_{b}'][wi]
+                                 for b in range(N_DAF_BINS)])
             np.testing.assert_allclose(got_hist, exp_hist)
             is_edge = (dac[member] == 1) | (dac[member] == self.n_hap - 1)
             np.testing.assert_allclose(res['mu_sfs'][wi], is_edge.mean(),
@@ -1653,26 +1649,11 @@ class TestFusedPerSiteWindowMembership:
 
 
 class TestEngineGridAgreement:
-    """Both windowed engines tile the same grid for the same matrix.
-
-    The grid anchors at the matrix's chromosome coordinates when they are
-    set; the first and last variant are only the fallback. A region- or
-    subset-derived matrix whose chrom_start sits before its first variant
-    must not shift its windows.
-    """
-
-    def _hm(self):
-        rng = np.random.RandomState(7)
-        positions = np.concatenate([
-            [243],
-            np.sort(rng.choice(np.arange(244, 100_000), 499, replace=False)),
-        ])
-        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
-        return HaplotypeMatrix(hap, positions,
-                               chrom_start=0, chrom_end=100_000)
+    """Both windowed engines tile the same grid for the same matrix,
+    anchored at the matrix chromosome bounds when they are set."""
 
     def test_iterator_anchors_at_chrom_start(self):
-        hm = self._hm()
+        hm = _leading_gap_hm()
         it = WindowedAnalyzer(window_size=10_000, step_size=10_000,
                               statistics=['pi'],
                               progress_bar=False).compute(hm)
@@ -1680,7 +1661,7 @@ class TestEngineGridAgreement:
         assert all(int(s) % 10_000 == 0 for s in it['start'])
 
     def test_iterator_grid_matches_fused(self):
-        hm = self._hm()
+        hm = _leading_gap_hm()
         fused = windowed_analysis(hm, window_size=10_000, step_size=10_000,
                                   statistics=['pi'])
         it = WindowedAnalyzer(window_size=10_000, step_size=10_000,
@@ -1718,7 +1699,7 @@ class TestEngineGridAgreement:
             rng.randint(0, 2, (20, n_var)).astype(np.int8),
             pos, 1, 999_999)
         wa = WindowedAnalyzer(window_size=20_000, step_size=20_000,
-                              statistics=['pi', 'n_variants'],
+                              statistics=['pi'],
                               progress_bar=False)
         r1 = wa.compute_region(hm, '1', 200_000, 300_000)
         r2 = wa.compute_region(hm, '1', 300_000, 400_000)
