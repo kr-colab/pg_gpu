@@ -2294,10 +2294,13 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     if any(s in statistics for s in _PER_SITE_SCATTER_STATS):
         k_hi = cp.searchsorted(ws_gpu, positions, side='right') - 1
         k_lo = cp.searchsorted(we_gpu, positions, side='right')
-        if positions.size:
-            n_per_var = max(1, int(cp.max(k_hi - k_lo).get()) + 1)
-        else:
-            n_per_var = 1
+        # n_per_var is grid geometry, not data: coverage depth (windows j
+        # with ws[j] <= x < we[j]) is maximized at a window start, and the
+        # window arrays are already on the host. An upper bound on any
+        # variant's run length; site_ok masks unused rows.
+        depth = (np.searchsorted(ws_cpu, ws_cpu, side='right')
+                 - np.searchsorted(we_cpu, ws_cpu, side='right'))
+        n_per_var = max(1, int(depth.max(initial=0)))
         site_win = (k_hi[None, :]
                     - cp.arange(n_per_var, dtype=cp.int64)[:, None])
         # site_win <= k_hi <= n_windows - 1 by construction, so k_lo is the
