@@ -1553,3 +1553,85 @@ class TestWindowedGarudCorrectness:
                                         err_msg=f"H123 window {w}")
             np.testing.assert_allclose(row["garud_h2h1"], h2h1_a, rtol=1e-9,
                                         err_msg=f"H2H1 window {w}")
+
+
+class TestEngineGridAgreement:
+    """Both windowed engines tile the same grid for the same matrix.
+
+    The grid anchors at the matrix's chromosome coordinates when they are
+    set; the first and last variant are only the fallback. A region- or
+    subset-derived matrix whose chrom_start sits before its first variant
+    must not shift its windows.
+    """
+
+    def _hm(self):
+        rng = np.random.RandomState(7)
+        positions = np.concatenate([
+            [243],
+            np.sort(rng.choice(np.arange(244, 100_000), 499, replace=False)),
+        ])
+        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+        return HaplotypeMatrix(hap, positions,
+                               chrom_start=0, chrom_end=100_000)
+
+    def test_iterator_anchors_at_chrom_start(self):
+        hm = self._hm()
+        it = WindowedAnalyzer(window_size=10_000, step_size=10_000,
+                              statistics=['pi'],
+                              progress_bar=False).compute(hm)
+        assert int(it['start'].iloc[0]) == 0
+        assert all(int(s) % 10_000 == 0 for s in it['start'])
+
+    def test_iterator_grid_matches_fused(self):
+        hm = self._hm()
+        fused = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                                  statistics=['pi'])
+        it = WindowedAnalyzer(window_size=10_000, step_size=10_000,
+                              statistics=['pi'],
+                              progress_bar=False).compute(hm)
+        # The fused engine reports every window; the iterator skips empty
+        # ones. Compare on the non-empty rows.
+        nonempty = fused[fused['n_variants'] > 0].reset_index(drop=True)
+        assert list(nonempty['start'].astype(int)) == \
+            list(it['start'].astype(int))
+        assert list(nonempty['end'].astype(int)) == \
+            list(it['end'].astype(int))
+        assert list(nonempty['n_variants'].astype(int)) == \
+            list(it['n_variants'].astype(int))
+        np.testing.assert_allclose(it['pi'].values, nonempty['pi'].values,
+                                   rtol=1e-9)
+
+    def test_positions_fallback_without_chrom_bounds(self):
+        rng = np.random.RandomState(3)
+        pos = np.sort(rng.choice(np.arange(5_000, 50_000), 200,
+                                 replace=False))
+        hap = rng.randint(0, 2, (12, len(pos)), dtype=np.int8)
+        hm = HaplotypeMatrix(hap, pos)
+        it = WindowedAnalyzer(window_size=5_000, step_size=5_000,
+                              statistics=['pi'],
+                              progress_bar=False).compute(hm)
+        assert int(it['start'].iloc[0]) == int(pos[0])
+
+    def test_compute_region_tiles_from_region_start(self):
+        rng = np.random.RandomState(0)
+        n_var = 400
+        pos = np.sort(rng.choice(np.arange(1, 1_000_000), n_var,
+                                 replace=False))
+        hm = HaplotypeMatrix(
+            rng.randint(0, 2, (20, n_var)).astype(np.int8),
+            pos, 1, 999_999)
+        wa = WindowedAnalyzer(window_size=20_000, step_size=20_000,
+                              statistics=['pi', 'n_variants'],
+                              progress_bar=False)
+        r1 = wa.compute_region(hm, '1', 200_000, 300_000)
+        r2 = wa.compute_region(hm, '1', 300_000, 400_000)
+        # Windows anchor at each region's start, so consecutive region
+        # calls tile without gaps or overlap.
+        assert list(r1['start'].astype(int)) == \
+            list(range(200_000, 300_000, 20_000))
+        assert list(r2['start'].astype(int)) == \
+            list(range(300_000, 400_000, 20_000))
+        in1 = int(((pos >= 200_000) & (pos < 300_000)).sum())
+        in2 = int(((pos >= 300_000) & (pos < 400_000)).sum())
+        assert int(r1['n_variants'].sum()) == in1
+        assert int(r2['n_variants'].sum()) == in2

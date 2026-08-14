@@ -370,15 +370,30 @@ class WindowIterator:
         else:
             raise ValueError(f"Unknown window type: {self.params.window_type}")
 
+    def _bp_window_bounds(self):
+        """Bounds of the bp window grid.
+
+        The matrix's chromosome coordinates win when set; the first and last
+        variant are the fallback. This is the same rule the fused engines
+        apply, so both engines tile the same grid for the same matrix --
+        anchoring at the first variant instead would shift every window of a
+        region- or subset-derived matrix whose chrom_start sits before its
+        first variant.
+        """
+        m = self.matrix
+        chrom_start = (int(m.chrom_start) if m.chrom_start is not None
+                       else int(self.positions_np[0]))
+        chrom_end = (int(m.chrom_end) if m.chrom_end is not None
+                     else int(self.positions_np[-1]))
+        return chrom_start, chrom_end
+
     def _iter_bp_windows(self) -> Iterator[WindowData]:
         """Iterate over fixed base pair windows."""
-        # Window bounds come from the first and last variant, so a matrix with
-        # no variants -- a region that covers none, for example -- has no
-        # windows to yield.
+        # A matrix with no variants -- a region that covers none, for
+        # example -- has no windows to yield, and no fallback bounds.
         if len(self.positions_np) == 0:
             return
-        chrom_start = int(self.positions_np[0])
-        chrom_end = int(self.positions_np[-1])
+        chrom_start, chrom_end = self._bp_window_bounds()
 
         window_id = 0
         start = chrom_start
@@ -480,10 +495,11 @@ class WindowIterator:
         if self.params.window_type == 'bp':
             if len(self.positions_np) == 0:
                 return 0
-            chrom_start = int(self.positions_np[0])
-            chrom_end = int(self.positions_np[-1])
-            return max(1, (chrom_end - chrom_start - self.params.window_size) //
-                      self.params.step_size + 1)
+            chrom_start, chrom_end = self._bp_window_bounds()
+            # Candidate window starts: chrom_start, +step, ... while < chrom_end
+            # -- the exact set _iter_bp_windows walks.
+            span = chrom_end - chrom_start
+            return max(0, -(-span // self.params.step_size))
         elif self.params.window_type == 'snp':
             n_variants = len(self.positions_np)
             if n_variants <= self.params.window_size:
