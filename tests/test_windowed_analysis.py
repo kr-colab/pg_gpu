@@ -1555,6 +1555,103 @@ class TestWindowedGarudCorrectness:
                                         err_msg=f"H2H1 window {w}")
 
 
+class TestFusedPerSiteWindowMembership:
+    """Window assignment of the per-site scatter stats in the fused engine.
+
+    A variant belongs to the right-open [start, end) window -- the same rule
+    n_variants and the theta / divergence stats use -- so a variant sitting
+    exactly on an interior boundary (pos == a window end == the next
+    window's start) belongs to the upper window. When windows overlap
+    (step < window), a variant belongs to every window that covers it, not
+    just one. Each window's daf_hist / mu_sfs / mean_nsl must equal the
+    value recomputed from that window's own variant slice.
+    """
+
+    n_hap = 24
+    n_var = 120
+
+    @pytest.fixture
+    def data(self):
+        rng = np.random.RandomState(4)
+        hap = rng.randint(0, 2, (self.n_hap, self.n_var)).astype(np.int8)
+        # Evenly spaced positions put variants exactly on window boundaries
+        # (3000, 6000, 9000 for 3 kb windows).
+        pos = np.arange(self.n_var) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, self.n_var * 100)
+        return hm, hap, pos
+
+    def _check_windows(self, hm, hap, pos, window, step):
+        from pg_gpu import selection
+        dac = hap.sum(axis=0)
+        # The fused engine's own binning formula; the subject here is
+        # membership, not binning.
+        daf_bin = np.minimum((dac / self.n_hap * 20).astype(int), 19)
+        nsl_all = np.asarray(selection.nsl(hm))
+        wa = windowed_analysis(hm, window_size=window, step_size=step,
+                               statistics=['mu_sfs', 'daf_hist',
+                                           'mean_nsl', 'pi'])
+        assert len(wa) > 1
+        for _, row in wa.iterrows():
+            s, e = row['start'], row['end']
+            member = (pos >= s) & (pos < e)
+            assert int(member.sum()) == int(row['n_variants'])
+            if not member.any():
+                continue
+            exp_hist = np.bincount(daf_bin[member], minlength=20).astype(float)
+            got_hist = np.array([row[f'daf_bin_{b}'] for b in range(20)])
+            np.testing.assert_allclose(
+                got_hist, exp_hist,
+                err_msg=f"daf_hist mismatch in [{s}, {e})")
+            is_edge = (dac[member] == 1) | (dac[member] == self.n_hap - 1)
+            np.testing.assert_allclose(
+                row['mu_sfs'], is_edge.mean(), atol=1e-12,
+                err_msg=f"mu_sfs mismatch in [{s}, {e})")
+            v = nsl_all[member]
+            v = v[np.isfinite(v)]
+            if len(v):
+                np.testing.assert_allclose(
+                    row['mean_nsl'], v.mean(), atol=1e-9,
+                    err_msg=f"mean_nsl mismatch in [{s}, {e})")
+
+    def test_boundary_variants_non_overlapping(self, data):
+        hm, hap, pos = data
+        self._check_windows(hm, hap, pos, 3000, 3000)
+
+    def test_every_variant_on_a_boundary(self, data):
+        # window == step == the position spacing: every variant sits
+        # exactly on a window start.
+        hm, hap, pos = data
+        self._check_windows(hm, hap, pos, 100, 100)
+
+    def test_overlapping_windows_two_deep(self, data):
+        hm, hap, pos = data
+        self._check_windows(hm, hap, pos, 2000, 1000)
+
+    def test_overlapping_windows_three_deep(self, data):
+        hm, hap, pos = data
+        self._check_windows(hm, hap, pos, 3000, 1000)
+
+    def test_direct_bp_bins_branch(self, data):
+        # Calling the fused function with explicit contiguous bp_bins
+        # exercises the branch without _win_starts/_win_stops.
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        hm, hap, pos = data
+        dac = hap.sum(axis=0)
+        daf_bin = np.minimum((dac / self.n_hap * 20).astype(int), 19)
+        bp = np.array([0., 3000., 6000., 9000., 12000.])
+        res = windowed_statistics_fused(
+            hm, bp_bins=bp, statistics=('daf_hist', 'mu_sfs'),
+            per_base=False)
+        for wi in range(4):
+            member = (pos >= bp[wi]) & (pos < bp[wi + 1])
+            exp_hist = np.bincount(daf_bin[member], minlength=20).astype(float)
+            got_hist = np.array([res[f'daf_bin_{b}'][wi] for b in range(20)])
+            np.testing.assert_allclose(got_hist, exp_hist)
+            is_edge = (dac[member] == 1) | (dac[member] == self.n_hap - 1)
+            np.testing.assert_allclose(res['mu_sfs'][wi], is_edge.mean(),
+                                       atol=1e-12)
+
+
 class TestEngineGridAgreement:
     """Both windowed engines tile the same grid for the same matrix.
 
