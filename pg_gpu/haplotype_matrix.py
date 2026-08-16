@@ -2099,7 +2099,6 @@ class HaplotypeMatrix:
         self,
         bp_bins,
         raw=False,
-        ac_filter=True,
         chunk_size='auto'
     ):
         """
@@ -2116,8 +2115,6 @@ class HaplotypeMatrix:
         raw : bool, optional
             If True, return raw sums of statistics across pairs in each bin.
             If False (default), return means.
-        ac_filter : bool, optional
-            If True (default), apply biallelic filtering before computation.
         chunk_size : int or 'auto', optional
             Number of pairs to process per chunk. If 'auto' (default),
             automatically estimates optimal size based on available GPU memory.
@@ -2135,33 +2132,29 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_single_pop(bp_bins)
         >>> stats[(0.0, 10000.0)]  # (DD, Dz, pi2) for first bin
         """
-        if ac_filter:
-            from ._warnings import _warn_biallelic_only
-            biallelic = self.restrict_to_biallelic()
-            _warn_biallelic_only(
-                self.num_variants - biallelic.num_variants,
-                context="compute_ld_statistics_gpu_single_pop")
-            seg = biallelic.restrict_to_segregating()
-            return seg.compute_ld_statistics_gpu_single_pop(
-                bp_bins=bp_bins, raw=raw, ac_filter=False, chunk_size=chunk_size
-            )
         if self.device == 'CPU':
             self.transfer_to_gpu()
+        from ._warnings import _warn_biallelic_only
+        biallelic = self.restrict_to_biallelic()
+        _warn_biallelic_only(
+            self.num_variants - biallelic.num_variants,
+            context="compute_ld_statistics_gpu_single_pop")
+        seg = biallelic.restrict_to_segregating()
 
         bp_bins_arr = np.array(bp_bins)
         max_dist = float(bp_bins_arr[-1])
         n_bins = len(bp_bins_arr) - 1
         bp_bins_cp = cp.array(bp_bins_arr)
         if chunk_size == 'auto':
-            chunk_size = _estimate_ld_chunk_size(self.num_haplotypes)
+            chunk_size = _estimate_ld_chunk_size(seg.num_haplotypes)
 
-        pos = self.positions
+        pos = seg.positions
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
         bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
         _accumulate_pair_bins(
-            self._biallelic_indicator(), pos, bp_bins_cp, n_bins,
+            seg._biallelic_indicator(), pos, bp_bins_cp, n_bins,
             max_dist, int(chunk_size), n_tail=0,
             bin_sums=bin_sums, bin_counts=bin_counts,
             pop1_indices=None, pop2_indices=None,
@@ -2175,7 +2168,6 @@ class HaplotypeMatrix:
         pop1: str,
         pop2: str,
         raw=False,
-        ac_filter=True,
         chunk_size='auto'
     ):
         """
@@ -2196,8 +2188,6 @@ class HaplotypeMatrix:
         raw : bool, optional
             If True, return raw sums of statistics across pairs in each bin.
             If False (default), return means.
-        ac_filter : bool, optional
-            If True (default), apply biallelic filtering before computation.
         chunk_size : int or 'auto', optional
             Number of pairs to process per chunk. If 'auto' (default),
             automatically estimates optimal size based on available GPU memory.
@@ -2218,38 +2208,33 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_two_pops(bp_bins, 'pop1', 'pop2')
         >>> stats[(0.0, 10000.0)]['DD_0_0']  # D^2 for pop1 in first bin
         """
-        if ac_filter:
-            from ._warnings import _warn_biallelic_only
-            biallelic = self.restrict_to_biallelic()
-            _warn_biallelic_only(
-                self.num_variants - biallelic.num_variants,
-                context="compute_ld_statistics_gpu_two_pops")
-            seg = biallelic.restrict_to_segregating()
-            return seg.compute_ld_statistics_gpu_two_pops(
-                bp_bins=bp_bins, pop1=pop1, pop2=pop2, raw=raw,
-                ac_filter=False, chunk_size=chunk_size
-            )
         if self.device == 'CPU':
             self.transfer_to_gpu()
+        from ._warnings import _warn_biallelic_only
+        biallelic = self.restrict_to_biallelic()
+        _warn_biallelic_only(
+            self.num_variants - biallelic.num_variants,
+            context="compute_ld_statistics_gpu_two_pops")
+        seg = biallelic.restrict_to_segregating()
 
         bp_bins_arr = np.array(bp_bins)
         max_dist = float(bp_bins_arr[-1])
         n_bins = len(bp_bins_arr) - 1
         bp_bins_cp = cp.array(bp_bins_arr)
-        pop1_indices = self._sample_sets[pop1]
-        pop2_indices = self._sample_sets[pop2]
+        pop1_indices = seg._sample_sets[pop1]
+        pop2_indices = seg._sample_sets[pop2]
         if chunk_size == 'auto':
             chunk_size = _estimate_ld_chunk_size(
                 max(len(pop1_indices), len(pop2_indices))
             )
 
-        pos = self.positions
+        pos = seg.positions
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
         bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
         _accumulate_pair_bins(
-            self._biallelic_indicator(), pos, bp_bins_cp, n_bins,
+            seg._biallelic_indicator(), pos, bp_bins_cp, n_bins,
             max_dist, int(chunk_size), n_tail=0,
             bin_sums=bin_sums, bin_counts=bin_counts,
             pop1_indices=pop1_indices, pop2_indices=pop2_indices,
@@ -2359,8 +2344,7 @@ def _accumulate_pair_bins(
         )
 
 
-def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
-                          chunk_size):
+def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, chunk_size):
     """Chunk-streamed dispatch for ``compute_ld_statistics_gpu_single_pop``."""
     bp_bins_arr = np.array(bp_bins)
     max_dist = float(bp_bins_arr[-1])
@@ -2376,10 +2360,9 @@ def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
     n_dropped = 0
     tail_haps, tail_pos = None, None
     for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
-        if ac_filter:
-            biallelic = chunk_hm.restrict_to_biallelic()
-            n_dropped += chunk_hm.num_variants - biallelic.num_variants
-            chunk_hm = biallelic.restrict_to_segregating()
+        biallelic = chunk_hm.restrict_to_biallelic()
+        n_dropped += chunk_hm.num_variants - biallelic.num_variants
+        chunk_hm = biallelic.restrict_to_segregating()
         chunk_haps = chunk_hm._biallelic_indicator()
         chunk_pos = chunk_hm.positions
         if not isinstance(chunk_pos, cp.ndarray):
@@ -2398,15 +2381,14 @@ def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
         tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
         del stitched_haps, stitched_pos, chunk_haps, chunk_pos
 
-    if ac_filter:
-        from ._warnings import _warn_biallelic_only
-        _warn_biallelic_only(
-            n_dropped, context="compute_ld_statistics_gpu_single_pop")
+    from ._warnings import _warn_biallelic_only
+    _warn_biallelic_only(
+        n_dropped, context="compute_ld_statistics_gpu_single_pop")
     return _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw)
 
 
 def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
-                        ac_filter, chunk_size):
+                        chunk_size):
     """Chunk-streamed dispatch for ``compute_ld_statistics_gpu_two_pops``."""
     bp_bins_arr = np.array(bp_bins)
     max_dist = float(bp_bins_arr[-1])
@@ -2426,10 +2408,9 @@ def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
     n_dropped = 0
     tail_haps, tail_pos = None, None
     for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
-        if ac_filter:
-            biallelic = chunk_hm.restrict_to_biallelic()
-            n_dropped += chunk_hm.num_variants - biallelic.num_variants
-            chunk_hm = biallelic.restrict_to_segregating()
+        biallelic = chunk_hm.restrict_to_biallelic()
+        n_dropped += chunk_hm.num_variants - biallelic.num_variants
+        chunk_hm = biallelic.restrict_to_segregating()
         chunk_haps = chunk_hm._biallelic_indicator()
         chunk_pos = chunk_hm.positions
         if not isinstance(chunk_pos, cp.ndarray):
@@ -2448,10 +2429,9 @@ def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
         tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
         del stitched_haps, stitched_pos, chunk_haps, chunk_pos
 
-    if ac_filter:
-        from ._warnings import _warn_biallelic_only
-        _warn_biallelic_only(
-            n_dropped, context="compute_ld_statistics_gpu_two_pops")
+    from ._warnings import _warn_biallelic_only
+    _warn_biallelic_only(
+        n_dropped, context="compute_ld_statistics_gpu_two_pops")
     return _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw)
 
 

@@ -183,7 +183,6 @@ ind3\tpop1
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=True,
-            ac_filter=False
         )
 
         # Check basic structure
@@ -221,13 +220,11 @@ ind3\tpop1
         bp_bins = np.array([0, 500, 2000, 5000])
 
         # This should work once missing data is implemented
-        # Note: ac_filter=False is required when using missing=True
         gpu_stats = h_gpu.compute_ld_statistics_gpu_two_pops(
             bp_bins=bp_bins,
             pop1="pop0",
             pop2="pop1",
             raw=True,
-            ac_filter=False
         )
 
         # Check we have all statistics
@@ -253,7 +250,6 @@ ind3\tpop1
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=True,
-            ac_filter=False
         )
 
         # Compare results
@@ -364,7 +360,6 @@ ind3\tpop1
             pop1="pop0",
             pop2="pop1",
             raw=True,
-            ac_filter=False  # Important: disable filter for missing data
         )
 
         # Compare all 15 two-population statistics
@@ -465,7 +460,6 @@ ind3\tpop1
             pop1="pop0",
             pop2="pop1",
             raw=True,
-            ac_filter=False
         )
 
         # Test this specific statistic across all bins

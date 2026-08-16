@@ -139,14 +139,14 @@ class TestSinglePopParity:
         s = stream.compute_ld_statistics_gpu_single_pop(bp_bins, raw=True)
         _assert_single_pop_equivalent(e, s)
 
-    def test_ac_filter_parity(self, vcz_store):
+    def test_filter_parity(self, vcz_store):
         # Per-chunk biallelic restriction must produce the same kept
         # variants as the global filter on the eager matrix, because
         # the filter looks only at allele counts at each variant.
         eager, stream = _aligned_single_pop_pair(vcz_store, chunk_bp=10_000)
         bp_bins = [0, 2_500, 7_500]
-        e = eager.compute_ld_statistics_gpu_single_pop(bp_bins, ac_filter=True)
-        s = stream.compute_ld_statistics_gpu_single_pop(bp_bins, ac_filter=True)
+        e = eager.compute_ld_statistics_gpu_single_pop(bp_bins)
+        s = stream.compute_ld_statistics_gpu_single_pop(bp_bins)
         _assert_single_pop_equivalent(e, s)
 
     def test_chunk_bp_smaller_than_max_dist(self, vcz_store):
@@ -191,16 +191,12 @@ class TestTwoPopParity:
         )
         _assert_two_pop_equivalent(e, s)
 
-    def test_ac_filter_parity(self, two_pop_vcz_store):
+    def test_filter_parity(self, two_pop_vcz_store):
         path, popfile = two_pop_vcz_store
         eager, stream = _aligned_two_pop_pair(path, popfile, chunk_bp=10_000)
         bp_bins = [0, 2_500, 7_500]
-        e = eager.compute_ld_statistics_gpu_two_pops(
-            bp_bins, "pop1", "pop2", ac_filter=True,
-        )
-        s = stream.compute_ld_statistics_gpu_two_pops(
-            bp_bins, "pop1", "pop2", ac_filter=True,
-        )
+        e = eager.compute_ld_statistics_gpu_two_pops(bp_bins, "pop1", "pop2")
+        s = stream.compute_ld_statistics_gpu_two_pops(bp_bins, "pop1", "pop2")
         _assert_two_pop_equivalent(e, s)
 
     def test_chunk_bp_smaller_than_max_dist(self, two_pop_vcz_store):

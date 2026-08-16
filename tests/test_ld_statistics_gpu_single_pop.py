@@ -34,28 +34,6 @@ class TestLDStatisticsGPUSinglePop:
         # Cleanup
         os.unlink(vcf_path)
 
-    @pytest.fixture
-    def single_pop_vcf_with_monomorphic(self):
-        """Create a VCF file with some monomorphic sites for testing ac_filter."""
-        vcf_content = """##fileformat=VCFv4.2
-##contig=<ID=1,length=10000>
-##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
-#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample1\tsample2\tsample3\tsample4
-1\t100\t.\tA\tT\t.\tPASS\t.\tGT\t0|1\t1|0\t0|0\t1|1
-1\t200\t.\tC\tG\t.\tPASS\t.\tGT\t0|0\t0|0\t0|0\t0|0
-1\t500\t.\tT\tA\t.\tPASS\t.\tGT\t0|1\t1|1\t0|0\t0|1
-1\t1000\t.\tG\tC\t.\tPASS\t.\tGT\t1|1\t1|1\t1|1\t1|1
-1\t2000\t.\tA\tT\t.\tPASS\t.\tGT\t0|0\t1|1\t1|0\t0|1
-"""
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.vcf') as f:
-            f.write(vcf_content)
-            vcf_path = f.name
-
-        yield vcf_path
-
-        # Cleanup
-        os.unlink(vcf_path)
-
     def test_single_population_basic(self, single_pop_vcf):
         """Test basic single population LD statistics computation."""
         # Load data into HaplotypeMatrix
@@ -68,7 +46,6 @@ class TestLDStatisticsGPUSinglePop:
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=True,
-            ac_filter=False  # No filtering for this test
         )
 
         # Check that we have results
@@ -95,14 +72,12 @@ class TestLDStatisticsGPUSinglePop:
         gpu_stats_avg = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=False,
-            ac_filter=False
         )
 
         # Compute raw sums for comparison
         gpu_stats_raw = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=True,
-            ac_filter=False
         )
 
         # For bins with multiple pairs, averaged values should differ from raw sums
@@ -119,30 +94,6 @@ class TestLDStatisticsGPUSinglePop:
                         assert np.isfinite(avg)
                         assert np.isfinite(raw)
 
-    def test_single_population_ac_filter(self, single_pop_vcf_with_monomorphic):
-        """Test single population LD statistics with allele count filtering."""
-        h_gpu = HaplotypeMatrix.from_vcf(single_pop_vcf_with_monomorphic)
-
-        bp_bins = np.array([0, 500, 2000, 5000])
-
-        # Compute with AC filter (default)
-        gpu_stats_filtered = h_gpu.compute_ld_statistics_gpu_single_pop(
-            bp_bins=bp_bins,
-            raw=True,
-            ac_filter=True
-        )
-
-        # Compute without AC filter
-        gpu_stats_unfiltered = h_gpu.compute_ld_statistics_gpu_single_pop(
-            bp_bins=bp_bins,
-            raw=True,
-            ac_filter=False
-        )
-
-        # The filtered version should have fewer or equal statistics
-        # (monomorphic sites should be filtered out)
-        assert len(gpu_stats_filtered) <= len(gpu_stats_unfiltered)
-
     def test_single_population_empty_bins(self, single_pop_vcf):
         """Test handling of empty bins in single population computation."""
         h_gpu = HaplotypeMatrix.from_vcf(single_pop_vcf)
@@ -153,7 +104,6 @@ class TestLDStatisticsGPUSinglePop:
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=False,
-            ac_filter=False
         )
 
         # Check all bins are present and empty bins have zero values
@@ -181,7 +131,6 @@ class TestLDStatisticsGPUSinglePop:
         single_pop_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=True,
-            ac_filter=False
         )
 
         # Compute using two-population function with same population
@@ -190,7 +139,6 @@ class TestLDStatisticsGPUSinglePop:
             pop1="pop0",
             pop2="pop0",
             raw=True,
-            ac_filter=False
         )
 
         # Extract DD_0_0, Dz_0_0_0, and pi2_0_0_0_0 from two-pop results
@@ -228,7 +176,6 @@ class TestLDStatisticsGPUSinglePop:
         gpu_stats = h_cpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=True,
-            ac_filter=False
         )
 
         # Should have results
@@ -247,7 +194,6 @@ class TestLDStatisticsGPUSinglePop:
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=True,
-            ac_filter=False
         )
 
         # Check that we have results
