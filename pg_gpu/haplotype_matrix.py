@@ -1802,8 +1802,7 @@ class HaplotypeMatrix:
         elif estimator == 'r2':
             # Biallelic-restrict (drop >=3-allele, warn once) and tally on the
             # 0/1 indicator so {0,2}/{1,2} codings are handled; per-bin output
-            # makes the site drop invisible. The tally contracts the sample
-            # axis (X.T @ X), so peak memory is O(m^2) rather than O(n_hap*m^2).
+            # makes the site drop invisible.
             from ._warnings import _warn_biallelic_only
             from pg_gpu import ld_statistics
             biallelic = self.restrict_to_biallelic()
