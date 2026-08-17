@@ -40,6 +40,9 @@ results**, except where the next section says so.
   ``tskit``'s function of the same name.
 * Windowed analysis: every windowed statistic now gives the same answer
   as running the plain function on that window's variants.
+* LD statistics operate on only sites with two present alleles, but allow
+  arbitrary integer coding. This is a break from parity with ``moments.LD``,
+  which restricts to sites with ``{0, 1}`` coding only.
 
 Results that change even for two-allele data
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
