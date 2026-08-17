@@ -1,9 +1,11 @@
 """
 Integration layer: GPU-accelerated LD statistics for moments inference.
 
-Drop-in replacement for moments.LD.Parsing.compute_ld_statistics() using
-pg_gpu's GPU kernels. Output format is identical to moments, so downstream
-inference (bootstrap_data, optimize_log_lbfgsb, Godambe) works unchanged.
+Mirrors moments.LD.Parsing.compute_ld_statistics() using pg_gpu's GPU kernels;
+the output format is identical, so downstream inference (bootstrap_data,
+optimize_log_lbfgsb, Godambe) works unchanged. Results match moments on {0,1}-
+coded input; unlike moments' is_biallelic_01 filter, this keeps sites biallelic
+in the sample but coded {0,2} or reference-absent {1,2}.
 
 Supports 1-4 populations.
 
