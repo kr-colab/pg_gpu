@@ -598,7 +598,7 @@ falls back to a slower route that produces the same numbers.
    * - ``fst``, ``fst_hudson``
      - Hudson's FST per window
    * - ``fst_wc``
-     - Weir-Cockerham FST per window (treats data as haploid; see below)
+     - Weir-Cockerham FST per window
    * - ``dxy``
      - Absolute divergence per window
    * - ``da``
@@ -627,12 +627,9 @@ falls back to a slower route that produces the same numbers.
 
 The rule to expect is that a windowed statistic gives the same answer
 as calling the plain function on just that window's variants. Alleles
-are counted separately here too, the same as everywhere else. There are
-two known exceptions:
+are counted separately here too, the same as everywhere else. There is
+one known exception:
 
-* Windowed ``fst_wc`` treats the data as haploid, so it will not match
-  the plain ``fst_weir_cockerham``, which treats it as diploid. This
-  holds even for two-allele data.
 * When data is missing, the windowed neutrality tests (``tajimas_d``,
   ``normalized_fay_wu_h``, ``zeng_e``, ``zeng_dh``) use the full sample
   size in their variance formula, while the plain versions use an

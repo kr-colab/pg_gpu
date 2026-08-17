@@ -1115,18 +1115,16 @@ class TestMultiallelicTwoPop:
                 assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
 
     def test_fused_dxy_fst_da_match_scalar(self, sim_hm):
-        """Fused CUDA two-pop kernel: dxy/fst_hudson/da per window == scalar.
-        (fst_wc is excluded: the fused kernel's WC is a haploid estimator that
-        differs from the scalar diploid fst_weir_cockerham, a separate issue.)"""
+        """Fused CUDA two-pop kernel: dxy/fst_hudson/fst_wc/da per window == scalar."""
         from pg_gpu.windowed_analysis import windowed_statistics_fused
         window_size = 25_000
         bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
                        dtype=float)
         r = windowed_statistics_fused(
-            sim_hm, bp_bins=bp, statistics=('dxy', 'fst_hudson', 'da'),
+            sim_hm, bp_bins=bp, statistics=('dxy', 'fst_hudson', 'fst_wc', 'da'),
             pop1='p1', pop2='p2', per_base=False, chrom='1')
-        for start, dxy_w, fst_w, da_w in zip(
-                r['start'], r['dxy'], r['fst_hudson'], r['da']):
+        for start, dxy_w, fst_w, wc_w, da_w in zip(
+                r['start'], r['dxy'], r['fst_hudson'], r['fst_wc'], r['da']):
             stop = start + window_size
             if stop > sim_hm.chrom_end:
                 continue
@@ -1139,11 +1137,12 @@ class TestMultiallelicTwoPop:
             assert np.isclose(da_w,
                               divergence.da(sub, 'p1', 'p2', span_normalize=False),
                               rtol=1e-9, atol=1e-12)
-            fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')
-            if np.isnan(fst_w) or np.isnan(fst_ref):
-                assert np.isnan(fst_w) and np.isnan(fst_ref)
-            else:
-                assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
+            for got, ref in ((fst_w, divergence.fst_hudson(sub, 'p1', 'p2')),
+                             (wc_w, divergence.fst_weir_cockerham(sub, 'p1', 'p2'))):
+                if np.isnan(got) or np.isnan(ref):
+                    assert np.isnan(got) and np.isnan(ref)
+                else:
+                    assert np.isclose(got, ref, rtol=1e-9, atol=1e-12)
 
     def test_per_variant_dxy_fst_match_scalar(self, sim_hm):
         """Per-variant engine (windowed_statistics): two-pop dxy/fst per window
