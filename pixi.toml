@@ -51,8 +51,19 @@ ipykernel = ">=6.0"
 ruff = ">=0.4"
 htslib = ">=1.19"  # provides bgzip/tabix for VCF round-trip tests
 
+[feature.moments.dependencies]
+# moments-popgen caps both of these, and the conda solve wins over the pypi
+# one, so the caps have to be stated here or the environment silently
+# resolves to an older moments than required below. Scoped to this feature,
+# so only the parity-comparison environment is held back.
+mpmath = "<1.4"
+scipy = "<1.17"
+
 [feature.moments.pypi-dependencies]
-moments-popgen = "*"
+# Below 1.5.3 the cython genotype kernel has a sign error in the
+# single-population pi2 correction, so the unphased parity tests compare
+# against wrong reference values.
+moments-popgen = ">=1.5.3"
 demesdraw = "*"
 demes = "*"
 
