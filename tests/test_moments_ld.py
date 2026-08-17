@@ -512,48 +512,67 @@ def plain_vcf(tmp_path_factory):
     return _write_small_vcf(str(tmp_path_factory.mktemp("plain")), alt_coded=False)
 
 
-@pytest.fixture(scope="module")
-def alt_coded_stats(alt_coded_vcf):
-    vcf, pop_file = alt_coded_vcf
+def _moments_and_gpu_stats(vcf_fixture, use_genotypes):
+    """moments and pg_gpu LD stats for a (vcf, pop_file) fixture, same estimator."""
+    vcf, pop_file = vcf_fixture
     m_stats = moments.LD.Parsing.compute_ld_statistics(
         vcf, pop_file=pop_file, pops=SMALL_VCF_POPS,
-        bp_bins=SMALL_VCF_BINS, use_genotypes=True, report=False)
+        bp_bins=SMALL_VCF_BINS, use_genotypes=use_genotypes, report=False)
     g_stats = compute_ld_statistics(
         vcf, pop_file=pop_file, pops=SMALL_VCF_POPS,
-        bp_bins=SMALL_VCF_BINS, use_genotypes=True, report=False)
+        bp_bins=SMALL_VCF_BINS, use_genotypes=use_genotypes, report=False)
     return m_stats, g_stats
 
 
+def _moments_positions(vcf):
+    """Positions moments keeps (its is_biallelic_01 input filter)."""
+    positions, *_ = moments.LD.Parsing.get_genotypes(vcf, use_h5=False, report=False)
+    return set(np.asarray(positions).tolist())
+
+
 class TestAltCodedSiteParity:
-    """A site whose observed alleles are {0, 2} is biallelic in the sample but
-    not coded {0, 1}. pg_gpu's single mode keeps it (arbitrary coding); moments'
-    is_biallelic_01 drops it. This pins that intentional divergence: pg_gpu keeps
-    the site, and the two therefore accumulate LD over different variant sets.
+    """The plain and alt-coded fixtures are built from the same RNG draws and
+    differ only in one site's coding: {0,1} in plain, {0,2} in alt-coded (allele
+    1 declared but never called). moments' is_biallelic_01 drops the {0,2} site;
+    pg_gpu's single mode keeps it, recoded. So the two agree on the plain ({0,1})
+    fixture and disagree on the alt-coded one, and the disagreement is
+    attributable to that single site.
 
     A single extra site is easy to overlook: it shifts DD and pi2, which are
     sums of large same-sign terms, by well under a percent. Dz is signed and
     cancels heavily, so the same site moves it by whole percent.
     """
 
-    def test_moments_drops_the_alt_coded_site(self, alt_coded_vcf):
-        """Pin the moments-side behavior this parity test is defined against:
-        moments keeps only sites whose observed alleles are exactly {0, 1}."""
-        vcf, _ = alt_coded_vcf
-        positions, *_ = moments.LD.Parsing.get_genotypes(vcf, use_h5=False, report=False)
-        assert ALT_CODED_POSITION not in set(np.asarray(positions).tolist())
+    def test_fixtures_differ_only_at_the_alt_coded_site(self, plain_vcf,
+                                                        alt_coded_vcf):
+        # The {0,2} site's alt-dosage equals the {0,1} labelling, so the two
+        # fixtures load to an identical dosage matrix: they agree on every {0,1}
+        # allele and differ only in that site's coding. moments keeps the same
+        # sites from both, minus the {0,2} site it drops; pg_gpu keeps it.
+        gp = GenotypeMatrix.from_vcf(plain_vcf[0])
+        ga = GenotypeMatrix.from_vcf(alt_coded_vcf[0])
+        np.testing.assert_array_equal(
+            _to_numpy(gp.positions), _to_numpy(ga.positions))
+        np.testing.assert_array_equal(
+            _to_numpy(gp.genotypes), _to_numpy(ga.genotypes))
+        assert ALT_CODED_POSITION in set(_to_numpy(ga.positions).tolist())
+        m_plain = _moments_positions(plain_vcf[0])
+        m_alt = _moments_positions(alt_coded_vcf[0])
+        assert ALT_CODED_POSITION in m_plain
+        assert m_alt == m_plain - {ALT_CODED_POSITION}
 
-    def test_pg_gpu_keeps_the_alt_coded_site(self, alt_coded_vcf):
-        # Single mode keeps the {0,2} site (biallelic in the sample, arbitrary
-        # coding), where moments' is_biallelic_01 drops it.
-        vcf, _ = alt_coded_vcf
-        gm = GenotypeMatrix.from_vcf(vcf)
-        assert ALT_CODED_POSITION in set(_to_numpy(gm.positions).tolist())
-        assert gm.num_variants == len(SMALL_VCF_POSITIONS)
-
-    def test_ld_sums_disagree(self, alt_coded_stats):
-        # pg_gpu keeps the {0,2} site moments drops, so their LD sums differ in
-        # at least one bin -- the intentional break with moments parity.
-        m, g = alt_coded_stats
+    @pytest.mark.parametrize("use_genotypes", [False, True], ids=["hap", "geno"])
+    def test_agree_on_plain_disagree_on_alt_coded(self, plain_vcf, alt_coded_vcf,
+                                                  use_genotypes):
+        # (c) On the {0,1} fixture pg_gpu matches moments for every statistic...
+        m, g = _moments_and_gpu_stats(plain_vcf, use_genotypes)
+        for i in range(len(m['sums'])):
+            np.testing.assert_allclose(
+                g['sums'][i], m['sums'][i], rtol=1e-6,
+                err_msg=f"plain fixture mismatch in sums[{i}]")
+        # ...(b) but on the alt-coded fixture pg_gpu keeps the {0,2} site moments
+        # drops, so at least one LD bin disagrees.
+        m, g = _moments_and_gpu_stats(alt_coded_vcf, use_genotypes)
         assert any(
             not np.allclose(g['sums'][i], m['sums'][i], rtol=1e-6)
             for i in range(len(m['bins'])))

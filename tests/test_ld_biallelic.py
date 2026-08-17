@@ -251,3 +251,52 @@ class TestTskitParity:
         fin = np.isfinite(a) & np.isfinite(b)
         assert fin.sum() > 10
         np.testing.assert_allclose(a[fin], b[fin], rtol=1e-9, atol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Loader consistency: single-mode LD is invariant across VCF / ts / zarr
+# ---------------------------------------------------------------------------
+
+
+class TestLoaderConsistency:
+    """Single-mode LD is identical whether the data is loaded from a VCF, a
+    tree sequence, or a zarr store. The biallelic+segregating filter and the
+    alt indicator depend only on the allele codes, which the loaders must
+    represent consistently (including on multiallelic and non-{0,1} sites).
+    """
+
+    def _ld(self, hm):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", BiallelicOnlyWarning)
+            return hm.compute_ld_statistics_gpu_single_pop(
+                [0, 5_000, 20_000, 50_000], raw=True)
+
+    def test_ld_identical_across_vcf_ts_zarr(self, tmp_path):
+        # A nucleotide model produces recurrent mutations, hence some >=3-allele
+        # and non-{0,1} coded sites -- exactly the cases the single mode has to
+        # filter or recode; all three loaders must handle them the same way.
+        ts = msprime.sim_ancestry(
+            samples=15, sequence_length=5e4, recombination_rate=1e-8,
+            population_size=1e4, random_seed=13, ploidy=2)
+        ts = msprime.sim_mutations(
+            ts, rate=1e-7, model=msprime.JC69(), random_seed=13)
+        assert any(len(s.alleles) > 2 for s in ts.sites())  # multiallelic present
+
+        vcf = str(tmp_path / "x.vcf")
+        with open(vcf, "w") as f:
+            ts.write_vcf(f)
+        vcz = str(tmp_path / "x.vcz")
+        HaplotypeMatrix.from_vcf(vcf).to_zarr(vcz, format="vcz", contig_name="1")
+
+        hm_ts = HaplotypeMatrix.from_ts(ts, device="GPU")
+        hm_vcf = HaplotypeMatrix.from_vcf(vcf)
+        hm_zarr = HaplotypeMatrix.from_zarr(vcz)
+
+        ref = self._ld(hm_ts)
+        for name, hm in (("vcf", hm_vcf), ("zarr", hm_zarr)):
+            r = self._ld(hm)
+            assert r.keys() == ref.keys()
+            for k in ref:
+                np.testing.assert_allclose(
+                    r[k], ref[k], rtol=1e-9, atol=1e-12,
+                    err_msg=f"{name} loader LD differs from ts in bin {k}")
