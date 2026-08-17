@@ -1411,7 +1411,9 @@ def _compute_mean_r2(matrix: HaplotypeMatrix, max_distance: int,
 
     pos_i, pos_j = cp.meshgrid(positions, positions, indexing='ij')
     distances = cp.abs(pos_j - pos_i)
-    mask = (distances > 0) & (distances <= max_distance)
+    # Exclude undefined (monomorphic/multiallelic) pairs, which pairwise_r2
+    # marks NaN, so a single such site in the window doesn't poison the mean.
+    mask = (distances > 0) & (distances <= max_distance) & ~cp.isnan(r2_matrix)
     if cp.any(mask):
         return float(cp.mean(r2_matrix[mask]).get())
     return np.nan
@@ -2257,11 +2259,26 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         need_winmat = ('omega' in stat_arrays or 'mu_ld' in stat_arrays
                        or need_dist)
 
+        # zns/omega restrict to biallelic; the excluded multiallelic sites are
+        # the same across the scan, so warn once here rather than once per
+        # window (per-window omega is fed already-biallelic input below, so its
+        # own restriction drops nothing and stays silent).
+        from ._warnings import _warn_biallelic_only
+        if {'zns', 'omega'} & stat_arrays.keys():
+            bmask = matrix._biallelic_mask()
+            _warn_biallelic_only(int((~bmask).sum()),
+                                 context="windowed_analysis")
+
         # Precompute for fused ZnS path
         if 'zns' in stat_arrays:
-            hap = matrix.haplotypes
-            hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
-            valid_mask = (hap >= 0).astype(cp.float64)
+            # Count on the 0/1 biallelic indicator so {0,2}/{1,2} codings are
+            # handled.
+            ind = matrix._biallelic_indicator()
+            hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
+            valid_mask = (ind >= 0).astype(cp.float64)
+            # Zeroing hap_clean (not valid_mask) forces dac==0 at multiallelic
+            # sites, so the per-window segregating filter excludes them from ZnS.
+            hap_clean[:, ~bmask] = 0.0
 
         for wi in range(n_windows):
             s, e = int(ws_np[wi]), int(we_np[wi])
@@ -2281,8 +2298,12 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 win_mat = HaplotypeMatrix(matrix.haplotypes[:, s:e],
                                            matrix.positions[s:e])
                 if 'omega' in stat_arrays:
+                    # Feed already-biallelic input so omega's own restriction
+                    # drops nothing and stays silent; warned once for the scan
+                    # above (_warn_biallelic_only is a no-op at 0).
                     stat_arrays['omega'][wi] = ld_statistics.omega(
-                        win_mat, missing_data=missing_data)
+                        win_mat.restrict_to_biallelic(),
+                        missing_data=missing_data)
                 if 'mu_ld' in stat_arrays:
                     stat_arrays['mu_ld'][wi] = ld_statistics.mu_ld(win_mat)
                 if need_dist:

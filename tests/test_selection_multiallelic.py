@@ -28,6 +28,11 @@ def _mat(hap, pos=None):
     return HaplotypeMatrix(hap.copy(), pos, 0, int(pos[-1]) + 1)
 
 
+def _strict_biallelic_mask(G):
+    """Sites whose sample alleles are exactly {0, 1}."""
+    return (G.max(axis=1) == 1) & (G == 0).any(axis=1) & (G == 1).any(axis=1)
+
+
 # ---------------------------------------------------------------------------
 # Brute-force pure-numpy nSL reference (one derived allele vs ancestral 0)
 # ---------------------------------------------------------------------------
@@ -105,12 +110,13 @@ class TestBiallelicReduction:
         assert both.sum() > 0
         np.testing.assert_allclose(score[both], ref[both], rtol=1e-5)
 
-    def test_biallelic_filter_of_multiallelic_fixture(self, multiallelic_hm):
-        _, hm = multiallelic_hm
-        hm_bi = hm.apply_biallelic_filter()
+    def test_nsl_matches_allel_on_biallelic_subset(self, multiallelic_hm):
+        ts, hm = multiallelic_hm
+        G = ts.genotype_matrix()
+        hm_bi = hm.get_subset(np.where(_strict_biallelic_mask(G))[0])
         hap = np.asarray(hm_bi.haplotypes.get()
                          if hasattr(hm_bi.haplotypes, "get") else hm_bi.haplotypes)
-        assert hap.max() <= 1  # genuinely biallelic after the filter
+        assert hap.max() <= 1  # strict {0,1} biallelic subset
         score = selection.nsl(hm_bi)
         assert score.ndim == 1
         ref = allel.nsl(hap.T, use_threads=False)  # allel layout (n_var, n_hap)

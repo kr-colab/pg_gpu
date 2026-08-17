@@ -1,9 +1,11 @@
 """
 Integration layer: GPU-accelerated LD statistics for moments inference.
 
-Drop-in replacement for moments.LD.Parsing.compute_ld_statistics() using
-pg_gpu's GPU kernels. Output format is identical to moments, so downstream
-inference (bootstrap_data, optimize_log_lbfgsb, Godambe) works unchanged.
+Mirrors moments.LD.Parsing.compute_ld_statistics() using pg_gpu's GPU kernels;
+the output format is identical, so downstream inference (bootstrap_data,
+optimize_log_lbfgsb, Godambe) works unchanged. Results match moments on {0,1}-
+coded input; unlike moments' is_biallelic_01 filter, this keeps sites biallelic
+in the sample but coded {0,2} or reference-absent {1,2}.
 
 Supports 1-4 populations.
 
@@ -40,14 +42,17 @@ from . import ld_statistics
 def compute_ld_statistics(
     vcf_file=None, rec_map_file=None, pop_file=None, pops=None,
     r_bins=None, bp_bins=None, use_genotypes=True,
-    report=True, ac_filter=True, haplotype_matrix=None,
+    report=True, haplotype_matrix=None,
     genotype_matrix=None, accessible_bed=None,
     pop_assignment=None,
 ):
-    """GPU-accelerated drop-in replacement for moments.LD.Parsing.compute_ld_statistics.
+    """GPU LD statistics in the moments.LD.Parsing.compute_ld_statistics output format.
 
-    Accepts the same arguments as the moments version so existing pipelines
-    can switch by changing only the import::
+    Accepts the same arguments as the moments version, but restricts to biallelic
+    segregating sites with arbitrary allele coding (two present alleles): {0,2}
+    and reference-absent {1,2} sites are kept and recoded, whereas moments'
+    is_biallelic_01 drops them. Results match moments only when the input is
+    already {0,1}-coded. The example below mirrors the moments call::
 
         # moments (CPU):
         import moments.LD
@@ -114,8 +119,6 @@ def compute_ld_statistics(
         on both the pg_gpu and moments sides of any comparison.
     report : bool
         Print progress.
-    ac_filter : bool
-        Apply biallelic filter.
     haplotype_matrix : HaplotypeMatrix, optional
         Pre-loaded HaplotypeMatrix (skips VCF loading and GPU transfer).
     genotype_matrix : GenotypeMatrix, optional
@@ -163,8 +166,6 @@ def compute_ld_statistics(
                 print(f"Loading {vcf_file} (genotypes) ...")
             gm = GenotypeMatrix.from_vcf(vcf_file)
             gm.load_pop_file(pop_file, pops=pops)
-            if ac_filter:
-                gm = gm.apply_biallelic_filter()
             if accessible_bed is not None and not gm.has_accessible_mask:
                 gm.set_accessible_mask(accessible_bed)
             gm.transfer_to_gpu()
@@ -186,8 +187,6 @@ def compute_ld_statistics(
                 print(f"Loading {vcf_file} ...")
             hm = HaplotypeMatrix.from_vcf(vcf_file)
             hm.load_pop_file(pop_file, pops=pops)
-            if ac_filter:
-                hm = hm.apply_biallelic_filter()
             if accessible_bed is not None and not hm.has_accessible_mask:
                 hm.set_accessible_mask(accessible_bed)
             hm.transfer_to_gpu()
@@ -311,8 +310,14 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
         count_fn = _compute_genotype_counts_for_pairs
         stat_fn = compute_multi_pop_statistics_batch_geno
     else:
-        pos = mat.positions
-        data_matrix = mat.haplotypes
+        # Keep exactly-two-present (biallelic + segregating) sites, any coding;
+        # the 0/1 indicator recodes {0,2}/{1,2} so the tally counts the alt.
+        from ._memutil import allele_counts
+        ac, _ = allele_counts(mat.haplotypes)
+        keep = (ac > 0).sum(axis=1) == 2
+        keep_idx = cp.where(keep)[0]
+        pos = mat.positions[keep_idx]
+        data_matrix = mat._biallelic_indicator()[:, keep_idx]
         count_fn = _compute_counts_for_pairs
         stat_fn = None  # handled by 2-pop fast path or multi-pop
 
@@ -331,7 +336,7 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
     # Genetic-distance lookup: filter once outside the loop so fancy-indexing
     # on the keep-mask doesn't repeat per chunk.
     if gen_dists_gpu is not None:
-        gen_dists_lookup = gen_dists_gpu[keep_idx] if use_genotypes else gen_dists_gpu
+        gen_dists_lookup = gen_dists_gpu[keep_idx]
     else:
         gen_dists_lookup = None
 
