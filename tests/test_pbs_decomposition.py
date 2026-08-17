@@ -214,6 +214,25 @@ class TestPairwiseDistance:
             np.testing.assert_allclose(dist_pg, dist_scipy, rtol=1e-10,
                                       err_msg=f"{metric} mismatch")
 
+    def test_missing_data_modes(self):
+        from scipy.spatial.distance import pdist
+        hap = np.array([
+            [0, 0, 1, -1],
+            [0, 1, 1, 0],
+            [1, 1, 0, 1],
+        ], dtype=np.int8)
+        matrix = HaplotypeMatrix(hap, np.arange(4) * 1000, 0, 4000)
+
+        excluded = decomposition.pairwise_distance(
+            matrix, metric='sqeuclidean', missing_data='exclude')
+        expected = pdist(hap[:, :3].astype(float), metric='sqeuclidean')
+        np.testing.assert_allclose(excluded, expected, rtol=1e-10)
+
+        included = decomposition.pairwise_distance(
+            matrix, metric='sqeuclidean', missing_data='include')
+        np.testing.assert_allclose(included, [4.0 / 3.0, 4.0, 3.0],
+                                   rtol=1e-10)
+
 
 # ---------------------------------------------------------------------------
 # PCoA tests
