@@ -121,7 +121,7 @@ def run_pg_gpu(vcf_paths, pop_path, pops):
     gm.transfer_to_gpu()
     _ = compute_ld_statistics(
         pops=pops, bp_bins=BP_BINS, report=False,
-        genotype_matrix=gm, use_genotypes=True, ac_filter=False)
+        genotype_matrix=gm, use_genotypes=True)
 
     t0 = time.time()
     for vcf in vcf_paths:
@@ -131,7 +131,7 @@ def run_pg_gpu(vcf_paths, pop_path, pops):
         gm.transfer_to_gpu()
         gpu_stats = compute_ld_statistics(
             pops=pops, bp_bins=BP_BINS, report=False,
-            genotype_matrix=gm, use_genotypes=True, ac_filter=False)
+            genotype_matrix=gm, use_genotypes=True)
     elapsed = time.time() - t0
 
     print(f"  pg_gpu: {N_REPS} reps computed in {elapsed:.3f}s")

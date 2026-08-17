@@ -397,7 +397,7 @@ class GenotypeMatrix:
 
     @classmethod
     def from_vcf(cls, path, include_invariant=False, accessible_bed=None,
-                 fields=None, biallelic_01_only=False):
+                 fields=None):
         """Construct from a VCF file.
 
         Parameters
@@ -408,12 +408,6 @@ class GenotypeMatrix:
             If True, include invariant sites and set n_total_sites.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
-        biallelic_01_only : bool
-            If True, keep only sites with alleles exactly {0, 1} (scikit-allel /
-            moments ``is_biallelic_01``): stricter than the default
-            two-present-allele rule -- also drops {0,2} and reference-absent {1,2}
-            sites. Used by the moments-LD shim to match moments' input filtering,
-            where the alt is always the first alternate allele.
         fields : list of str, optional
             VCF FORMAT/INFO tags to load (e.g. ``['GQ', 'DP', 'MQ']``); see
             ``HaplotypeMatrix.from_vcf`` for the shape contract. Arrays are
@@ -457,21 +451,9 @@ class GenotypeMatrix:
         is_biallelic, alt = _biallelic_and_alt(ac)
         _warn_biallelic_only(int(np.sum(~is_biallelic)),
                              context="GenotypeMatrix.from_vcf")
-        if biallelic_01_only:
-            # moments' is_biallelic_01: alleles exactly {0, 1}. Stricter than
-            # the <=2-present default -- also drops {0,2} / reference-absent
-            # {1,2} and monomorphic {0}/{1}. On the kept sites the alt is 1,
-            # which _biallelic_and_alt already returns.
-            has_1 = (ac[:, 1] > 0 if ac.shape[1] > 1
-                     else np.zeros(len(ac), bool))
-            no_ge2 = ((ac[:, 2:].sum(axis=1) == 0) if ac.shape[1] > 2
-                      else np.ones(len(ac), bool))
-            keep = (ac[:, 0] > 0) & has_1 & no_ge2
-        else:
-            keep = is_biallelic
-        gt = gt[keep]
-        pos = pos[keep]
-        alt = alt[keep]
+        gt = gt[is_biallelic]
+        pos = pos[is_biallelic]
+        alt = alt[is_biallelic]
 
         qc_fields = (_resolve_qc_fields_vcf(callset, tag_to_path, unknown_tags)
                      if fields else {})
@@ -479,7 +461,7 @@ class GenotypeMatrix:
         # sliced consistently or they'd no longer align with the genotype
         # matrix.
         for tag, arr in qc_fields.items():
-            qc_fields[tag] = arr[keep]
+            qc_fields[tag] = arr[is_biallelic]
 
         # Dosage = per-genotype count of the alt allele (0/1/2); a call with any
         # missing allele (-1) -> -1.
