@@ -511,13 +511,13 @@ def _relatedness_columns(hap, sample_sets, n_alleles, centre=True):
 # ---------------------------------------------------------------------------
 
 def _get_genotype_data(matrix, population=None):
-    """Get diploid genotype matrix (n_individuals, n_variants) on GPU.
+    """Get the diploid dosage matrix (n_individuals, n_variants) on GPU.
 
-    Returns genotypes directly from GenotypeMatrix, or builds them from
-    HaplotypeMatrix by summing paired haplotypes. Avoids the memory cost
-    of round-tripping through an intermediate haplotype representation.
+    Callers reach here only with a GenotypeMatrix: ``grm`` and ``ibs`` reject
+    haplotype input up front, so haplotypes become dosages through the one
+    conversion in ``GenotypeMatrix.from_haplotype_matrix``, which counts the
+    alt allele and drops sites carrying more than two.
     """
-    from .haplotype_matrix import HaplotypeMatrix
     from .genotype_matrix import GenotypeMatrix
     from ._utils import get_population_matrix
 
@@ -529,17 +529,7 @@ def _get_genotype_data(matrix, population=None):
 
     if isinstance(matrix, GenotypeMatrix):
         return matrix.genotypes, matrix.genotypes.shape[0]
-    elif isinstance(matrix, HaplotypeMatrix):
-        hap = matrix.haplotypes
-        n_ind = hap.shape[0] // 2
-        h1 = hap[0:2 * n_ind:2, :]
-        h2 = hap[1:2 * n_ind:2, :]
-        missing = (h1 < 0) | (h2 < 0)
-        geno = (cp.maximum(h1, 0) + cp.maximum(h2, 0)).astype(cp.int8)
-        geno[missing] = -1
-        return geno, n_ind
-    else:
-        raise TypeError(f"Expected HaplotypeMatrix or GenotypeMatrix, got {type(matrix)}")
+    raise TypeError(f"Expected GenotypeMatrix, got {type(matrix)}")
 
 
 def _stream_ibs(streaming_matrix, *, population, missing_data,
