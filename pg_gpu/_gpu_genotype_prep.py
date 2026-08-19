@@ -4,10 +4,9 @@ and GenotypeMatrix.
 The VCZ ``call_genotype`` array is ``(n_var, n_dip, 2)`` int8. The two matrix
 classes consume it differently:
 
-* ``HaplotypeMatrix`` wants ``(n_hap, n_var)`` int8 with haps
-  ``0..n_dip-1`` carrying ploidy 0 and haps ``n_dip..2*n_dip-1`` carrying
-  ploidy 1. ``build_haplotype_matrix`` does the ploidy interleave +
-  transpose on the GPU.
+* ``HaplotypeMatrix`` wants ``(n_hap, n_var)`` int8 in the canonical row
+  order: hap ``2i`` carries sample i's ploidy 0 and hap ``2i+1`` its ploidy
+  1. ``build_haplotype_matrix`` does that interleave + transpose on the GPU.
 * ``GenotypeMatrix`` wants ``(n_indiv, n_var)`` int8 dosages (0/1/2 with
   ``-1`` for missing). ``build_genotype_matrix`` counts each site's alt
   allele on the GPU and propagates missing.
@@ -67,13 +66,12 @@ def build_haplotype_matrix(gt, pos, *,
     n_var, n_dip, _ = gt.shape
     gt_gpu = cp.asarray(gt)
 
-    # transpose (n_var, n_dip, 2) -> (2, n_dip, n_var) puts ploidy outermost,
-    # then the reshape concatenates: hap[0..n_dip-1] = ploidy 0 samples,
-    # hap[n_dip..2*n_dip-1] = ploidy 1 samples. This matches the layout
-    # HaplotypeMatrix.load_pop_file builds, so sample_sets indices line up
-    # without a permutation.
+    # The ploidy axis is last and varies fastest, so reshaping to
+    # (n_var, 2 * n_dip) interleaves the two gametes of each sample; the
+    # transpose then yields the canonical row order, individual i at rows
+    # 2i and 2i+1.
     haps = cp.ascontiguousarray(
-        gt_gpu.transpose(2, 1, 0).reshape(2 * n_dip, n_var)
+        gt_gpu.reshape(n_var, 2 * n_dip).T
     )
     del gt_gpu
 

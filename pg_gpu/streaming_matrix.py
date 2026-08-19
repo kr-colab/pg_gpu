@@ -606,14 +606,10 @@ class _StreamingMatrixBase:
                     f"got {n_hap}."
                 )
             n_dip_sub = n_hap // 2
-            # The subsample ploidy ordering matches the source's
-            # convention: haps 0..n_dip-1 = ploidy 0, n_dip..2*n_dip-1
-            # = ploidy 1. Assemble the (n_var, n_dip', 2) layout in
-            # cupy so we don't round-trip through a multi-GB host buffer.
-            gt = cp.empty((n_var, n_dip_sub, 2), dtype=gm_gpu.dtype)
-            gt[:, :, 0] = gm_gpu[:, :n_dip_sub]
-            gt[:, :, 1] = gm_gpu[:, n_dip_sub:]
-            del gm_gpu
+            # Canonical row order puts a sample's two gametes adjacent, so the
+            # haplotype axis is already the flattened (n_dip', 2) layout and
+            # the split is a view rather than a copy.
+            gt = gm_gpu.reshape(n_var, n_dip_sub, 2)
 
         return self._build_chunk(
             gt, pos,

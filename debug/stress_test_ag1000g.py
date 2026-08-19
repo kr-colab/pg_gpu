@@ -110,8 +110,8 @@ def load_data(skip_allel=False):
     assert ploidy == 2
 
     haplotypes = np.empty((n_variants, 2 * n_samples), dtype=gt.dtype)
-    haplotypes[:, :n_samples] = gt[:, :, 0]
-    haplotypes[:, n_samples:] = gt[:, :, 1]
+    haplotypes[:, 0::2] = gt[:, :, 0]
+    haplotypes[:, 1::2] = gt[:, :, 1]
     haplotypes = haplotypes.T
 
     chrom_start = REGION_START if REGION_START is not None else int(positions[0])

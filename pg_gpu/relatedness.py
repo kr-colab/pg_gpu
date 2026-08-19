@@ -532,8 +532,8 @@ def _get_genotype_data(matrix, population=None):
     elif isinstance(matrix, HaplotypeMatrix):
         hap = matrix.haplotypes
         n_ind = hap.shape[0] // 2
-        h1 = hap[:n_ind, :]
-        h2 = hap[n_ind:, :]
+        h1 = hap[0:2 * n_ind:2, :]
+        h2 = hap[1:2 * n_ind:2, :]
         missing = (h1 < 0) | (h2 < 0)
         geno = (cp.maximum(h1, 0) + cp.maximum(h2, 0)).astype(cp.int8)
         geno[missing] = -1
@@ -541,83 +541,6 @@ def _get_genotype_data(matrix, population=None):
     else:
         raise TypeError(f"Expected HaplotypeMatrix or GenotypeMatrix, got {type(matrix)}")
 
-
-def _get_haplotype_data(matrix, population=None):
-    """Get haplotype matrix and number of diploid individuals.
-
-    Returns the raw haplotype matrix on GPU (no genotype conversion)
-    so callers can build diploid genotypes per-chunk.
-    """
-    from .haplotype_matrix import HaplotypeMatrix
-    from .genotype_matrix import GenotypeMatrix
-    from ._utils import get_population_matrix
-
-    if population is not None:
-        matrix = get_population_matrix(matrix, population)
-
-    if hasattr(matrix, 'device') and matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    if isinstance(matrix, GenotypeMatrix):
-        # Convert genotypes back to haplotype layout for uniform processing
-        geno = matrix.genotypes  # (n_ind, n_var)
-        n_ind = geno.shape[0]
-        # Fake haplotype layout: allele1 = geno // 2, allele2 = geno - allele1
-        # This is approximate for het sites but correct for IBS/GRM counting
-        h1 = cp.where(geno >= 0, geno // 2, -1).astype(cp.int8)
-        h2 = cp.where(geno >= 0, geno - geno // 2, -1).astype(cp.int8)
-        hap = cp.concatenate([h1, h2], axis=0)
-        return hap, n_ind
-    elif isinstance(matrix, HaplotypeMatrix):
-        n_ind = matrix.num_haplotypes // 2
-        return matrix.haplotypes, n_ind
-    else:
-        raise TypeError(f"Expected HaplotypeMatrix or GenotypeMatrix, got {type(matrix)}")
-
-
-def _get_diploid_genotypes(matrix, population=None):
-    """Extract diploid genotype matrix (n_individuals, n_variants) on GPU.
-
-    If input is HaplotypeMatrix, pairs consecutive haplotypes into diploid
-    genotypes (hap[0]+hap[1], hap[2]+hap[3], ...).
-    """
-    from .haplotype_matrix import HaplotypeMatrix
-    from .genotype_matrix import GenotypeMatrix
-    from ._utils import get_population_matrix
-
-    if population is not None:
-        matrix = get_population_matrix(matrix, population)
-
-    if hasattr(matrix, 'device') and matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    if isinstance(matrix, GenotypeMatrix):
-        return matrix.genotypes
-    elif isinstance(matrix, HaplotypeMatrix):
-        hap = matrix.haplotypes
-        n_hap = hap.shape[0]
-        n_ind = n_hap // 2
-        # Pair consecutive haplotypes: first n_ind are allele 1,
-        # next n_ind are allele 2 (pg_gpu convention)
-        geno = hap[:n_ind, :].astype(cp.int8) + hap[n_ind:, :].astype(cp.int8)
-        # Mark as missing (-1) if either haplotype is missing
-        missing = (hap[:n_ind, :] < 0) | (hap[n_ind:, :] < 0)
-        geno[missing] = -1
-        return geno
-    else:
-        raise TypeError(f"Expected HaplotypeMatrix or GenotypeMatrix, got {type(matrix)}")
-
-
-# ---------------------------------------------------------------------------
-# Streaming IBS: variant-axis stream + indiv-axis row-block tile
-# ---------------------------------------------------------------------------
-#
-# The three accumulators (ibs2, ibs1, n_joint) are each (n_ind, n_ind) and
-# decompose by sum over variants, so the variant axis can be streamed
-# chunk-by-chunk. The output itself can exceed GPU memory (80 GB at 100k
-# diploids), so the individual axis is tiled into row blocks and the
-# accumulators live on host -- only one row-block's (block_size, n_ind)
-# matmul output sits on the GPU at a time.
 
 def _stream_ibs(streaming_matrix, *, population, missing_data,
                 block_size=None):

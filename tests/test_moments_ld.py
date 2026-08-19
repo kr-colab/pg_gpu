@@ -588,21 +588,15 @@ class TestHaplotypeMatrixGenotypePath:
     through ``GenotypeMatrix.from_haplotype_matrix``, so the conversion has to
     recover the same individuals the VCF loader would have built.
 
-    pg_gpu pairs haplotypes into diploids two contradictory ways (issue #148):
-    consecutive rows ``(2i, 2i+1)``, which ``from_haplotype_matrix`` uses, and
-    split-half rows ``(i, i + n_ind)``, which the VCF/zarr loaders produce and
-    ``load_pop_file`` documents. Whichever order is eventually made canonical,
-    one VCF loaded two ways has to yield the same individuals -- so these
-    comparisons hold either way, and the fixture is VCF-loaded to keep them
-    independent of that decision.
+    Haplotype rows are ordered so that sample ``i`` owns rows ``2i`` and
+    ``2i + 1``, and every loader emits that order, so one VCF loaded two ways
+    yields the same individuals.
 
     Getting it wrong builds each "individual" from two different people's
     chromosomes and scrambles the population assignment with it, which no
     downstream statistic can detect.
     """
 
-    @pytest.mark.xfail(reason="haplotype->diploid pairing, issue #148",
-                       strict=False)
     def test_conversion_matches_vcf_genotypes(self, plain_vcf):
         vcf, _ = plain_vcf
         direct = GenotypeMatrix.from_vcf(vcf)
@@ -612,8 +606,6 @@ class TestHaplotypeMatrixGenotypePath:
         np.testing.assert_array_equal(
             _to_numpy(converted.genotypes), _to_numpy(direct.genotypes))
 
-    @pytest.mark.xfail(reason="haplotype->diploid pairing, issue #148",
-                       strict=False)
     def test_conversion_preserves_sample_sets(self, plain_vcf):
         vcf, pop_file = plain_vcf
         direct = GenotypeMatrix.from_vcf(vcf)
@@ -624,8 +616,6 @@ class TestHaplotypeMatrixGenotypePath:
         for pop in SMALL_VCF_POPS:
             assert sorted(converted.sample_sets[pop]) == sorted(direct.sample_sets[pop])
 
-    @pytest.mark.xfail(reason="haplotype->diploid pairing, issue #148",
-                       strict=False)
     def test_ld_sums_match_the_vcf_path(self, plain_vcf):
         vcf, pop_file = plain_vcf
         hm = HaplotypeMatrix.from_vcf(vcf)
