@@ -576,6 +576,15 @@ class _StreamingMatrixBase:
         sample_subset : sequence of int, optional
             Haplotype-axis indices to keep. ``None`` keeps every
             haplotype.
+
+            Sample ``i`` is rows ``2i`` and ``2i + 1``. Ask for both to
+            keep whole samples. Ask for only one and the rows you get
+            back still sit side by side, but a neighbouring pair is no
+            longer one sample. Do not feed such a matrix to anything
+            that works per individual -- ``grm``, ``ibs``,
+            ``fst_weir_cockerham``, ``heterozygosity_observed``, or
+            ``GenotypeMatrix.from_haplotype_matrix``. Statistics that
+            read each row on its own are fine either way.
         """
         if region is None:
             left, right = self.chrom_start, self.chrom_end
