@@ -1668,11 +1668,11 @@ void fused_windowed_twopop(const signed char* hap1_t,
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
 
-        // Haploid per-allele counts (cnt) over every non-missing call, plus
-        // the diploid tallies Weir-Cockerham needs: consecutive rows are one
-        // individual, dip[] counts allele copies carried by complete
-        // individuals, and het[] counts individuals holding exactly one copy
-        // of an allele. One pass per population covers both.
+        // One pass per population gives three counts for each allele a:
+        // hom[a] is individuals with two copies, het[a] is individuals with
+        // one copy, and half[a] is lone gametes whose partner is missing.
+        // Weir-Cockerham below uses hom and het. The allele frequencies use
+        // all three.
         int hom1[MAX_ALLELES], het1[MAX_ALLELES], half1[MAX_ALLELES];
         int hom2[MAX_ALLELES], het2[MAX_ALLELES], half2[MAX_ALLELES];
         int valid1 = 0, nind1 = 0, valid2 = 0, nind2 = 0;
