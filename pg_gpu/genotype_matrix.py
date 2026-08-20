@@ -805,6 +805,12 @@ class GenotypeMatrix:
             population labels.
         pops : list of str, optional
             Populations to include. If None, includes all found.
+
+        Notes
+        -----
+        Each population lists individual indices, one per sample. This differs
+        from ``HaplotypeMatrix.load_pop_file``, which lists haplotype rows and
+        so gives two entries per sample.
         """
         if self.samples is None:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")

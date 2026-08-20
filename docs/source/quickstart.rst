@@ -43,11 +43,16 @@ manually via ``sample_sets``:
    # From a population file (uses stored sample names)
    h.load_pop_file("pops.txt")
 
-   # Or manually
+   # Or manually. These are haplotype rows, not samples: sample i is rows
+   # 2i and 2i + 1, so pop1 here is samples 0 and 1, not samples 0 to 3.
    h.sample_sets = {
        "pop1": [0, 1, 2, 3],
        "pop2": [4, 5, 6, 7]
    }
+
+   # For a list of samples, take both rows of each
+   samples = [0, 1, 5]
+   h.sample_sets = {"pop1": [r for s in samples for r in (2 * s, 2 * s + 1)]}
 
 Working with Zarr
 ~~~~~~~~~~~~~~~~~~

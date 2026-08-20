@@ -57,7 +57,8 @@ Read this section if you are comparing against older pg_gpu results.
   ``GenotypeMatrix.from_haplotype_matrix``, and genotype-mode LD -- now
   read the same order the loaders write, so their values change for data
   loaded from VCF or zarr. Statistics that treat rows as independent
-  gametes are unaffected. ``sample_sets`` built by ``load_pop_file`` now
+  gametes are unaffected, as long as the same rows are selected.
+  ``sample_sets`` built by ``load_pop_file`` now
   lists ``2i`` and ``2i + 1`` for each member, and hand-written index
   lists that assumed the previous order need updating.
 * Frequency spectra: sites where nothing varies no longer contribute,
