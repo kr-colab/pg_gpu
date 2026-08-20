@@ -495,7 +495,7 @@ same values, so your results do not change -- only the speed.
 
 A windowed statistic should give you the same number as calling the
 plain function on just that window's variants. See :doc:`features` for
-the two cases where that is not quite true.
+the one case where that is not quite true.
 
 For advanced usage with custom bin edges, use ``windowed_statistics_fused()``
 directly:

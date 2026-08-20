@@ -61,6 +61,13 @@ Read this section if you are comparing against older pg_gpu results.
   ``sample_sets`` built by ``load_pop_file`` now lists ``2i`` and
   ``2i + 1`` for each member, and hand-written index lists that assumed
   the previous order need updating.
+* Windowed ``fst_wc`` now gives the same estimate as
+  ``divergence.fst_weir_cockerham``. It used to treat the data as haploid
+  and lump every alternate allele together, so it returned a different
+  number from the plain function on the same variants. Expect windowed
+  values to move: the old ones were off by a small fixed amount, which is
+  under a few percent once FST is above about 0.02 and much larger when
+  FST is near zero. The plain function is unchanged.
 * Frequency spectra: sites where nothing varies no longer contribute,
   folded spectra are returned as ``float64`` rather than integers, and
   ``joint_sfs_folded`` returns a full ``(n1 + 1, n2 + 1)`` grid folded
