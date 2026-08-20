@@ -315,16 +315,16 @@ class TestHaplotypeMatrixFilter:
         # The variant axis stays put when only genotypes= is applied
         # without drop_all_missing.
         assert filtered.haplotypes.shape == loaded.haplotypes.shape
-        # Sample s rejected at variant v means both haplotype rows (s, v)
-        # and (s + n_samples, v) are -1.
+        # Sample s rejected at variant v means both of its haplotype rows,
+        # (2s, v) and (2s + 1, v), are -1.
         n_samples = loaded.haplotypes.shape[0] // 2
         haps_host = _host(filtered._haplotypes)
         gt_keep_host = np.asarray(gt_keep)
         for v in range(haps_host.shape[1]):
             for s in range(n_samples):
                 if not gt_keep_host[v, s]:
-                    assert haps_host[s, v] == -1
-                    assert haps_host[s + n_samples, v] == -1
+                    assert haps_host[2 * s, v] == -1
+                    assert haps_host[2 * s + 1, v] == -1
 
     def test_drop_all_missing_kicks_in(self, tmp_path):
         hm = _simulate_hm()

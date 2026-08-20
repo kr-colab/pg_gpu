@@ -15,6 +15,8 @@ import pytest
 from pg_gpu import BiallelicOnlyWarning, GenotypeMatrix
 from pg_gpu.zarr_io import write_vcz
 
+from .conftest import canonical_hap_rows
+
 
 def _host(a):
     return a.get() if hasattr(a, "get") else np.asarray(a)
@@ -176,3 +178,170 @@ class TestMultiallelicParity:
         assert len(chunks) >= 2   # the sites really did split across chunks
         bo = [w for w in rec if issubclass(w.category, BiallelicOnlyWarning)]
         assert len(bo) == 1
+
+
+class TestHaplotypeRowOrder:
+    """Every loader must place a sample's two gametes at rows 2i and 2i+1.
+
+    The loaders used to disagree: from_ts emitted that order while the VCF and
+    zarr paths emitted ploidy-0 rows followed by ploidy-1 rows. Whichever
+    convention a consumer assumed, data from the other loader was paired across
+    individuals -- silently, since a mispaired matrix is still well formed.
+    """
+
+    @pytest.fixture(scope="class")
+    def ts_and_vcf(self, tmp_path_factory):
+        """A diploid tree sequence and the VCF written from it."""
+        msprime = pytest.importorskip("msprime")
+        ts = msprime.sim_ancestry(samples=8, population_size=1e4,
+                                  sequence_length=2e4, recombination_rate=1e-8,
+                                  random_seed=11, ploidy=2)
+        ts = msprime.sim_mutations(ts, rate=1e-7, random_seed=11,
+                                   model="binary")
+        assert ts.num_sites > 0
+        path = str(tmp_path_factory.mktemp("rows") / "ts.vcf")
+        with open(path, "w") as fh:
+            ts.write_vcf(fh, individual_names=[f"s{i}" for i
+                                               in range(ts.num_individuals)])
+        return ts, path
+
+    def test_vcf_and_zarr_agree_with_canonical_order(self, tmp_path):
+        from pg_gpu import HaplotypeMatrix
+
+        cg, pos = _BIALLELIC_CG, _BIALLELIC_POS
+        vcf = str(tmp_path / "rows.vcf")
+        _write_vcf_from_cg(vcf, cg, pos, _SAMPLES)
+        vcz = str(tmp_path / "rows.vcz.zarr")
+        write_vcz(vcz, cg, pos, samples=_SAMPLES, contig_name="1")
+
+        expected = canonical_hap_rows(cg)
+        np.testing.assert_array_equal(_host(HaplotypeMatrix.from_vcf(vcf).haplotypes),
+                                      expected)
+        np.testing.assert_array_equal(_host(HaplotypeMatrix.from_zarr(vcz).haplotypes),
+                                      expected)
+
+    def test_from_ts_matches_the_vcf_loader(self, ts_and_vcf):
+        """A tree sequence and the VCF written from it load identically."""
+        from pg_gpu import HaplotypeMatrix
+
+        ts, vcf = ts_and_vcf
+        hm_ts = HaplotypeMatrix.from_ts(ts)
+        hm_vcf = HaplotypeMatrix.from_vcf(vcf)
+        np.testing.assert_array_equal(_host(hm_ts.haplotypes),
+                                      _host(hm_vcf.haplotypes))
+
+        # tskit sample nodes 2i / 2i+1 are individual i, so summing adjacent
+        # rows is the per-individual dosage the loaders must reproduce.
+        g = ts.genotype_matrix()
+        truth = np.stack([g[:, 2 * i] + g[:, 2 * i + 1]
+                          for i in range(ts.num_individuals)], axis=1).T
+        gm = GenotypeMatrix.from_haplotype_matrix(hm_ts)
+        np.testing.assert_array_equal(_host(gm.genotypes), truth)
+
+    def test_consumers_read_the_canonical_order(self, ts_and_vcf):
+        """Statistics that rebuild individuals agree with a host reference.
+
+        Loader-against-loader would prove nothing once the rows are known to be
+        byte-identical, so each statistic is checked against a value computed
+        directly from the tree sequence instead.
+        """
+        from pg_gpu import HaplotypeMatrix, diversity, relatedness
+
+        ts, vcf = ts_and_vcf
+        hm = HaplotypeMatrix.from_vcf(vcf)
+        g = ts.genotype_matrix()
+        dosage = np.stack([g[:, 2 * i] + g[:, 2 * i + 1]
+                           for i in range(ts.num_individuals)], axis=1).T
+
+        ho = float(np.nanmean(_host(diversity.heterozygosity_observed(hm))))
+        assert ho == pytest.approx(float((dosage == 1).mean()), rel=1e-12)
+
+        # For ibs and grm, build the reference GenotypeMatrix straight from the
+        # tree sequence dosages so the comparison isolates the pairing without
+        # restating either statistic's formula.
+        pos = np.asarray([s.position for s in ts.sites()], dtype=np.int64)
+        ref = GenotypeMatrix(dosage.astype(np.int8), pos,
+                             int(pos[0]), int(pos[-1]))
+        via_loader = GenotypeMatrix.from_haplotype_matrix(hm)
+        np.testing.assert_allclose(_host(relatedness.ibs(via_loader)),
+                                   _host(relatedness.ibs(ref)), rtol=1e-12)
+        np.testing.assert_allclose(_host(relatedness.grm(via_loader)),
+                                   _host(relatedness.grm(ref)), rtol=1e-12)
+
+    def test_to_zarr_round_trip_preserves_pairing(self, tmp_path):
+        """The writer must read the same row order the loaders emit."""
+        from pg_gpu import HaplotypeMatrix
+
+        cg, pos = _BIALLELIC_CG, _BIALLELIC_POS
+        vcz = str(tmp_path / "in.vcz.zarr")
+        write_vcz(vcz, cg, pos, samples=_SAMPLES, contig_name="1")
+        hm = HaplotypeMatrix.from_zarr(vcz)
+
+        out = str(tmp_path / "out.vcz.zarr")
+        hm.to_zarr(out, format="vcz", contig_name="1")
+        np.testing.assert_array_equal(_host(HaplotypeMatrix.from_zarr(out).haplotypes),
+                                      _host(hm.haplotypes))
+
+    def test_populations_pair_within_their_own_subset(self, tmp_path):
+        """Pairing must survive subsetting to a population.
+
+        Statistics like fst_weir_cockerham pair consecutive rows *within* the
+        population subset, a second pairing step layered on the row order. The
+        populations here alternate through the samples, so each one's rows are
+        non-contiguous in the full matrix and the subset has to carry the
+        adjacency with it.
+        """
+        from pg_gpu import HaplotypeMatrix, divergence, diversity
+
+        rng = np.random.default_rng(4)
+        n_var, n_dip = 40, 6
+        cg = rng.integers(0, 2, size=(n_var, n_dip, 2)).astype(np.int8)
+        pos = np.arange(1, n_var + 1) * 100
+        names = [f"s{i}" for i in range(n_dip)]
+
+        vcf = str(tmp_path / "multipop.vcf")
+        _write_vcf_from_cg(vcf, cg, pos, names)
+        pop_file = tmp_path / "multipop.tsv"
+        pop_file.write_text("".join(
+            f"s{i}\t{'p1' if i % 2 == 0 else 'p2'}\n" for i in range(n_dip)))
+
+        hm = HaplotypeMatrix.from_vcf(vcf)
+        hm.load_pop_file(str(pop_file))
+        # p1 = samples 0, 2, 4 -> both gametes of each, still adjacent in pairs
+        assert sorted(hm.sample_sets["p1"]) == [0, 1, 4, 5, 8, 9]
+        assert sorted(hm.sample_sets["p2"]) == [2, 3, 6, 7, 10, 11]
+
+        def only(dips):
+            """A matrix holding just these samples, in canonical order."""
+            return HaplotypeMatrix(canonical_hap_rows(cg[:, dips, :]), pos,
+                                   int(pos[0]), int(pos[-1]))
+
+        # Per-population statistic against a matrix of just that population.
+        for pop, dips in (("p1", [0, 2, 4]), ("p2", [1, 3, 5])):
+            got = float(np.nanmean(_host(
+                diversity.heterozygosity_observed(hm, population=pop))))
+            ref = float(np.nanmean(_host(
+                diversity.heterozygosity_observed(only(dips)))))
+            assert got == pytest.approx(ref, rel=1e-12), pop
+
+        # Two-population statistic against the same populations laid out
+        # contiguously, which must give the identical estimate.
+        stacked = only([0, 2, 4, 1, 3, 5])
+        stacked.sample_sets = {"p1": list(range(6)), "p2": list(range(6, 12))}
+        assert float(divergence.fst_weir_cockerham(hm, "p1", "p2")) == pytest.approx(
+            float(divergence.fst_weir_cockerham(stacked, "p1", "p2")), rel=1e-12)
+
+    def test_load_pop_file_lists_both_gametes(self, tmp_path):
+        """Population sets must hold rows 2i and 2i+1 for each member."""
+        from pg_gpu import HaplotypeMatrix
+
+        cg, pos = _BIALLELIC_CG, _BIALLELIC_POS
+        vcf = str(tmp_path / "pops.vcf")
+        _write_vcf_from_cg(vcf, cg, pos, _SAMPLES)
+        pop_file = tmp_path / "pops.tsv"
+        pop_file.write_text("s0\tp1\ns1\tp1\ns2\tp2\n")
+
+        hm = HaplotypeMatrix.from_vcf(vcf)
+        hm.load_pop_file(str(pop_file))
+        assert sorted(hm.sample_sets["p1"]) == [0, 1, 2, 3]
+        assert sorted(hm.sample_sets["p2"]) == [4, 5]

@@ -151,6 +151,19 @@ class HaplotypeMatrix:
     labels. Supports GPU-accelerated computation of diversity, divergence,
     selection, and LD statistics.
 
+    Row order
+    ---------
+    Rows are gametes, and for diploid data the two gametes of one sample are
+    adjacent: sample ``i`` owns rows ``2i`` and ``2i + 1``. Every loader
+    produces this order and every consumer that reconstructs individuals --
+    ``GenotypeMatrix.from_haplotype_matrix``, ``relatedness.ibs``,
+    ``divergence.fst_weir_cockerham``, ``diversity.heterozygosity_observed``,
+    the ``to_zarr`` writer -- assumes it. ``sample_sets`` therefore lists both
+    gametes of each member, e.g. sample 3 contributes ``[6, 7]``.
+
+    Statistics that treat rows as independent gametes are unaffected by the
+    order; only the ones above pair rows.
+
     Parameters
     ----------
     genotypes : ndarray, shape (n_haplotypes, n_variants)
@@ -483,10 +496,11 @@ class HaplotypeMatrix:
                                source=f"VCF '{path}'")
         num_variants, num_samples, _ = genotypes.shape
 
-        haplotypes = np.empty((num_variants, 2 * num_samples), dtype=genotypes.dtype)
-        haplotypes[:, :num_samples] = genotypes[:, :, 0]
-        haplotypes[:, num_samples:] = genotypes[:, :, 1]
-        haplotypes = haplotypes.T
+        # Ploidy is the fastest-varying axis of (n_var, n_samples, 2), so
+        # merging the trailing axes interleaves each sample's two gametes and
+        # lands directly on the canonical row order.
+        haplotypes = np.asarray(genotypes).reshape(
+            num_variants, 2 * num_samples).T
 
         positions = np.array(vcf['variants/POS'])
         sample_names = list(vcf['samples'])
@@ -821,8 +835,8 @@ class HaplotypeMatrix:
         n_hap, n_var = hap.shape
         n_samples = n_hap // 2
         gt = np.empty((n_var, n_samples, 2), dtype=hap.dtype)
-        gt[:, :, 0] = hap[:n_samples, :].T
-        gt[:, :, 1] = hap[n_samples:, :].T
+        gt[:, :, 0] = hap[0::2, :].T
+        gt[:, :, 1] = hap[1::2, :].T
         return gt
 
     def load_pop_file(self, pop_assignment, pops: list = None):
@@ -842,11 +856,16 @@ class HaplotypeMatrix:
             labels.
         pops : list of str, optional
             Populations to include. If None, includes all found populations.
+
+        Notes
+        -----
+        Each population's entry lists haplotype rows, not samples, so a member
+        contributes both of its gametes (sample ``i`` gives ``2i`` and
+        ``2i + 1``).
         """
         if self.samples is None:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
 
-        n_samples = len(self.samples)
         if isinstance(pop_assignment, dict):
             pop_map = {str(k): str(v) for k, v in pop_assignment.items() if v}
         else:
@@ -862,19 +881,15 @@ class HaplotypeMatrix:
         if pops is None:
             pops = sorted(found_pops)
 
-        # Block ordering: ploidy-0 indices first, then ploidy-1 indices.
-        # _get_genotype_data and _get_diploid_genotypes split the
-        # haplotype axis at hap.shape[0] // 2 to recover diploid pairs,
-        # which only gives correct pairing under this layout. Matches
-        # what ZarrGenotypeSource produces from a pop file too, so the
-        # streaming and eager paths agree.
+        # Canonical row order: sample i owns haplotype rows 2i and 2i+1, so a
+        # population's index list holds both gametes of each of its samples.
         pop_dips = {p: [] for p in pops}
         for i, name in enumerate(self.samples):
             pop = pop_map.get(name)
             if pop in pop_dips:
                 pop_dips[pop].append(i)
         pop_sets = {
-            p: dips + [d + n_samples for d in dips]
+            p: [h for d in dips for h in (2 * d, 2 * d + 1)]
             for p, dips in pop_dips.items()
         }
 
@@ -1464,10 +1479,10 @@ class HaplotypeMatrix:
         # haplotype matrix so the original is untouched.
         if genotypes_arr is not None:
             # (n_var, n_samples) -> (2 * n_samples, n_var): both
-            # haplotype rows for a sample share its genotype mask.
+            # haplotype rows for a sample share its genotype mask, and under
+            # the canonical row order those rows are adjacent.
             per_sample_keep = genotypes_arr.T  # (n_samples, n_var)
-            hap_keep = xp.concatenate([per_sample_keep, per_sample_keep],
-                                      axis=0)
+            hap_keep = xp.repeat(per_sample_keep, 2, axis=0)
             haps = xp.where(hap_keep, haps_src, np.int8(-1))
         else:
             haps = haps_src

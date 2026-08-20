@@ -157,3 +157,19 @@ def multiallelic_hm(multiallelic_ts):
     """(ts, hm) pair for the multiallelic tree sequence; hm on GPU."""
     from pg_gpu import HaplotypeMatrix
     return multiallelic_ts, HaplotypeMatrix.from_ts(multiallelic_ts, device="GPU")
+
+
+def canonical_hap_rows(call_genotype):
+    """Reference (n_hap, n_var) rows for a ``(n_var, n_dip, 2)`` block.
+
+    Spelled as explicit per-ploidy column slices rather than a reshape so it
+    stays an independent statement of the canonical row order -- sample i at
+    rows 2i and 2i+1 -- rather than a mirror of the loader implementation.
+    """
+    import numpy as np
+
+    n_var, n_dip, _ = call_genotype.shape
+    haps = np.empty((n_var, 2 * n_dip), dtype=call_genotype.dtype)
+    haps[:, 0::2] = call_genotype[:, :, 0]
+    haps[:, 1::2] = call_genotype[:, :, 1]
+    return haps.T

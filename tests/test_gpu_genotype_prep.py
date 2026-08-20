@@ -3,6 +3,8 @@ GPU-side prep of (n_var, n_dip, 2) blocks."""
 
 import numpy as np
 import pytest
+
+from .conftest import canonical_hap_rows
 import cupy as cp
 
 from pg_gpu._gpu_genotype_prep import (
@@ -12,13 +14,8 @@ from pg_gpu._gpu_genotype_prep import (
 
 def _reference_reshape(gt):
     """Host-only equivalent of build_haplotype_matrix's reshape, used as
-    ground truth in equivalence tests. Matches the layout
-    HaplotypeMatrix.load_pop_file expects (ploidy 0 first, then ploidy 1)."""
-    n_var, n_dip, _ = gt.shape
-    haps = np.empty((n_var, 2 * n_dip), dtype=gt.dtype)
-    haps[:, :n_dip] = gt[:, :, 0]
-    haps[:, n_dip:] = gt[:, :, 1]
-    return haps.T
+    ground truth in equivalence tests."""
+    return canonical_hap_rows(gt)
 
 
 @pytest.fixture
