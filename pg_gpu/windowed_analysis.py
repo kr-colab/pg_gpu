@@ -1598,11 +1598,23 @@ _fused_windowed_twopop_kernel = cp.RawKernel(r'''
    the bounds checks stay because that filter is derived from the
    single-population subset (or the whole matrix), neither of which need cover
    both of pop1 and pop2. */
-__device__ inline void tally_pop(const signed char* row, int n_hap,
+__device__ inline void tally_pop(const signed char* row, int n_hap, int need_wc,
                                  int* hom, int* het, int* half,
                                  int* out_valid, int* out_nind) {
     for (int a = 0; a < MAX_ALLELES; a++) { hom[a] = 0; het[a] = 0; half[a] = 0; }
     int valid = 0, nind = 0;
+    if (!need_wc) {
+        /* Only gamete counts are wanted. Putting every gamete in half[] keeps
+           the 2*hom + het + half sum right while touching one array per
+           gamete instead of three. */
+        for (int i = 0; i < n_hap; i++) {
+            signed char g = row[i];
+            if (g >= 0) { valid++; if (g < MAX_ALLELES) half[g]++; }
+        }
+        *out_valid = valid;
+        *out_nind = 0;
+        return;
+    }
     int i = 0;
     for (; i + 1 < n_hap; i += 2) {
         signed char x = row[i];
@@ -1672,13 +1684,14 @@ void fused_windowed_twopop(const signed char* hap1_t,
         // hom[a] is individuals with two copies, het[a] is individuals with
         // one copy, and half[a] is lone gametes whose partner is missing.
         // Weir-Cockerham below uses hom and het. The allele frequencies use
-        // all three.
+        // all three. Without Weir-Cockerham only the frequencies are needed,
+        // so the tally skips the pairing and fills half[] alone.
         int hom1[MAX_ALLELES], het1[MAX_ALLELES], half1[MAX_ALLELES];
         int hom2[MAX_ALLELES], het2[MAX_ALLELES], half2[MAX_ALLELES];
         int valid1 = 0, nind1 = 0, valid2 = 0, nind2 = 0;
-        tally_pop(hap1_t + (long long)v * n_hap1, n_hap1,
+        tally_pop(hap1_t + (long long)v * n_hap1, n_hap1, need_wc,
                   hom1, het1, half1, &valid1, &nind1);
-        tally_pop(hap2_t + (long long)v * n_hap2, n_hap2,
+        tally_pop(hap2_t + (long long)v * n_hap2, n_hap2, need_wc,
                   hom2, het2, half2, &valid2, &nind2);
 
         if (valid1 == 0 || valid2 == 0) continue;
