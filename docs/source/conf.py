@@ -32,6 +32,12 @@ extensions = [
     'nbsphinx',
 ]
 
+# The walkthrough needs a CUDA GPU and a multi-terabyte store that no build
+# host has, so its committed outputs are the published ones. Without this,
+# nbsphinx defaults to 'auto' and executes any notebook whose outputs are
+# missing, turning a cleared cell into a failed docs build.
+nbsphinx_execute = 'never'
+
 # Theme
 html_theme = 'sphinx_rtd_theme'
 
