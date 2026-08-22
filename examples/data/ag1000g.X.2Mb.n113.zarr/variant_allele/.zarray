@@ -1,0 +1,27 @@
+{
+  "shape": [
+    1577851,
+    4
+  ],
+  "chunks": [
+    10000,
+    4
+  ],
+  "dtype": "|O",
+  "fill_value": "",
+  "order": "C",
+  "filters": [
+    {
+      "id": "vlen-utf8"
+    }
+  ],
+  "dimension_separator": ".",
+  "compressor": {
+    "id": "blosc",
+    "cname": "zstd",
+    "clevel": 5,
+    "shuffle": 2,
+    "blocksize": 0
+  },
+  "zarr_format": 2
+}

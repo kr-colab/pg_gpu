@@ -18,12 +18,14 @@ reference_code/*
 docs/build/
 data/
 !tests/data/
+!examples/data/
 cache/
 moments/
 simulations/
 commit_message.txt
 *.png
 *.csv
+!examples/data/*.csv
 
 CLAUDE.md
 TODO_*.md

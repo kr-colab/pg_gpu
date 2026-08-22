@@ -1,0 +1,114 @@
+sample_id,country,location,year,month,latitude,longitude,sex_call,aim_species,taxon,2La,2Rb,2Rc,2Rd,2Rj,2Ru,rdl_gt
+AB0085-Cx,Burkina Faso,Pala,2012,7,11.151,-4.235,F,gambiae,gambiae,2,2,0,0,0,0,A_G
+AB0086-Cx,Burkina Faso,Pala,2012,7,11.151,-4.235,F,gambiae,gambiae,2,2,0,0,0,0,A_A
+AB0096-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,F,gambiae,gambiae,2,2,0,0,0,0,A_G
+AB0103-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,F,gambiae,gambiae,2,2,0,0,0,0,A_A
+AB0104-Cx,Burkina Faso,Bana Village,2012,7,11.233,-4.472,F,gambiae,gambiae,2,2,0,0,0,0,A_G
+AB0116-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,F,gambiae,gambiae,2,2,0,0,0,0,G_A
+AB0117-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,1,2,0,0,0,0,G_A
+AB0118-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,2,2,0,0,0,0,A_A
+AB0119-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,2,2,0,0,0,0,G_A
+AB0126-Cx,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,1,2,0,0,0,0,A_G
+AB0127-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,2,2,0,0,0,0,G_G
+AB0128-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,2,2,0,0,0,0,G_A
+AB0129-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,2,1,0,0,0,0,A_G
+AB0130-Cx,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,2,1,0,0,0,0,A_A
+AB0133-C,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,2,2,0,0,0,0,A_G
+AB0134-C,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,2,1,0,0,0,0,A_G
+AB0135-C,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,2,2,0,0,0,0,A_G
+AB0136-Cx,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,2,2,0,0,0,0,A_A
+AB0143-Cx,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,2,2,0,0,0,0,G_G
+AB0144-C,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,2,2,0,0,0,0,G_A
+AB0145-C,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,1,2,0,0,0,0,A_G
+AB0146-Cx,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,2,2,0,0,0,0,A_A
+AB0147-C,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,2,1,0,0,0,0,A_A
+AB0148-Cx,Burkina Faso,Souroukoudinga,2012,7,11.238,-4.235,F,gambiae,gambiae,1,2,0,0,0,0,A_G
+AB0150-Cx,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,2,2,0,0,0,0,G_G
+AB0151-Cx,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,1,1,0,0,0,0,G_A
+AB0153-C,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,1,1,0,0,0,0,A_A
+AB0155-Cx,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,2,1,0,0,0,0,G_G
+AB0157-Cx,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,1,1,0,0,0,0,A_G
+AB0158-Cx,Burkina Faso,Bana Village,2012,7,11.233,-4.472,M,gambiae,gambiae,2,1,0,0,0,0,A_A
+AB0293-C,Cameroon,Doulougou,2005,-1,10.425,14.242,F,gambiae,gambiae,2,2,0,0,0,0,G_A
+AB0294-C,Cameroon,Doulougou,2005,-1,10.425,14.242,F,gambiae,gambiae,2,2,0,0,0,0,G_A
+AB0295-C,Cameroon,Doulougou,2005,-1,10.425,14.242,F,gambiae,gambiae,2,2,0,0,0,0,G_A
+AB0297-C,Cameroon,Moussourtouk,2005,-1,10.342,14.236,F,gambiae,gambiae,2,2,0,0,0,0,A_A
+AC0089-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,1,0,0,0,0,A_A
+AC0090-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0091-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,1,0,0,0,0,A_A
+AC0092-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,1,0,0,0,0,A_A
+AC0093-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0094-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0095-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,0,0,0,0,0,A_A
+AC0096-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0097-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,1,0,0,0,0,A_A
+AC0098-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,0,0,0,0,0,A_A
+AC0099-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AC0100-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0101-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0102-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AC0103-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,0,0,0,0,0,A_A
+AC0104-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AC0105-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AC0106-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,0,0,0,0,0,A_A
+AC0107-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AC0108-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,0,0,0,0,0,A_A
+AC0109-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,1,0,0,0,0,A_A
+AC0110-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0111-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,1,0,0,0,0,A_A
+AC0112-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0113-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0114-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,1,0,0,0,0,A_A
+AC0115-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,0,0,0,0,0,A_A
+AC0116-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,2,0,0,0,0,0,A_A
+AC0117-Cx,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AC0118-C,Uganda,Nagongera,2012,10,0.77,34.026,F,gambiae,gambiae,1,1,0,0,0,0,A_A
+AN0007-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AN0008-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,1,0,0,0,0,A_A
+AN0009-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,1,1,0,0,0,0,G_G
+AN0010-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,0,0,0,0,0,A_G
+AN0011-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,1,0,0,0,0,A_A
+AN0012-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AN0013-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AN0014-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AN0015-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,0,0,0,0,0,A_G
+AN0016-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,1,1,0,0,0,0,A_A
+AN0017-Cx,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,1,2,0,0,0,0,A_G
+AN0018-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,0,0,0,0,0,A_G
+AN0019-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,0,0,0,0,0,G_A
+AN0020-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,0,1,0,0,0,0,G_A
+AN0021-C,Cameroon,Mayos,2009,9,4.341,13.558,F,gambiae,gambiae,1,2,0,0,0,0,G_A
+AN0022-C,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,1,1,0,0,0,0,A_G
+AN0023-C,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,2,1,0,0,0,0,A_A
+AN0024-C,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,2,2,0,0,0,0,A_A
+AN0025-Cx,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,1,0,0,0,0,0,A_A
+AN0026-Cx,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,2,1,0,0,0,0,A_G
+AN0027-C,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,1,2,0,0,0,0,A_G
+AN0028-C,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,0,1,0,0,0,0,A_A
+AN0029-C,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,1,1,0,0,0,0,A_A
+AN0030-C,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,2,0,0,0,0,0,A_A
+AN0031-C,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,1,1,0,0,0,0,G_A
+AN0032-C,Cameroon,Gado Badzere,2009,9,5.747,14.442,M,gambiae,gambiae,1,2,0,0,0,0,A_A
+AP0002-C,Mayotte,Combani,2011,-1,-12.779,45.143,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0005-C,Mayotte,Bouyouni,2011,-1,-12.738,45.142,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0006-C,Mayotte,Mtsanga Charifou,2011,-1,-12.991,45.156,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AP0007-C,Mayotte,Mtsamboro Forest Reserve,2011,-1,-12.703,45.081,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AP0008-C,Mayotte,Combani,2011,-1,-12.779,45.143,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AP0009-C,Mayotte,Combani,2011,-1,-12.779,45.143,M,gambiae,gambiae,2,0,0,0,0,0,A_A
+AP0010-C,Mayotte,Combani,2011,-1,-12.779,45.143,M,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0011-C,Mayotte,Combani,2011,-1,-12.779,45.143,M,gambiae,gambiae,2,0,0,0,0,0,A_A
+AP0013-Cx,Mayotte,Combani,2011,-1,-12.779,45.143,M,gambiae,gambiae,2,0,0,0,0,0,A_A
+AP0014-Cx,Mayotte,Mont Benara,2011,-1,-12.857,45.155,M,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0017-Cx,Mayotte,Mtsanga Charifou,2011,-1,-12.991,45.156,F,gambiae,gambiae,1,0,0,0,0,0,A_A
+AP0019-C,Mayotte,Mtsanga Charifou,2011,-1,-12.991,45.156,M,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0020-C,Mayotte,Mtsanga Charifou,2011,-1,-12.991,45.156,M,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0021-C,Mayotte,Karihani Lake,2011,-1,-12.797,45.122,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0022-C,Mayotte,Karihani Lake,2011,-1,-12.797,45.122,F,gambiae,gambiae,2,0,0,0,0,0,A_A
+AP0023-C,Mayotte,Mtsanga Charifou,2011,-1,-12.991,45.156,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0025-C,Mayotte,Sada,2011,-1,-12.852,45.104,M,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0030-C,Mayotte,Mont Benara,2011,-1,-12.857,45.155,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0031-C,Mayotte,Mtsanga Charifou,2011,-1,-12.991,45.156,M,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0032-C,Mayotte,Mtsanga Charifou,2011,-1,-12.991,45.156,M,gambiae,gambiae,1,0,0,0,0,0,A_A
+AP0033-C,Mayotte,Karihani Lake,2011,-1,-12.797,45.122,F,gambiae,gambiae,0,0,0,0,0,0,A_A
+AP0034-C,Mayotte,Sada,2011,-1,-12.852,45.104,M,gambiae,gambiae,1,0,0,0,0,0,A_A
+AP0035-C,Mayotte,Sada,2011,-1,-12.852,45.104,M,gambiae,gambiae,0,0,0,0,0,0,A_A
