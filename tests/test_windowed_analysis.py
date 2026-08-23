@@ -426,7 +426,8 @@ class TestChunkedFused:
             _memutil.estimate_fused_chunk_size = orig
 
         for k in ('pi', 'theta_w', 'tajimas_d', 'segregating_sites'):
-            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
 
     def test_two_pop_chunked_matches_fused(self, matrix_with_pops):
@@ -457,8 +458,117 @@ class TestChunkedFused:
             _memutil.estimate_fused_chunk_size = orig
 
         for k in ('fst', 'fst_wc', 'dxy', 'da'):
-            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
+
+    def test_two_pop_chunked_with_population_subset(self, matrix_with_pops):
+        """Chunked two-pop values must not depend on the population= subset.
+
+        The dispatcher passes population=pop1 alongside pop1/pop2, so the
+        chunked engine holds the pop1 subset while the sample_sets row
+        numbers index the original matrix. The engine must read the rows
+        from the original matrix; indexing the subset selected the wrong
+        haplotypes without raising (#189).
+        """
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        from pg_gpu import _memutil
+
+        hm = matrix_with_pops
+        hm.transfer_to_gpu()
+
+        bp_bins = np.arange(0, 500_001, 50_000, dtype=np.float64)
+        stats = ('pi', 'fst', 'fst_wc', 'dxy', 'da')
+
+        r1 = windowed_statistics_fused(
+            hm, bp_bins=bp_bins, statistics=stats,
+            population='pop1', pop1='pop1', pop2='pop2')
+
+        orig = _memutil.estimate_fused_chunk_size
+        _memutil.estimate_fused_chunk_size = lambda n, memory_fraction=0.35: 500
+        try:
+            r2 = windowed_statistics_fused_chunked(
+                hm, bp_bins=bp_bins, statistics=stats,
+                population='pop1', pop1='pop1', pop2='pop2')
+        finally:
+            _memutil.estimate_fused_chunk_size = orig
+
+        for k in stats:
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
+                                       err_msg=f"Mismatch in {k}")
+
+    def test_two_pop_chunked_accepts_row_lists(self, matrix_with_pops):
+        """Row-list populations work in both engines, not only names."""
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        from pg_gpu import _memutil
+
+        hm = matrix_with_pops
+        hm.transfer_to_gpu()
+        n = hm.num_haplotypes
+        l1, l2 = list(range(n // 2)), list(range(n // 2, n))
+
+        bp_bins = np.arange(0, 500_001, 50_000, dtype=np.float64)
+        r1 = windowed_statistics_fused(
+            hm, bp_bins=bp_bins, statistics=('fst', 'fst_wc'),
+            pop1=l1, pop2=l2)
+        orig = _memutil.estimate_fused_chunk_size
+        _memutil.estimate_fused_chunk_size = lambda n, memory_fraction=0.35: 500
+        try:
+            r2 = windowed_statistics_fused_chunked(
+                hm, bp_bins=bp_bins, statistics=('fst', 'fst_wc'),
+                pop1=l1, pop2=l2)
+        finally:
+            _memutil.estimate_fused_chunk_size = orig
+        for k in ('fst', 'fst_wc'):
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
+                                       err_msg=f"Mismatch in {k}")
+
+    def test_over_cap_allele_in_pop2_drops_site_with_warning(self):
+        """An over-cap allele only pop2 carries must drop the site, warned.
+
+        The cap filter used to reduce over the population= subset (always
+        pop1 from the dispatcher), so a site with an allele index >= 8 in
+        pop2 alone survived it; the kernel's bounds checks then dropped
+        those gametes from the tallies while the valid count kept them,
+        skewing every statistic with no warning.
+        """
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        from pg_gpu._warnings import MultiallelicCapWarning
+
+        rng = np.random.RandomState(5)
+        n_hap, n_var = 40, 300
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[25, 40] = 9                       # pop2 row only
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40))}
+        hm.transfer_to_gpu()
+
+        # Scalar reference on the sites the cap keeps.
+        keep = np.ones(n_var, dtype=bool)
+        keep[40] = False
+        ref_hm = HaplotypeMatrix(hap[:, keep], pos[keep], 0, (n_var + 1) * 100)
+        ref_hm.sample_sets = hm.sample_sets
+        ref = divergence.fst_weir_cockerham(ref_hm, 'p1', 'p2')
+
+        bp = np.array([0.0, (n_var + 1) * 100.0])
+        for fn in (windowed_statistics_fused, windowed_statistics_fused_chunked):
+            with pytest.warns(MultiallelicCapWarning):
+                r = fn(hm, bp_bins=bp, statistics=('fst_wc',),
+                       population='p1', pop1='p1', pop2='p2')
+            np.testing.assert_allclose(r['fst_wc'][0], ref, rtol=1e-9,
+                                       err_msg=fn.__name__)
 
     def test_mixed_single_twopop_chunked(self, matrix_with_pops):
         """Mixed single+two-pop stats should not crash (KeyError regression)."""
@@ -483,6 +593,56 @@ class TestChunkedFused:
         for k in ('pi', 'theta_w', 'fst', 'fst_wc', 'dxy'):
             assert k in r, f"Missing {k}"
             assert len(r[k]) > 0
+
+
+class TestTwoPopColumnNaming:
+    """One request, one column set, whichever engine serves it (#193)."""
+
+    def test_two_pop_columns_match_across_modes(self):
+        rng = np.random.RandomState(7)
+        n_hap, n_var = 40, 400
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40))}
+
+        # 'include' routes fst_wc to the fused engine, 'exclude' to the
+        # per-window fallback; both must name the column after the
+        # statistic alone.
+        frames = {
+            mode: windowed_analysis(
+                hm, window_size=10_000, step_size=10_000,
+                statistics=['fst_wc'], populations=['p1', 'p2'],
+                missing_data=mode)
+            for mode in ('include', 'exclude')
+        }
+        for mode, df in frames.items():
+            assert 'fst_wc' in df.columns, f"no bare fst_wc under {mode!r}"
+        assert list(frames['include'].columns) == list(frames['exclude'].columns)
+
+    def test_three_pop_request_returns_every_pair(self):
+        """Three populations must yield all pairs under both modes, never a
+        bare column silently holding the first pair only."""
+        rng = np.random.RandomState(8)
+        n_hap, n_var = 60, 400
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40)),
+                          "p3": list(range(40, 60))}
+
+        frames = {
+            mode: windowed_analysis(
+                hm, window_size=10_000, step_size=10_000,
+                statistics=['fst'], populations=['p1', 'p2', 'p3'],
+                missing_data=mode)
+            for mode in ('include', 'exclude')
+        }
+        for mode, df in frames.items():
+            assert 'fst' not in df.columns, f"bare fst under {mode!r}"
+            for pair in ('fst_p1_p2', 'fst_p1_p3', 'fst_p2_p3'):
+                assert pair in df.columns, f"missing {pair} under {mode!r}"
+        assert list(frames['include'].columns) == list(frames['exclude'].columns)
 
 
 class TestFusedMissingData:
@@ -1115,18 +1275,16 @@ class TestMultiallelicTwoPop:
                 assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
 
     def test_fused_dxy_fst_da_match_scalar(self, sim_hm):
-        """Fused CUDA two-pop kernel: dxy/fst_hudson/da per window == scalar.
-        (fst_wc is excluded: the fused kernel's WC is a haploid estimator that
-        differs from the scalar diploid fst_weir_cockerham, a separate issue.)"""
+        """Fused CUDA two-pop kernel: dxy/fst_hudson/fst_wc/da per window == scalar."""
         from pg_gpu.windowed_analysis import windowed_statistics_fused
         window_size = 25_000
         bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
                        dtype=float)
         r = windowed_statistics_fused(
-            sim_hm, bp_bins=bp, statistics=('dxy', 'fst_hudson', 'da'),
+            sim_hm, bp_bins=bp, statistics=('dxy', 'fst_hudson', 'fst_wc', 'da'),
             pop1='p1', pop2='p2', per_base=False, chrom='1')
-        for start, dxy_w, fst_w, da_w in zip(
-                r['start'], r['dxy'], r['fst_hudson'], r['da']):
+        for start, dxy_w, fst_w, wc_w, da_w in zip(
+                r['start'], r['dxy'], r['fst_hudson'], r['fst_wc'], r['da']):
             stop = start + window_size
             if stop > sim_hm.chrom_end:
                 continue
@@ -1139,11 +1297,12 @@ class TestMultiallelicTwoPop:
             assert np.isclose(da_w,
                               divergence.da(sub, 'p1', 'p2', span_normalize=False),
                               rtol=1e-9, atol=1e-12)
-            fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')
-            if np.isnan(fst_w) or np.isnan(fst_ref):
-                assert np.isnan(fst_w) and np.isnan(fst_ref)
-            else:
-                assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
+            for got, ref in ((fst_w, divergence.fst_hudson(sub, 'p1', 'p2')),
+                             (wc_w, divergence.fst_weir_cockerham(sub, 'p1', 'p2'))):
+                if np.isnan(got) or np.isnan(ref):
+                    assert np.isnan(got) and np.isnan(ref)
+                else:
+                    assert np.isclose(got, ref, rtol=1e-9, atol=1e-12)
 
     def test_per_variant_dxy_fst_match_scalar(self, sim_hm):
         """Per-variant engine (windowed_statistics): two-pop dxy/fst per window

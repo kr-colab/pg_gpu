@@ -372,7 +372,7 @@ Two-population (one kernel launch for all):
 
 - ``fst`` -- Hudson's FST (ratio of averages)
 - ``fst_hudson`` -- alias for ``fst``
-- ``fst_wc`` -- Weir-Cockerham FST (haploid)
+- ``fst_wc`` -- Weir-Cockerham FST
 - ``dxy`` -- absolute divergence
 - ``da`` -- net divergence (Dxy - mean within-pop pi)
 

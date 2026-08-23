@@ -1331,7 +1331,14 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     requested = set(statistics)
 
     can_fuse = (missing_data == 'include'
-                and requested <= fused_all)
+                and requested <= fused_all
+                # A two-population statistic with anything other than exactly
+                # two populations must not reach the fused engine, which
+                # computes the first pair only and names the column after the
+                # bare statistic. The per-window fallback computes every pair
+                # and suffixes the names, the same as missing_data='exclude'.
+                and (not (requested & fused_two)
+                     or len(populations or []) == 2))
 
     if can_fuse:
         if haplotype_matrix.device == 'CPU':
@@ -1396,7 +1403,22 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         span_normalize=span_normalize,
         **kwargs
     )
-    return analyzer.compute(haplotype_matrix)
+    df = analyzer.compute(haplotype_matrix)
+    # The analyzer names two-population columns "<stat>_<pop1>_<pop2>"
+    # because it computes every pair. The fused and scatter engines name
+    # them after the statistic alone when exactly two populations are
+    # given, and a two-population request must name those columns the
+    # same whichever engine serves it. With one pair the bare name is
+    # unambiguous, so rename on the way out; direct analyzer use and
+    # requests with three or more populations keep the suffixed form.
+    if populations is not None and len(populations) == 2:
+        p1, p2 = populations
+        df = df.rename(columns={
+            f"{stat}_{p1}_{p2}": stat
+            for stat in statistics
+            if isinstance(stat, str) and f"{stat}_{p1}_{p2}" in df.columns
+        })
+    return df
 
 
 # Helper functions for built-in statistics
@@ -1449,7 +1471,7 @@ def _warn_fused_allele_cap(n_over):
         MultiallelicCapWarning, stacklevel=3)
 
 
-def _filter_fused_allele_cap_raw(hap_raw, positions):
+def _filter_fused_allele_cap_raw(hap_raw, positions, cap_source=None):
     """Cap filter for the chunked path's un-transposed (n_hap, n_var) matrix.
 
     Reduces over the haplotype axis (axis 0) to get per-variant max allele
@@ -1458,15 +1480,31 @@ def _filter_fused_allele_cap_raw(hap_raw, positions):
     >= _FUSED_MAX_ALLELES and emits a ``MultiallelicCapWarning``; missing (-1)
     never triggers the cap. (The non-chunked single-pass path filters inline,
     capturing the keep mask so the two-pop kernel's hap1/hap2 align.)
+
+    ``cap_source`` is the matrix the reduction runs over; it defaults to
+    ``hap_raw`` but must be the original matrix whenever the kernels will
+    read rows beyond ``hap_raw`` -- otherwise an over-cap allele in those
+    rows survives the filter and is silently dropped from the tallies. It
+    must share ``hap_raw``'s variant axis.
+
+    Also returns the kept variants' column indices into the unfiltered
+    matrix, or ``None`` when nothing was dropped. The two-population block
+    reads rows from the original matrix, so it needs these to select the
+    same variants the filtered axis holds.
     """
-    overcap = hap_raw.max(axis=0) >= _FUSED_MAX_ALLELES
+    src = hap_raw if cap_source is None else cap_source
+    overcap = src.max(axis=0) >= _FUSED_MAX_ALLELES
     n_over = int(overcap.sum())
+    keep_idx = None
     if n_over:
         _warn_fused_allele_cap(n_over)
         keep = ~overcap
         hap_raw = hap_raw[:, keep]
         positions = positions[keep]
-    return hap_raw, positions
+        # int32 is enough: the kernel already receives the variant count as
+        # an int32, so a matrix this path accepts cannot exceed that range.
+        keep_idx = cp.where(keep)[0].astype(cp.int32)
+    return hap_raw, positions, keep_idx
 
 
 _fused_windowed_kernel_v2 = cp.RawKernel(r'''
@@ -1582,6 +1620,66 @@ void fused_windowed_stats_v2(const signed char* hap_t,
 # Two-population fused kernel for FST and Dxy
 _fused_windowed_twopop_kernel = cp.RawKernel(r'''
 #define MAX_ALLELES 8   /* keep in sync with _FUSED_MAX_ALLELES (host guard) */
+
+/* Tally one population at one site, pairing consecutive rows into diploid
+   individuals. Counting by individual class rather than by gamete keeps the
+   per-allele tallies to one update for a homozygote and two for a
+   heterozygote, and both consumers derive what they need:
+
+       gamete copies of allele a  = 2*hom[a] + het[a] + half[a]
+       copies within individuals  = 2*hom[a] + het[a]
+
+   half[] holds gametes whose partner is missing (and a trailing unpaired
+   gamete), which count toward allele frequencies but form no individual.
+
+   Sites carrying an allele index >= MAX_ALLELES are dropped on the host,
+   which derives the filter from the whole matrix whenever two-population
+   statistics are requested, so it covers pop1 and pop2. The bounds checks
+   stay as a guard for direct kernel callers. */
+__device__ inline void tally_pop(const signed char* row, int n_hap, int need_wc,
+                                 int* hom, int* het, int* half,
+                                 int* out_valid, int* out_nind) {
+    for (int a = 0; a < MAX_ALLELES; a++) { hom[a] = 0; het[a] = 0; half[a] = 0; }
+    int valid = 0, nind = 0;
+    if (!need_wc) {
+        /* Only gamete counts are wanted. Putting every gamete in half[] keeps
+           the 2*hom + het + half sum right while touching one array per
+           gamete instead of three. */
+        for (int i = 0; i < n_hap; i++) {
+            signed char g = row[i];
+            if (g >= 0) { valid++; if (g < MAX_ALLELES) half[g]++; }
+        }
+        *out_valid = valid;
+        *out_nind = 0;
+        return;
+    }
+    int i = 0;
+    for (; i + 1 < n_hap; i += 2) {
+        signed char x = row[i];
+        signed char y = row[i + 1];
+        if (x >= 0 && y >= 0) {
+            valid += 2;
+            nind++;
+            if (x == y) {
+                if (x < MAX_ALLELES) hom[x]++;
+            } else {
+                if (x < MAX_ALLELES) het[x]++;
+                if (y < MAX_ALLELES) het[y]++;
+            }
+        } else if (x >= 0) {
+            valid++; if (x < MAX_ALLELES) half[x]++;
+        } else if (y >= 0) {
+            valid++; if (y < MAX_ALLELES) half[y]++;
+        }
+    }
+    if (i < n_hap) {   /* odd count: the trailing gamete has no partner */
+        signed char x = row[i];
+        if (x >= 0) { valid++; if (x < MAX_ALLELES) half[x]++; }
+    }
+    *out_valid = valid;
+    *out_nind = nind;
+}
+
 extern "C" __global__
 void fused_windowed_twopop(const signed char* hap1_t,
                            const signed char* hap2_t,
@@ -1589,13 +1687,14 @@ void fused_windowed_twopop(const signed char* hap1_t,
                            const long long* win_stop,
                            int n_hap1, int n_hap2,
                            int n_total_var, int n_windows,
+                           int need_wc,
                            double* out_fst_num,
                            double* out_fst_den,
                            double* out_dxy_sum,
                            double* out_pi1_sum,
                            double* out_pi2_sum,
                            double* out_wc_a_sum,
-                           double* out_wc_ab_sum) {
+                           double* out_wc_abc_sum) {
     int wid = blockIdx.x;
     if (wid >= n_windows) return;
 
@@ -1607,49 +1706,86 @@ void fused_windowed_twopop(const signed char* hap1_t,
             out_fst_num[wid] = 0.0;  out_fst_den[wid] = 0.0;
             out_dxy_sum[wid] = 0.0;  out_pi1_sum[wid] = 0.0;
             out_pi2_sum[wid] = 0.0;  out_wc_a_sum[wid] = 0.0;
-            out_wc_ab_sum[wid] = 0.0;
+            out_wc_abc_sum[wid] = 0.0;
         }
         return;
     }
 
     double t_fst_num = 0.0, t_fst_den = 0.0;
     double t_dxy = 0.0, t_pi1 = 0.0, t_pi2 = 0.0;
-    double t_wc_a = 0.0, t_wc_ab = 0.0;
+    double t_wc_a = 0.0, t_wc_abc = 0.0;
 
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
 
-        // Per-allele counts over non-missing calls (shared cnt width for both
-        // pops). Sites with an allele index >= MAX_ALLELES are filtered on the
-        // host before launch, so every allele fits in cnt[].
-        int cnt1[MAX_ALLELES];
-        int cnt2[MAX_ALLELES];
-        for (int a = 0; a < MAX_ALLELES; a++) { cnt1[a] = 0; cnt2[a] = 0; }
-        int valid1 = 0;
-        const signed char* row1 = hap1_t + (long long)v * n_hap1;
-        for (int h = 0; h < n_hap1; h++) {
-            signed char a = row1[h];
-            if (a >= 0) { valid1++; if (a < MAX_ALLELES) cnt1[a]++; }
-        }
-        int valid2 = 0;
-        const signed char* row2 = hap2_t + (long long)v * n_hap2;
-        for (int h = 0; h < n_hap2; h++) {
-            signed char a = row2[h];
-            if (a >= 0) { valid2++; if (a < MAX_ALLELES) cnt2[a]++; }
-        }
+        // One pass per population gives three counts for each allele a:
+        // hom[a] is individuals with two copies, het[a] is individuals with
+        // one copy, and half[a] is lone gametes whose partner is missing.
+        // Weir-Cockerham below uses hom and het. The allele frequencies use
+        // all three. Without Weir-Cockerham only the frequencies are needed,
+        // so the tally skips the pairing and fills half[] alone.
+        int hom1[MAX_ALLELES], het1[MAX_ALLELES], half1[MAX_ALLELES];
+        int hom2[MAX_ALLELES], het2[MAX_ALLELES], half2[MAX_ALLELES];
+        int valid1 = 0, nind1 = 0, valid2 = 0, nind2 = 0;
+        tally_pop(hap1_t + (long long)v * n_hap1, n_hap1, need_wc,
+                  hom1, het1, half1, &valid1, &nind1);
+        tally_pop(hap2_t + (long long)v * n_hap2, n_hap2, need_wc,
+                  hom2, het2, half2, &valid2, &nind2);
 
         if (valid1 == 0 || valid2 == 0) continue;
 
         double dn1 = (double)valid1;
         double dn2 = (double)valid2;
 
+        // Weir-Cockerham, mirroring divergence.fst_weir_cockerham (see its
+        // NOTE): a per-allele one-vs-rest ANOVA over diploid individuals whose
+        // components are between-population (a), between-individual-within-
+        // population (b), and between-gamete-within-individual (c), giving
+        // FST = sum(a) / sum(a + b + c) over alleles and sites. Absent alleles
+        // contribute zero to each, so the loop can run the full width. With
+        // r = 2 the scalar's (r-1)*s2/r folds to s2/2 and its nc to n_C.
+        double di1 = (double)nind1;
+        double di2 = (double)nind2;
+        double n_tot = di1 + di2;
+        double n_bar = n_tot / 2.0;
+        // n_C reduces to 2*di1*di2/n_tot, so it is positive exactly when both
+        // populations have a complete individual; n_bar > 1 implies n_tot > 2.
+        if (need_wc && n_bar > 1.0) {
+            double n_C = n_tot - (di1 * di1 + di2 * di2) / n_tot;
+            if (n_C > 0.0) {
+                // Divisors that do not vary across alleles, reciprocated once.
+                double inv_2di1 = 0.5 / di1;
+                double inv_2di2 = 0.5 / di2;
+                double inv_ntot = 1.0 / n_tot;
+                double inv_nbar = 1.0 / n_bar;
+                double inv_nbar_m1 = 1.0 / (n_bar - 1.0);
+                double nbar_over_nC = n_bar / n_C;
+                double nbar_ratio = n_bar * inv_nbar_m1;
+                double hb_coef = (2.0 * n_bar - 1.0) * 0.25 * inv_nbar;
+                for (int a = 0; a < MAX_ALLELES; a++) {
+                    double p1a = (double)(2 * hom1[a] + het1[a]) * inv_2di1;
+                    double p2a = (double)(2 * hom2[a] + het2[a]) * inv_2di2;
+                    double p_bar = (di1 * p1a + di2 * p2a) * inv_ntot;
+                    double s2 = (di1 * (p1a - p_bar) * (p1a - p_bar) +
+                                 di2 * (p2a - p_bar) * (p2a - p_bar)) * inv_nbar;
+                    double hb = (double)(het1[a] + het2[a]) * inv_ntot;
+                    double base = p_bar * (1.0 - p_bar) - s2 * 0.5;
+                    double av = nbar_over_nC *
+                        (s2 - inv_nbar_m1 * (base - hb * 0.25));
+                    double bv = nbar_ratio * (base - hb_coef * hb);
+                    t_wc_a += av;
+                    t_wc_abc += av + bv + hb * 0.5;
+                }
+            }
+        }
+
         // Per-allele within-pop mean pairwise difference (same pairs summed over
         // alleles) and between-pop difference (per-allele cross term) -- mirrors
         // divergence._hudson_fst_from_counts / dxy, multiallelic-correct.
         double same1 = 0.0, same2 = 0.0, between_same = 0.0;
         for (int a = 0; a < MAX_ALLELES; a++) {
-            double c1 = (double)cnt1[a];
-            double c2 = (double)cnt2[a];
+            double c1 = (double)(2 * hom1[a] + het1[a] + half1[a]);
+            double c2 = (double)(2 * hom2[a] + het2[a] + half2[a]);
             same1 += c1 * (c1 - 1.0);
             same2 += c2 * (c2 - 1.0);
             between_same += c1 * c2;
@@ -1659,37 +1795,11 @@ void fused_windowed_twopop(const signed char* hap1_t,
         double within = (mpd1 + mpd2) / 2.0;
         double between = 1.0 - between_same / (dn1 * dn2);
 
-        // Total non-reference copy counts (all alt alleles collapsed) retained
-        // for the HAPLOID Weir-Cockerham block below, which is deliberately
-        // unchanged -- the fused fst_wc haploid/diploid mismatch is tracked
-        // separately and is out of scope here.
-        double d_ac1_1 = dn1 - (double)cnt1[0];
-        double d_ac2_1 = dn2 - (double)cnt2[0];
-
         t_fst_num += between - within;
         t_fst_den += between;
         t_dxy += between;
         t_pi1 += mpd1;
         t_pi2 += mpd2;
-
-        // Weir-Cockerham (haploid, h_bar=0, r=2, per-site sample sizes)
-        double n_total = dn1 + dn2;
-        double n_bar = n_total / 2.0;
-        double n_C = (n_total - (dn1*dn1 + dn2*dn2) / n_total);
-        double p1 = d_ac1_1 / dn1;
-        double p2 = d_ac2_1 / dn2;
-        double p_bar = (dn1 * p1 + dn2 * p2) / n_total;
-        double s2 = (dn1 * (p1 - p_bar) * (p1 - p_bar) +
-                     dn2 * (p2 - p_bar) * (p2 - p_bar)) / n_bar;
-        double pq = p_bar * (1.0 - p_bar);
-
-        double a_val = 0.0, b_val = 0.0;
-        if (n_bar > 1.0 && n_C > 0.0) {
-            a_val = (n_bar / n_C) * (s2 - (1.0 / (n_bar - 1.0)) * (pq - s2 / 2.0));
-            b_val = (n_bar / (n_bar - 1.0)) * (pq - s2 / 2.0);
-        }
-        t_wc_a += a_val;
-        t_wc_ab += a_val + b_val;
     }
 
     // Block reduction (7 values)
@@ -1701,7 +1811,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
     smem[768 + tid]    = t_pi1;
     smem[1024 + tid]   = t_pi2;
     smem[1280 + tid]   = t_wc_a;
-    smem[1536 + tid]   = t_wc_ab;
+    smem[1536 + tid]   = t_wc_abc;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
@@ -1724,7 +1834,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
         out_pi1_sum[wid]  = smem[768];
         out_pi2_sum[wid]  = smem[1024];
         out_wc_a_sum[wid] = smem[1280];
-        out_wc_ab_sum[wid]= smem[1536];
+        out_wc_abc_sum[wid] = smem[1536];
     }
 }
 ''', 'fused_windowed_twopop')
@@ -1921,7 +2031,16 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # variant-index ranges are computed against the retained sites. Capture the
     # keep mask so the two-pop path can slice hap1/hap2 to the same variants
     # (positions/window indices are computed against the filtered set below).
-    cap_keep = hap.max(axis=1) < _FUSED_MAX_ALLELES if hap.shape[0] else None
+    # When two-population statistics are requested the kernel reads pop1 and
+    # pop2 rows of the original matrix, which the single-population subset
+    # need not cover, so the reduction runs over the original.
+    if any(s in ('fst', 'fst_hudson', 'fst_wc', 'dxy', 'da')
+           for s in statistics):
+        cap_src = haplotype_matrix.haplotypes
+        cap_keep = (cap_src.max(axis=0) < _FUSED_MAX_ALLELES
+                    if cap_src.shape[1] else None)
+    else:
+        cap_keep = hap.max(axis=1) < _FUSED_MAX_ALLELES if hap.shape[0] else None
     if cap_keep is not None and not bool(cap_keep.all()):
         _warn_fused_allele_cap(int((~cap_keep).sum()))
         hap = hap[cap_keep]
@@ -2073,7 +2192,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         out_pi1 = cp.zeros(n_windows, dtype=cp.float64)
         out_pi2 = cp.zeros(n_windows, dtype=cp.float64)
         out_wc_a = cp.zeros(n_windows, dtype=cp.float64)
-        out_wc_ab = cp.zeros(n_windows, dtype=cp.float64)
+        out_wc_abc = cp.zeros(n_windows, dtype=cp.float64)
+        need_wc = 'fst_wc' in statistics
 
         block = 256
         grid = n_windows
@@ -2083,8 +2203,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             (hap1, hap2, win_start, win_stop,
              np.int32(n1), np.int32(n2),
              np.int32(n_total_var), np.int32(n_windows),
+             np.int32(need_wc),
              out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
-             out_wc_a, out_wc_ab))
+             out_wc_a, out_wc_abc))
 
         # Post-process on GPU, single .get() per result
         if 'fst' in statistics or 'fst_hudson' in statistics:
@@ -2096,8 +2217,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 results['fst_hudson'] = hudson_fst
 
         if 'fst_wc' in statistics:
-            results['fst_wc'] = cp.where(out_wc_ab > 0,
-                                          out_wc_a / out_wc_ab, cp.nan).get()
+            results['fst_wc'] = cp.where(out_wc_abc > 0,
+                                          out_wc_a / out_wc_abc, cp.nan).get()
 
         if 'dxy' in statistics:
             if per_base:
@@ -2362,8 +2483,15 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         positions = cp.asarray(positions)
 
     # Drop sites the fused kernel's per-allele capacity can't represent. Must
-    # precede window indexing so variant-index ranges match the retained sites.
-    hap_raw, positions = _filter_fused_allele_cap_raw(hap_raw, positions)
+    # precede window indexing so variant-index ranges match the retained
+    # sites. When two-population statistics are requested the kernels read
+    # pop1 and pop2 rows of the original matrix, which the single-population
+    # subset need not cover, so the cap reduction runs over the original.
+    two_pop_stats = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
+    two_pop_requested = any(s in statistics for s in two_pop_stats)
+    hap_raw, positions, cap_keep_idx = _filter_fused_allele_cap_raw(
+        hap_raw, positions,
+        cap_source=haplotype_matrix.haplotypes if two_pop_requested else None)
     n_total_var = hap_raw.shape[1]
 
     # Window ranges (same setup as non-chunked)
@@ -2522,17 +2650,30 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             results['max_daf'] = max_daf_arr
 
     # ── Two-pop stats via chunked fused kernel ───────────────────────────
-    two_pop_stats = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
-    two_pop_requested = any(s in statistics for s in two_pop_stats)
+    # two_pop_requested was computed above, before the cap filter, which
+    # needs it to pick its reduction source.
     if two_pop_requested:
         if pop1 is None or pop2 is None:
             raise ValueError("pop1 and pop2 required for fst/dxy/da")
 
-        # Get population haplotype indices from the original (unsubsetted) matrix
-        pop1_idx = haplotype_matrix.sample_sets[pop1]
-        pop2_idx = haplotype_matrix.sample_sets[pop2]
-        n1 = len(pop1_idx)
-        n2 = len(pop2_idx)
+        # The population row numbers index the original matrix, but hap_raw
+        # can be the single-population subset (the dispatcher passes
+        # population=pop1 alongside pop1/pop2). CuPy fancy indexing does not
+        # bounds-check, so applying these rows to the subset would silently
+        # read the wrong haplotypes. Read the rows from the original matrix,
+        # and select the same variant columns the cap filter kept.
+        # A population is a sample_sets name or a row list, the same as the
+        # single-shot engine accepts via get_population_matrix.
+        def pop_rows_of(pop):
+            rows = (haplotype_matrix.sample_sets[pop]
+                    if isinstance(pop, str) else list(pop))
+            return cp.asarray(rows, dtype=cp.int64)
+
+        orig_hap = haplotype_matrix.haplotypes
+        pop1_rows = pop_rows_of(pop1)
+        pop2_rows = pop_rows_of(pop2)
+        n1 = len(pop1_rows)
+        n2 = len(pop2_rows)
         # Chunk size based on the larger population
         twopop_chunk = estimate_fused_chunk_size(max(n1, n2))
         twopop_chunk = max(twopop_chunk, max_win_variants + 1)
@@ -2543,7 +2684,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         acc_pi1 = cp.zeros(n_windows, dtype=cp.float64)
         acc_pi2 = cp.zeros(n_windows, dtype=cp.float64)
         acc_wc_a = cp.zeros(n_windows, dtype=cp.float64)
-        acc_wc_ab = cp.zeros(n_windows, dtype=cp.float64)
+        acc_wc_abc = cp.zeros(n_windows, dtype=cp.float64)
+        need_wc = 'fst_wc' in statistics
 
         for c_start in range(0, n_total_var, twopop_chunk):
             c_end = min(c_start + twopop_chunk, n_total_var)
@@ -2557,10 +2699,17 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             clipped_stop = cp.minimum(win_stop[w_idx], c_end) - c_start
             n_overlap = len(w_idx)
 
-            hap1_t = cp.ascontiguousarray(
-                hap_raw[pop1_idx, c_start:c_end].T.astype(cp.int8))
-            hap2_t = cp.ascontiguousarray(
-                hap_raw[pop2_idx, c_start:c_end].T.astype(cp.int8))
+            def pop_chunk_t(rows):
+                # Chunk columns count filtered variants; map them back to
+                # original columns when the cap filter dropped sites.
+                if cap_keep_idx is None:
+                    blk = orig_hap[rows, c_start:c_end]
+                else:
+                    blk = orig_hap[cp.ix_(rows, cap_keep_idx[c_start:c_end])]
+                return cp.ascontiguousarray(blk.T.astype(cp.int8))
+
+            hap1_t = pop_chunk_t(pop1_rows)
+            hap2_t = pop_chunk_t(pop2_rows)
             n_chunk_var = c_end - c_start
 
             out_fst_num = cp.zeros(n_overlap, dtype=cp.float64)
@@ -2569,23 +2718,25 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             out_pi1 = cp.zeros(n_overlap, dtype=cp.float64)
             out_pi2 = cp.zeros(n_overlap, dtype=cp.float64)
             out_wc_a = cp.zeros(n_overlap, dtype=cp.float64)
-            out_wc_ab = cp.zeros(n_overlap, dtype=cp.float64)
+            out_wc_abc = cp.zeros(n_overlap, dtype=cp.float64)
 
             _fused_windowed_twopop_kernel(
                 (int(n_overlap),), (256,),
                 (hap1_t, hap2_t, clipped_start, clipped_stop,
                  np.int32(n1), np.int32(n2),
                  np.int32(n_chunk_var), np.int32(n_overlap),
+                 np.int32(need_wc),
                  out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
-                 out_wc_a, out_wc_ab))
+                 out_wc_a, out_wc_abc))
 
             cp.add.at(acc_fst_num, w_idx, out_fst_num)
             cp.add.at(acc_fst_den, w_idx, out_fst_den)
             cp.add.at(acc_dxy, w_idx, out_dxy)
             cp.add.at(acc_pi1, w_idx, out_pi1)
             cp.add.at(acc_pi2, w_idx, out_pi2)
-            cp.add.at(acc_wc_a, w_idx, out_wc_a)
-            cp.add.at(acc_wc_ab, w_idx, out_wc_ab)
+            if need_wc:
+                cp.add.at(acc_wc_a, w_idx, out_wc_a)
+                cp.add.at(acc_wc_abc, w_idx, out_wc_abc)
 
             del hap1_t, hap2_t
             free_gpu_pool()
@@ -2600,8 +2751,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                 results['fst_hudson'] = hudson_fst
 
         if 'fst_wc' in statistics:
-            results['fst_wc'] = cp.where(acc_wc_ab > 0,
-                                          acc_wc_a / acc_wc_ab, cp.nan).get()
+            results['fst_wc'] = cp.where(acc_wc_abc > 0,
+                                          acc_wc_a / acc_wc_abc, cp.nan).get()
 
         if 'dxy' in statistics:
             if per_base:

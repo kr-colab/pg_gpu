@@ -368,10 +368,6 @@ _SCATTER_VARIANCE = (
     "rather than per-site valid counts, diverging from the scalar under "
     "missing data. #135"
 )
-_FST_WC_FUSED = (
-    "the fused fst_wc kernel was not converted to the per-allele one-vs-rest "
-    "Weir-Cockerham ANOVA the scalar/python-loop path now uses. #135"
-)
 _DA_SCATTER_EXCLUDE = (
     "under missing_data='exclude' the scatter da's within-population pi terms "
     "use a different site set than the scalar (dxy agrees), so da diverges. #135"
@@ -410,9 +406,6 @@ _XFAILS = {
     ("theta_w", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("segregating_sites", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("fay_wu_h", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-
-    # fused fst_wc kernel not updated to the per-allele WC ANOVA (all conditions).
-    ("fst_wc", "fused"): [(_FST_WC_FUSED, None)],
 
     # scatter da within-pop pi term uses a different site set under exclude.
     ("da", "scatter"): [(_DA_SCATTER_EXCLUDE, _WHEN_EXCLUDE)],
