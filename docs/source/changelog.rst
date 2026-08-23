@@ -78,7 +78,10 @@ Read this section if you are comparing against older pg_gpu results.
   ``sample_sets`` and ``materialize(sample_subset=...)`` both speak
   haplotype rows on a haplotype stream and individual rows on a genotype
   stream, so ``materialize(sample_subset=stream.sample_sets[pop])``
-  works on either class. The genotype stream's sets previously held
+  works on either class. This changes what a genotype stream's
+  ``sample_subset`` means: it took haplotype columns before and takes
+  individual rows now, so callers that passed columns must halve their
+  values. The genotype stream's sets previously held
   haplotype columns that indexed past its individual axis. Assigning
   ``sample_sets`` on a stream validates like the eager classes, and pop
   files validate once at stream construction.

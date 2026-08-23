@@ -605,11 +605,26 @@ class TestDirectListValidation:
         with pytest.raises(ValueError, match="at least one"):
             relatedness.genetic_relatedness(hm, sample_sets=[[0, 1], []])
 
-    def test_load_pop_file_drops_absent_population(self):
-        from pg_gpu import divergence
+    def test_load_pop_file_drops_absent_population_with_warning(self):
         hm = self._hm()
         hm.samples = [f's{i}' for i in range(6)]
-        hm.load_pop_file({'s0': 'p1', 's1': 'p1', 's2': 'p2', 's3': 'p2',
-                          'zz': 'ghost'})
+        with pytest.warns(UserWarning, match="dropped: ghost"):
+            hm.load_pop_file({'s0': 'p1', 's1': 'p1', 's2': 'p2',
+                              's3': 'p2', 'zz': 'ghost'})
         assert 'ghost' not in hm.sample_sets
         assert sorted(hm.sample_sets) == ['p1', 'p2']
+
+    def test_nested_list_population_gets_clean_error(self):
+        """The pairing check stays silent on malformed input so the
+        validating chokepoint raises the proper error, at every site."""
+        from pg_gpu import diversity
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        hm = self._hm()
+        hm.sample_sets = {'p2': [8, 9, 10, 11]}
+        hm.transfer_to_gpu()
+        with pytest.raises(ValueError, match="one-dimensional"):
+            diversity.heterozygosity_observed(hm, population=[[0, 1], [2, 3]])
+        with pytest.raises(ValueError, match="one-dimensional"):
+            windowed_statistics_fused(hm, bp_bins=np.array([0.0, 700.0]),
+                                      statistics=('fst_wc',),
+                                      pop1=[[0, 1], [2, 3]], pop2='p2')

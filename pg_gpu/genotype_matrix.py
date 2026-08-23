@@ -860,7 +860,15 @@ class GenotypeMatrix:
 
         # A population with no member in this matrix resolves empty --
         # routine when the matrix holds a sample subset of the pop file's
-        # cohort. Drop it rather than fail the whole load.
+        # cohort. Drop it rather than fail the whole load, but say so: a
+        # silently vanishing population sends the user's next error to the
+        # statistic call instead of here.
+        dropped = sorted(p for p, rows in pop_sets.items() if not rows)
+        if dropped:
+            import warnings
+            warnings.warn(
+                f"pop file populations with no member in this matrix "
+                f"dropped: {', '.join(dropped)}", stacklevel=2)
         self.sample_sets = {p: rows for p, rows in pop_sets.items() if rows}
 
     def restrict_to_segregating(self):

@@ -441,10 +441,9 @@ class _StreamingMatrixBase:
         sets = source.pop_cols
         if sets:
             sets = self._sets_in_row_space(sets)
-            # A pop-file population with no member in the store resolves
-            # empty; drop it rather than fail the whole load.
-            sets = {p: rows for p, rows in sets.items() if len(rows)}
-        self.sample_sets = sets or None
+        # None means no pop file; {} means a pop file matched nothing.
+        # Keeping the difference mirrors the eager loaders.
+        self.sample_sets = sets
         # Span-normalization metadata, mirroring the eager HaplotypeMatrix.
         # None when no accessible BED was supplied at load; see get_span.
         self.accessible_mask = accessible_mask
@@ -695,9 +694,10 @@ class _StreamingMatrixBase:
 
     def _subset_hap_columns(self, sample_subset):
         """The store's haplotype columns for a subset given in this
-        stream's row space. Identity for a haplotype stream; the genotype
-        stream expands each individual to its two gametes."""
-        return sample_subset
+        stream's row space. Host ints for a haplotype stream (a cupy
+        subset arrives as device scalars); the genotype stream expands
+        each individual to its two gametes."""
+        return [int(i) for i in sample_subset]
 
     def _read_subsample_via_kvikio(self, left, right, sample_subset):
         """Open the fetcher's GDSStore-backed ``call_genotype`` array

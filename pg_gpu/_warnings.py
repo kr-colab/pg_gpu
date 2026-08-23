@@ -147,8 +147,7 @@ def check_sample_set_rows(label, rows, n_rows):
         raise ValueError(
             f"{label} must be one-dimensional; got shape {arr.shape}")
     if arr.size == 0:
-        raise ValueError(f"{label} holds no rows; a population must "
-                         f"name at least one")
+        raise ValueError(f"{label} holds no rows; at least one is required")
     if not np.issubdtype(arr.dtype, np.integer):
         raise ValueError(
             f"{label} must hold integer row numbers; got dtype {arr.dtype}")
@@ -178,7 +177,14 @@ def check_paired_rows(rows, context, stacklevel=3):
     if n % 2:
         problem = f"has {n} rows, so pairing drops the last one"
     else:
-        arr = _rows_as_numpy(rows)
+        try:
+            arr = _rows_as_numpy(rows)
+        except (TypeError, ValueError):
+            return
+        if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
+            # Malformed input has no pairing to speak about; the
+            # validating chokepoints raise the proper error for it.
+            return
         first = arr[0::2] // 2
         second = arr[1::2] // 2
         bad = np.nonzero(first != second)[0]

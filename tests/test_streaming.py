@@ -118,6 +118,18 @@ class TestStreamingFromZarr:
         with pytest.raises(ValueError, match="duplicate"):
             stream_g.materialize(sample_subset=[0, 0, 2, 3])
 
+    def test_cupy_sample_subset_works_on_both_classes(self, vcz_store):
+        from pg_gpu import GenotypeMatrix
+        path, _ = vcz_store
+        hs = HaplotypeMatrix.from_zarr(path, streaming="always",
+                                       chunk_bp=5_000)
+        m = hs.materialize(sample_subset=cp.arange(4))
+        assert m.num_haplotypes == 4
+        gs = GenotypeMatrix.from_zarr(path, streaming="always",
+                                      chunk_bp=5_000)
+        m = gs.materialize(sample_subset=cp.arange(4))
+        assert m.num_individuals == 4
+
     def test_stream_setter_validates_in_own_row_space(self, vcz_store):
         """Assigning sample_sets on a stream validates like the eager
         classes; the bare assignment used to carry garbage into every
