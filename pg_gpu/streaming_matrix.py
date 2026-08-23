@@ -433,8 +433,17 @@ class _StreamingMatrixBase:
         )
         # Mirror the eager classes' idiom: store the explicit value
         # (or None) and let the property fall back to a default 'all'
-        # set when no pop file resolved at source construction.
-        self._sample_sets = source.pop_cols
+        # set when no pop file resolved at source construction. The pop
+        # file resolves to haplotype columns; _sets_in_row_space puts them
+        # in this stream's own row space. Validate once here -- every
+        # chunk shares the stream's row space, so chunks carry the sets
+        # without re-checking.
+        sets = source.pop_cols
+        if sets:
+            sets = self._sets_in_row_space(sets)
+        # None means no pop file; {} means a pop file matched nothing.
+        # Keeping the difference mirrors the eager loaders.
+        self.sample_sets = sets
         # Span-normalization metadata, mirroring the eager HaplotypeMatrix.
         # None when no accessible BED was supplied at load; see get_span.
         self.accessible_mask = accessible_mask
@@ -528,6 +537,26 @@ class _StreamingMatrixBase:
 
     @sample_sets.setter
     def sample_sets(self, value):
+        """
+        Set the sample sets.
+
+        Each value must name rows in this stream's own row space --
+        haplotype rows on a haplotype stream, individual rows on a
+        genotype stream -- as a list, tuple, or one-dimensional integer
+        array, without duplicates. Every chunk carries these sets, so an
+        invalid assignment would put garbage rows in front of each
+        chunk's statistics. The dict is stored as given, not copied;
+        mutating it afterwards is not re-validated.
+        """
+        if value is None:
+            self._sample_sets = None
+            return
+        if not isinstance(value, dict):
+            raise ValueError("sample_sets must be a dictionary")
+        from ._warnings import check_sample_set_rows
+        n_rows = self._sample_axis_size()
+        for key, rows in value.items():
+            check_sample_set_rows(f"sample_sets[{key!r}]", rows, n_rows)
         self._sample_sets = value
 
     def iter_gpu_chunks(self):
@@ -574,17 +603,26 @@ class _StreamingMatrixBase:
             exclusive. ``None`` materializes the full mappable range,
             which on a biobank-scale store will OOM.
         sample_subset : sequence of int, optional
-            Haplotype-axis indices to keep. ``None`` keeps every
-            haplotype.
+            Rows to keep, in this stream's own row space -- the same
+            space ``sample_sets`` uses, so
+            ``materialize(sample_subset=stream.sample_sets[pop])`` works
+            on either class. ``None`` keeps everything. The subset obeys
+            the same rules as a ``sample_sets`` value: rows within the
+            matrix, no duplicates.
 
-            Sample ``i`` is rows ``2i`` and ``2i + 1``. Ask for both to
-            keep whole samples. Ask for only one and the rows you get
-            back still sit side by side, but a neighbouring pair is no
-            longer one sample. Do not feed such a matrix to anything
-            that works per individual -- ``grm``, ``ibs``,
-            ``fst_weir_cockerham``, ``heterozygosity_observed``, or
-            ``GenotypeMatrix.from_haplotype_matrix``. Statistics that
-            read each row on its own are fine either way.
+            On a haplotype stream rows are gametes: sample ``i`` is rows
+            ``2i`` and ``2i + 1``, and asking for one gamete of a pair
+            gives back rows that sit side by side without being one
+            sample -- do not feed such a matrix to anything that works
+            per individual (``grm``, ``ibs``, ``fst_weir_cockerham``,
+            ``heterozygosity_observed``,
+            ``GenotypeMatrix.from_haplotype_matrix``). On a genotype
+            stream rows are individuals, so whole samples are the only
+            thing it is possible to ask for.
+
+            The stream's ``sample_sets`` are renumbered into the subset:
+            each population keeps the members the subset retains, and a
+            population with none left is dropped.
         """
         if region is None:
             left, right = self.chrom_start, self.chrom_end
@@ -594,6 +632,15 @@ class _StreamingMatrixBase:
         if sample_subset is None:
             gt, pos = self._source.slice_region(left, right)
         else:
+            # The subset names rows in this stream's own row space and
+            # obeys the same rules as a sample_sets value; the store read
+            # below wants haplotype columns, which _subset_hap_columns
+            # supplies per class.
+            from ._warnings import check_sample_set_rows
+            sample_subset = list(sample_subset)
+            check_sample_set_rows("sample_subset", sample_subset,
+                                  self._sample_axis_size())
+            hap_cols = self._subset_hap_columns(sample_subset)
             # If the fetcher uses kvikio, decompress through it: at
             # biobank-scale sample subsets the host-side oindex codec
             # pipeline that ``slice_subsample`` would use is minutes per
@@ -601,11 +648,11 @@ class _StreamingMatrixBase:
             # fall back to the host stage with the gather on GPU.
             if isinstance(self._fetcher, KvikioChunkFetcher):
                 gm_gpu, pos = self._read_subsample_via_kvikio(
-                    left, right, sample_subset
+                    left, right, hap_cols
                 )
             else:
                 gm_gpu, pos = self._source.slice_subsample(
-                    left, right, sample_subset, to_gpu=True
+                    left, right, hap_cols, to_gpu=True
                 )
             n_var, n_hap = gm_gpu.shape
             if n_hap % 2 != 0:
@@ -620,11 +667,37 @@ class _StreamingMatrixBase:
             # the split is a view rather than a copy.
             gt = gm_gpu.reshape(n_var, n_dip_sub, 2)
 
+        # sample_subset renumbers the rows, so full-matrix sample_sets no
+        # longer apply. Keep each population's surviving members, renumbered
+        # into the subset; a population with no member left is dropped. The
+        # renumbering is per-class: the subset is haplotype columns, and the
+        # genotype stream's sets hold individual rows.
+        sets = self._sample_sets
+        if sample_subset is not None and sets:
+            sets = {p: rows for p, rows in
+                    self._renumber_sets(sets, sample_subset).items()
+                    if len(rows)}
+
         return self._build_chunk(
             gt, pos,
             chrom_start=left, chrom_end=right,
-            sample_sets=self._sample_sets,
+            sample_sets=sets,
         )
+
+    def _renumber_sets(self, sets, sample_subset):
+        """Sets renumbered into the subset's row space; rows the subset
+        does not retain are dropped. The subset and the sets share this
+        stream's row space, so one mapping serves both classes."""
+        new_row = {int(r): i for i, r in enumerate(sample_subset)}
+        return {p: [new_row[int(r)] for r in rows if int(r) in new_row]
+                for p, rows in sets.items()}
+
+    def _subset_hap_columns(self, sample_subset):
+        """The store's haplotype columns for a subset given in this
+        stream's row space. Host ints for a haplotype stream (a cupy
+        subset arrives as device scalars); the genotype stream expands
+        each individual to its two gametes."""
+        return [int(i) for i in sample_subset]
 
     def _read_subsample_via_kvikio(self, left, right, sample_subset):
         """Open the fetcher's GDSStore-backed ``call_genotype`` array
@@ -648,6 +721,15 @@ class _StreamingMatrixBase:
 
     def _build_chunk(self, gt, pos, **kwargs):  # pragma: no cover -- abstract
         raise NotImplementedError
+
+    def _sets_in_row_space(self, pop_cols):
+        """Pop-file sets in this stream's row space.
+
+        The pop file resolves to haplotype columns, which already are the
+        rows of a haplotype stream; the genotype stream overrides this to
+        map gametes to individuals.
+        """
+        return pop_cols
 
     def __repr__(self):
         return (
@@ -691,7 +773,15 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
         return self.num_haplotypes
 
     def _build_chunk(self, gt, pos, **kwargs):
-        return build_haplotype_matrix(gt, pos, **kwargs)
+        # The stream's setter validated these sets in the stream's row
+        # space, which every chunk shares, so skip the eager setter's
+        # re-validation -- np.unique per population per chunk adds up to
+        # minutes over a biobank-scale walk.
+        sets = kwargs.pop('sample_sets', None)
+        m = build_haplotype_matrix(gt, pos, **kwargs)
+        if sets is not None:
+            m._sample_sets = sets
+        return m
 
     def _repr_sample_axis(self):
         return f"num_haplotypes={self.num_haplotypes}"
@@ -744,8 +834,29 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
     def _sample_axis_size(self):
         return self.num_individuals
 
+    def _sets_in_row_space(self, pop_cols):
+        # The pop file resolves to haplotype columns, but this stream's
+        # rows are individuals. Both of a sample's gametes floor-divide to
+        # its individual, so the unique halves are the individual rows.
+        # Before this mapping the chunks carried haplotype-numbered sets
+        # that indexed past the individual axis.
+        return {p: np.unique(np.asarray(cols) // 2)
+                for p, cols in pop_cols.items()}
+
+    def _subset_hap_columns(self, sample_subset):
+        # This stream's rows are individuals; the store's columns are
+        # gametes. Sample i owns columns 2i and 2i + 1, and the pair
+        # lands adjacently, so the (n_dip, 2) reshape below recovers
+        # exactly the requested individuals in order.
+        return [c for i in sample_subset for c in (2 * int(i), 2 * int(i) + 1)]
+
     def _build_chunk(self, gt, pos, **kwargs):
+        # Same skip as the haplotype stream: the sets were validated once
+        # at construction, in this stream's own (individual) row space.
+        sets = kwargs.pop('sample_sets', None)
         m = build_genotype_matrix(gt, pos, **kwargs)
+        if sets is not None:
+            m._sample_sets = sets
         if m._n_multiallelic_recoded and not self._biallelic_warned:
             from ._warnings import _warn_biallelic_only
             _warn_biallelic_only(m._n_multiallelic_recoded,

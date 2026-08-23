@@ -84,6 +84,125 @@ class MultiallelicCapWarning(UserWarning):
     """
 
 
+class UnpairedRowsWarning(UserWarning):
+    """Emitted when a diploid statistic pairs a row list that does not pair.
+
+    Statistics that reconstruct individuals pair consecutive entries of a
+    population's row list, and every loader writes sample ``i`` to rows
+    ``2i`` and ``2i + 1``. A list whose length is odd, or whose consecutive
+    entries span two individuals -- one gamete per individual
+    (``[0, 2, 4, ...]``) is the classic case -- is silently mis-paired, so
+    those statistics compute something other than what the set describes.
+    Gamete statistics accept any list, which is why this fires from the
+    pairing consumers rather than from the ``sample_sets`` setter. Silence
+    with::
+
+        import warnings
+        from pg_gpu import UnpairedRowsWarning
+        warnings.filterwarnings("ignore", category=UnpairedRowsWarning)
+    """
+
+
+def _rows_as_numpy(rows):
+    """Row numbers as a host numpy array.
+
+    Accepts lists, tuples, numpy arrays, cupy arrays, and sequences of
+    numpy or cupy integer scalars (``list(cp.arange(4))`` produces the
+    last kind).
+    """
+    if hasattr(rows, '__cuda_array_interface__'):
+        rows = rows.get()
+    try:
+        return np.asarray(rows)
+    except (TypeError, ValueError):
+        return np.asarray([int(r) for r in rows])
+
+
+def check_sample_set_rows(label, rows, n_rows):
+    """Reject a row list no matrix can serve.
+
+    CuPy fancy indexing does not bounds-check, so an out-of-range row
+    silently reads whatever memory it lands on, and a duplicated row counts
+    one gamete twice in every statistic. Neither has a valid meaning, so
+    both raise, and so does an empty set -- a population must name at
+    least one row, which is also the reference tskit behavior.
+
+    A set is a list, a tuple, or a one-dimensional integer array (numpy or
+    cupy; the streaming loaders build arrays). ``label`` is interpolated
+    verbatim into the messages, e.g. ``"sample_sets['p1']"`` or
+    ``"population row list"``.
+    """
+    if (isinstance(rows, (list, tuple, np.ndarray))
+            or hasattr(rows, '__cuda_array_interface__')):
+        try:
+            arr = _rows_as_numpy(rows)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{label} must hold integer row numbers") from None
+    else:
+        raise ValueError(
+            f"{label} must be a list, tuple, or 1-D integer array; "
+            f"got {type(rows).__name__}")
+    if arr.ndim != 1:
+        raise ValueError(
+            f"{label} must be one-dimensional; got shape {arr.shape}")
+    if arr.size == 0:
+        raise ValueError(f"{label} holds no rows; at least one is required")
+    if not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError(
+            f"{label} must hold integer row numbers; got dtype {arr.dtype}")
+    lo, hi = int(arr.min()), int(arr.max())
+    if lo < 0 or hi >= n_rows:
+        offender = lo if lo < 0 else hi
+        raise ValueError(
+            f"{label} holds row {offender}, but the matrix has rows "
+            f"0..{n_rows - 1}")
+    if np.unique(arr).size != arr.size:
+        raise ValueError(
+            f"{label} holds duplicate rows, which would count the same "
+            f"gamete more than once")
+
+
+def check_paired_rows(rows, context, stacklevel=3):
+    """Warn when a population row list cannot pair into diploid individuals.
+
+    The caller pairs consecutive entries, so the check mirrors that
+    exactly: even length, and each consecutive pair drawn from one
+    individual (``row // 2`` equal). Order inside a pair and the order of
+    pairs in the list are both free. ``stacklevel`` points the warning at
+    the caller's caller by default; call sites nested one deeper pass 4.
+    """
+    n = len(rows)
+    problem = None
+    if n % 2:
+        problem = f"has {n} rows, so pairing drops the last one"
+    else:
+        try:
+            arr = _rows_as_numpy(rows)
+        except (TypeError, ValueError):
+            return
+        if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
+            # Malformed input has no pairing to speak about; the
+            # validating chokepoints raise the proper error for it.
+            return
+        first = arr[0::2] // 2
+        second = arr[1::2] // 2
+        bad = np.nonzero(first != second)[0]
+        if bad.size:
+            k = int(bad[0])
+            a, b = int(arr[2 * k]), int(arr[2 * k + 1])
+            problem = (f"pairs rows {a} and {b}, which belong to "
+                       f"individuals {a // 2} and {b // 2}")
+    if problem is not None:
+        warnings.warn(
+            f"{context}: the population row list {problem}. Statistics "
+            f"that reconstruct individuals pair consecutive list entries, "
+            f"and every loader writes sample i to rows 2i and 2i + 1, so "
+            f"this set gives them something other than the individuals it "
+            f"describes.",
+            UnpairedRowsWarning, stacklevel=stacklevel)
+
+
 class BiallelicOnlyWarning(UserWarning):
     """Emitted when a biallelic-only statistic or loader drops multiallelic sites.
 

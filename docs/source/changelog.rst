@@ -61,6 +61,30 @@ Read this section if you are comparing against older pg_gpu results.
   ``sample_sets`` built by ``load_pop_file`` now lists ``2i`` and
   ``2i + 1`` for each member, and hand-written index lists that assumed
   the previous order need updating.
+* Row lists are validated at assignment and at resolution: assigning
+  ``sample_sets`` and passing a row list as a population argument both
+  raise ``ValueError`` for out-of-range or duplicated rows instead of
+  silently producing wrong numbers. The statistics that pair rows into
+  individuals (``fst_weir_cockerham``, ``heterozygosity_observed``,
+  windowed ``fst_wc``, and ``GenotypeMatrix.from_haplotype_matrix``)
+  warn when a list does not carry each sample's two rows adjacently;
+  gamete statistics accept any list, as before. An empty set also
+  raises -- a population must name at least one row, matching tskit --
+  and ``load_pop_file`` drops a population with no member in the matrix
+  instead of storing it empty. Duplicates are a hard error, so
+  bootstrapping over individuals by repeating rows in a set is not
+  possible; resample windows or blocks instead.
+* Streaming matrices follow one row space end to end: a stream's
+  ``sample_sets`` and ``materialize(sample_subset=...)`` both speak
+  haplotype rows on a haplotype stream and individual rows on a genotype
+  stream, so ``materialize(sample_subset=stream.sample_sets[pop])``
+  works on either class. This changes what a genotype stream's
+  ``sample_subset`` means: it took haplotype columns before and takes
+  individual rows now, so callers that passed columns must halve their
+  values. The genotype stream's sets previously held
+  haplotype columns that indexed past its individual axis. Assigning
+  ``sample_sets`` on a stream validates like the eager classes, and pop
+  files validate once at stream construction.
 * Windowed ``fst_wc`` now gives the same estimate as
   ``divergence.fst_weir_cockerham``. It used to treat the data as haploid
   and lump every alternate allele together, so it returned a different

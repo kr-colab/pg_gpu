@@ -67,6 +67,18 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     from .streaming_matrix import _StreamingMatrixBase
     from .haplotype_matrix import HaplotypeMatrix
 
+    # This list-of-row-lists parameter never passes the sample_sets setter,
+    # so apply the same range and duplicate rules here. Without them an
+    # invalid row was silently dropped from the tally -- wrong membership
+    # rather than an error. Gate on the accepted input types so anything
+    # else still reaches the dispatch below and its TypeError.
+    if sample_sets is not None and isinstance(
+            haplotype_matrix, (_StreamingMatrixBase, HaplotypeMatrix)):
+        from ._warnings import check_sample_set_rows
+        for k, rows in enumerate(sample_sets):
+            check_sample_set_rows(f"sample_sets[{k}]", list(rows),
+                                  haplotype_matrix.num_haplotypes)
+
     if isinstance(haplotype_matrix, _StreamingMatrixBase):
         return _stream_genetic_relatedness(
             haplotype_matrix, sample_sets=sample_sets, indexes=indexes,

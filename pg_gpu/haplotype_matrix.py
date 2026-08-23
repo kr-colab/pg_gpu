@@ -219,7 +219,7 @@ class HaplotypeMatrix:
         self._accessible_mask = None
         self.chrom_start = chrom_start
         self.chrom_end = chrom_end
-        self._sample_sets = sample_sets
+        self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
         self.samples = samples  # diploid sample names from VCF
         # Optional per-variant (n_var,) and per-genotype (n_var, n_samples)
@@ -310,13 +310,24 @@ class HaplotypeMatrix:
     def sample_sets(self, sample_sets: dict):
         """
         Set the sample sets.
+
+        Each value must be a list, tuple, or one-dimensional integer
+        array of haplotype row numbers within the
+        matrix, without duplicates. Lists that do not pair rows into
+        individuals are accepted here -- gamete statistics take any list --
+        and the statistics that reconstruct individuals warn when they
+        meet one. The dict is stored as given, not copied; mutating it
+        afterwards is not re-validated.
         """
+        if sample_sets is None:
+            self._sample_sets = None
+            return
         if not isinstance(sample_sets, dict):
             raise ValueError("sample_sets must be a dictionary")
-        # check that the values are lists
+        from ._warnings import check_sample_set_rows
+        n_rows = self._haplotypes.shape[0]
         for key, value in sample_sets.items():
-            if not isinstance(value, list):
-                raise ValueError("values in sample_sets must be lists")
+            check_sample_set_rows(f"sample_sets[{key!r}]", value, n_rows)
         self._sample_sets = sample_sets
 
     @property
@@ -894,7 +905,18 @@ class HaplotypeMatrix:
             for p, dips in pop_dips.items()
         }
 
-        self.sample_sets = pop_sets
+        # A population with no member in this matrix resolves empty --
+        # routine when the matrix holds a sample subset of the pop file's
+        # cohort. Drop it rather than fail the whole load, but say so: a
+        # silently vanishing population sends the user's next error to the
+        # statistic call instead of here.
+        dropped = sorted(p for p, rows in pop_sets.items() if not rows)
+        if dropped:
+            import warnings
+            warnings.warn(
+                f"pop file populations with no member in this matrix "
+                f"dropped: {', '.join(dropped)}", stacklevel=2)
+        self.sample_sets = {p: rows for p, rows in pop_sets.items() if rows}
 
     @classmethod
     def from_ts(cls, ts: tskit.TreeSequence, device: str = 'CPU',

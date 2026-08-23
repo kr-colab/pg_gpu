@@ -87,7 +87,7 @@ class GenotypeMatrix:
         self._accessible_mask = None
         self.chrom_start = chrom_start
         self.chrom_end = chrom_end
-        self._sample_sets = sample_sets
+        self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
         self.samples = samples
         # See HaplotypeMatrix.fields for the shape contract.
@@ -163,6 +163,24 @@ class GenotypeMatrix:
 
     @sample_sets.setter
     def sample_sets(self, sample_sets):
+        """
+        Set the sample sets.
+
+        Each value must be a list, tuple, or one-dimensional integer
+        array of individual row numbers within the
+        matrix, without duplicates. Rows are individuals here, so no
+        pairing applies. The dict is stored as given, not copied; mutating
+        it afterwards is not re-validated.
+        """
+        if sample_sets is None:
+            self._sample_sets = None
+            return
+        if not isinstance(sample_sets, dict):
+            raise ValueError("sample_sets must be a dictionary")
+        from ._warnings import check_sample_set_rows
+        n_rows = self._genotypes.shape[0]
+        for key, value in sample_sets.items():
+            check_sample_set_rows(f"sample_sets[{key!r}]", value, n_rows)
         self._sample_sets = sample_sets
 
     @property
@@ -349,8 +367,14 @@ class GenotypeMatrix:
         # remap sample_sets: haplotype indices -> individual indices
         new_sample_sets = None
         if hap_matrix._sample_sets is not None:
+            from ._warnings import check_paired_rows
             new_sample_sets = {}
             for name, indices in hap_matrix._sample_sets.items():
+                # The i // 2 collapse assumes each set carries whole
+                # individuals; a set holding one gamete of a sample would
+                # silently become that whole individual here.
+                check_paired_rows(
+                    indices, f"GenotypeMatrix.from_haplotype_matrix({name})")
                 # map haplotype indices to individual indices
                 ind_indices = sorted(set(i // 2 for i in indices))
                 new_sample_sets[name] = ind_indices
@@ -834,7 +858,18 @@ class GenotypeMatrix:
             if pop in pop_sets:
                 pop_sets[pop].append(i)
 
-        self.sample_sets = pop_sets
+        # A population with no member in this matrix resolves empty --
+        # routine when the matrix holds a sample subset of the pop file's
+        # cohort. Drop it rather than fail the whole load, but say so: a
+        # silently vanishing population sends the user's next error to the
+        # statistic call instead of here.
+        dropped = sorted(p for p, rows in pop_sets.items() if not rows)
+        if dropped:
+            import warnings
+            warnings.warn(
+                f"pop file populations with no member in this matrix "
+                f"dropped: {', '.join(dropped)}", stacklevel=2)
+        self.sample_sets = {p: rows for p, rows in pop_sets.items() if rows}
 
     def restrict_to_segregating(self):
         """Drop monomorphic (non-segregating) sites.
