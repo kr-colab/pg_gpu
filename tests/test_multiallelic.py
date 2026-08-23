@@ -544,6 +544,40 @@ class TestDivergenceVsTskit:
         fst_pg = divergence.fst_weir_cockerham(hm, 'A', 'B')
         np.testing.assert_allclose(fst_pg, fst_allel, rtol=1e-9)
 
+    def test_windowed_fst_wc_matches_allel(self, multiallelic_ts):
+        # The fused kernel against the same independent reference, per
+        # window. The parity suite only ties the kernel to the scalar, so
+        # without this the kernel never meets a reference outside the
+        # package.
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        ts = multiallelic_ts
+        G = ts.genotype_matrix()
+        nsites, n_nodes = G.shape
+        n_ind = n_nodes // 2
+        half = n_ind // 2
+        gd = allel.GenotypeArray(G.reshape(nsites, n_ind, 2))
+        a, b, c = allel.weir_cockerham_fst(
+            gd, [list(range(half)), list(range(half, n_ind))])
+
+        hm = HaplotypeMatrix.from_ts(ts, device="GPU")
+        hm.sample_sets = {'A': list(range(2 * half)),
+                          'B': list(range(2 * half, n_nodes))}
+        pos = hm.positions
+        pos = pos.get() if hasattr(pos, 'get') else np.asarray(pos)
+
+        W = 20_000
+        bp = np.arange(0, int(ts.sequence_length) + W, W, dtype=float)
+        r = windowed_statistics_fused(
+            hm, bp_bins=bp, statistics=('fst_wc',), pop1='A', pop2='B',
+            per_base=False, chrom='1')
+        for w, (start, stop) in enumerate(zip(bp[:-1], bp[1:])):
+            m = (pos >= start) & (pos < stop)
+            if not m.any():
+                continue
+            ref = np.nansum(a[m]) / np.nansum(a[m] + b[m] + c[m])
+            np.testing.assert_allclose(r['fst_wc'][w], ref, rtol=1e-9,
+                                       err_msg=f"window {w}")
+
     def test_pbs_matches_allel(self, multiallelic_ts):
         # PBS composes three per-allele Hudson FSTs; matches allel.pbs.
         from pg_gpu import divergence
