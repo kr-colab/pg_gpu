@@ -219,7 +219,7 @@ class HaplotypeMatrix:
         self._accessible_mask = None
         self.chrom_start = chrom_start
         self.chrom_end = chrom_end
-        self._sample_sets = sample_sets
+        self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
         self.samples = samples  # diploid sample names from VCF
         # Optional per-variant (n_var,) and per-genotype (n_var, n_samples)
@@ -310,13 +310,22 @@ class HaplotypeMatrix:
     def sample_sets(self, sample_sets: dict):
         """
         Set the sample sets.
+
+        Each value must be a list of haplotype row numbers within the
+        matrix, without duplicates. Lists that do not pair rows into
+        individuals are accepted here -- gamete statistics take any list --
+        and the statistics that reconstruct individuals warn when they
+        meet one.
         """
+        if sample_sets is None:
+            self._sample_sets = None
+            return
         if not isinstance(sample_sets, dict):
             raise ValueError("sample_sets must be a dictionary")
-        # check that the values are lists
+        from ._warnings import check_sample_set_rows
+        n_rows = self._haplotypes.shape[0]
         for key, value in sample_sets.items():
-            if not isinstance(value, list):
-                raise ValueError("values in sample_sets must be lists")
+            check_sample_set_rows(key, value, n_rows)
         self._sample_sets = sample_sets
 
     @property

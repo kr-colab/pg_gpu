@@ -84,6 +84,98 @@ class MultiallelicCapWarning(UserWarning):
     """
 
 
+class UnpairedRowsWarning(UserWarning):
+    """Emitted when a diploid statistic pairs a row list that does not pair.
+
+    Statistics that reconstruct individuals pair consecutive entries of a
+    population's row list, and every loader writes sample ``i`` to rows
+    ``2i`` and ``2i + 1``. A list whose length is odd, or whose consecutive
+    entries span two individuals -- one gamete per individual
+    (``[0, 2, 4, ...]``) is the classic case -- is silently mis-paired, so
+    those statistics compute something other than what the set describes.
+    Gamete statistics accept any list, which is why this fires from the
+    pairing consumers rather than from the ``sample_sets`` setter. Silence
+    with::
+
+        import warnings
+        from pg_gpu import UnpairedRowsWarning
+        warnings.filterwarnings("ignore", category=UnpairedRowsWarning)
+    """
+
+
+def check_sample_set_rows(name, rows, n_rows):
+    """Reject a sample_sets row list no matrix can serve.
+
+    CuPy fancy indexing does not bounds-check, so an out-of-range row
+    silently reads whatever memory it lands on, and a duplicated row counts
+    one gamete twice in every statistic. Neither has a valid meaning, so
+    both raise. Empty lists pass: subsetting code builds them legitimately.
+
+    A set is a list, a tuple, or a one-dimensional integer array (the
+    streaming loaders build arrays).
+    """
+    if isinstance(rows, (list, tuple)):
+        arr = np.asarray(rows)
+    elif isinstance(rows, np.ndarray):
+        arr = rows
+    else:
+        raise ValueError(
+            f"sample_sets[{name!r}] must be a list, tuple, or 1-D integer "
+            f"array; got {type(rows).__name__}")
+    if arr.ndim != 1:
+        raise ValueError(
+            f"sample_sets[{name!r}] must be one-dimensional; "
+            f"got shape {arr.shape}")
+    if arr.size == 0:
+        return
+    if not np.issubdtype(arr.dtype, np.integer):
+        raise ValueError(
+            f"sample_sets[{name!r}] must hold integer row numbers; "
+            f"got dtype {arr.dtype}")
+    lo, hi = int(arr.min()), int(arr.max())
+    if lo < 0 or hi >= n_rows:
+        offender = lo if lo < 0 else hi
+        raise ValueError(
+            f"sample_sets[{name!r}] holds row {offender}, but the matrix "
+            f"has rows 0..{n_rows - 1}")
+    if np.unique(arr).size != arr.size:
+        raise ValueError(
+            f"sample_sets[{name!r}] holds duplicate rows, which would "
+            f"count the same gamete more than once")
+
+
+def check_paired_rows(rows, context):
+    """Warn when a population row list cannot pair into diploid individuals.
+
+    The caller pairs consecutive entries, so the check mirrors that
+    exactly: even length, and each consecutive pair drawn from one
+    individual (``row // 2`` equal). Order inside a pair and the order of
+    pairs in the list are both free.
+    """
+    n = len(rows)
+    problem = None
+    if n % 2:
+        problem = f"has {n} rows, so pairing drops the last one"
+    else:
+        arr = np.asarray(rows)
+        first = arr[0::2] // 2
+        second = arr[1::2] // 2
+        bad = np.nonzero(first != second)[0]
+        if bad.size:
+            k = int(bad[0])
+            a, b = int(arr[2 * k]), int(arr[2 * k + 1])
+            problem = (f"pairs rows {a} and {b}, which belong to "
+                       f"individuals {a // 2} and {b // 2}")
+    if problem is not None:
+        warnings.warn(
+            f"{context}: the population row list {problem}. Statistics "
+            f"that reconstruct individuals pair consecutive list entries, "
+            f"and every loader writes sample i to rows 2i and 2i + 1, so "
+            f"this set gives them something other than the individuals it "
+            f"describes.",
+            UnpairedRowsWarning, stacklevel=3)
+
+
 class BiallelicOnlyWarning(UserWarning):
     """Emitted when a biallelic-only statistic or loader drops multiallelic sites.
 

@@ -316,6 +316,14 @@ def fst_weir_cockerham(haplotype_matrix,
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
+    # WC pairs consecutive rows of each subset into individuals, so a row
+    # list that does not carry each individual's two rows adjacently gives
+    # a wrong answer with no error. Gamete statistics accept such lists,
+    # which is why the check lives here and warns rather than raises.
+    from ._warnings import check_paired_rows
+    for pop, idx in ((pop1, pop1_idx), (pop2, pop2_idx)):
+        label = pop if isinstance(pop, str) else "row list"
+        check_paired_rows(idx, f"fst_weir_cockerham({label})")
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 

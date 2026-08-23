@@ -1863,6 +1863,14 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
     """
 
     if population is not None:
+        # Consecutive subset rows become one individual below, so warn on
+        # a row list that does not carry each individual's rows adjacently.
+        from ._warnings import check_paired_rows
+        if ploidy == 2:
+            rows = (haplotype_matrix.sample_sets[population]
+                    if isinstance(population, str) else population)
+            label = population if isinstance(population, str) else "row list"
+            check_paired_rows(rows, f"heterozygosity_observed({label})")
         matrix = _get_population_matrix(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix

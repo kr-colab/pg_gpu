@@ -348,3 +348,144 @@ def test_pairwise_LD_v_transfers():
     assert isinstance(D, cp.ndarray)
     # Check that D is symmetric (D should equal its transpose).
     assert cp.allclose(D, D.T)
+
+
+class TestSampleSetsValidation:
+    """sample_sets rejects lists no matrix can serve (#201)."""
+
+    def _hm(self, n_hap=8, n_var=10):
+        hap = np.zeros((n_hap, n_var), dtype=np.int8)
+        return HaplotypeMatrix(hap, np.arange(1, n_var + 1), 0, n_var + 1)
+
+    def test_out_of_range_raises(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="rows 0..7"):
+            hm.sample_sets = {'p': [0, 1, 999]}
+        with pytest.raises(ValueError, match="row -1"):
+            hm.sample_sets = {'p': [-1, 0]}
+
+    def test_duplicates_raise(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="duplicate"):
+            hm.sample_sets = {'p': [0, 0, 1, 2]}
+
+    def test_non_integer_raises(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="integer"):
+            hm.sample_sets = {'p': [0.5, 1.5]}
+
+    def test_constructor_validates_too(self):
+        hap = np.zeros((4, 5), dtype=np.int8)
+        with pytest.raises(ValueError, match="rows 0..3"):
+            HaplotypeMatrix(hap, np.arange(1, 6), 0, 6,
+                            sample_sets={'p': [99]})
+
+    def test_legitimate_assignments_pass(self):
+        hm = self._hm()
+        # Overlap across keys is allowed; only within-set duplication is not.
+        hm.sample_sets = {'p1': [0, 1, 2, 3], 'p2': [2, 3, 4, 5]}
+        hm.sample_sets = {'p': []}
+        hm.sample_sets = None
+        assert list(hm.sample_sets) == ['all']
+
+    def test_genotype_matrix_validates_individual_rows(self):
+        from pg_gpu.genotype_matrix import GenotypeMatrix
+        gm = GenotypeMatrix(np.zeros((4, 5), dtype=np.int8),
+                            np.arange(1, 6), 0, 6)
+        with pytest.raises(ValueError, match="rows 0..3"):
+            gm.sample_sets = {'p': [0, 7]}
+        gm.sample_sets = {'p': [0, 3]}
+
+
+class TestUnpairedRowsWarning:
+    """Pairing consumers warn on lists that do not pair into individuals."""
+
+    def _hm(self, n_hap=12, n_var=60, seed=3):
+        rng = np.random.RandomState(seed)
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(1, n_var + 1) * 10, 0,
+                             (n_var + 1) * 10)
+        return hm
+
+    def _assert_quiet(self, fn):
+        import warnings as w
+        from pg_gpu._warnings import UnpairedRowsWarning
+        with w.catch_warnings(record=True) as rec:
+            w.simplefilter("always")
+            fn()
+        assert not [r for r in rec if issubclass(r.category,
+                                                 UnpairedRowsWarning)]
+
+    def test_scalar_wc_warns_on_gamete_stride(self):
+        from pg_gpu import divergence
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6], 'p2': [8, 9, 10, 11]}
+        with pytest.warns(UnpairedRowsWarning, match="individuals 0 and 1"):
+            divergence.fst_weir_cockerham(hm, 'p1', 'p2')
+
+    def test_scalar_wc_warns_on_odd_list(self):
+        from pg_gpu import divergence
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 1, 2], 'p2': [8, 9, 10, 11]}
+        with pytest.warns(UnpairedRowsWarning, match="drops the last one"):
+            divergence.fst_weir_cockerham(hm, 'p1', 'p2')
+
+    def test_scalar_wc_warns_on_cross_pairing(self):
+        # Sorted parity would pass this list; consumer-order pairing must not.
+        from pg_gpu import divergence
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 1, 3], 'p2': [8, 9, 10, 11]}
+        with pytest.warns(UnpairedRowsWarning):
+            divergence.fst_weir_cockerham(hm, 'p1', 'p2')
+
+    def test_scalar_wc_quiet_on_correct_pairings(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        # Adjacent pairs in any pair order, and swapped within a pair, are
+        # all the same partition.
+        for p1 in ([0, 1, 2, 3], [2, 3, 0, 1], [1, 0, 3, 2]):
+            hm.sample_sets = {'p1': p1, 'p2': [8, 9, 10, 11]}
+            self._assert_quiet(
+                lambda: divergence.fst_weir_cockerham(hm, 'p1', 'p2'))
+
+    def test_gamete_statistics_stay_quiet(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6], 'p2': [8, 9, 10, 11]}
+        self._assert_quiet(lambda: divergence.fst_hudson(hm, 'p1', 'p2'))
+        self._assert_quiet(lambda: divergence.dxy(hm, 'p1', 'p2'))
+
+    def test_het_observed_warns_on_gamete_stride(self):
+        from pg_gpu import diversity
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6]}
+        with pytest.warns(UnpairedRowsWarning):
+            diversity.heterozygosity_observed(hm, population='p1')
+
+    def test_windowed_fst_wc_warns_and_fst_alone_does_not(self):
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6], 'p2': [8, 9, 10, 11]}
+        hm.transfer_to_gpu()
+        bp = np.array([0.0, 700.0])
+        with pytest.warns(UnpairedRowsWarning):
+            windowed_statistics_fused(hm, bp_bins=bp, statistics=('fst_wc',),
+                                      pop1='p1', pop2='p2')
+        self._assert_quiet(
+            lambda: windowed_statistics_fused(hm, bp_bins=bp,
+                                              statistics=('fst',),
+                                              pop1='p1', pop2='p2'))
+
+    def test_load_pop_file_output_is_quiet(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        hm.samples = [f's{i}' for i in range(6)]
+        hm.load_pop_file({f's{i}': ('p1' if i < 3 else 'p2')
+                          for i in range(6)})
+        self._assert_quiet(
+            lambda: divergence.fst_weir_cockerham(hm, 'p1', 'p2'))

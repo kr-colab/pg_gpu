@@ -87,7 +87,7 @@ class GenotypeMatrix:
         self._accessible_mask = None
         self.chrom_start = chrom_start
         self.chrom_end = chrom_end
-        self._sample_sets = sample_sets
+        self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
         self.samples = samples
         # See HaplotypeMatrix.fields for the shape contract.
@@ -163,6 +163,22 @@ class GenotypeMatrix:
 
     @sample_sets.setter
     def sample_sets(self, sample_sets):
+        """
+        Set the sample sets.
+
+        Each value must be a list of individual row numbers within the
+        matrix, without duplicates. Rows are individuals here, so no
+        pairing applies.
+        """
+        if sample_sets is None:
+            self._sample_sets = None
+            return
+        if not isinstance(sample_sets, dict):
+            raise ValueError("sample_sets must be a dictionary")
+        from ._warnings import check_sample_set_rows
+        n_rows = self._genotypes.shape[0]
+        for key, value in sample_sets.items():
+            check_sample_set_rows(key, value, n_rows)
         self._sample_sets = sample_sets
 
     @property
