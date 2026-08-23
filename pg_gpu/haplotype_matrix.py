@@ -311,7 +311,8 @@ class HaplotypeMatrix:
         """
         Set the sample sets.
 
-        Each value must be a list of haplotype row numbers within the
+        Each value must be a list, tuple, or one-dimensional integer
+        array of haplotype row numbers within the
         matrix, without duplicates. Lists that do not pair rows into
         individuals are accepted here -- gamete statistics take any list --
         and the statistics that reconstruct individuals warn when they
@@ -904,7 +905,10 @@ class HaplotypeMatrix:
             for p, dips in pop_dips.items()
         }
 
-        self.sample_sets = pop_sets
+        # A population with no member in this matrix resolves empty --
+        # routine when the matrix holds a sample subset of the pop file's
+        # cohort. Drop it rather than fail the whole load.
+        self.sample_sets = {p: rows for p, rows in pop_sets.items() if rows}
 
     @classmethod
     def from_ts(cls, ts: tskit.TreeSequence, device: str = 'CPU',

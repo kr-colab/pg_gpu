@@ -384,9 +384,20 @@ class TestSampleSetsValidation:
         hm = self._hm()
         # Overlap across keys is allowed; only within-set duplication is not.
         hm.sample_sets = {'p1': [0, 1, 2, 3], 'p2': [2, 3, 4, 5]}
-        hm.sample_sets = {'p': []}
         hm.sample_sets = None
         assert list(hm.sample_sets) == ['all']
+
+    def test_empty_set_raises(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="at least one"):
+            hm.sample_sets = {'p': []}
+
+    def test_dict_value_gets_clean_error(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="list, tuple, or 1-D"):
+            hm.sample_sets = {'p': {'a': 1}}
+        with pytest.raises(ValueError, match="integer row numbers"):
+            hm.sample_sets = {'p': [[0, 1], [2]]}
 
     def test_genotype_matrix_validates_individual_rows(self):
         from pg_gpu.genotype_matrix import GenotypeMatrix
@@ -559,3 +570,46 @@ class TestDirectListValidation:
         with pytest.raises(ValueError, match="rows 0"):
             relatedness.genetic_relatedness(
                 hm, sample_sets=[[0, 1], [2, 999999]])
+
+    def test_unknown_population_name_gives_value_error(self):
+        """Every engine agrees on the unknown-name error, not KeyError."""
+        from pg_gpu import diversity
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 1, 2, 3], 'p2': [8, 9, 10, 11]}
+        hm.transfer_to_gpu()
+        with pytest.raises(ValueError, match="not found"):
+            diversity.heterozygosity_observed(hm, population='nope')
+        bp = np.array([0.0, 700.0])
+        for fn in (windowed_statistics_fused, windowed_statistics_fused_chunked):
+            with pytest.raises(ValueError, match="not found"):
+                fn(hm, bp_bins=bp, statistics=('fst_wc',),
+                   pop1='p1', pop2='nope')
+
+    def test_genetic_relatedness_wrong_type_gives_type_error(self):
+        """Validation must not shadow the dispatch TypeError."""
+        from pg_gpu import relatedness
+        from pg_gpu.genotype_matrix import GenotypeMatrix
+        gm = GenotypeMatrix(np.zeros((4, 5), dtype=np.int8),
+                            np.arange(1, 6), 0, 6)
+        with pytest.raises(TypeError, match="requires a HaplotypeMatrix"):
+            relatedness.genetic_relatedness(gm, sample_sets=[[0, 1], [2, 3]])
+
+    def test_genetic_relatedness_empty_set_gives_value_error(self):
+        from pg_gpu import relatedness
+        hm = self._hm()
+        hm.transfer_to_gpu()
+        with pytest.raises(ValueError, match="at least one"):
+            relatedness.genetic_relatedness(hm, sample_sets=[[0, 1], []])
+
+    def test_load_pop_file_drops_absent_population(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        hm.samples = [f's{i}' for i in range(6)]
+        hm.load_pop_file({'s0': 'p1', 's1': 'p1', 's2': 'p2', 's3': 'p2',
+                          'zz': 'ghost'})
+        assert 'ghost' not in hm.sample_sets
+        assert sorted(hm.sample_sets) == ['p1', 'p2']

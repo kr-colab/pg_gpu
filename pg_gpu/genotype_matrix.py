@@ -166,7 +166,8 @@ class GenotypeMatrix:
         """
         Set the sample sets.
 
-        Each value must be a list of individual row numbers within the
+        Each value must be a list, tuple, or one-dimensional integer
+        array of individual row numbers within the
         matrix, without duplicates. Rows are individuals here, so no
         pairing applies. The dict is stored as given, not copied; mutating
         it afterwards is not re-validated.
@@ -857,7 +858,10 @@ class GenotypeMatrix:
             if pop in pop_sets:
                 pop_sets[pop].append(i)
 
-        self.sample_sets = pop_sets
+        # A population with no member in this matrix resolves empty --
+        # routine when the matrix holds a sample subset of the pop file's
+        # cohort. Drop it rather than fail the whole load.
+        self.sample_sets = {p: rows for p, rows in pop_sets.items() if rows}
 
     def restrict_to_segregating(self):
         """Drop monomorphic (non-segregating) sites.

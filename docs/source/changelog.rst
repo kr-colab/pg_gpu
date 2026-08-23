@@ -68,9 +68,20 @@ Read this section if you are comparing against older pg_gpu results.
   individuals (``fst_weir_cockerham``, ``heterozygosity_observed``,
   windowed ``fst_wc``, and ``GenotypeMatrix.from_haplotype_matrix``)
   warn when a list does not carry each sample's two rows adjacently;
-  gamete statistics accept any list, as before. Streaming loads with a
-  pop file validate once at stream construction, and the genotype
-  stream's sets now hold individual rows rather than haplotype columns.
+  gamete statistics accept any list, as before. An empty set also
+  raises -- a population must name at least one row, matching tskit --
+  and ``load_pop_file`` drops a population with no member in the matrix
+  instead of storing it empty. Duplicates are a hard error, so
+  bootstrapping over individuals by repeating rows in a set is not
+  possible; resample windows or blocks instead.
+* Streaming matrices follow one row space end to end: a stream's
+  ``sample_sets`` and ``materialize(sample_subset=...)`` both speak
+  haplotype rows on a haplotype stream and individual rows on a genotype
+  stream, so ``materialize(sample_subset=stream.sample_sets[pop])``
+  works on either class. The genotype stream's sets previously held
+  haplotype columns that indexed past its individual axis. Assigning
+  ``sample_sets`` on a stream validates like the eager classes, and pop
+  files validate once at stream construction.
 * Windowed ``fst_wc`` now gives the same estimate as
   ``divergence.fst_weir_cockerham``. It used to treat the data as haploid
   and lump every alternate allele together, so it returned a different

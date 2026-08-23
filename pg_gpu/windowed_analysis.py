@@ -2173,8 +2173,12 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             # Weir-Cockerham; the gamete statistics take any row list.
             from ._warnings import check_paired_rows
             for pop in (pop1, pop2):
-                rows = (haplotype_matrix.sample_sets[pop]
+                # .get: an unknown name skips the check and reaches
+                # get_population_matrix below for its proper ValueError.
+                rows = (haplotype_matrix.sample_sets.get(pop)
                         if isinstance(pop, str) else list(pop))
+                if rows is None:
+                    continue
                 label = pop if isinstance(pop, str) else "row list"
                 check_paired_rows(rows, f"windowed fst_wc({label})")
 
@@ -2677,8 +2681,15 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         # A population is a sample_sets name or a row list, the same as the
         # single-shot engine accepts via get_population_matrix.
         def pop_rows_of(pop):
-            rows = (haplotype_matrix.sample_sets[pop]
-                    if isinstance(pop, str) else list(pop))
+            if isinstance(pop, str):
+                rows = haplotype_matrix.sample_sets.get(pop)
+                if rows is None:
+                    # Match get_population_matrix's error for unknown names,
+                    # so the chunked and single-shot engines agree.
+                    raise ValueError(
+                        f"Population {pop} not found in sample_sets")
+            else:
+                rows = list(pop)
             if not isinstance(pop, str):
                 # Direct row lists never pass the sample_sets setter; apply
                 # the same range and duplicate rules before the gather.

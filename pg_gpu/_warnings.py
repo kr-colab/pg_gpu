@@ -110,7 +110,7 @@ def _rows_as_numpy(rows):
     numpy or cupy integer scalars (``list(cp.arange(4))`` produces the
     last kind).
     """
-    if hasattr(rows, 'get') and not isinstance(rows, np.ndarray):
+    if hasattr(rows, '__cuda_array_interface__'):
         rows = rows.get()
     try:
         return np.asarray(rows)
@@ -124,15 +124,21 @@ def check_sample_set_rows(label, rows, n_rows):
     CuPy fancy indexing does not bounds-check, so an out-of-range row
     silently reads whatever memory it lands on, and a duplicated row counts
     one gamete twice in every statistic. Neither has a valid meaning, so
-    both raise. Empty lists pass: subsetting code builds them legitimately.
+    both raise, and so does an empty set -- a population must name at
+    least one row, which is also the reference tskit behavior.
 
     A set is a list, a tuple, or a one-dimensional integer array (numpy or
     cupy; the streaming loaders build arrays). ``label`` is interpolated
     verbatim into the messages, e.g. ``"sample_sets['p1']"`` or
     ``"population row list"``.
     """
-    if isinstance(rows, (list, tuple, np.ndarray)) or hasattr(rows, 'get'):
-        arr = _rows_as_numpy(rows)
+    if (isinstance(rows, (list, tuple, np.ndarray))
+            or hasattr(rows, '__cuda_array_interface__')):
+        try:
+            arr = _rows_as_numpy(rows)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"{label} must hold integer row numbers") from None
     else:
         raise ValueError(
             f"{label} must be a list, tuple, or 1-D integer array; "
@@ -141,7 +147,8 @@ def check_sample_set_rows(label, rows, n_rows):
         raise ValueError(
             f"{label} must be one-dimensional; got shape {arr.shape}")
     if arr.size == 0:
-        return
+        raise ValueError(f"{label} holds no rows; a population must "
+                         f"name at least one")
     if not np.issubdtype(arr.dtype, np.integer):
         raise ValueError(
             f"{label} must hold integer row numbers; got dtype {arr.dtype}")
