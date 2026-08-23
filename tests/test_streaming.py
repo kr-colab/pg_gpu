@@ -75,12 +75,13 @@ class TestStreamingFromZarr:
         g = relatedness.grm(stream)
         assert g.shape == (n_dip, n_dip)
 
-    def test_materialize_subset_renumbers_individual_sets(self, vcz_store,
-                                                          tmp_path):
-        """The subset names haplotype columns while this stream's sets
-        hold individual rows; the renumbering used to key on haplotype
-        coordinates and produce out-of-range individual sets, silently
-        after chunk construction stopped re-validating."""
+    def test_materialize_subset_speaks_individual_rows(self, vcz_store,
+                                                       tmp_path):
+        """A genotype stream's subset and its sample_sets share the
+        individual row space, so feeding a population's own rows back as
+        the subset is the supported idiom. Both used to disagree: the
+        sets moved to individual rows while the subset still meant
+        haplotype columns, silently selecting the wrong samples."""
         from pg_gpu import GenotypeMatrix
         path, hm = vcz_store
         n_dip = hm.num_haplotypes // 2
@@ -93,14 +94,49 @@ class TestStreamingFromZarr:
                                           chunk_bp=5_000,
                                           pop_assignment=str(popfile))
 
-        # Whole samples 0, 1 (p1) and `half` (p2), as haplotype columns.
-        sub = [0, 1, 2, 3, 2 * half, 2 * half + 1]
-        m = stream.materialize(sample_subset=sub)
-        assert m.num_individuals == 3
-        assert sorted(int(i) for i in m.sample_sets['p1']) == [0, 1]
-        assert sorted(int(i) for i in m.sample_sets['p2']) == [2]
+        # The documented idiom: a population's rows as the subset.
+        m = stream.materialize(sample_subset=list(stream.sample_sets['p2']))
+        assert m.num_individuals == n_dip - half
+        assert sorted(int(i) for i in m.sample_sets['p2']) == list(
+            range(n_dip - half))
+        assert 'p1' not in m.sample_sets
         for rows in m.sample_sets.values():
             assert max(int(i) for i in rows) < m.num_individuals
+
+    def test_materialize_subset_is_validated(self, vcz_store, tmp_path):
+        """The subset obeys the same rules as a sample_sets value."""
+        from pg_gpu import GenotypeMatrix
+        path, hm = vcz_store
+        stream_h = HaplotypeMatrix.from_zarr(path, streaming="always",
+                                             chunk_bp=5_000)
+        with pytest.raises(ValueError, match="duplicate"):
+            stream_h.materialize(sample_subset=[0, 1, 0, 1])
+        with pytest.raises(ValueError, match="rows 0"):
+            stream_h.materialize(sample_subset=[0, 10**6])
+        stream_g = GenotypeMatrix.from_zarr(path, streaming="always",
+                                            chunk_bp=5_000)
+        with pytest.raises(ValueError, match="duplicate"):
+            stream_g.materialize(sample_subset=[0, 0, 2, 3])
+
+    def test_stream_setter_validates_in_own_row_space(self, vcz_store):
+        """Assigning sample_sets on a stream validates like the eager
+        classes; the bare assignment used to carry garbage into every
+        chunk and out through materialize."""
+        from pg_gpu import GenotypeMatrix
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        stream_h = HaplotypeMatrix.from_zarr(path, streaming="always",
+                                             chunk_bp=5_000)
+        with pytest.raises(ValueError, match="rows 0"):
+            stream_h.sample_sets = {'p': [0, 10**6]}
+        stream_h.sample_sets = {'p': [0, 1, 2, 3]}
+
+        stream_g = GenotypeMatrix.from_zarr(path, streaming="always",
+                                            chunk_bp=5_000)
+        # Individual rows: n_dip is one past the end for this stream.
+        with pytest.raises(ValueError, match=f"rows 0..{n_dip - 1}"):
+            stream_g.sample_sets = {'p': [0, n_dip]}
+        stream_g.sample_sets = {'p': [0, 1]}
 
     def test_streaming_always_returns_streaming_class(self, vcz_store):
         path, _ = vcz_store
