@@ -405,21 +405,17 @@ def compare_missing_strategies(h, window_size=10000):
 ## Diversity Statistics
 
 ```python
-from pg_gpu import diversity
+from pg_gpu import diversity, sfs
 
 # Whole-chromosome
 pi_val  = diversity.pi(h)
 theta   = diversity.theta_w(h)
 tajd    = diversity.tajimas_d(h)
 he      = diversity.heterozygosity_expected(h)
-# heterozygosity_observed takes a HaplotypeMatrix, NOT a GenotypeMatrix,
-# but it assumes consecutive rows are the two haplotypes of one diploid
-# (hap[0::2] vs hap[1::2]). Matrices built by `from_vcf` / `from_zarr`
-# use a different layout (rows 0..n_dip-1 = ploidy 0; rows n_dip.. =
-# ploidy 1), so calling it on a loader-produced matrix gives meaningless
-# values. Use GenotypeMatrix-based dosage statistics for Ho on loaded
-# data, or hand-build a HaplotypeMatrix with the consecutive-pair
-# layout first.
+# heterozygosity_observed takes a HaplotypeMatrix, not a GenotypeMatrix. It
+# pairs rows into individuals: sample i is rows 2i and 2i+1, which is what
+# every loader produces.
+ho      = diversity.heterozygosity_observed(h)
 
 # Per-population
 pi_pop1 = diversity.pi(h, population='pop1')
@@ -430,7 +426,7 @@ stats = diversity.diversity_stats(h, population='pop1',
     statistics=['pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'])
 
 # SFS
-afs = diversity.allele_frequency_spectrum(h)
+afs = sfs.sfs(h)
 
 # Neutrality test suite
 nt = diversity.neutrality_tests(h, population='pop1')

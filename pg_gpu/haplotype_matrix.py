@@ -158,7 +158,8 @@ class HaplotypeMatrix:
     produces this order and every consumer that reconstructs individuals --
     ``GenotypeMatrix.from_haplotype_matrix``, ``relatedness.ibs``,
     ``divergence.fst_weir_cockerham``, ``diversity.heterozygosity_observed``,
-    the ``to_zarr`` writer -- assumes it. ``sample_sets`` therefore lists both
+    ``diversity.inbreeding_coefficient``, genotype-mode LD, and the
+    ``to_zarr`` writer -- assumes it. ``sample_sets`` therefore lists both
     gametes of each member, e.g. sample 3 contributes ``[6, 7]``.
 
     Statistics that treat rows as independent gametes are unaffected by the
