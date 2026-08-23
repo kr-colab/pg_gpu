@@ -2640,11 +2640,16 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         # bounds-check, so applying these rows to the subset would silently
         # read the wrong haplotypes. Read the rows from the original matrix,
         # and select the same variant columns the cap filter kept.
+        # A population is a sample_sets name or a row list, the same as the
+        # single-shot engine accepts via get_population_matrix.
+        def pop_rows_of(pop):
+            rows = (haplotype_matrix.sample_sets[pop]
+                    if isinstance(pop, str) else list(pop))
+            return cp.asarray(rows, dtype=cp.int64)
+
         orig_hap = haplotype_matrix.haplotypes
-        pop1_rows = cp.asarray(haplotype_matrix.sample_sets[pop1],
-                               dtype=cp.int64)
-        pop2_rows = cp.asarray(haplotype_matrix.sample_sets[pop2],
-                               dtype=cp.int64)
+        pop1_rows = pop_rows_of(pop1)
+        pop2_rows = pop_rows_of(pop2)
         n1 = len(pop1_rows)
         n2 = len(pop2_rows)
         # Chunk size based on the larger population

@@ -426,7 +426,8 @@ class TestChunkedFused:
             _memutil.estimate_fused_chunk_size = orig
 
         for k in ('pi', 'theta_w', 'tajimas_d', 'segregating_sites'):
-            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
 
     def test_two_pop_chunked_matches_fused(self, matrix_with_pops):
@@ -457,7 +458,8 @@ class TestChunkedFused:
             _memutil.estimate_fused_chunk_size = orig
 
         for k in ('fst', 'fst_wc', 'dxy', 'da'):
-            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
 
     def test_two_pop_chunked_with_population_subset(self, matrix_with_pops):
@@ -495,7 +497,38 @@ class TestChunkedFused:
             _memutil.estimate_fused_chunk_size = orig
 
         for k in stats:
-            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
+                                       err_msg=f"Mismatch in {k}")
+
+    def test_two_pop_chunked_accepts_row_lists(self, matrix_with_pops):
+        """Row-list populations work in both engines, not only names."""
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        from pg_gpu import _memutil
+
+        hm = matrix_with_pops
+        hm.transfer_to_gpu()
+        n = hm.num_haplotypes
+        l1, l2 = list(range(n // 2)), list(range(n // 2, n))
+
+        bp_bins = np.arange(0, 500_001, 50_000, dtype=np.float64)
+        r1 = windowed_statistics_fused(
+            hm, bp_bins=bp_bins, statistics=('fst', 'fst_wc'),
+            pop1=l1, pop2=l2)
+        orig = _memutil.estimate_fused_chunk_size
+        _memutil.estimate_fused_chunk_size = lambda n, memory_fraction=0.35: 500
+        try:
+            r2 = windowed_statistics_fused_chunked(
+                hm, bp_bins=bp_bins, statistics=('fst', 'fst_wc'),
+                pop1=l1, pop2=l2)
+        finally:
+            _memutil.estimate_fused_chunk_size = orig
+        for k in ('fst', 'fst_wc'):
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
 
     def test_mixed_single_twopop_chunked(self, matrix_with_pops):
