@@ -548,6 +548,30 @@ class TestTwoPopColumnNaming:
             assert 'fst_wc' in df.columns, f"no bare fst_wc under {mode!r}"
         assert list(frames['include'].columns) == list(frames['exclude'].columns)
 
+    def test_three_pop_request_returns_every_pair(self):
+        """Three populations must yield all pairs under both modes, never a
+        bare column silently holding the first pair only."""
+        rng = np.random.RandomState(8)
+        n_hap, n_var = 60, 400
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40)),
+                          "p3": list(range(40, 60))}
+
+        frames = {
+            mode: windowed_analysis(
+                hm, window_size=10_000, step_size=10_000,
+                statistics=['fst'], populations=['p1', 'p2', 'p3'],
+                missing_data=mode)
+            for mode in ('include', 'exclude')
+        }
+        for mode, df in frames.items():
+            assert 'fst' not in df.columns, f"bare fst under {mode!r}"
+            for pair in ('fst_p1_p2', 'fst_p1_p3', 'fst_p2_p3'):
+                assert pair in df.columns, f"missing {pair} under {mode!r}"
+        assert list(frames['include'].columns) == list(frames['exclude'].columns)
+
 
 class TestFusedMissingData:
     """Fused two-pop kernel must use per-site valid counts under missingness."""

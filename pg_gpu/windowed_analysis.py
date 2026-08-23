@@ -1331,7 +1331,14 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     requested = set(statistics)
 
     can_fuse = (missing_data == 'include'
-                and requested <= fused_all)
+                and requested <= fused_all
+                # A two-population statistic with anything other than exactly
+                # two populations must not reach the fused engine, which
+                # computes the first pair only and names the column after the
+                # bare statistic. The per-window fallback computes every pair
+                # and suffixes the names, the same as missing_data='exclude'.
+                and (not (requested & fused_two)
+                     or len(populations or []) == 2))
 
     if can_fuse:
         if haplotype_matrix.device == 'CPU':
@@ -1400,9 +1407,10 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     # The analyzer names two-population columns "<stat>_<pop1>_<pop2>"
     # because it computes every pair. The fused and scatter engines name
     # them after the statistic alone when exactly two populations are
-    # given, and the same request must return the same columns whichever
-    # engine serves it. With one pair the bare name is unambiguous, so
-    # rename on the way out; direct analyzer use keeps the suffixed form.
+    # given, and a two-population request must name those columns the
+    # same whichever engine serves it. With one pair the bare name is
+    # unambiguous, so rename on the way out; direct analyzer use and
+    # requests with three or more populations keep the suffixed form.
     if populations is not None and len(populations) == 2:
         p1, p2 = populations
         df = df.rename(columns={
