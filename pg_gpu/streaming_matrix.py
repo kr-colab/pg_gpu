@@ -585,6 +585,10 @@ class _StreamingMatrixBase:
             ``fst_weir_cockerham``, ``heterozygosity_observed``, or
             ``GenotypeMatrix.from_haplotype_matrix``. Statistics that
             read each row on its own are fine either way.
+
+            The stream's ``sample_sets`` are renumbered into the subset:
+            each population keeps the members the subset retains, and a
+            population with none left is dropped.
         """
         if region is None:
             left, right = self.chrom_start, self.chrom_end
@@ -620,10 +624,20 @@ class _StreamingMatrixBase:
             # the split is a view rather than a copy.
             gt = gm_gpu.reshape(n_var, n_dip_sub, 2)
 
+        # sample_subset renumbers the rows, so full-matrix sample_sets no
+        # longer apply. Keep each population's surviving members, renumbered
+        # into the subset; a population with no member left is dropped.
+        sets = self._sample_sets
+        if sample_subset is not None and sets:
+            new_row = {int(r): i for i, r in enumerate(sample_subset)}
+            sets = {p: [new_row[int(r)] for r in rows if int(r) in new_row]
+                    for p, rows in sets.items()}
+            sets = {p: rows for p, rows in sets.items() if rows} or None
+
         return self._build_chunk(
             gt, pos,
             chrom_start=left, chrom_end=right,
-            sample_sets=self._sample_sets,
+            sample_sets=sets,
         )
 
     def _read_subsample_via_kvikio(self, left, right, sample_subset):
