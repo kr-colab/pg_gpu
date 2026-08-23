@@ -64,7 +64,7 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         ``indexes``.
     """
     from ._memutil import estimate_variant_chunk_size
-    from .streaming_matrix import _StreamingMatrixBase
+    from .streaming_matrix import StreamingHaplotypeMatrix
     from .haplotype_matrix import HaplotypeMatrix
 
     # This list-of-row-lists parameter never passes the sample_sets setter,
@@ -73,13 +73,16 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     # rather than an error. Gate on the accepted input types so anything
     # else still reaches the dispatch below and its TypeError.
     if sample_sets is not None and isinstance(
-            haplotype_matrix, (_StreamingMatrixBase, HaplotypeMatrix)):
+            haplotype_matrix, (StreamingHaplotypeMatrix, HaplotypeMatrix)):
         from ._warnings import check_sample_set_rows
         for k, rows in enumerate(sample_sets):
             check_sample_set_rows(f"sample_sets[{k}]", list(rows),
                                   haplotype_matrix.num_haplotypes)
 
-    if isinstance(haplotype_matrix, _StreamingMatrixBase):
+    # Only the haplotype stream has the row semantics this statistic
+    # needs; a genotype stream must fall through to the TypeError below,
+    # the same way grm and ibs reject the wrong stream class.
+    if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
         return _stream_genetic_relatedness(
             haplotype_matrix, sample_sets=sample_sets, indexes=indexes,
             centre=centre, polarised=polarised, proportion=proportion,

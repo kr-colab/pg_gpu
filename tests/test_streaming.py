@@ -38,6 +38,17 @@ def _stream_concat(streaming_hm):
 
 class TestStreamingFromZarr:
 
+    def test_genetic_relatedness_rejects_genotype_stream(self, vcz_store):
+        """A genotype stream must get the clean TypeError, not an
+        AttributeError from whichever haplotype attribute reads first."""
+        from pg_gpu import GenotypeMatrix, relatedness
+        path, _ = vcz_store
+        gs = GenotypeMatrix.from_zarr(path, streaming="always",
+                                      chunk_bp=5_000)
+        for kwargs in ({}, {'sample_sets': [[0, 1], [2, 3]]}):
+            with pytest.raises(TypeError, match="requires a HaplotypeMatrix"):
+                relatedness.genetic_relatedness(gs, **kwargs)
+
     def test_pop_assignment_yields_individual_row_sets(self, vcz_store,
                                                         tmp_path):
         """The stream stored pop-file sets in haplotype coordinates while
