@@ -460,6 +460,44 @@ class TestChunkedFused:
             np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
 
+    def test_two_pop_chunked_with_population_subset(self, matrix_with_pops):
+        """Chunked two-pop values must not depend on the population= subset.
+
+        The dispatcher passes population=pop1 alongside pop1/pop2, so the
+        chunked engine holds the pop1 subset while the sample_sets row
+        numbers index the original matrix. The engine must read the rows
+        from the original matrix; indexing the subset selected the wrong
+        haplotypes without raising (#189).
+        """
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        from pg_gpu import _memutil
+
+        hm = matrix_with_pops
+        hm.transfer_to_gpu()
+
+        bp_bins = np.arange(0, 500_001, 50_000, dtype=np.float64)
+        stats = ('pi', 'fst', 'fst_wc', 'dxy', 'da')
+
+        r1 = windowed_statistics_fused(
+            hm, bp_bins=bp_bins, statistics=stats,
+            population='pop1', pop1='pop1', pop2='pop2')
+
+        orig = _memutil.estimate_fused_chunk_size
+        _memutil.estimate_fused_chunk_size = lambda n, memory_fraction=0.35: 500
+        try:
+            r2 = windowed_statistics_fused_chunked(
+                hm, bp_bins=bp_bins, statistics=stats,
+                population='pop1', pop1='pop1', pop2='pop2')
+        finally:
+            _memutil.estimate_fused_chunk_size = orig
+
+        for k in stats:
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
+                                       err_msg=f"Mismatch in {k}")
+
     def test_mixed_single_twopop_chunked(self, matrix_with_pops):
         """Mixed single+two-pop stats should not crash (KeyError regression)."""
         from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked

@@ -1458,15 +1458,24 @@ def _filter_fused_allele_cap_raw(hap_raw, positions):
     >= _FUSED_MAX_ALLELES and emits a ``MultiallelicCapWarning``; missing (-1)
     never triggers the cap. (The non-chunked single-pass path filters inline,
     capturing the keep mask so the two-pop kernel's hap1/hap2 align.)
+
+    Also returns the kept variants' column indices into the unfiltered
+    matrix, or ``None`` when nothing was dropped. The two-population block
+    reads rows from the original matrix, so it needs these to select the
+    same variants the filtered axis holds.
     """
     overcap = hap_raw.max(axis=0) >= _FUSED_MAX_ALLELES
     n_over = int(overcap.sum())
+    keep_idx = None
     if n_over:
         _warn_fused_allele_cap(n_over)
         keep = ~overcap
         hap_raw = hap_raw[:, keep]
         positions = positions[keep]
-    return hap_raw, positions
+        # int32 is enough: the kernel already receives the variant count as
+        # an int32, so a matrix this path accepts cannot exceed that range.
+        keep_idx = cp.where(keep)[0].astype(cp.int32)
+    return hap_raw, positions, keep_idx
 
 
 _fused_windowed_kernel_v2 = cp.RawKernel(r'''
@@ -2437,7 +2446,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 
     # Drop sites the fused kernel's per-allele capacity can't represent. Must
     # precede window indexing so variant-index ranges match the retained sites.
-    hap_raw, positions = _filter_fused_allele_cap_raw(hap_raw, positions)
+    hap_raw, positions, cap_keep_idx = _filter_fused_allele_cap_raw(
+        hap_raw, positions)
     n_total_var = hap_raw.shape[1]
 
     # Window ranges (same setup as non-chunked)
@@ -2602,11 +2612,19 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         if pop1 is None or pop2 is None:
             raise ValueError("pop1 and pop2 required for fst/dxy/da")
 
-        # Get population haplotype indices from the original (unsubsetted) matrix
-        pop1_idx = haplotype_matrix.sample_sets[pop1]
-        pop2_idx = haplotype_matrix.sample_sets[pop2]
-        n1 = len(pop1_idx)
-        n2 = len(pop2_idx)
+        # The population row numbers index the original matrix, but hap_raw
+        # can be the single-population subset (the dispatcher passes
+        # population=pop1 alongside pop1/pop2). CuPy fancy indexing does not
+        # bounds-check, so applying these rows to the subset would silently
+        # read the wrong haplotypes. Read the rows from the original matrix,
+        # and select the same variant columns the cap filter kept.
+        orig_hap = haplotype_matrix.haplotypes
+        pop1_rows = cp.asarray(haplotype_matrix.sample_sets[pop1],
+                               dtype=cp.int64)
+        pop2_rows = cp.asarray(haplotype_matrix.sample_sets[pop2],
+                               dtype=cp.int64)
+        n1 = len(pop1_rows)
+        n2 = len(pop2_rows)
         # Chunk size based on the larger population
         twopop_chunk = estimate_fused_chunk_size(max(n1, n2))
         twopop_chunk = max(twopop_chunk, max_win_variants + 1)
@@ -2632,10 +2650,17 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             clipped_stop = cp.minimum(win_stop[w_idx], c_end) - c_start
             n_overlap = len(w_idx)
 
-            hap1_t = cp.ascontiguousarray(
-                hap_raw[pop1_idx, c_start:c_end].T.astype(cp.int8))
-            hap2_t = cp.ascontiguousarray(
-                hap_raw[pop2_idx, c_start:c_end].T.astype(cp.int8))
+            def pop_chunk_t(rows):
+                # Chunk columns count filtered variants; map them back to
+                # original columns when the cap filter dropped sites.
+                if cap_keep_idx is None:
+                    blk = orig_hap[rows, c_start:c_end]
+                else:
+                    blk = orig_hap[cp.ix_(rows, cap_keep_idx[c_start:c_end])]
+                return cp.ascontiguousarray(blk.T.astype(cp.int8))
+
+            hap1_t = pop_chunk_t(pop1_rows)
+            hap2_t = pop_chunk_t(pop2_rows)
             n_chunk_var = c_end - c_start
 
             out_fst_num = cp.zeros(n_overlap, dtype=cp.float64)
