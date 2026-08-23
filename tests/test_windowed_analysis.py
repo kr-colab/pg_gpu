@@ -218,6 +218,41 @@ class TestWindowedAnalyzer:
         assert 'end' in results.columns
         assert len(results) > 0
 
+    def test_compute_region(self):
+        """compute_region takes genomic coordinates, which normally run far
+        past the variant count."""
+        rng = np.random.RandomState(7)
+        n_variants = 400
+        positions = np.sort(rng.choice(np.arange(1, 1000000), n_variants,
+                                       replace=False))
+        haplotypes = rng.randint(0, 2, size=(20, n_variants))
+        matrix = HaplotypeMatrix(haplotypes, positions, 1, 999999)
+
+        analyzer = WindowedAnalyzer(
+            window_size=20000, step_size=20000,
+            statistics=['pi', 'n_variants'], progress_bar=False)
+
+        results = analyzer.compute_region(matrix, '1', 200000, 300000)
+
+        assert isinstance(results, pd.DataFrame)
+        assert len(results) > 0
+        in_region = ((positions >= 200000) & (positions < 300000)).sum()
+        assert results['n_variants'].sum() == in_region
+
+    def test_compute_region_without_variants(self):
+        """A region that covers no variant gives no windows, not an error."""
+        positions = np.array([1000, 2000, 900000])
+        haplotypes = np.random.randint(0, 2, size=(10, 3))
+        matrix = HaplotypeMatrix(haplotypes, positions, 1, 999999)
+
+        analyzer = WindowedAnalyzer(
+            window_size=10000, statistics=['pi'], progress_bar=False)
+
+        results = analyzer.compute_region(matrix, '1', 400000, 500000)
+
+        assert isinstance(results, pd.DataFrame)
+        assert len(results) == 0
+
     def test_population_analysis(self):
         """Test analysis with multiple populations."""
         n_variants = 500

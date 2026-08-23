@@ -233,11 +233,18 @@ class HaplotypeMatrix:
                 accessible_mask, chrom_start, chrom_end)
         self.accessible_mask = accessible_mask
         if self._accessible_mask is not None and self.n_total_sites is None:
-            if chrom_start is not None and chrom_end is not None:
-                self.n_total_sites = self._accessible_mask.count_accessible(
-                    chrom_start, chrom_end + 1)
-            else:
-                self.n_total_sites = self._accessible_mask.total_accessible
+            self.n_total_sites = self._accessible_bases_in_range()
+
+    def _accessible_bases_in_range(self):
+        """Count the accessible bases inside [chrom_start, chrom_end].
+
+        ``chrom_end`` is inclusive, so the half-open count needs one more
+        base. A matrix without bounds counts the whole mask.
+        """
+        if self.chrom_start is not None and self.chrom_end is not None:
+            return self._accessible_mask.count_accessible(
+                self.chrom_start, self.chrom_end + 1)
+        return self._accessible_mask.total_accessible
 
     @property
     def haplotypes(self):
@@ -366,11 +373,7 @@ class HaplotypeMatrix:
         # span more (we widen it to avoid losing bases inside the range
         # when chrom_end < BED max), but only in-range bases count toward
         # the per-base normalization denominator.
-        if self.chrom_start is not None and self.chrom_end is not None:
-            self.n_total_sites = self.accessible_mask.count_accessible(
-                self.chrom_start, self.chrom_end + 1)
-        else:
-            self.n_total_sites = self.accessible_mask.total_accessible
+        self.n_total_sites = self._accessible_bases_in_range()
         return self
 
     def remove_accessible_mask(self):
@@ -1029,6 +1032,32 @@ class HaplotypeMatrix:
         return (f"HaplotypeMatrix(shape={self.shape}, "
                 f"first_position={first_pos}, last_position={last_pos})")
 
+    def _empty_subset(self) -> "HaplotypeMatrix":
+        """Build a copy of this matrix that holds no variants.
+
+        The constructor rejects zero-size arrays, so a subset that keeps no
+        variant must be assembled attribute by attribute. The caller narrows
+        the coordinates and the callable-site count afterwards if the subset
+        covers less than the parent.
+        """
+        xp = cp if self._device == 'GPU' else np
+        result = object.__new__(HaplotypeMatrix)
+        result._haplotypes = xp.empty((self.haplotypes.shape[0], 0),
+                                      dtype=self.haplotypes.dtype)
+        result._positions = xp.array([], dtype=self.positions.dtype)
+        result._accessible_idx = None
+        result._hap_filtered = None
+        result._pos_filtered = None
+        result._device = self._device
+        result._sample_sets = self._sample_sets
+        result.chrom_start = self.chrom_start
+        result.chrom_end = self.chrom_end
+        result.n_total_sites = self.n_total_sites
+        result.samples = self.samples
+        result.fields = {}
+        result.accessible_mask = None
+        return result
+
     def get_subset(self, positions) -> "HaplotypeMatrix":
         """
         Get a subset of the haplotype matrix based on the provided positions.
@@ -1056,30 +1085,7 @@ class HaplotypeMatrix:
 
         # Handle empty positions array
         if len(positions) == 0:
-            # Create empty subset maintaining the same structure
-            # Need to create arrays that have non-zero size to satisfy constructor
-            if self.device == 'GPU':
-                empty_haplotypes = cp.empty((self.haplotypes.shape[0], 0), dtype=self.haplotypes.dtype)
-                empty_positions = cp.array([], dtype=self.positions.dtype)
-            else:
-                empty_haplotypes = np.empty((self.haplotypes.shape[0], 0), dtype=self.haplotypes.dtype)
-                empty_positions = np.array([], dtype=self.positions.dtype)
-
-            # For empty subsets, bypass constructor validation
-            result = object.__new__(HaplotypeMatrix)
-            result._haplotypes = empty_haplotypes
-            result._positions = empty_positions
-            result._accessible_idx = None
-            result._hap_filtered = None
-            result._pos_filtered = None
-            result.chrom_start = self.chrom_start
-            result.chrom_end = self.chrom_end
-            result._sample_sets = self._sample_sets
-            result._device = self._device
-            result.n_total_sites = self.n_total_sites
-            result.accessible_mask = None
-            result.samples = self.samples
-            return result
+            return self._empty_subset()
 
         if not (positions >= 0).all() or not (positions < self.haplotypes.shape[1]).all():
             raise ValueError("Positions must be valid indices within the haplotype matrix.")
@@ -1098,33 +1104,49 @@ class HaplotypeMatrix:
 
     def get_subset_from_range(self, low: int, high: int) -> "HaplotypeMatrix":
         """
-        Get a subset of the haplotype matrix based on a range of positions.
+        Get a subset of the haplotype matrix over a range of genomic coordinates.
 
         Parameters:
-            low (int): The lower bound of the range (inclusive).
-            high (int): The upper bound of the range (exclusive).
+            low (int): Start of the range in base pairs (inclusive).
+            high (int): End of the range in base pairs (exclusive).
 
         Returns:
-            HaplotypeMatrix: A new instance containing the subset of the haplotype matrix.
+            HaplotypeMatrix: A new instance holding the variants inside the
+                range. The result holds no variants when the range covers none.
         """
-        # Validate range
-        if low < 0 or high > self.positions.size or low >= high:
+        # low and high are genomic coordinates, not variant indices, so the
+        # only bounds that mean anything are that the range starts at or after
+        # zero and is not empty. A range that reaches past the last variant is
+        # a valid query: it returns the variants that do fall inside it.
+        if low < 0 or low >= high:
             raise ValueError("Invalid range specified")
 
-        # Check device and find indices of positions within the specified range
-        positions = cp.asarray(self.positions) if self.device == 'GPU' else np.asarray(self.positions)
-        indices = cp.where((positions >= low) & (positions < high))[0] if self.device == 'GPU' else np.where((positions >= low) & (positions < high))[0]
+        xp = cp if self.device == 'GPU' else np
+        positions = xp.asarray(self.positions)
+        indices = xp.where((positions >= low) & (positions < high))[0]
 
-        # Create the subset of haplotypes based on the found indices
         sliced_mask = None
         if self.accessible_mask is not None:
             sliced_mask = self.accessible_mask.slice(low, high)
+
+        # chrom_end is inclusive, so the last base of [low, high) is high - 1.
+        if len(indices) == 0:
+            result = self._empty_subset()
+            result.chrom_start = low
+            result.chrom_end = high - 1
+            result.accessible_mask = sliced_mask
+            # The parent count covers the whole parent range, not this one.
+            result.n_total_sites = (result._accessible_bases_in_range()
+                                    if sliced_mask is not None else None)
+            return result
+
         return HaplotypeMatrix(
             self.haplotypes[:, indices],
             self.positions[indices],
             chrom_start=low,
-            chrom_end=high,
+            chrom_end=high - 1,
             sample_sets=self._sample_sets,
+            samples=self.samples,
             accessible_mask=sliced_mask,
         )
 

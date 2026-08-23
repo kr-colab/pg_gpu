@@ -229,6 +229,89 @@ def test_get_subset_from_range(sample_vcf):
     assert isinstance(subset, HaplotypeMatrix)
     assert subset.shape == (20, count)
 
+def _sparse_matrix(n_var=100, span=1_000_000, seed=0):
+    """A matrix whose coordinates are far larger than its variant count.
+
+    Real data always looks like this, and it is the case that separates a
+    coordinate range from a range of variant indices.
+    """
+    rng = np.random.RandomState(seed)
+    pos = np.sort(rng.choice(np.arange(1, span), n_var, replace=False))
+    hap = rng.randint(0, 2, size=(20, n_var)).astype(np.int8)
+    return HaplotypeMatrix(hap, pos, chrom_start=1, chrom_end=span - 1)
+
+
+def test_get_subset_from_range_accepts_real_coordinates():
+    """The range is in base pairs, so it may run far past the variant count."""
+    hm = _sparse_matrix()
+    pos = np.asarray(hm.positions)
+    low, high = 200_000, 300_000
+    expected = int(((pos >= low) & (pos < high)).sum())
+    assert expected > 0
+
+    subset = hm.get_subset_from_range(low, high)
+    assert subset.shape == (20, expected)
+    np.testing.assert_array_equal(
+        np.asarray(subset.positions), pos[(pos >= low) & (pos < high)])
+
+
+def test_get_subset_from_range_sets_inclusive_chrom_end():
+    """high is exclusive, but chrom_end is inclusive."""
+    hm = _sparse_matrix()
+    subset = hm.get_subset_from_range(200_000, 300_000)
+    assert subset.chrom_start == 200_000
+    assert subset.chrom_end == 299_999
+
+
+def test_get_subset_from_range_keeps_sample_names():
+    hm = _sparse_matrix()
+    hm.samples = [f"s{i}" for i in range(10)]
+    subset = hm.get_subset_from_range(200_000, 300_000)
+    assert subset.samples == hm.samples
+
+
+def test_get_subset_from_range_empty_window():
+    """A valid range that covers no variant gives an empty matrix."""
+    hm = _sparse_matrix()
+    pos = np.asarray(hm.positions)
+    gap_low = int(pos[0]) + 1
+    gap_high = int(pos[1])
+    assert gap_low < gap_high  # the two first variants are not adjacent
+
+    subset = hm.get_subset_from_range(gap_low, gap_high)
+    assert subset.shape[1] == 0
+    assert subset.positions.size == 0
+    assert subset.chrom_start == gap_low
+    assert subset.chrom_end == gap_high - 1
+    assert subset.fields == {}
+
+
+def test_get_subset_from_range_beyond_last_variant():
+    """A range past the data returns nothing rather than an error."""
+    hm = _sparse_matrix()
+    subset = hm.get_subset_from_range(2_000_000, 3_000_000)
+    assert subset.shape[1] == 0
+
+
+def test_get_subset_from_range_rejects_malformed_range():
+    hm = _sparse_matrix()
+    with pytest.raises(ValueError, match="Invalid range"):
+        hm.get_subset_from_range(-1, 100)
+    with pytest.raises(ValueError, match="Invalid range"):
+        hm.get_subset_from_range(500, 500)
+    with pytest.raises(ValueError, match="Invalid range"):
+        hm.get_subset_from_range(500, 100)
+
+
+def test_empty_subset_exposes_fields(sample_vcf):
+    """An empty subset is a usable matrix, not a half-built one."""
+    hap_matrix = HaplotypeMatrix.from_vcf(sample_vcf)
+    empty = hap_matrix.get_subset(np.array([], dtype=np.int64))
+    assert empty.fields == {}
+    assert empty.shape[1] == 0
+    assert empty.samples == hap_matrix.samples
+
+
 def test_get_subset(sample_vcf):
     """Test get_subset method."""
     hap_matrix = HaplotypeMatrix.from_vcf(sample_vcf)
