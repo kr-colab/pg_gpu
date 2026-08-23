@@ -168,7 +168,8 @@ class GenotypeMatrix:
 
         Each value must be a list of individual row numbers within the
         matrix, without duplicates. Rows are individuals here, so no
-        pairing applies.
+        pairing applies. The dict is stored as given, not copied; mutating
+        it afterwards is not re-validated.
         """
         if sample_sets is None:
             self._sample_sets = None
@@ -178,7 +179,7 @@ class GenotypeMatrix:
         from ._warnings import check_sample_set_rows
         n_rows = self._genotypes.shape[0]
         for key, value in sample_sets.items():
-            check_sample_set_rows(key, value, n_rows)
+            check_sample_set_rows(f"sample_sets[{key!r}]", value, n_rows)
         self._sample_sets = sample_sets
 
     @property
@@ -365,8 +366,14 @@ class GenotypeMatrix:
         # remap sample_sets: haplotype indices -> individual indices
         new_sample_sets = None
         if hap_matrix._sample_sets is not None:
+            from ._warnings import check_paired_rows
             new_sample_sets = {}
             for name, indices in hap_matrix._sample_sets.items():
+                # The i // 2 collapse assumes each set carries whole
+                # individuals; a set holding one gamete of a sample would
+                # silently become that whole individual here.
+                check_paired_rows(
+                    indices, f"GenotypeMatrix.from_haplotype_matrix({name})")
                 # map haplotype indices to individual indices
                 ind_indices = sorted(set(i // 2 for i in indices))
                 new_sample_sets[name] = ind_indices

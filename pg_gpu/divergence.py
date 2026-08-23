@@ -753,7 +753,14 @@ def _get_population_indices(haplotype_matrix: HaplotypeMatrix,
             raise ValueError(f"Population {pop} not found in sample_sets")
         return haplotype_matrix.sample_sets[pop]
     else:
-        return list(pop)
+        indices = list(pop)
+        # Direct row-list arguments never pass the sample_sets setter, so
+        # the same range and duplicate rules apply here before the rows
+        # reach CuPy's unchecked fancy indexing.
+        from ._warnings import check_sample_set_rows
+        check_sample_set_rows("population row list", indices,
+                              haplotype_matrix.haplotypes.shape[0])
+        return indices
 
 
 def _hudson_fst_from_counts(ac1, nv1, ac2, nv2):

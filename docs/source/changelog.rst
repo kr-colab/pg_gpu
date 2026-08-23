@@ -61,12 +61,16 @@ Read this section if you are comparing against older pg_gpu results.
   ``sample_sets`` built by ``load_pop_file`` now lists ``2i`` and
   ``2i + 1`` for each member, and hand-written index lists that assumed
   the previous order need updating.
-* ``sample_sets`` now rejects row lists no matrix can serve: an
-  out-of-range or duplicated row raises ``ValueError`` instead of
+* Row lists are validated at assignment and at resolution: assigning
+  ``sample_sets`` and passing a row list as a population argument both
+  raise ``ValueError`` for out-of-range or duplicated rows instead of
   silently producing wrong numbers. The statistics that pair rows into
   individuals (``fst_weir_cockerham``, ``heterozygosity_observed``,
-  windowed ``fst_wc``) warn when a list does not carry each sample's two
-  rows adjacently; gamete statistics accept any list, as before.
+  windowed ``fst_wc``, and ``GenotypeMatrix.from_haplotype_matrix``)
+  warn when a list does not carry each sample's two rows adjacently;
+  gamete statistics accept any list, as before. Streaming loads with a
+  pop file validate once at stream construction, and the genotype
+  stream's sets now hold individual rows rather than haplotype columns.
 * Windowed ``fst_wc`` now gives the same estimate as
   ``divergence.fst_weir_cockerham``. It used to treat the data as haploid
   and lump every alternate allele together, so it returned a different

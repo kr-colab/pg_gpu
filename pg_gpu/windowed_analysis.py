@@ -2679,12 +2679,21 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         def pop_rows_of(pop):
             rows = (haplotype_matrix.sample_sets[pop]
                     if isinstance(pop, str) else list(pop))
+            if not isinstance(pop, str):
+                # Direct row lists never pass the sample_sets setter; apply
+                # the same range and duplicate rules before the gather.
+                from ._warnings import check_sample_set_rows
+                check_sample_set_rows("population row list", rows,
+                                      haplotype_matrix.haplotypes.shape[0])
             if need_wc:
                 # The kernel pairs consecutive rows into individuals for
                 # Weir-Cockerham; the gamete statistics take any row list.
+                # stacklevel 4: this closure adds a frame over the direct
+                # call sites the default points past.
                 from ._warnings import check_paired_rows
                 label = pop if isinstance(pop, str) else "row list"
-                check_paired_rows(rows, f"windowed fst_wc({label})")
+                check_paired_rows(rows, f"windowed fst_wc({label})",
+                                  stacklevel=4)
             return cp.asarray(rows, dtype=cp.int64)
 
         orig_hap = haplotype_matrix.haplotypes

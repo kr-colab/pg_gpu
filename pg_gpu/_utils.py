@@ -33,6 +33,12 @@ def get_population_matrix(matrix, population: Union[str, list]):
         pop_indices = matrix.sample_sets[population]
     else:
         pop_indices = list(population)
+        # Direct row-list arguments never pass the sample_sets setter, so
+        # the same range and duplicate rules apply here before the rows
+        # reach CuPy's unchecked fancy indexing.
+        from ._warnings import check_sample_set_rows
+        check_sample_set_rows("population row list", pop_indices,
+                              matrix.shape[0])
 
     subset_sets = {'all': list(range(len(pop_indices)))}
     if isinstance(matrix, GenotypeMatrix):

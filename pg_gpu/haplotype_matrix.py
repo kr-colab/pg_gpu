@@ -315,7 +315,8 @@ class HaplotypeMatrix:
         matrix, without duplicates. Lists that do not pair rows into
         individuals are accepted here -- gamete statistics take any list --
         and the statistics that reconstruct individuals warn when they
-        meet one.
+        meet one. The dict is stored as given, not copied; mutating it
+        afterwards is not re-validated.
         """
         if sample_sets is None:
             self._sample_sets = None
@@ -325,7 +326,7 @@ class HaplotypeMatrix:
         from ._warnings import check_sample_set_rows
         n_rows = self._haplotypes.shape[0]
         for key, value in sample_sets.items():
-            check_sample_set_rows(key, value, n_rows)
+            check_sample_set_rows(f"sample_sets[{key!r}]", value, n_rows)
         self._sample_sets = sample_sets
 
     @property

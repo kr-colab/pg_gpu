@@ -103,61 +103,75 @@ class UnpairedRowsWarning(UserWarning):
     """
 
 
-def check_sample_set_rows(name, rows, n_rows):
-    """Reject a sample_sets row list no matrix can serve.
+def _rows_as_numpy(rows):
+    """Row numbers as a host numpy array.
+
+    Accepts lists, tuples, numpy arrays, cupy arrays, and sequences of
+    numpy or cupy integer scalars (``list(cp.arange(4))`` produces the
+    last kind).
+    """
+    if hasattr(rows, 'get') and not isinstance(rows, np.ndarray):
+        rows = rows.get()
+    try:
+        return np.asarray(rows)
+    except (TypeError, ValueError):
+        return np.asarray([int(r) for r in rows])
+
+
+def check_sample_set_rows(label, rows, n_rows):
+    """Reject a row list no matrix can serve.
 
     CuPy fancy indexing does not bounds-check, so an out-of-range row
     silently reads whatever memory it lands on, and a duplicated row counts
     one gamete twice in every statistic. Neither has a valid meaning, so
     both raise. Empty lists pass: subsetting code builds them legitimately.
 
-    A set is a list, a tuple, or a one-dimensional integer array (the
-    streaming loaders build arrays).
+    A set is a list, a tuple, or a one-dimensional integer array (numpy or
+    cupy; the streaming loaders build arrays). ``label`` is interpolated
+    verbatim into the messages, e.g. ``"sample_sets['p1']"`` or
+    ``"population row list"``.
     """
-    if isinstance(rows, (list, tuple)):
-        arr = np.asarray(rows)
-    elif isinstance(rows, np.ndarray):
-        arr = rows
+    if isinstance(rows, (list, tuple, np.ndarray)) or hasattr(rows, 'get'):
+        arr = _rows_as_numpy(rows)
     else:
         raise ValueError(
-            f"sample_sets[{name!r}] must be a list, tuple, or 1-D integer "
-            f"array; got {type(rows).__name__}")
+            f"{label} must be a list, tuple, or 1-D integer array; "
+            f"got {type(rows).__name__}")
     if arr.ndim != 1:
         raise ValueError(
-            f"sample_sets[{name!r}] must be one-dimensional; "
-            f"got shape {arr.shape}")
+            f"{label} must be one-dimensional; got shape {arr.shape}")
     if arr.size == 0:
         return
     if not np.issubdtype(arr.dtype, np.integer):
         raise ValueError(
-            f"sample_sets[{name!r}] must hold integer row numbers; "
-            f"got dtype {arr.dtype}")
+            f"{label} must hold integer row numbers; got dtype {arr.dtype}")
     lo, hi = int(arr.min()), int(arr.max())
     if lo < 0 or hi >= n_rows:
         offender = lo if lo < 0 else hi
         raise ValueError(
-            f"sample_sets[{name!r}] holds row {offender}, but the matrix "
-            f"has rows 0..{n_rows - 1}")
+            f"{label} holds row {offender}, but the matrix has rows "
+            f"0..{n_rows - 1}")
     if np.unique(arr).size != arr.size:
         raise ValueError(
-            f"sample_sets[{name!r}] holds duplicate rows, which would "
-            f"count the same gamete more than once")
+            f"{label} holds duplicate rows, which would count the same "
+            f"gamete more than once")
 
 
-def check_paired_rows(rows, context):
+def check_paired_rows(rows, context, stacklevel=3):
     """Warn when a population row list cannot pair into diploid individuals.
 
     The caller pairs consecutive entries, so the check mirrors that
     exactly: even length, and each consecutive pair drawn from one
     individual (``row // 2`` equal). Order inside a pair and the order of
-    pairs in the list are both free.
+    pairs in the list are both free. ``stacklevel`` points the warning at
+    the caller's caller by default; call sites nested one deeper pass 4.
     """
     n = len(rows)
     problem = None
     if n % 2:
         problem = f"has {n} rows, so pairing drops the last one"
     else:
-        arr = np.asarray(rows)
+        arr = _rows_as_numpy(rows)
         first = arr[0::2] // 2
         second = arr[1::2] // 2
         bad = np.nonzero(first != second)[0]
@@ -173,7 +187,7 @@ def check_paired_rows(rows, context):
             f"and every loader writes sample i to rows 2i and 2i + 1, so "
             f"this set gives them something other than the individuals it "
             f"describes.",
-            UnpairedRowsWarning, stacklevel=3)
+            UnpairedRowsWarning, stacklevel=stacklevel)
 
 
 class BiallelicOnlyWarning(UserWarning):

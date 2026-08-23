@@ -19,7 +19,7 @@ def sample_vcf():
         random_seed=42,
         ploidy=2
     )
-    ts = msprime.sim_mutations(ts, rate=0.01)
+    ts = msprime.sim_mutations(ts, rate=0.01, random_seed=42)
     # Create a temporary file
     with tempfile.NamedTemporaryFile(suffix='.vcf', delete=False) as tmp:
         # Write VCF to temporary file
@@ -489,3 +489,65 @@ class TestUnpairedRowsWarning:
                           for i in range(6)})
         self._assert_quiet(
             lambda: divergence.fst_weir_cockerham(hm, 'p1', 'p2'))
+
+
+class TestDirectListValidation:
+    """Row lists passed as population arguments are validated at resolution,
+    not only at sample_sets assignment."""
+
+    def _hm(self, n_hap=12, n_var=60, seed=3):
+        rng = np.random.RandomState(seed)
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        return HaplotypeMatrix(hap, np.arange(1, n_var + 1) * 10, 0,
+                               (n_var + 1) * 10)
+
+    def test_out_of_range_direct_lists_raise(self):
+        from pg_gpu import diversity, divergence
+        hm = self._hm()
+        with pytest.raises(ValueError, match="rows 0"):
+            diversity.pi(hm, population=[0, 1, 999999])
+        with pytest.raises(ValueError, match="rows 0"):
+            divergence.fst_hudson(hm, [0, 1], [2, 999999])
+
+    def test_duplicate_direct_list_raises(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        with pytest.raises(ValueError, match="duplicate"):
+            divergence.fst_weir_cockerham(hm, [0, 0, 1, 1], [8, 9, 10, 11])
+
+    def test_cupy_array_populations_work(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        hm.transfer_to_gpu()
+        v = divergence.fst_weir_cockerham(hm, cp.arange(4), cp.arange(8, 12))
+        ref = divergence.fst_weir_cockerham(hm, [0, 1, 2, 3], [8, 9, 10, 11])
+        assert np.isclose(v, ref)
+
+    def test_generator_population_works(self):
+        from pg_gpu import diversity
+        hm = self._hm()
+        v = diversity.heterozygosity_observed(hm,
+                                              population=(i for i in range(4)))
+        ref = diversity.heterozygosity_observed(hm, population=[0, 1, 2, 3])
+        assert cp.allclose(cp.asarray(v), cp.asarray(ref))
+
+    def test_chunked_windowed_fst_wc_warns_on_stride(self):
+        from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6], 'p2': [8, 9, 10, 11]}
+        hm.transfer_to_gpu()
+        bp = np.array([0.0, 700.0])
+        with pytest.warns(UnpairedRowsWarning):
+            windowed_statistics_fused_chunked(hm, bp_bins=bp,
+                                              statistics=('fst_wc',),
+                                              pop1='p1', pop2='p2')
+
+    def test_from_haplotype_matrix_warns_on_gamete_set(self):
+        from pg_gpu.genotype_matrix import GenotypeMatrix
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6]}
+        hm.transfer_to_gpu()
+        with pytest.warns(UnpairedRowsWarning):
+            GenotypeMatrix.from_haplotype_matrix(hm)
