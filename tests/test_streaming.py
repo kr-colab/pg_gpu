@@ -38,6 +38,43 @@ def _stream_concat(streaming_hm):
 
 class TestStreamingFromZarr:
 
+    def test_pop_assignment_yields_individual_row_sets(self, vcz_store,
+                                                        tmp_path):
+        """The stream stored pop-file sets in haplotype coordinates while
+        its chunks hold individual rows, so chunk construction raised once
+        sample_sets grew validation."""
+        from pg_gpu import GenotypeMatrix
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        half = n_dip // 2
+        popfile = tmp_path / "pops.tsv"
+        lines = ["sample\tpop"] + [
+            f"s{i}\t{'p1' if i < half else 'p2'}" for i in range(n_dip)]
+        popfile.write_text("\n".join(lines) + "\n")
+
+        stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                          chunk_bp=5_000,
+                                          pop_assignment=str(popfile))
+        sets = stream.sample_sets
+        assert sorted(int(i) for i in sets['p1']) == list(range(half))
+        assert sorted(int(i) for i in sets['p2']) == list(range(half, n_dip))
+        for _, _, chunk in stream.iter_gpu_chunks():
+            assert max(int(i) for i in chunk.sample_sets['p2']) < n_dip
+            break
+
+    def test_grm_runs_with_pop_assignment(self, vcz_store, tmp_path):
+        from pg_gpu import GenotypeMatrix, relatedness
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        popfile = tmp_path / "pops.tsv"
+        lines = ["sample\tpop"] + [f"s{i}\tp1" for i in range(n_dip)]
+        popfile.write_text("\n".join(lines) + "\n")
+        stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                          chunk_bp=5_000,
+                                          pop_assignment=str(popfile))
+        g = relatedness.grm(stream)
+        assert g.shape == (n_dip, n_dip)
+
     def test_streaming_always_returns_streaming_class(self, vcz_store):
         path, _ = vcz_store
         hm = HaplotypeMatrix.from_zarr(path, streaming="always", chunk_bp=5_000)
@@ -274,6 +311,41 @@ class TestMaterialize:
         with pytest.raises(ValueError, match="even count"):
             stream.materialize(region=(10_000, 20_000),
                                sample_subset=[0, 1, 2])  # odd
+
+
+class TestMaterializeSampleSetRenumbering:
+    """materialize(sample_subset=...) renumbers sample_sets into the
+    subset; it used to carry full-matrix row numbers onto a smaller
+    matrix."""
+
+    def _stream_with_pops(self, vcz_store, tmp_path):
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        half = n_dip // 2
+        popfile = tmp_path / "pops.tsv"
+        lines = ["sample\tpop"] + [
+            f"s{i}\t{'p1' if i < half else 'p2'}" for i in range(n_dip)]
+        popfile.write_text("\n".join(lines) + "\n")
+        stream = HaplotypeMatrix.from_zarr(path, streaming="always",
+                                           chunk_bp=5_000,
+                                           pop_assignment=str(popfile))
+        return stream, half
+
+    def test_subset_sets_are_renumbered(self, vcz_store, tmp_path):
+        stream, half = self._stream_with_pops(vcz_store, tmp_path)
+        # Samples 0 and 1 from p1, sample `half` from p2, whole samples.
+        sub = [0, 1, 2, 3, 2 * half, 2 * half + 1]
+        m = stream.materialize(sample_subset=sub)
+        assert m.num_haplotypes == 6
+        assert sorted(int(i) for i in m.sample_sets['p1']) == [0, 1, 2, 3]
+        assert sorted(int(i) for i in m.sample_sets['p2']) == [4, 5]
+
+    def test_population_absent_from_subset_is_dropped(self, vcz_store,
+                                                      tmp_path):
+        stream, half = self._stream_with_pops(vcz_store, tmp_path)
+        m = stream.materialize(sample_subset=[0, 1, 2, 3])
+        assert 'p2' not in m.sample_sets
+        assert sorted(int(i) for i in m.sample_sets['p1']) == [0, 1, 2, 3]
 
 
 class TestChunkFetcherABC:

@@ -433,8 +433,19 @@ class _StreamingMatrixBase:
         )
         # Mirror the eager classes' idiom: store the explicit value
         # (or None) and let the property fall back to a default 'all'
-        # set when no pop file resolved at source construction.
-        self._sample_sets = source.pop_cols
+        # set when no pop file resolved at source construction. The pop
+        # file resolves to haplotype columns; _sets_in_row_space puts them
+        # in this stream's own row space. Validate once here -- every
+        # chunk shares the stream's row space, so chunks carry the sets
+        # without re-checking.
+        sets = source.pop_cols
+        if sets:
+            sets = self._sets_in_row_space(sets)
+            from ._warnings import check_sample_set_rows
+            n_rows = self._sample_axis_size()
+            for name, rows in sets.items():
+                check_sample_set_rows(f"sample_sets[{name!r}]", rows, n_rows)
+        self._sample_sets = sets
         # Span-normalization metadata, mirroring the eager HaplotypeMatrix.
         # None when no accessible BED was supplied at load; see get_span.
         self.accessible_mask = accessible_mask
@@ -663,6 +674,15 @@ class _StreamingMatrixBase:
     def _build_chunk(self, gt, pos, **kwargs):  # pragma: no cover -- abstract
         raise NotImplementedError
 
+    def _sets_in_row_space(self, pop_cols):
+        """Pop-file sets in this stream's row space.
+
+        The pop file resolves to haplotype columns, which already are the
+        rows of a haplotype stream; the genotype stream overrides this to
+        map gametes to individuals.
+        """
+        return pop_cols
+
     def __repr__(self):
         return (
             f"{type(self).__name__}(num_variants={self.num_variants}, "
@@ -705,7 +725,15 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
         return self.num_haplotypes
 
     def _build_chunk(self, gt, pos, **kwargs):
-        return build_haplotype_matrix(gt, pos, **kwargs)
+        # The stream validated sample_sets once at construction and every
+        # chunk shares the stream's row space, so skip the setter's
+        # re-validation -- np.unique per population per chunk adds up to
+        # minutes over a biobank-scale walk.
+        sets = kwargs.pop('sample_sets', None)
+        m = build_haplotype_matrix(gt, pos, **kwargs)
+        if sets is not None:
+            m._sample_sets = sets
+        return m
 
     def _repr_sample_axis(self):
         return f"num_haplotypes={self.num_haplotypes}"
@@ -758,8 +786,22 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
     def _sample_axis_size(self):
         return self.num_individuals
 
+    def _sets_in_row_space(self, pop_cols):
+        # The pop file resolves to haplotype columns, but this stream's
+        # rows are individuals. Both of a sample's gametes floor-divide to
+        # its individual, so the unique halves are the individual rows.
+        # Before this mapping the chunks carried haplotype-numbered sets
+        # that indexed past the individual axis.
+        return {p: np.unique(np.asarray(cols) // 2)
+                for p, cols in pop_cols.items()}
+
     def _build_chunk(self, gt, pos, **kwargs):
+        # Same skip as the haplotype stream: the sets were validated once
+        # at construction, in this stream's own (individual) row space.
+        sets = kwargs.pop('sample_sets', None)
         m = build_genotype_matrix(gt, pos, **kwargs)
+        if sets is not None:
+            m._sample_sets = sets
         if m._n_multiallelic_recoded and not self._biallelic_warned:
             from ._warnings import _warn_biallelic_only
             _warn_biallelic_only(m._n_multiallelic_recoded,
