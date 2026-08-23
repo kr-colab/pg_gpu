@@ -1396,7 +1396,21 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         span_normalize=span_normalize,
         **kwargs
     )
-    return analyzer.compute(haplotype_matrix)
+    df = analyzer.compute(haplotype_matrix)
+    # The analyzer names two-population columns "<stat>_<pop1>_<pop2>"
+    # because it computes every pair. The fused and scatter engines name
+    # them after the statistic alone when exactly two populations are
+    # given, and the same request must return the same columns whichever
+    # engine serves it. With one pair the bare name is unambiguous, so
+    # rename on the way out; direct analyzer use keeps the suffixed form.
+    if populations is not None and len(populations) == 2:
+        p1, p2 = populations
+        df = df.rename(columns={
+            f"{stat}_{p1}_{p2}": stat
+            for stat in statistics
+            if isinstance(stat, str) and f"{stat}_{p1}_{p2}" in df.columns
+        })
+    return df
 
 
 # Helper functions for built-in statistics

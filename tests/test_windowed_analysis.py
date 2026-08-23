@@ -523,6 +523,32 @@ class TestChunkedFused:
             assert len(r[k]) > 0
 
 
+class TestTwoPopColumnNaming:
+    """One request, one column set, whichever engine serves it (#193)."""
+
+    def test_two_pop_columns_match_across_modes(self):
+        rng = np.random.RandomState(7)
+        n_hap, n_var = 40, 400
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40))}
+
+        # 'include' routes fst_wc to the fused engine, 'exclude' to the
+        # per-window fallback; both must name the column after the
+        # statistic alone.
+        frames = {
+            mode: windowed_analysis(
+                hm, window_size=10_000, step_size=10_000,
+                statistics=['fst_wc'], populations=['p1', 'p2'],
+                missing_data=mode)
+            for mode in ('include', 'exclude')
+        }
+        for mode, df in frames.items():
+            assert 'fst_wc' in df.columns, f"no bare fst_wc under {mode!r}"
+        assert list(frames['include'].columns) == list(frames['exclude'].columns)
+
+
 class TestFusedMissingData:
     """Fused two-pop kernel must use per-site valid counts under missingness."""
 
