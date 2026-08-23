@@ -531,6 +531,45 @@ class TestChunkedFused:
                                        equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
 
+    def test_over_cap_allele_in_pop2_drops_site_with_warning(self):
+        """An over-cap allele only pop2 carries must drop the site, warned.
+
+        The cap filter used to reduce over the population= subset (always
+        pop1 from the dispatcher), so a site with an allele index >= 8 in
+        pop2 alone survived it; the kernel's bounds checks then dropped
+        those gametes from the tallies while the valid count kept them,
+        skewing every statistic with no warning.
+        """
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        from pg_gpu._warnings import MultiallelicCapWarning
+
+        rng = np.random.RandomState(5)
+        n_hap, n_var = 40, 300
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[25, 40] = 9                       # pop2 row only
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40))}
+        hm.transfer_to_gpu()
+
+        # Scalar reference on the sites the cap keeps.
+        keep = np.ones(n_var, dtype=bool)
+        keep[40] = False
+        ref_hm = HaplotypeMatrix(hap[:, keep], pos[keep], 0, (n_var + 1) * 100)
+        ref_hm.sample_sets = hm.sample_sets
+        ref = divergence.fst_weir_cockerham(ref_hm, 'p1', 'p2')
+
+        bp = np.array([0.0, (n_var + 1) * 100.0])
+        for fn in (windowed_statistics_fused, windowed_statistics_fused_chunked):
+            with pytest.warns(MultiallelicCapWarning):
+                r = fn(hm, bp_bins=bp, statistics=('fst_wc',),
+                       population='p1', pop1='p1', pop2='p2')
+            np.testing.assert_allclose(r['fst_wc'][0], ref, rtol=1e-9,
+                                       err_msg=fn.__name__)
+
     def test_mixed_single_twopop_chunked(self, matrix_with_pops):
         """Mixed single+two-pop stats should not crash (KeyError regression)."""
         from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked

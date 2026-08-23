@@ -1471,7 +1471,7 @@ def _warn_fused_allele_cap(n_over):
         MultiallelicCapWarning, stacklevel=3)
 
 
-def _filter_fused_allele_cap_raw(hap_raw, positions):
+def _filter_fused_allele_cap_raw(hap_raw, positions, cap_source=None):
     """Cap filter for the chunked path's un-transposed (n_hap, n_var) matrix.
 
     Reduces over the haplotype axis (axis 0) to get per-variant max allele
@@ -1481,12 +1481,19 @@ def _filter_fused_allele_cap_raw(hap_raw, positions):
     never triggers the cap. (The non-chunked single-pass path filters inline,
     capturing the keep mask so the two-pop kernel's hap1/hap2 align.)
 
+    ``cap_source`` is the matrix the reduction runs over; it defaults to
+    ``hap_raw`` but must be the original matrix whenever the kernels will
+    read rows beyond ``hap_raw`` -- otherwise an over-cap allele in those
+    rows survives the filter and is silently dropped from the tallies. It
+    must share ``hap_raw``'s variant axis.
+
     Also returns the kept variants' column indices into the unfiltered
     matrix, or ``None`` when nothing was dropped. The two-population block
     reads rows from the original matrix, so it needs these to select the
     same variants the filtered axis holds.
     """
-    overcap = hap_raw.max(axis=0) >= _FUSED_MAX_ALLELES
+    src = hap_raw if cap_source is None else cap_source
+    overcap = src.max(axis=0) >= _FUSED_MAX_ALLELES
     n_over = int(overcap.sum())
     keep_idx = None
     if n_over:
@@ -1625,10 +1632,10 @@ _fused_windowed_twopop_kernel = cp.RawKernel(r'''
    half[] holds gametes whose partner is missing (and a trailing unpaired
    gamete), which count toward allele frequencies but form no individual.
 
-   Sites carrying an allele index >= MAX_ALLELES are dropped on the host, but
-   the bounds checks stay because that filter is derived from the
-   single-population subset (or the whole matrix), neither of which need cover
-   both of pop1 and pop2. */
+   Sites carrying an allele index >= MAX_ALLELES are dropped on the host,
+   which derives the filter from the whole matrix whenever two-population
+   statistics are requested, so it covers pop1 and pop2. The bounds checks
+   stay as a guard for direct kernel callers. */
 __device__ inline void tally_pop(const signed char* row, int n_hap, int need_wc,
                                  int* hom, int* het, int* half,
                                  int* out_valid, int* out_nind) {
@@ -2024,7 +2031,16 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # variant-index ranges are computed against the retained sites. Capture the
     # keep mask so the two-pop path can slice hap1/hap2 to the same variants
     # (positions/window indices are computed against the filtered set below).
-    cap_keep = hap.max(axis=1) < _FUSED_MAX_ALLELES if hap.shape[0] else None
+    # When two-population statistics are requested the kernel reads pop1 and
+    # pop2 rows of the original matrix, which the single-population subset
+    # need not cover, so the reduction runs over the original.
+    if any(s in ('fst', 'fst_hudson', 'fst_wc', 'dxy', 'da')
+           for s in statistics):
+        cap_src = haplotype_matrix.haplotypes
+        cap_keep = (cap_src.max(axis=0) < _FUSED_MAX_ALLELES
+                    if cap_src.shape[1] else None)
+    else:
+        cap_keep = hap.max(axis=1) < _FUSED_MAX_ALLELES if hap.shape[0] else None
     if cap_keep is not None and not bool(cap_keep.all()):
         _warn_fused_allele_cap(int((~cap_keep).sum()))
         hap = hap[cap_keep]
@@ -2467,9 +2483,15 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         positions = cp.asarray(positions)
 
     # Drop sites the fused kernel's per-allele capacity can't represent. Must
-    # precede window indexing so variant-index ranges match the retained sites.
+    # precede window indexing so variant-index ranges match the retained
+    # sites. When two-population statistics are requested the kernels read
+    # pop1 and pop2 rows of the original matrix, which the single-population
+    # subset need not cover, so the cap reduction runs over the original.
+    two_pop_stats = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
+    two_pop_requested = any(s in statistics for s in two_pop_stats)
     hap_raw, positions, cap_keep_idx = _filter_fused_allele_cap_raw(
-        hap_raw, positions)
+        hap_raw, positions,
+        cap_source=haplotype_matrix.haplotypes if two_pop_requested else None)
     n_total_var = hap_raw.shape[1]
 
     # Window ranges (same setup as non-chunked)
@@ -2628,8 +2650,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             results['max_daf'] = max_daf_arr
 
     # ── Two-pop stats via chunked fused kernel ───────────────────────────
-    two_pop_stats = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
-    two_pop_requested = any(s in statistics for s in two_pop_stats)
+    # two_pop_requested was computed above, before the cap filter, which
+    # needs it to pick its reduction source.
     if two_pop_requested:
         if pop1 is None or pop2 is None:
             raise ValueError("pop1 and pop2 required for fst/dxy/da")
