@@ -551,3 +551,11 @@ class TestDirectListValidation:
         hm.transfer_to_gpu()
         with pytest.warns(UnpairedRowsWarning):
             GenotypeMatrix.from_haplotype_matrix(hm)
+
+    def test_genetic_relatedness_list_of_lists_validated(self):
+        from pg_gpu import relatedness
+        hm = self._hm()
+        hm.transfer_to_gpu()
+        with pytest.raises(ValueError, match="rows 0"):
+            relatedness.genetic_relatedness(
+                hm, sample_sets=[[0, 1], [2, 999999]])

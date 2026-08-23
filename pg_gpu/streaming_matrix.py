@@ -599,7 +599,9 @@ class _StreamingMatrixBase:
 
             The stream's ``sample_sets`` are renumbered into the subset:
             each population keeps the members the subset retains, and a
-            population with none left is dropped.
+            population with none left is dropped. On a genotype stream
+            the sets hold individual rows, so an individual survives only
+            when the subset keeps both of its gametes as one pair.
         """
         if region is None:
             left, right = self.chrom_start, self.chrom_end
@@ -637,19 +639,28 @@ class _StreamingMatrixBase:
 
         # sample_subset renumbers the rows, so full-matrix sample_sets no
         # longer apply. Keep each population's surviving members, renumbered
-        # into the subset; a population with no member left is dropped.
+        # into the subset; a population with no member left is dropped. The
+        # renumbering is per-class: the subset is haplotype columns, and the
+        # genotype stream's sets hold individual rows.
         sets = self._sample_sets
         if sample_subset is not None and sets:
-            new_row = {int(r): i for i, r in enumerate(sample_subset)}
-            sets = {p: [new_row[int(r)] for r in rows if int(r) in new_row]
-                    for p, rows in sets.items()}
-            sets = {p: rows for p, rows in sets.items() if rows} or None
+            sets = {p: rows for p, rows in
+                    self._renumber_sets(sets, sample_subset).items()
+                    if len(rows)} or None
 
         return self._build_chunk(
             gt, pos,
             chrom_start=left, chrom_end=right,
             sample_sets=sets,
         )
+
+    def _renumber_sets(self, sets, sample_subset):
+        """Sets renumbered into the subset's row space; rows the subset
+        does not retain are dropped. Rows here are haplotypes; the
+        genotype stream overrides to renumber individuals."""
+        new_row = {int(r): i for i, r in enumerate(sample_subset)}
+        return {p: [new_row[int(r)] for r in rows if int(r) in new_row]
+                for p, rows in sets.items()}
 
     def _read_subsample_via_kvikio(self, left, right, sample_subset):
         """Open the fetcher's GDSStore-backed ``call_genotype`` array
@@ -794,6 +805,22 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
         # that indexed past the individual axis.
         return {p: np.unique(np.asarray(cols) // 2)
                 for p, cols in pop_cols.items()}
+
+    def _renumber_sets(self, sets, sample_subset):
+        # The subset names haplotype columns, but this stream's sets hold
+        # individual rows. Subset individual j is the column pair
+        # (subset[2j], subset[2j + 1]); an individual survives when its
+        # two gametes form one such pair. Split pairs dissolve their
+        # individual, so its members drop from the sets, matching the
+        # materialize docstring's whole-samples guidance.
+        new_ind = {}
+        for j in range(len(sample_subset) // 2):
+            a = int(sample_subset[2 * j])
+            b = int(sample_subset[2 * j + 1])
+            if a // 2 == b // 2:
+                new_ind[a // 2] = j
+        return {p: [new_ind[int(r)] for r in rows if int(r) in new_ind]
+                for p, rows in sets.items()}
 
     def _build_chunk(self, gt, pos, **kwargs):
         # Same skip as the haplotype stream: the sets were validated once

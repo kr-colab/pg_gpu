@@ -75,6 +75,33 @@ class TestStreamingFromZarr:
         g = relatedness.grm(stream)
         assert g.shape == (n_dip, n_dip)
 
+    def test_materialize_subset_renumbers_individual_sets(self, vcz_store,
+                                                          tmp_path):
+        """The subset names haplotype columns while this stream's sets
+        hold individual rows; the renumbering used to key on haplotype
+        coordinates and produce out-of-range individual sets, silently
+        after chunk construction stopped re-validating."""
+        from pg_gpu import GenotypeMatrix
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        half = n_dip // 2
+        popfile = tmp_path / "pops.tsv"
+        lines = ["sample\tpop"] + [
+            f"s{i}\t{'p1' if i < half else 'p2'}" for i in range(n_dip)]
+        popfile.write_text("\n".join(lines) + "\n")
+        stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                          chunk_bp=5_000,
+                                          pop_assignment=str(popfile))
+
+        # Whole samples 0, 1 (p1) and `half` (p2), as haplotype columns.
+        sub = [0, 1, 2, 3, 2 * half, 2 * half + 1]
+        m = stream.materialize(sample_subset=sub)
+        assert m.num_individuals == 3
+        assert sorted(int(i) for i in m.sample_sets['p1']) == [0, 1]
+        assert sorted(int(i) for i in m.sample_sets['p2']) == [2]
+        for rows in m.sample_sets.values():
+            assert max(int(i) for i in rows) < m.num_individuals
+
     def test_streaming_always_returns_streaming_class(self, vcz_store):
         path, _ = vcz_store
         hm = HaplotypeMatrix.from_zarr(path, streaming="always", chunk_bp=5_000)
