@@ -157,3 +157,68 @@ def test_heterozygosity_zero_sample_pop_site_is_finite():
     gm.sample_sets = {"A": [0, 1, 2], "B": [3, 4, 5, 6]}
     het = _compute_heterozygosity(gm, ["A", "B"], use_genotypes=True)
     assert all(np.isfinite(v) for v in het.values())
+
+
+# ---------------------------------------------------------------------------
+# Haplotype-path heterozygosity: coding invariance, site set, missing calls
+# ---------------------------------------------------------------------------
+
+
+class TestHaplotypeHeterozygosity:
+    """The hap branch of ``_compute_heterozygosity`` must count the alt allele
+    on the same exactly-two-present-allele, indicator-recoded site set as the
+    LD sums, whatever the allele coding, and drop missing calls from the
+    per-site sample size."""
+
+    def _hm(self, hap, sets=None):
+        from pg_gpu import HaplotypeMatrix
+        hap = np.asarray(hap, dtype=np.int8)
+        n_var = hap.shape[1]
+        pos = np.arange(1, n_var + 1, dtype=np.int64) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = sets or {"A": list(range(hap.shape[0]))}
+        hm.transfer_to_gpu()
+        return hm
+
+    BASE = np.array([[0, 1, 0],
+                     [1, 1, 0],
+                     [1, 0, 1],
+                     [1, 0, 0]], dtype=np.int8)
+
+    def test_oracle_value(self):
+        # per-site alt carriers a of n=4: 2*a*(n-a)/(n*(n-1))
+        # cols: a=3 -> 0.5, a=2 -> 2/3, a=1 -> 0.5
+        het = _compute_heterozygosity(self._hm(self.BASE), ["A"])
+        assert het["H_0_0"] == pytest.approx(0.5 + 2 / 3 + 0.5)
+
+    def test_coding_invariance(self):
+        h01 = _compute_heterozygosity(self._hm(self.BASE), ["A"])
+        h02 = _compute_heterozygosity(self._hm(self.BASE * 2), ["A"])
+        h12 = _compute_heterozygosity(self._hm(self.BASE + 1), ["A"])
+        assert h02 == pytest.approx(h01)
+        assert h12 == pytest.approx(h01)
+
+    def test_coding_invariance_two_pops(self):
+        sets = {"A": [0, 1], "B": [2, 3]}
+        h01 = _compute_heterozygosity(self._hm(self.BASE, sets), ["A", "B"])
+        h02 = _compute_heterozygosity(self._hm(self.BASE * 2, sets),
+                                      ["A", "B"])
+        assert set(h01) == {"H_0_0", "H_0_1", "H_1_1"}
+        assert h02 == pytest.approx(h01)
+        # cross term, per site: (ref_A*alt_B + alt_A*ref_B) / (n_A*n_B)
+        # cols (a_A, a_B) of n=2 each: (1,2) -> 0.5, (2,0) -> 1.0, (0,1) -> 0.5
+        assert h01["H_0_1"] == pytest.approx(0.5 + 1.0 + 0.5)
+
+    def test_multiallelic_site_excluded(self):
+        tri = np.hstack([self.BASE,
+                         np.array([[0], [1], [2], [0]], dtype=np.int8)])
+        h_base = _compute_heterozygosity(self._hm(self.BASE), ["A"])
+        h_tri = _compute_heterozygosity(self._hm(tri), ["A"])
+        assert h_tri == pytest.approx(h_base)
+
+    def test_missing_call_leaves_site_sample_size(self):
+        # one alt carrier among three valid calls; counting the missing call
+        # as ref (n=4, a=1) would give 0.5 instead
+        col = np.array([[1], [0], [0], [-1]], dtype=np.int8)
+        het = _compute_heterozygosity(self._hm(col), ["A"])
+        assert het["H_0_0"] == pytest.approx(2 * 1 * 2 / (3 * 2))
