@@ -607,3 +607,16 @@ class TestHaplotypeDiversity:
         assert abs(h_div_pop1 - h_div_allel_pop1) < 1e-10
         assert abs(h_div_pop2 - h_div_allel_pop2) < 1e-10
         assert abs(h_div_all - h_div_allel_all) < 1e-10
+
+
+def test_diversity_stats_key_order_matches_request():
+    """The result dict lists keys in the caller's order, whatever the
+    process hash seed, so DataFrame columns built from it are stable."""
+    hap = np.random.default_rng(5).integers(0, 2, (12, 80), dtype=np.int8)
+    pos = np.arange(1, 81, dtype=np.int64) * 100
+    hm = HaplotypeMatrix(cp.asarray(hap), cp.asarray(pos))
+    for order in (['pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'],
+                  ['tajimas_d', 'theta_l', 'pi', 'segregating_sites'],
+                  ['theta_h', 'pi']):
+        res = diversity.diversity_stats(hm, statistics=order)
+        assert list(res) == order

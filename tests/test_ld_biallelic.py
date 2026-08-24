@@ -300,3 +300,44 @@ class TestLoaderConsistency:
                 np.testing.assert_allclose(
                     r[k], ref[k], rtol=1e-9, atol=1e-12,
                     err_msg=f"{name} loader LD differs from ts in bin {k}")
+
+
+class TestFilterSpanPreserved:
+    """restrict_to_biallelic / restrict_to_segregating keep the parent
+    chromosome bounds, so span-normalized statistics keep their
+    denominator after filtering."""
+
+    def _hm(self):
+        import numpy as np
+        import cupy as cp
+        from pg_gpu import HaplotypeMatrix
+        rng = np.random.default_rng(31)
+        hap = rng.integers(0, 2, (10, 50), dtype=np.int8)
+        hap[:, 7][hap[:, 7] == 1] = 2
+        hap[np.array([0, 1, 2]), 7] = 1  # three alleles present at site 7
+        hap[:, 20] = 0                    # monomorphic site
+        pos = np.sort(rng.choice(np.arange(500, 9500), 50,
+                                 replace=False)).astype(np.int64)
+        return HaplotypeMatrix(cp.asarray(hap), cp.asarray(pos),
+                               chrom_start=0, chrom_end=10000)
+
+    def test_biallelic_keeps_bounds(self):
+        h = self._hm()
+        hb = h.restrict_to_biallelic()
+        assert hb.num_variants == 49
+        assert (hb.chrom_start, hb.chrom_end) == (0, 10000)
+
+    def test_segregating_keeps_bounds(self):
+        h = self._hm()
+        hs = h.restrict_to_segregating()
+        assert hs.num_variants == 49
+        assert (hs.chrom_start, hs.chrom_end) == (0, 10000)
+
+    def test_span_normalized_pi_uses_parent_span(self):
+        import pytest
+        from pg_gpu import diversity
+        h = self._hm()
+        hb = h.restrict_to_biallelic()
+        raw = diversity.pi(hb, span_normalize=False)
+        per_bp = diversity.pi(hb, span_normalize=True)
+        assert per_bp == pytest.approx(raw / 10001)

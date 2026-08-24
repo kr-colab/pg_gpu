@@ -1163,7 +1163,9 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
         elif stat not in ('pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'):
             raise ValueError(f"Unknown statistic: {stat}")
 
-    return results
+    # Give back keys in the caller's order; the theta batch above fills
+    # results in set-iteration order, which varies with the hash seed.
+    return {s: results[s] for s in statistics}
 
 
 

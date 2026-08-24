@@ -130,6 +130,10 @@ Read this section if you are comparing against older pg_gpu results.
 * ``dxy(span_normalize=False)`` and ``da(span_normalize=False)`` return
   the raw sum, matching every other statistic. They used to divide by
   the number of sites.
+* The biallelic and segregating filters keep the parent matrix's
+  chromosome bounds. The old filter moved the bounds to the first and
+  last surviving variant, which quietly changed the denominator of any
+  span-normalized statistic computed afterwards.
 * ``decomposition.pairwise_distance`` supports ``euclidean``,
   ``sqeuclidean``, and ``cityblock``. Other metrics now raise
   ``NotImplementedError``, and passing a ``GenotypeMatrix`` raises a
