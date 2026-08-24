@@ -1584,16 +1584,20 @@ class TestFusedPerSiteWindowMembership:
                              N_DAF_BINS - 1)
         return hm, pos, dac, daf_bin
 
-    def _check_window(self, row_hist, row_mu, row_nsl, member,
-                      dac, daf_bin, nsl_all, label):
+    def _check_window(self, row_hist, row_mu, member, dac, daf_bin, label,
+                      row_nsl=None, nsl_all=None):
         from pg_gpu.windowed_analysis import N_DAF_BINS
         exp_hist = np.bincount(daf_bin[member],
                                minlength=N_DAF_BINS).astype(float)
+        if exp_hist.sum() > 0:
+            exp_hist = exp_hist / exp_hist.sum()   # daf_hist rows sum to 1
         np.testing.assert_allclose(row_hist, exp_hist,
                                    err_msg=f"daf_hist mismatch in {label}")
         is_edge = (dac[member] == 1) | (dac[member] == self.n_hap - 1)
         np.testing.assert_allclose(row_mu, is_edge.mean(), atol=1e-12,
                                    err_msg=f"mu_sfs mismatch in {label}")
+        if nsl_all is None:
+            return
         v = nsl_all[member]
         v = v[np.isfinite(v)]
         if len(v):
@@ -1622,9 +1626,9 @@ class TestFusedPerSiteWindowMembership:
             if not member.any():
                 continue
             hist = np.array([row[f'daf_bin_{b}'] for b in range(N_DAF_BINS)])
-            self._check_window(hist, row['mu_sfs'], row['mean_nsl'],
-                               member, dac, daf_bin, nsl_all,
-                               f"[{s}, {e})")
+            self._check_window(hist, row['mu_sfs'], member, dac, daf_bin,
+                               f"[{s}, {e})", row_nsl=row['mean_nsl'],
+                               nsl_all=nsl_all)
 
     def test_direct_bp_bins_branch(self, data):
         # Calling the fused function with explicit contiguous bp_bins
@@ -1638,14 +1642,10 @@ class TestFusedPerSiteWindowMembership:
             per_base=False)
         for wi in range(4):
             member = (pos >= bp[wi]) & (pos < bp[wi + 1])
-            exp_hist = np.bincount(daf_bin[member],
-                                   minlength=N_DAF_BINS).astype(float)
             got_hist = np.array([res[f'daf_bin_{b}'][wi]
                                  for b in range(N_DAF_BINS)])
-            np.testing.assert_allclose(got_hist, exp_hist)
-            is_edge = (dac[member] == 1) | (dac[member] == self.n_hap - 1)
-            np.testing.assert_allclose(res['mu_sfs'][wi], is_edge.mean(),
-                                       atol=1e-12)
+            self._check_window(got_hist, res['mu_sfs'][wi], member, dac,
+                               daf_bin, f"bp bin {wi}")
 
 
 class TestEngineGridAgreement:

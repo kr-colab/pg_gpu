@@ -42,7 +42,7 @@ from pg_gpu.windowed_analysis import (
     _windowed_thetas_scatter,
     _windowed_twopop_scatter,
     windowed_statistics_fused,
-    _DAF_N_BINS,
+    N_DAF_BINS,
 )
 
 from .conftest import simulate_hm
@@ -463,7 +463,7 @@ def test_path_matches_scalar(request, condition, stat, path):
 
 @pytest.mark.parametrize("condition", list(_CONDITIONS))
 def test_daf_hist_matches_scalar(request, condition):
-    """daf_hist is vector-valued (daf_bin_0 .. daf_bin_{_DAF_N_BINS - 1}), so it
+    """daf_hist is vector-valued (daf_bin_0 .. daf_bin_{N_DAF_BINS - 1}), so it
     sits outside the scalar _STATS matrix. The fused engine computes it under
     missing_data='include'; check its whole-region histogram against
     diversity.daf_histogram.
@@ -475,11 +475,11 @@ def test_daf_hist_matches_scalar(request, condition):
         pytest.skip("windowed daf_hist is computed by the fused engine "
                     "(missing_data='include') only")
     hm = request.getfixturevalue(cond.fixture)
-    ref, _ = diversity.daf_histogram(hm, n_bins=_DAF_N_BINS, missing_data="include")
+    ref, _ = diversity.daf_histogram(hm, n_bins=N_DAF_BINS, missing_data="include")
 
     out = windowed_statistics_fused(hm, _whole_bp_bins(hm),
                                     statistics=("daf_hist",), per_base=False,
                                     missing_data="include", population=None)
     got_fused = np.array([np.asarray(out[f"daf_bin_{b}"])[0]
-                          for b in range(_DAF_N_BINS)])
+                          for b in range(N_DAF_BINS)])
     np.testing.assert_allclose(got_fused, ref, rtol=RTOL, atol=ATOL)

@@ -811,7 +811,7 @@ class TestWindowedDafMuSfsMatchesScalar:
     @pytest.mark.parametrize("kind", ["biallelic", "multiallelic"])
     @pytest.mark.parametrize("missing", [False, True])
     def test_whole_region_matches_scalar(self, kind, missing):
-        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
+        from pg_gpu.windowed_analysis import windowed_analysis, N_DAF_BINS
         hap = self._hap(kind, missing)
         nv = hap.shape[1]
         pos = np.arange(nv) * 100
@@ -823,10 +823,10 @@ class TestWindowedDafMuSfsMatchesScalar:
                                missing_data='include')
         assert len(wa) == 1
         w_mu = wa['mu_sfs'].values[0]
-        w_hist = np.array([wa[f'daf_bin_{b}'].values[0] for b in range(_DAF_N_BINS)])
+        w_hist = np.array([wa[f'daf_bin_{b}'].values[0] for b in range(N_DAF_BINS)])
 
         sc_mu = diversity.mu_sfs(hm, missing_data='include')
-        sc_hist, _ = diversity.daf_histogram(hm, n_bins=_DAF_N_BINS, missing_data='include')
+        sc_hist, _ = diversity.daf_histogram(hm, n_bins=N_DAF_BINS, missing_data='include')
 
         if np.isnan(sc_mu):
             assert np.isnan(w_mu)
@@ -838,7 +838,7 @@ class TestWindowedDafMuSfsMatchesScalar:
         # A site that is monomorphic for the derived allele but has one missing
         # haplotype must not count as an SFS edge: classification uses the site's
         # own valid-sample count, not a global haplotype count.
-        from pg_gpu.windowed_analysis import windowed_analysis, _DAF_N_BINS
+        from pg_gpu.windowed_analysis import windowed_analysis, N_DAF_BINS
         n = 20
         hap = np.zeros((n, 4), dtype=np.int8)
         hap[:, :] = np.array([0, 1, 1, 1])  # sites 1..3 monomorphic-derived
