@@ -12,7 +12,10 @@ import numpy as np
 import cupy as cp
 import pandas as pd
 
+from cupy import cublas
+
 from .haplotype_matrix import HaplotypeMatrix
+from ._memutil import allele_counts, estimate_variant_chunk_size
 from ._utils import get_population_matrix as _get_population_matrix
 
 _GPU_MEM_BUDGET = 0.3
@@ -35,14 +38,35 @@ def _prepare_centered(haplotype_matrix, population=None, missing_data='include',
     False the count is not computed (returned as 0), avoiding its host sync on the
     per-window path (local PCA normalizes by ncol, not segregating sites).
     """
-    from ._memutil import allele_counts
+    hap, K = _gpu_hap(haplotype_matrix, population, n_alleles)
+    return _centered_block(hap, missing_data, K, need_segregating)
 
+
+def _gpu_hap(haplotype_matrix, population=None, n_alleles=None):
+    """Population-subset, move to the GPU, and resolve the allele width K.
+
+    ``n_alleles`` hoists K when the caller already knows it, avoiding the
+    per-call ``hap.max()`` host sync.
+    """
     matrix = (_get_population_matrix(haplotype_matrix, population)
               if population is not None else haplotype_matrix)
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
-
     hap = matrix.haplotypes
+    if n_alleles is not None:
+        K = int(n_alleles)
+    else:
+        K = int(hap.max()) + 1 if hap.size else 1
+    return hap, K
+
+
+def _centered_block(hap, missing_data, K, need_segregating=True):
+    """Standardized block for one GPU variant slice; see _prepare_centered.
+
+    Every step is per-site (allele counts, centering, the missing-complete
+    filter, the segregating count), so slicing the variant axis and summing
+    the per-slice Grams reproduces the whole-matrix Gram exactly.
+    """
     n_samples, n_var = hap.shape
     if missing_data == 'exclude' and n_var:
         complete = cp.sum(hap >= 0, axis=0) == n_samples
@@ -51,10 +75,6 @@ def _prepare_centered(haplotype_matrix, population=None, missing_data='include',
     if hap.shape[1] == 0:
         return cp.zeros((n_samples, 0), dtype=cp.float64), 0
 
-    if n_alleles is not None:
-        K = int(n_alleles)                             # hoisted (avoids a per-call max sync)
-    else:
-        K = int(hap.max()) + 1 if hap.size else 1
     ac, n_valid = allele_counts(hap, n_alleles=K)     # (n_var, K), (n_var,)
     pairs = cp.argwhere(ac > 0)                        # present (site, allele), all alleles
     if pairs.shape[0] == 0:
@@ -74,6 +94,31 @@ def _prepare_centered(haplotype_matrix, population=None, missing_data='include',
     else:
         n_segregating = 0
     return X, n_segregating
+
+
+def _centered_gram_chunked(hap, missing_data, K, chunk_vars):
+    """Accumulate the centered Gram X @ X.T over variant chunks.
+
+    Never materializes the full standardized matrix: each chunk builds its
+    own (n_samples, chunk_cols) block and rank-k-updates the accumulator
+    with cublas syrk, which computes only the LOWER triangle (half the
+    flops of a full product; the upper triangle stays zero, which is the
+    triangle ``eigh`` reads). Returns (C, n_segregating, n_cols); the
+    chunk summation order differs from a dense product, so C matches it
+    to float accumulation error, not bit for bit.
+    """
+    n_samples, n_var = hap.shape
+    C = cp.zeros((n_samples, n_samples), dtype=cp.float64)
+    n_segregating = 0
+    n_cols = 0
+    for start in range(0, n_var, chunk_vars):
+        Xc, seg = _centered_block(
+            hap[:, start:start + chunk_vars], missing_data, K)
+        if Xc.shape[1]:
+            cublas.syrk('N', Xc, out=C, alpha=1.0, beta=1.0, lower=True)
+        n_segregating += seg
+        n_cols += Xc.shape[1]
+    return C, n_segregating, n_cols
 
 
 def _pca_from_gram(C, n_samples, n_components):
@@ -103,7 +148,9 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     centered by its allele frequency with no variance scaling, and the
     sample-by-sample Gram X @ X.T is normalized by the number of segregating
     sites. Every haplotype is treated as its own sample, so this is
-    multiallelic-correct at any ploidy. For the diploid dosage PCA standardized by
+    multiallelic-correct at any ploidy. When the standardized matrix would
+    not fit in GPU memory, the Gram is accumulated over variant chunks
+    instead, so exact PCA runs at any matrix size. For the diploid dosage PCA standardized by
     binomial variance, use pca_dosage on a GenotypeMatrix.
 
     Parameters
@@ -132,11 +179,19 @@ def pca(haplotype_matrix: HaplotypeMatrix,
             "for the diploid dosage PCA standardized by binomial variance use "
             "pca_dosage on a GenotypeMatrix.")
 
-    X, n_segregating = _prepare_centered(haplotype_matrix, population, missing_data)
-    n_samples, n_cols = X.shape
-    n_components = min(n_components, n_samples, max(n_cols, 1))
+    hap, K = _gpu_hap(haplotype_matrix, population)
+    n_samples, n_var = hap.shape
 
-    C = X @ X.T
+    # One code path at any size: the accumulator sized by the shared
+    # chunk estimator degenerates to a single iteration when memory is
+    # ample. The standardization keeps ~3 float64 arrays of block size
+    # alive at peak, and K bounds the per-variant column expansion
+    # (at most K present alleles per site).
+    chunk_vars = estimate_variant_chunk_size(
+        n_samples, bytes_per_element=8, n_intermediates=3 * K)
+    C, n_segregating, n_cols = _centered_gram_chunked(
+        hap, missing_data, K, chunk_vars)
+    n_components = min(n_components, n_samples, max(n_cols, 1))
     if n_segregating > 0:
         C = C / n_segregating
     return _pca_from_gram(C, n_samples, n_components)

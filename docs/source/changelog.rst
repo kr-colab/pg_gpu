@@ -111,6 +111,9 @@ Read this section if you are comparing against older pg_gpu results.
   ``pca_dosage`` / ``randomized_pca_dosage``, which take a
   ``GenotypeMatrix``. The ``scaler`` argument is gone, and each
   function raises a ``TypeError`` on the wrong matrix type.
+  ``pca`` accumulates its Gram over variant chunks when the standardized
+  matrix would not fit in GPU memory, so the exact decomposition runs at
+  any matrix size.
   ``local_pca`` and ``lostruct`` changed the same way. They no longer
   match the R ``lostruct`` package number for number -- the eigenvalue
   scale differs -- though the component directions still agree closely,
