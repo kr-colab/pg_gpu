@@ -1170,10 +1170,13 @@ class HaplotypeMatrix:
             return self.get_subset(keep)
         hap = self.haplotypes[:, keep]
         positions = self.positions[keep]
+        # Dropping sites does not shrink the chromosome: keep the parent
+        # bounds so span-normalized statistics keep their denominator,
+        # like the GenotypeMatrix filters.
         return HaplotypeMatrix(
             hap, positions,
-            chrom_start=int(positions[0].get()),
-            chrom_end=int(positions[-1].get()),
+            chrom_start=self.chrom_start,
+            chrom_end=self.chrom_end,
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
             accessible_mask=self.accessible_mask,
@@ -1196,10 +1199,13 @@ class HaplotypeMatrix:
             return self.get_subset(keep)
         hap = self.haplotypes[:, keep]
         positions = self.positions[keep]
+        # Dropping sites does not shrink the chromosome: keep the parent
+        # bounds so span-normalized statistics keep their denominator,
+        # like the GenotypeMatrix filters.
         return HaplotypeMatrix(
             hap, positions,
-            chrom_start=int(positions[0].get()),
-            chrom_end=int(positions[-1].get()),
+            chrom_start=self.chrom_start,
+            chrom_end=self.chrom_end,
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
             accessible_mask=self.accessible_mask,
