@@ -136,7 +136,7 @@ Diversity Statistics
    theta = diversity.theta_w(h, span_normalize=True)
    tajd = diversity.tajimas_d(h)
 
-   # Heterozygosity
+   # Heterozygosity -- per-variant arrays, shape (n_variants,)
    he = diversity.heterozygosity_expected(h)
    ho = diversity.heterozygosity_observed(h)
    f = diversity.inbreeding_coefficient(h)
@@ -518,7 +518,7 @@ the same call works on either container:
 
 .. code-block:: python
 
-   from pg_gpu import GenotypeMatrix
+   from pg_gpu import GenotypeMatrix, distance_stats
 
    # Convert from haploid (pairs consecutive haplotypes)
    gm = GenotypeMatrix.from_haplotype_matrix(h)

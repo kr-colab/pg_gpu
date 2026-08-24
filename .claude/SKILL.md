@@ -249,7 +249,12 @@ warnings.filterwarnings("ignore", category=MemoryLimitedWarning)
 h.load_pop_file("pops.txt")           # loads all pops
 h.load_pop_file("pops.txt", pops=["pop1", "pop2"])  # subset
 
-# Manual
+# Manual -- values are haplotype ROW indices: sample i owns rows 2i and
+# 2i+1, so each pop below holds 2 diploid samples. Assignment validates
+# rows: out-of-range or duplicate entries raise ValueError. A pop that
+# splits an individual's row pair draws UnpairedRowsWarning when a
+# pairing-aware stat (heterozygosity_observed, fst_weir_cockerham)
+# consumes it.
 h.sample_sets = {"pop1": [0,1,2,3], "pop2": [4,5,6,7]}
 
 # Inspect
@@ -365,8 +370,8 @@ h_filtered = h.filter_variants_by_missing(max_missing_freq=0.2)  # ≤20% missin
 pi = diversity.pi(h)                          # include mode
 pi = diversity.pi(h, missing_data='exclude')  # exclude mode
 
-# Biallelic-only filter (required for iHS, LD stats)
-h_bi = h.apply_biallelic_filter()
+# Drop sites with three or more distinct alleles (allele codes preserved)
+h_bi = h.restrict_to_biallelic()
 ```
 
 ### Demonstrate missing data options (test/compare)
@@ -411,6 +416,8 @@ from pg_gpu import diversity, sfs
 pi_val  = diversity.pi(h)
 theta   = diversity.theta_w(h)
 tajd    = diversity.tajimas_d(h)
+# The two heterozygosity stats return per-variant arrays with shape
+# (n_variants,), not scalars -- reduce with .mean() for a summary.
 he      = diversity.heterozygosity_expected(h)
 # heterozygosity_observed takes a HaplotypeMatrix, not a GenotypeMatrix. It
 # pairs rows into individuals: sample i is rows 2i and 2i+1, which is what
@@ -545,21 +552,25 @@ dist_between, dist_within1, dist_within2 = (
 ```python
 from pg_gpu import selection
 
-# Requires phased, biallelic data
-h_bi = h.apply_biallelic_filter()
+# ihs / nsl take phased data with any allele count. They return one
+# score per variant on {0,1}-coded data, or (n_variants, K-1) -- one
+# column per alternate allele code -- when higher codes are present.
+# Filter first for the classic 1-D scan.
+h_bi = h.restrict_to_biallelic()
 
 ihs     = selection.ihs(h_bi)
-ihs_std = selection.standardize(ihs)          # standardize raw scores
 nsl     = selection.nsl(h_bi)
+ihs_std = selection.standardize(ihs)          # plain z-score
 
 # Allele-count-binned standardization (recommended for iHS / nSL):
-# bin scores by the per-variant alt allele count and z-score within bins.
-# h_bi.haplotypes is a cupy array on the GPU; missing cells (-1) need to
-# be masked out of the count.
+# bin scores by the per-variant derived-allele count, z-score within
+# bins. standardize_by_allele_count takes 1-D scores; if ihs came back
+# 2-D, standardize each column a separately with its own carrier count
+# (hap == a + 1).
 import cupy as cp
-hap = h_bi.haplotypes  # (n_hap, n_var), values in {0, 1, -1}
-aac = cp.sum(cp.where(hap > 0, 1, 0), axis=0).get()  # alt allele count per variant
-ihs_std_binned, bins = selection.standardize_by_allele_count(ihs, aac)
+hap = h_bi.haplotypes  # (n_hap, n_var); -1 marks missing cells
+dac = cp.sum(hap == 1, axis=0).get()  # allele-1 carriers per variant
+ihs_std_binned, bins = selection.standardize_by_allele_count(ihs, dac)
 
 # Cross-population
 xpehh = selection.xpehh(h_bi, 'pop1', 'pop2')
@@ -604,7 +615,7 @@ coords, explained = decomposition.randomized_pca(h, n_components=20)
 
 # PCoA (distance-based)
 dist = decomposition.pairwise_distance(h)
-coords_pcoa = decomposition.pcoa(dist, n_components=10)
+coords_pcoa, pcoa_var = decomposition.pcoa(dist, n_components=10)
 
 # Plot first 2 PCs with population labels. Build a per-haplotype pop label
 # array from h.sample_sets: each pop maps to its haplotype-axis indices.
@@ -724,7 +735,7 @@ Notes:
 2. **`windowed_analysis` is a function, not a module** at attribute access. `windowed_analysis.windowed_statistics(...)` raises AttributeError; call `windowed_analysis(h, ...)` directly, or `from pg_gpu.windowed_analysis import windowed_statistics_fused`.
 3. **`patterson_f3` / `patterson_d` return per-variant arrays, not scalars.** `T, B = admixture.patterson_f3(h, pop_c, pop_a, pop_b)` returns two `(n_variants,)` numpy arrays; the scalar F3 is `T.sum() / B.sum()`. Same shape contract for `num, den = admixture.patterson_d(...)`: scalar is `num.sum() / den.sum()`. For block-jackknife SE, prefer `admixture.average_patterson_f3(..., blen=N)` / `average_patterson_d(..., blen=N)` — they return `(estimate, se, z, vb, vj)` and bin internally. With `missing_data='exclude'` the arrays carry `0` placeholders for masked sites and sums still come out right; the explicit `nansum` form is unnecessary.
 4. **Matrices live on the GPU.** Loaders (`from_vcf`, `from_zarr`) return GPU-resident matrices; all stat functions also auto-`transfer_to_gpu()` on the eager classes if a caller hand-constructed one from numpy. You almost never need to call the transfer methods yourself. To hand a result to pandas / seaborn / matplotlib, call `.get()` on the returned cupy array — that's the device-to-host step. `StreamingHaplotypeMatrix` has no `transfer_to_*` methods (it manages chunk-by-chunk residency); pass it straight to the stat functions.
-5. **Selection scans need biallelic data**: always run `h.apply_biallelic_filter()` first.
+5. **Selection scan output shape**: `ihs` / `nsl` return `(n_variants,)` on {0,1}-coded data and `(n_variants, K-1)` (one column per alternate allele code) otherwise. `h.restrict_to_biallelic()` gives the classic 1-D scan on {0,1} codes, but it preserves codes -- a surviving `{0,2}` site still forces the 2-D form. `standardize_by_allele_count` takes 1-D input; standardize each column against its own allele count.
 6. **`span_normalize`**: default `True`; requires `chrom_start` / `chrom_end`, an `accessible_bed`, or `h.set_accessible_mask(...)` for meaningful per-base estimates.
 7. **Streaming dispatch**: `streaming='never'` raises `MemoryError` when the matrix would exceed 50 % of free GPU memory. Use `streaming='auto'` for unknown-size loads — `windowed_analysis`, `diversity.*`, `sfs.sfs` / `joint_sfs`, and `selection.*` dispatch on the streaming matrix automatically. Pairwise / cross-window kernels (`pairwise_r2`, `locate_unlinked`, the full-r² heatmap form of `windowed_r_squared`, `grm`, `ibs`) cannot run streaming — call `.materialize(region=(lo, hi))` to pull a sub-region into an eager matrix for those.
 8. **`fields=` is eager-only**: passing `fields=['DP', 'GQ', ...]` raises `NotImplementedError` whenever the load takes the streaming path (always under `streaming='always'`; under `streaming='auto'` only when the matrix would not fit eagerly). For larger regions, skip the loader and read `call_<TAG>` / `variant_<TAG>` directly with `zarr.open(...)`.
