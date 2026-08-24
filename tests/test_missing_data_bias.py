@@ -238,6 +238,12 @@ class TestExcludeKeepsMatrixContext:
         ex = h.exclude_missing_sites()
         assert ex.has_accessible_mask
 
+    def test_filter_by_missing_keeps_context(self):
+        h = self._hm()
+        f = h.filter_variants_by_missing(max_missing_freq=0.05)
+        assert f.num_variants == 47
+        assert (f.chrom_start, f.chrom_end) == (0, 10000)
+
     def test_exclude_pi_uses_parent_span(self):
         from pg_gpu import diversity
         h = self._hm()

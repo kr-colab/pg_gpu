@@ -138,9 +138,10 @@ Read this section if you are comparing against older pg_gpu results.
   last surviving variant, which quietly changed the denominator of any
   span-normalized statistic computed afterwards.
   ``exclude_missing_sites`` (and so every statistic under
-  ``missing_data='exclude'``) follows the same rule and also keeps the
-  accessibility mask: filtering sites changes neither the chromosome
-  extent nor which bases are accessible.
+  ``missing_data='exclude'``) and ``filter_variants_by_missing`` follow
+  the same rule and also keep the accessibility mask: filtering sites
+  changes neither the chromosome extent nor which bases are
+  accessible.
 * ``decomposition.pairwise_distance`` supports ``euclidean``,
   ``sqeuclidean``, and ``cityblock``. Other metrics now raise
   ``NotImplementedError``, and passing a ``GenotypeMatrix`` raises a

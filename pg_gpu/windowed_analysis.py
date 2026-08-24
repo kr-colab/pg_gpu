@@ -775,10 +775,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     else:
         matrix = haplotype_matrix
 
-    # Anchor the window grid before any missing-data filtering: the
-    # filtered subset carries no chromosome bounds and starts at its first
-    # complete site, which would hand every statistic in a mixed request
-    # its own grid.
+    # Anchor the window grid before any missing-data filtering: a matrix
+    # without chromosome bounds falls back to its variant hull, which
+    # moves when a terminal site is incomplete, handing every statistic
+    # in a mixed request its own grid.
     pos_cpu = cp.asnumpy(matrix.positions)
     chrom_start, chrom_end = _bp_grid_bounds(matrix, pos_cpu)
     if chrom_end <= chrom_start:

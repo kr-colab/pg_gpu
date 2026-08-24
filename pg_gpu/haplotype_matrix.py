@@ -1150,6 +1150,27 @@ class HaplotypeMatrix:
             accessible_mask=sliced_mask,
         )
 
+    def _keep_sites(self, keep) -> "HaplotypeMatrix":
+        """Subset to the given site indices, keeping the parent context.
+
+        Dropping sites changes neither the chromosome extent nor which
+        bases are accessible, so the child carries the parent's bounds,
+        accessibility mask, sample sets, and n_total_sites -- the rule
+        every same-region site filter follows. An empty selection routes
+        through get_subset, which builds a valid 0-variant matrix (the
+        constructor rejects empty arrays).
+        """
+        if len(keep) == 0:
+            return self.get_subset(keep)
+        return HaplotypeMatrix(
+            self.haplotypes[:, keep], self.positions[keep],
+            chrom_start=self.chrom_start,
+            chrom_end=self.chrom_end,
+            sample_sets=self._sample_sets,
+            n_total_sites=self.n_total_sites,
+            accessible_mask=self.accessible_mask,
+        )
+
     def restrict_to_biallelic(self) -> "HaplotypeMatrix":
         """Restrict to biallelic sites (drop >=3-allele), preserving allele codes.
 
@@ -1164,23 +1185,7 @@ class HaplotypeMatrix:
 
         ac, _ = allele_counts(self.haplotypes)
         biallelic, _ = _biallelic_and_alt(ac)
-        keep = cp.where(biallelic)[0]
-        if keep.shape[0] == 0:
-            # get_subset builds a valid 0-variant matrix; the constructor rejects empty
-            return self.get_subset(keep)
-        hap = self.haplotypes[:, keep]
-        positions = self.positions[keep]
-        # Dropping sites does not shrink the chromosome: keep the parent
-        # bounds so span-normalized statistics keep their denominator,
-        # like the GenotypeMatrix filters.
-        return HaplotypeMatrix(
-            hap, positions,
-            chrom_start=self.chrom_start,
-            chrom_end=self.chrom_end,
-            sample_sets=self._sample_sets,
-            n_total_sites=self.n_total_sites,
-            accessible_mask=self.accessible_mask,
-        )
+        return self._keep_sites(cp.where(biallelic)[0])
 
     def restrict_to_segregating(self) -> "HaplotypeMatrix":
         """Drop non-segregating (monomorphic) sites.
@@ -1193,23 +1198,7 @@ class HaplotypeMatrix:
         from ._memutil import allele_counts
 
         ac, _ = allele_counts(self.haplotypes)
-        keep = cp.where((ac > 0).sum(axis=1) >= 2)[0]
-        if keep.shape[0] == 0:
-            # get_subset builds a valid 0-variant matrix; the constructor rejects empty
-            return self.get_subset(keep)
-        hap = self.haplotypes[:, keep]
-        positions = self.positions[keep]
-        # Dropping sites does not shrink the chromosome: keep the parent
-        # bounds so span-normalized statistics keep their denominator,
-        # like the GenotypeMatrix filters.
-        return HaplotypeMatrix(
-            hap, positions,
-            chrom_start=self.chrom_start,
-            chrom_end=self.chrom_end,
-            sample_sets=self._sample_sets,
-            n_total_sites=self.n_total_sites,
-            accessible_mask=self.accessible_mask,
-        )
+        return self._keep_sites(cp.where((ac > 0).sum(axis=1) >= 2)[0])
 
     def _biallelic_indicator(self) -> cp.ndarray:
         """0/1 alt-indicator array for the current sites; -1 for missing.
@@ -1406,12 +1395,8 @@ class HaplotypeMatrix:
         Returns
         -------
         HaplotypeMatrix
-            Filtered matrix. Returns self if no missing data.
-
-        Raises
-        ------
-        ValueError
-            If no sites remain after filtering.
+            Filtered matrix. Returns self if no missing data, and a
+            matrix with zero variants when no site is complete.
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
@@ -1431,21 +1416,7 @@ class HaplotypeMatrix:
         valid = cp.where(~has_missing)[0]
         if len(valid) == hap.shape[1]:
             return self
-        if len(valid) == 0:
-            return self.get_subset(valid)
-        # Dropping incomplete sites does not shrink the chromosome or
-        # change its accessibility: keep the parent bounds and mask like
-        # the restrict_to_* filters, so span-normalized statistics keep
-        # their denominator. The no-missing path above returns self with
-        # the same context; get_subset alone would strip it.
-        return HaplotypeMatrix(
-            hap[:, valid], self.positions[valid],
-            chrom_start=self.chrom_start,
-            chrom_end=self.chrom_end,
-            sample_sets=self._sample_sets,
-            n_total_sites=self.n_total_sites,
-            accessible_mask=self.accessible_mask,
-        )
+        return self._keep_sites(valid)
 
     def filter_variants_by_missing(self, max_missing_freq=0.1):
         """
@@ -1461,15 +1432,10 @@ class HaplotypeMatrix:
         filtered : HaplotypeMatrix
             New HaplotypeMatrix with filtered variants
         """
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
         missing_freq = self.count_missing(axis=0) / self.num_haplotypes
-        if self.device == 'GPU':
-            valid_mask = missing_freq <= max_missing_freq
-            valid_indices = cp.where(valid_mask)[0]
-            return self.get_subset(valid_indices)
-        else:
-            valid_mask = missing_freq <= max_missing_freq
-            valid_indices = np.where(valid_mask)[0]
-            return self.get_subset(valid_indices)
+        return self._keep_sites(cp.where(missing_freq <= max_missing_freq)[0])
 
     def filter(self, variants=None, genotypes=None,
                drop_all_missing: bool = True) -> "HaplotypeMatrix":
