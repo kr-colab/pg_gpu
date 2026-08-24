@@ -355,17 +355,19 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
     if max_allele < 1:
         return np.full(matrix.num_variants, np.nan)
 
-    cols = []
-    for a in range(1, max_allele + 1):
-        nsl0_fwd, nsla_fwd = _nsl01_scan_gpu(hap, focal_allele=a)
-        nsl0_rev, nsla_rev = _nsl01_scan_gpu(hap[::-1], focal_allele=a)
-        nsl0 = nsl0_fwd + nsl0_rev[::-1]
-        nsla = nsla_fwd + nsla_rev[::-1]
-        cols.append(cp.log(nsla / nsl0))
+    # One pair-walk scores every derived allele at once -- the shared-suffix
+    # state never depends on the focal choice, so the per-allele passes this
+    # replaced were re-buying the same O(pairs x variants) traffic to change
+    # one comparison.
+    nsl0_fwd, nsla_fwd = _nsl01_scan_gpu(hap, max_focal=max_allele)
+    nsl0_rev, nsla_rev = _nsl01_scan_gpu(hap[::-1], max_focal=max_allele)
+    nsl0 = nsl0_fwd + nsl0_rev[::-1]
+    nsla = nsla_fwd + nsla_rev[::-1, :]
+    scores = cp.log(nsla / nsl0[:, None])
 
-    if len(cols) == 1:
-        return cols[0].get()
-    return cp.stack(cols, axis=1).get()
+    if max_allele == 1:
+        return scores[:, 0].get()
+    return scores.get()
 
 
 def xpnsl(haplotype_matrix: HaplotypeMatrix,
@@ -531,27 +533,35 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     if max_allele < 1:
         return np.full(matrix.num_variants, np.nan)
     ac, n_valid = allele_counts(matrix.haplotypes, n_alleles=max_allele + 1)
-    n0 = ac[:, 0]
 
     # One log(IHH_a / IHH_0) column per derived allele a (one-vs-ancestral).
     # Biallelic data has a single derived allele and returns a 1-D array
     # identical to the classic iHS.
-    cols = []
-    for a in range(1, max_allele + 1):
-        na = ac[:, a]
-        ihh0_fwd, ihha_fwd = _ihh01_scan_hist_gpu(
-            hap, gaps_gpu, n0, na, n_valid, a,
-            min_ehh, min_maf, include_edges)
-        ihh0_rev, ihha_rev = _ihh01_scan_hist_gpu(
-            hap[::-1], gaps_gpu[::-1], n0[::-1], na[::-1], n_valid[::-1], a,
-            min_ehh, min_maf, include_edges)
-        ihh0 = ihh0_fwd + ihh0_rev[::-1]
-        ihha = ihha_fwd + ihha_rev[::-1]
-        cols.append(cp.log(ihha / ihh0))
+    # One pair-walk scores every derived allele at once -- the shared-suffix
+    # state never depends on the focal choice, so the per-allele passes this
+    # replaced were re-buying the same O(pairs x variants) traffic to change
+    # one comparison.
+    ihh0_fwd, ihha_fwd = _ihh01_scan_hist_gpu(
+        hap, gaps_gpu, ac, min_ehh, include_edges)
+    ihh0_rev, ihha_rev = _ihh01_scan_hist_gpu(
+        hap[::-1], gaps_gpu[::-1], ac[::-1], min_ehh, include_edges)
+    ihh0 = ihh0_fwd + ihh0_rev[::-1]
+    ihha = ihha_fwd + ihha_rev[::-1, :]
+    scores = cp.log(ihha / ihh0[:, None])
 
-    if len(cols) == 1:
-        return cols[0].get()
-    return cp.stack(cols, axis=1).get()
+    # Per-allele MAF, formerly applied inside each scan pass: the focal
+    # allele's own frequency among valid haplotypes. Reduces to
+    # min(n0, n1)/(n0 + n1) on biallelic sites and makes a common allele
+    # with index >= 2 visible to the filter.
+    nv = cp.maximum(n_valid.astype(cp.float64), 1.0)
+    freq = ac[:, 1:].astype(cp.float64) / nv[:, None]
+    maf = cp.minimum(freq, 1.0 - freq)
+    maf_fail = (n_valid == 0)[:, None] | (maf < min_maf)
+    scores[maf_fail] = cp.nan
+
+    if max_allele == 1:
+        return scores[:, 0].get()
+    return scores.get()
 
 
 def xpehh(haplotype_matrix: HaplotypeMatrix,
@@ -777,10 +787,14 @@ extern "C" __global__
 void nsl01_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
                        long long stride_var, long long stride_hap,
                        const int* pair_j, const int* pair_k, int n_pairs,
-                       int focal_allele,
-                       double* ssl_sum_00, double* ssl_sum_11,
-                       int* count_00, int* count_11) {
-    // Each thread handles one haplotype pair across all variants.
+                       int max_focal,
+                       double* ssl_sum_00, double* ssl_sum_a,
+                       int* count_00, int* count_a) {
+    // Each thread handles one haplotype pair across all variants, scoring
+    // EVERY derived allele in the single walk: the shared-suffix length
+    // depends only on equality and missingness, never on which allele is
+    // focal, so one pass produces what one pass per allele used to.
+    // ssl_sum_a / count_a are (max_focal, n_variants), allele-major.
     // Warp-level reduction reduces atomic contention by 32x.
     int pid = blockDim.x * blockIdx.x + threadIdx.x;
     if (pid >= n_pairs) return;
@@ -795,35 +809,44 @@ void nsl01_scan_kernel(const signed char* h, int n_variants, int n_haplotypes,
         signed char a1 = h[i * stride_var + j * stride_hap];
         signed char a2 = h[i * stride_var + k * stride_hap];
 
-        double sv00 = 0.0, sv11 = 0.0;
-        int c00 = 0, c11 = 0;
+        double sv00 = 0.0;
+        int c00 = 0;
+        int g = 0;   // this pair's derived class at this site, 0 = none
 
-        // One-vs-ancestral focal split: a homozygous ancestral pair scores
-        // class 0, a homozygous focal-allele pair scores class 1. A homozygous
-        // pair of any other allele extends the shared run but scores neither
-        // (it belongs to a different derived allele's one-vs-ancestral test).
+        // One-vs-ancestral split: a homozygous ancestral pair scores class
+        // 0, a homozygous derived pair scores its own allele's class. Each
+        // pair lands in exactly one class per site.
         if (a1 < 0 || a2 < 0) {
             ssl += 1;
         } else if (a1 == a2) {
             ssl += 1;
             if (a1 == 0) { sv00 = (double)ssl; c00 = 1; }
-            else if (a1 == focal_allele) { sv11 = (double)ssl; c11 = 1; }
+            else if (a1 <= max_focal) { g = a1; }
         } else {
             ssl = 0;
         }
 
         for (int off = 16; off > 0; off >>= 1) {
             sv00 += __shfl_down_sync(mask, sv00, off);
-            sv11 += __shfl_down_sync(mask, sv11, off);
             c00  += __shfl_down_sync(mask, c00, off);
-            c11  += __shfl_down_sync(mask, c11, off);
         }
-
         if (lane == 0) {
             if (sv00 != 0.0) atomicAdd(&ssl_sum_00[i], sv00);
-            if (sv11 != 0.0) atomicAdd(&ssl_sum_11[i], sv11);
             if (c00 != 0)    atomicAdd(&count_00[i], c00);
-            if (c11 != 0)    atomicAdd(&count_11[i], c11);
+        }
+
+        for (int a = 1; a <= max_focal; a++) {
+            double sva = (g == a) ? (double)ssl : 0.0;
+            int ca = (g == a) ? 1 : 0;
+            for (int off = 16; off > 0; off >>= 1) {
+                sva += __shfl_down_sync(mask, sva, off);
+                ca  += __shfl_down_sync(mask, ca, off);
+            }
+            if (lane == 0 && ca != 0) {
+                long long slot = (long long)(a - 1) * n_variants + i;
+                atomicAdd(&ssl_sum_a[slot], sva);
+                atomicAdd(&count_a[slot], ca);
+            }
         }
     }
 }
@@ -882,9 +905,9 @@ def _get_pair_indices(n_haplotypes):
 # Private helpers: SSL-based scans for nSL
 # ---------------------------------------------------------------------------
 
-def _nsl01_scan_gpu(h, focal_allele=1):
-    """Forward scan computing mean SSL for the ancestral (0) and focal-allele
-    classes.
+def _nsl01_scan_gpu(h, max_focal=1):
+    """Forward scan computing mean SSL for the ancestral (0) class and for
+    every derived-allele class, in one walk over the pairs.
 
     Uses a stride-aware CUDA kernel with one thread per haplotype pair.
     Reads transposed/reversed views directly without copying.
@@ -893,14 +916,16 @@ def _nsl01_scan_gpu(h, focal_allele=1):
     ----------
     h : cupy.ndarray, shape (n_variants, n_haplotypes)
         Can be a non-contiguous view (e.g., from .T or [::-1]).
-    focal_allele : int
-        Derived allele index scored against the ancestral (0) class. On
-        biallelic data this is 1 and reproduces the classic nSL.
+    max_focal : int
+        Highest derived allele index to score. On biallelic data this is 1
+        and column 0 reproduces the classic nSL.
 
     Returns
     -------
     nsl0 : cupy.ndarray, float64, shape (n_variants,)
-    nsl1 : cupy.ndarray, float64, shape (n_variants,)
+    nsl_a : cupy.ndarray, float64, shape (n_variants, max_focal)
+        Column ``a - 1`` is the mean SSL of the allele-``a`` homozygous
+        class; NaN where the class has no pair.
     """
     n_variants, n_haplotypes = h.shape
     n_pairs = (n_haplotypes * (n_haplotypes - 1)) // 2
@@ -908,9 +933,9 @@ def _nsl01_scan_gpu(h, focal_allele=1):
     pair_j, pair_k = _get_pair_indices(n_haplotypes)
 
     ssl_sum_00 = cp.zeros(n_variants, dtype=cp.float64)
-    ssl_sum_11 = cp.zeros(n_variants, dtype=cp.float64)
+    ssl_sum_a = cp.zeros((max_focal, n_variants), dtype=cp.float64)
     count_00 = cp.zeros(n_variants, dtype=cp.int32)
-    count_11 = cp.zeros(n_variants, dtype=cp.int32)
+    count_a = cp.zeros((max_focal, n_variants), dtype=cp.int32)
 
     # Ensure int8 dtype; keep as view (no contiguous copy needed)
     h_view = h if h.dtype == cp.int8 else h.astype(cp.int8, copy=False)
@@ -922,13 +947,13 @@ def _nsl01_scan_gpu(h, focal_allele=1):
     _nsl01_kernel((grid,), (block,),
                   (h_view, np.int32(n_variants), np.int32(n_haplotypes),
                    np.int64(s0), np.int64(s1),
-                   pair_j, pair_k, np.int32(n_pairs), np.int32(focal_allele),
-                   ssl_sum_00, ssl_sum_11, count_00, count_11))
+                   pair_j, pair_k, np.int32(n_pairs), np.int32(max_focal),
+                   ssl_sum_00, ssl_sum_a, count_00, count_a))
 
     nsl0 = cp.where(count_00 > 0, ssl_sum_00 / count_00, cp.nan)
-    nsl1 = cp.where(count_11 > 0, ssl_sum_11 / count_11, cp.nan)
+    nsl_a = cp.where(count_a > 0, ssl_sum_a / count_a, cp.nan)
 
-    return nsl0, nsl1
+    return nsl0, nsl_a.T
 
 
 def _nsl_scan_gpu(h):
@@ -1041,11 +1066,13 @@ void ihh01_ssl_pervar_kernel_v2(
     int n_haplotypes,
     int n_pairs,
     int* hist00,              // (chunk_len, hist_size) for 0-0 pairs
-    int* hist11,              // (chunk_len, hist_size) for focal-focal pairs
+    int* hist_a,              // (max_focal, hist_capacity, hist_size)
     int* ssl_state,           // (n_pairs,) persistent across chunks
     int hist_size,
     int chunk_start,          // offset into global variant index
-    int focal_allele          // derived allele scored against the ancestral (0)
+    int max_focal,            // highest derived allele scored, all at once
+    int hist_capacity         // allocated rows per allele block; the last
+                              // chunk is shorter than the buffer it reuses
 ) {
     int pid = blockDim.x * blockIdx.x + threadIdx.x;
     if (pid >= n_pairs) return;
@@ -1073,21 +1100,26 @@ void ihh01_ssl_pervar_kernel_v2(
 
         int bucket = ssl < hist_size ? ssl : hist_size - 1;
         int is_class00 = (h1 == 0 && h2 == 0) ? 1 : 0;
-        int is_class11 = (h1 == focal_allele && h2 == focal_allele) ? 1 : 0;
+        // A homozygous derived pair belongs to its own allele's class; each
+        // pair lands in exactly one class per site, so one walk scores every
+        // derived allele at once.
+        int g = (h1 == h2 && h1 > 0 && h1 <= max_focal) ? h1 : 0;
 
         // Warp-aggregated histogram deposits using __match_any_sync
         unsigned match_bucket = __match_any_sync(0xFFFFFFFF, bucket);
         unsigned c00_ballot = __ballot_sync(0xFFFFFFFF, is_class00);
-        unsigned c11_ballot = __ballot_sync(0xFFFFFFFF, is_class11);
         int c00_in_group = __popc(match_bucket & c00_ballot);
-        int c11_in_group = __popc(match_bucket & c11_ballot);
+        int leader = (lane == (__ffs(match_bucket) - 1));
 
-        // Only the lowest-lane thread in each bucket group does atomics
-        if (lane == (__ffs(match_bucket) - 1)) {
-            if (c00_in_group > 0)
-                atomicAdd(&hist00[ci * hist_size + bucket], c00_in_group);
-            if (c11_in_group > 0)
-                atomicAdd(&hist11[ci * hist_size + bucket], c11_in_group);
+        if (leader && c00_in_group > 0)
+            atomicAdd(&hist00[ci * hist_size + bucket], c00_in_group);
+
+        for (int a = 1; a <= max_focal; a++) {
+            unsigned ca_ballot = __ballot_sync(0xFFFFFFFF, g == a);
+            int ca_in_group = __popc(match_bucket & ca_ballot);
+            if (leader && ca_in_group > 0)
+                atomicAdd(&hist_a[((long long)(a - 1) * hist_capacity + ci)
+                                  * hist_size + bucket], ca_in_group);
         }
     }
 
@@ -1260,40 +1292,38 @@ def _integrate_ihh_gpu(hist, gaps, n_pairs_arr, chunk_start, min_ehh,
 # Private helpers: SSL-based scans for IHS
 # ---------------------------------------------------------------------------
 
-def _ihh01_scan_hist_gpu(h, gaps, n0_counts, na_counts, n_valid, focal_allele,
-                         min_ehh=0.05, min_maf=0.05,
-                         include_edges=False, max_ssl_cap=None):
-    """Forward scan computing IHH for the ancestral (0) and focal-allele
-    classes via histograms.
+def _ihh01_scan_hist_gpu(h, gaps, ac,
+                         min_ehh=0.05, include_edges=False, max_ssl_cap=None):
+    """Forward scan computing IHH for the ancestral (0) class and every
+    derived-allele class, in one walk over the pairs.
 
     Uses warp-aggregated atomics, on-the-fly pair index computation, and
     stride-based access to eliminate pair arrays and contiguous copies.
-    All intermediate results stay on GPU.
+    All intermediate results stay on GPU. The shared-suffix state never
+    depends on the focal choice, so one walk replaces the per-allele
+    passes that re-bought the same O(pairs x variants) traffic.
 
     Parameters
     ----------
     h : cupy.ndarray, shape (n_variants, n_haplotypes)
         Can be a non-contiguous view (e.g., from [::-1]).
     gaps : cupy.ndarray, float64, shape (n_variants - 1,)
-    n0_counts, na_counts : cupy.ndarray, shape (n_variants,)
-        Per-site counts of the ancestral allele (0) and the focal derived
-        allele, in the same variant order as ``h`` (reverse them for a
-        reversed scan). Precomputed once via ``allele_counts`` and reused.
-    n_valid : cupy.ndarray, shape (n_variants,)
-        Non-missing haplotypes per site, same order as ``h``.
-    focal_allele : int
-        Derived allele scored against the ancestral (0) class.
-    min_ehh, min_maf : float
+    ac : cupy.ndarray, shape (n_variants, K)
+        Per-site allele counts in the same variant order as ``h`` (reverse
+        them for a reversed scan). Precomputed once via ``allele_counts``.
+    min_ehh : float
     include_edges : bool
     max_ssl_cap : int or None
 
     Returns
     -------
     ihh0 : cp.ndarray, float64, shape (n_variants,)
-    ihh_a : cp.ndarray, float64, shape (n_variants,)
+    ihh_a : cp.ndarray, float64, shape (n_variants, K - 1)
+        Column ``a - 1`` is the IHH of the allele-``a`` homozygous class.
     """
     n_variants, n_haplotypes = h.shape
     n_pairs = (n_haplotypes * (n_haplotypes - 1)) // 2
+    max_focal = ac.shape[1] - 1
 
     if max_ssl_cap is None:
         max_ssl_cap = min(n_variants, 10_000)
@@ -1304,9 +1334,9 @@ def _ihh01_scan_hist_gpu(h, gaps, n0_counts, na_counts, n_valid, focal_allele,
     s0, s1 = h_view.strides  # bytes per element (int8 = 1 byte)
     gaps_contig = cp.ascontiguousarray(gaps)
 
-    # Chunk size: target ~2 GB for two histograms
+    # Chunk size: target ~2 GB of histograms total, however many classes.
     target_bytes = 2 * 1024**3
-    bytes_per_variant = hist_size * 4 * 2  # two int32 histograms
+    bytes_per_variant = hist_size * 4 * (1 + max_focal)
     chunk_size = max(1, target_bytes // bytes_per_variant)
     chunk_size = min(chunk_size, n_variants)
 
@@ -1314,51 +1344,39 @@ def _ihh01_scan_hist_gpu(h, gaps, n0_counts, na_counts, n_valid, focal_allele,
     grid_ssl = (n_pairs + block_ssl - 1) // block_ssl
 
     ihh0_out = cp.empty(n_variants, dtype=cp.float64)
-    ihha_out = cp.empty(n_variants, dtype=cp.float64)
+    ihha_out = cp.empty((n_variants, max_focal), dtype=cp.float64)
     ssl_state = cp.zeros(n_pairs, dtype=cp.int32)
 
     # Pre-allocate per-chunk buffers (reused across chunks; ~2 GB hists)
     hist00_buf = cp.empty((chunk_size, hist_size), dtype=cp.int32)
-    hist11_buf = cp.empty((chunk_size, hist_size), dtype=cp.int32)
+    hista_buf = cp.empty((max_focal, chunk_size, hist_size), dtype=cp.int32)
 
     for chunk_start in range(0, n_variants, chunk_size):
         chunk_end = min(chunk_start + chunk_size, n_variants)
         c_len = chunk_end - chunk_start
 
         hist00 = hist00_buf[:c_len]
-        hist11 = hist11_buf[:c_len]
         hist00.fill(0)
-        hist11.fill(0)
+        hista_buf[:, :c_len].fill(0)
 
         _ihh01_ssl_pervar_kernel_v2((grid_ssl,), (block_ssl,),
             (h_view, np.int64(s0), np.int64(s1),
              np.int32(c_len), np.int32(n_haplotypes), np.int32(n_pairs),
-             hist00, hist11, ssl_state, np.int32(hist_size),
-             np.int32(chunk_start), np.int32(focal_allele)))
+             hist00, hista_buf, ssl_state, np.int32(hist_size),
+             np.int32(chunk_start), np.int32(max_focal),
+             np.int32(chunk_size)))
 
-        n0_chunk = n0_counts[chunk_start:chunk_end]
-        na_chunk = na_counts[chunk_start:chunk_end]
-        nv_chunk = n_valid[chunk_start:chunk_end]
-
+        n0_chunk = ac[chunk_start:chunk_end, 0]
         n00 = (n0_chunk * (n0_chunk - 1) // 2).astype(cp.int32)
-        naa = (na_chunk * (na_chunk - 1) // 2).astype(cp.int32)
+        ihh0_out[chunk_start:chunk_end] = _integrate_ihh_gpu(
+            hist00, gaps_contig, n00, chunk_start, min_ehh, include_edges)
 
-        ihh0_chunk = _integrate_ihh_gpu(hist00, gaps_contig, n00,
-                                         chunk_start, min_ehh, include_edges)
-        ihha_chunk = _integrate_ihh_gpu(hist11, gaps_contig, naa,
-                                         chunk_start, min_ehh, include_edges)
-
-        # Per-allele MAF: the focal allele's own frequency among valid
-        # haplotypes. Reduces to min(n0,n1)/(n0+n1) on biallelic sites and
-        # makes a common allele with index >= 2 visible to the filter.
-        freq_a = na_chunk.astype(cp.float64) / cp.maximum(nv_chunk.astype(cp.float64), 1.0)
-        maf = cp.minimum(freq_a, 1.0 - freq_a)
-        maf_fail = (nv_chunk == 0) | (maf < min_maf)
-        ihh0_chunk[maf_fail] = cp.nan
-        ihha_chunk[maf_fail] = cp.nan
-
-        ihh0_out[chunk_start:chunk_end] = ihh0_chunk
-        ihha_out[chunk_start:chunk_end] = ihha_chunk
+        for a in range(1, max_focal + 1):
+            na_chunk = ac[chunk_start:chunk_end, a]
+            naa = (na_chunk * (na_chunk - 1) // 2).astype(cp.int32)
+            ihha_out[chunk_start:chunk_end, a - 1] = _integrate_ihh_gpu(
+                hista_buf[a - 1, :c_len], gaps_contig, naa,
+                chunk_start, min_ehh, include_edges)
 
     return ihh0_out, ihha_out
 
