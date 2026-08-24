@@ -1727,10 +1727,23 @@ class HaplotypeMatrix:
             biallelic sites only.
         """
         if estimator == 'rogers_huff':
+            from .genotype_matrix import GenotypeMatrix
             from .ld_statistics import _rogers_huff_pairwise_r
-            r_full = _rogers_huff_pairwise_r(self)
-            r2 = r_full ** 2
-            r2 = cp.where(cp.isnan(r2), 0.0, r2)
+
+            # Rogers-Huff r is a diploid-dosage correlation: pair adjacent
+            # haplotypes into 0/1/2 dosages. The conversion keeps sites with
+            # at most two distinct present alleles (the _biallelic_mask
+            # criterion) and drops the rest with a warning; dropped sites
+            # come back as NaN rows/columns, like the 'r2' branch.
+            keep = self._biallelic_mask()
+            gm = GenotypeMatrix.from_haplotype_matrix(self)
+            r2_kept = _rogers_huff_pairwise_r(gm) ** 2
+            if gm.num_variants == self.num_variants:
+                r2 = r2_kept
+            else:
+                idx = cp.where(keep)[0]
+                r2 = cp.full((self.num_variants, self.num_variants), cp.nan)
+                r2[cp.ix_(idx, idx)] = r2_kept
             cp.fill_diagonal(r2, 0)
             return r2
         if estimator != 'r2':
@@ -1835,7 +1848,9 @@ class HaplotypeMatrix:
             ``'r2'`` (default) -- naive haplotype r² from frequency
             counts. ``'rogers_huff'`` -- Rogers-Huff r² on diploid
             0/1/2 dosages obtained by pairing adjacent haplotypes;
-            matches :func:`scikit-allel.rogers_huff_r` ** 2.
+            sites with three or more present alleles are dropped
+            before binning. Matches
+            :func:`scikit-allel.rogers_huff_r` ** 2.
 
         Returns
         -------
@@ -1853,10 +1868,16 @@ class HaplotypeMatrix:
                     "windowed_r_squared(estimator='rogers_huff', pop=...) "
                     "is not yet implemented; pass the full matrix or "
                     "subset to the desired haplotypes first.")
+            from .genotype_matrix import GenotypeMatrix
             from pg_gpu.ld_statistics import _rogers_huff_pairwise_r
-            m = self.num_variants
-            pos = self.positions
-            r_full = _rogers_huff_pairwise_r(self)
+
+            # Pair adjacent haplotypes into 0/1/2 dosages; sites with three
+            # or more present alleles are dropped with a warning and vanish
+            # from the bins, like the 'r2' branch's biallelic restriction.
+            gm = GenotypeMatrix.from_haplotype_matrix(self)
+            m = gm.num_variants
+            pos = gm.positions
+            r_full = _rogers_huff_pairwise_r(gm)
             iu = cp.triu_indices(m, k=1)
             r2_vals = (r_full[iu]) ** 2
         elif estimator == 'r2':

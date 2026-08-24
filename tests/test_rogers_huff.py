@@ -160,3 +160,113 @@ class TestEstimatorResolver:
     def test_unknown_estimator_raises(self):
         with pytest.raises(ValueError, match="Unknown estimator"):
             _resolve_ld_estimator('bogus', is_hap_matrix=True)
+
+
+# ---------------------------------------------------------------------------
+# HaplotypeMatrix methods that route through the dosage estimator
+# ---------------------------------------------------------------------------
+
+
+class TestHaplotypeMatrixEstimator:
+
+    def test_pairwise_r2_matches_module_function(self):
+        hm = _random_hm(n_diploids=30, n_var=40, seed=11)
+        r2_hm = hm.pairwise_r2(estimator='rogers_huff').get()
+        import scipy.spatial.distance as ssd
+        r2_gm = ssd.squareform(rogers_huff_r_squared(_gm(hm)).get())
+        finite = np.isfinite(r2_gm)
+        assert np.isfinite(r2_hm).sum() == finite.sum()
+        np.testing.assert_allclose(r2_hm[finite], r2_gm[finite], rtol=1e-12)
+
+    def test_pairwise_r2_matches_allel(self):
+        hm = _random_hm(n_diploids=40, n_var=50, seed=5)
+        r2_hm = hm.pairwise_r2(estimator='rogers_huff').get()
+        import scipy.spatial.distance as ssd
+        r_allel = ssd.squareform(_allel_r(hm).astype(np.float64))
+        r2_allel = r_allel ** 2
+        finite = np.isfinite(r2_allel) & np.isfinite(r2_hm)
+        np.fill_diagonal(finite, False)
+        np.testing.assert_allclose(
+            r2_hm[finite], r2_allel[finite], rtol=1e-5, atol=1e-5)
+
+    def test_pairwise_r2_multiallelic_site_is_nan(self):
+        hm = _random_hm(n_diploids=20, n_var=12, seed=7)
+        hap = np.array(cp.asnumpy(hm.haplotypes))
+        carriers = np.where(hap[:, 4] == 1)[0]
+        hap[carriers[: carriers.size // 2], 4] = 2
+        hm3 = HaplotypeMatrix(hap, cp.asnumpy(hm.positions), 0, 12 * 1000)
+        with pytest.warns(UserWarning, match="biallelic"):
+            r2 = hm3.pairwise_r2(estimator='rogers_huff').get()
+        assert r2.shape == (12, 12)
+        off = np.ones(12, dtype=bool)
+        off[4] = False
+        assert np.isnan(r2[4, off]).all() and np.isnan(r2[off, 4]).all()
+        assert r2[4, 4] == 0
+        kept = np.ix_(off, off)
+        assert np.isfinite(r2[kept]).any()
+
+    def test_pairwise_r2_monomorphic_site_is_nan(self):
+        hm = _random_hm(n_diploids=20, n_var=8, seed=9)
+        hap = np.array(cp.asnumpy(hm.haplotypes))
+        hap[:, 3] = 0
+        hm0 = HaplotypeMatrix(hap, cp.asnumpy(hm.positions), 0, 8 * 1000)
+        r2 = hm0.pairwise_r2(estimator='rogers_huff').get()
+        off = np.ones(8, dtype=bool)
+        off[3] = False
+        assert np.isnan(r2[3, off]).all()
+        assert r2[3, 3] == 0
+
+    def test_windowed_r_squared_runs_and_matches_manual(self):
+        hm = _random_hm(n_diploids=30, n_var=40, seed=13)
+        bins = [0, 10000, 20000, 40000]
+        res, counts = hm.windowed_r_squared(bins, percentile=50,
+                                            estimator='rogers_huff')
+        r = _allel_r(hm).astype(np.float64)
+        import scipy.spatial.distance as ssd
+        r2_full = ssd.squareform(r) ** 2
+        pos = cp.asnumpy(hm.positions)
+        ii, jj = np.triu_indices(40, k=1)
+        d = pos[jj] - pos[ii]
+        vals = r2_full[ii, jj]
+        for b in range(3):
+            sel = (d >= bins[b]) & (d < bins[b + 1]) & np.isfinite(vals)
+            assert counts[b] == sel.sum()
+            if sel.any():
+                np.testing.assert_allclose(res[b], np.percentile(vals[sel], 50),
+                                           rtol=1e-5, atol=1e-5)
+
+    def test_windowed_r_squared_drops_multiallelic_pairs(self):
+        hm = _random_hm(n_diploids=20, n_var=10, seed=15)
+        hap = np.array(cp.asnumpy(hm.haplotypes))
+        carriers = np.where(hap[:, 2] == 1)[0]
+        hap[carriers[: carriers.size // 2], 2] = 2
+        hm3 = HaplotypeMatrix(hap, cp.asnumpy(hm.positions), 0, 10 * 1000)
+        bins = [0, 10000]
+        with pytest.warns(UserWarning, match="biallelic"):
+            _, counts3 = hm3.windowed_r_squared(bins,
+                                                estimator='rogers_huff')
+        _, counts2 = hm.windowed_r_squared(bins, estimator='rogers_huff')
+        assert counts3[0] < counts2[0]
+
+    def test_windowed_r_squared_pop_raises(self):
+        hm = _random_hm(n_diploids=10, n_var=10, seed=17)
+        hm.sample_sets = {"p": list(range(10))}
+        with pytest.raises(NotImplementedError):
+            hm.windowed_r_squared([0, 10000], pop="p",
+                                  estimator='rogers_huff')
+
+    def test_missing_values_raise(self):
+        hm = _random_hm(n_diploids=10, n_var=10, seed=19)
+        hap = np.array(cp.asnumpy(hm.haplotypes))
+        hap[0, 0] = -1
+        hmm = HaplotypeMatrix(hap, cp.asnumpy(hm.positions), 0, 10 * 1000)
+        with pytest.raises(ValueError, match="missing"):
+            hmm.pairwise_r2(estimator='rogers_huff')
+
+    def test_odd_haplotype_count_raises(self):
+        rng = np.random.default_rng(21)
+        hap = rng.integers(0, 2, (9, 10), dtype=np.int8)
+        pos = np.arange(10, dtype=np.int64) * 1000
+        hm = HaplotypeMatrix(hap, pos, 0, 10 * 1000)
+        with pytest.raises(ValueError, match="even number"):
+            hm.pairwise_r2(estimator='rogers_huff')
