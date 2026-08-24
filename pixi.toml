@@ -75,9 +75,17 @@ sphinx-rtd-theme = ">=1.0"
 python = ">=3.12"
 ruff = ">=0.4"
 
+[feature.cov.dependencies]
+pytest-cov = ">=4.0"
+diff-cover = ">=9.0"
+# Match the default/moments envs; the GPU/moments stack has no 3.14 wheels and a
+# fresh solve would otherwise pick the newest Python.
+python = "3.12.*"
+
 [environments]
 default = ["gpu", "dev", "docs"]
 moments = ["gpu", "dev", "docs", "moments"]
+coverage = ["gpu", "dev", "docs", "moments", "cov"]
 lint = ["lint"]
 
 [tasks]
@@ -85,3 +93,14 @@ test = { cmd = "pytest tests/ -v" }
 test-parallel = { cmd = "pytest tests/ -v -n 10" }
 lint = { cmd = "ruff check pg_gpu/ tests/ examples/" }
 docs = { cmd = "make html", cwd = "docs" }
+
+# FIXME: LD_PRELOAD forces the env libstdc++; the pip kvikio wheel otherwise loads
+# the older system libstdc++, after which importing scipy/moments fails with a
+# missing CXXABI symbol.
+[feature.cov.tasks]
+# Run in order: `pixi run coverage && pixi run diff-coverage <branch to compare>`
+coverage = { cmd = "bash -c 'LD_PRELOAD=$CONDA_PREFIX/lib/libstdc++.so.6 pytest tests/ --slow --cov=pg_gpu --cov-report=term-missing --cov-report=html --cov-report=xml -n 10'" }
+
+[feature.cov.tasks.diff-coverage]
+cmd = "diff-cover coverage.xml --compare-branch={{ base }} --format html:htmlcov/diff-coverage.html"
+args = [{ arg = "base", default = "main" }]

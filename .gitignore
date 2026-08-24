@@ -26,6 +26,8 @@ commit_message.txt
 *.png
 *.csv
 !examples/data/*.csv
+# generated conversion artifact of the tracked im-parsing-example.vcf
+examples/data/*.h5
 
 CLAUDE.md
 TODO_*.md
@@ -39,3 +41,9 @@ docs/superpowers/
 # vim for the cool kids
 *.swp
 *.swo
+
+# coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml

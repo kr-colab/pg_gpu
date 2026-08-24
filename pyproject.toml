@@ -127,6 +127,18 @@ filterwarnings = [
     "ignore::pg_gpu._warnings.BiallelicOnlyWarning",
 ]
 
+[tool.coverage.run]
+source = ["pg_gpu"]
+# pythonpath adds pg_gpu/ to sys.path, so modules are importable both as pg_gpu.x
+# and x; relative_files keeps a module attributed to one file path rather than
+# split across the two import names.
+relative_files = true
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"
