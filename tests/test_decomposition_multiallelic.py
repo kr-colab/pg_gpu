@@ -139,3 +139,57 @@ class TestLocalPCAMultiallelic:
                                  window_size=3000, step_size=3000)
         valid = res.windows['n_variants'].values >= 6
         assert np.isfinite(se[valid]).all()
+
+
+class TestChunkedGram:
+    """The chunked Gram accumulator must reproduce the dense standardized
+    product: same per-site math on variant slices, summed. syrk fills the
+    lower triangle only, so comparisons symmetrize first."""
+
+    def _hap(self, seed=23, n_hap=30, n_var=61):
+        rng = np.random.default_rng(seed)
+        hap = rng.integers(0, 2, (n_hap, n_var), dtype=np.int8)
+        tri = rng.choice(n_var, 8, replace=False)
+        for j in tri:
+            carriers = np.where(hap[:, j] == 1)[0]
+            hap[carriers[: carriers.size // 2], j] = 2
+        miss = rng.random((n_hap, n_var)) < 0.05
+        hap[miss] = -1
+        hap[:, 11] = 0            # monomorphic site
+        hap[:, 17] = -1           # fully missing site
+        return cp.asarray(hap)
+
+    @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+    @pytest.mark.parametrize("chunk_vars", [1, 7, 61])
+    def test_matches_dense(self, missing_data, chunk_vars):
+        from pg_gpu.decomposition import _centered_block, _centered_gram_chunked
+        hap = self._hap()
+        K = int(hap.max()) + 1
+        X, seg_dense = _centered_block(hap, missing_data, K)
+        C_dense = (X @ X.T).get()
+        C, seg, n_cols = _centered_gram_chunked(hap, missing_data, K, chunk_vars)
+        assert seg == seg_dense
+        assert n_cols == X.shape[1]
+        low = np.tril(C.get())
+        np.testing.assert_allclose(low + np.tril(low, -1).T, C_dense,
+                                   rtol=1e-10, atol=1e-10)
+
+    def test_pca_multichunk_matches_single_chunk(self, monkeypatch):
+        from pg_gpu import HaplotypeMatrix, decomposition
+        hap = self._hap(seed=5)
+        n_hap, n_var = hap.shape
+        pos = np.arange(1, n_var + 1, dtype=np.int64) * 50
+        hm = HaplotypeMatrix(hap, cp.asarray(pos))
+        coords_one, ratio_one = decomposition.pca(hm, n_components=5)
+        monkeypatch.setattr(decomposition, "estimate_variant_chunk_size",
+                            lambda *a, **k: 7)
+        coords_multi, ratio_multi = decomposition.pca(hm, n_components=5)
+        for j in range(coords_one.shape[1]):
+            k = np.argmax(np.abs(coords_one[:, j]))
+            if np.sign(coords_one[k, j]) != np.sign(coords_multi[k, j]):
+                coords_multi[:, j] = -coords_multi[:, j]
+        np.testing.assert_allclose(coords_multi, coords_one,
+                                   rtol=1e-8, atol=1e-8)
+        np.testing.assert_allclose(np.asarray(ratio_multi),
+                                   np.asarray(ratio_one),
+                                   rtol=1e-10, atol=1e-12)
