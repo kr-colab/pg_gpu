@@ -384,25 +384,40 @@ def _compute_heterozygosity(mat, pops, use_genotypes=False):
     """Compute H_i_j statistics on GPU for N populations (moments convention).
 
     Works with both haplotype and genotype data by converting to allele
-    counts with the haploid sample size convention.
+    counts with the haploid sample size convention. The haplotype branch
+    restricts to the same exactly-two-present-allele site set as
+    ``_compute_ld_sums`` and counts the alt allele on the 0/1 indicator, so
+    every allele coding ({0,1}, {0,2}, reference-absent {1,2}) gives the same
+    H, and a missing call leaves both the alt count and the per-site sample
+    size, matching the genotype branch's valid mask.
     """
     num_pops = len(pops)
+
+    if not use_genotypes:
+        # _biallelic_indicator transfers a CPU-resident matrix to the GPU,
+        # so it must run before allele_counts sees mat.haplotypes.
+        indicator = mat._biallelic_indicator()
+        from ._memutil import allele_counts
+        ac, _ = allele_counts(mat.haplotypes)
+        keep_idx = cp.where((ac > 0).sum(axis=1) == 2)[0]
+        indicator = indicator[:, keep_idx]
 
     alt_counts = []
     ref_counts = []
     hap_sizes = []
     for pop in pops:
         pidx = mat.sample_sets[pop]
+        if isinstance(pidx, list):
+            pidx = cp.array(pidx, dtype=cp.int32)
         if use_genotypes:
-            if isinstance(pidx, list):
-                pidx = cp.array(pidx, dtype=cp.int32)
             pop_data = mat.genotypes[pidx, :]
             valid = pop_data >= 0
             alt = cp.sum(cp.where(valid, pop_data, 0).astype(cp.int32), axis=0).astype(cp.float64)
             n_hap = 2.0 * cp.sum(valid, axis=0).astype(cp.float64)
         else:
-            alt = cp.sum(cp.maximum(mat.haplotypes[pidx, :], 0).astype(cp.int32), axis=0).astype(cp.float64)
-            n_hap = cp.float64(len(pidx)) * cp.ones_like(alt)
+            pop_ind = indicator[pidx, :]
+            alt = cp.sum(pop_ind == 1, axis=0).astype(cp.float64)
+            n_hap = cp.sum(pop_ind >= 0, axis=0).astype(cp.float64)
         alt_counts.append(alt)
         ref_counts.append(n_hap - alt)
         hap_sizes.append(n_hap)
