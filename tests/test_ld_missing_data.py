@@ -212,8 +212,8 @@ ind3\tpop1
         for i, sample_name in enumerate(vcf_data['samples']):
             pop = pop_assignments.get(sample_name)
             if pop in pop_sets:
-                pop_sets[pop].append(i)
-                pop_sets[pop].append(i + n_samples)  # Add haplotype indices
+                pop_sets[pop].append(2 * i)
+                pop_sets[pop].append(2 * i + 1)
 
         h_gpu.sample_sets = pop_sets
 
@@ -349,8 +349,8 @@ ind3\tpop1
         for i, sample_name in enumerate(vcf_data['samples']):
             pop = pop_assignments.get(sample_name)
             if pop in pop_sets:
-                pop_sets[pop].append(i)
-                pop_sets[pop].append(i + n_samples)  # Add haplotype indices
+                pop_sets[pop].append(2 * i)
+                pop_sets[pop].append(2 * i + 1)
 
         h_gpu.sample_sets = pop_sets
 
@@ -449,8 +449,8 @@ ind3\tpop1
         for i, sample_name in enumerate(vcf_data['samples']):
             pop = pop_assignments.get(sample_name)
             if pop in pop_sets:
-                pop_sets[pop].append(i)
-                pop_sets[pop].append(i + n_samples)
+                pop_sets[pop].append(2 * i)
+                pop_sets[pop].append(2 * i + 1)
 
         h_gpu.sample_sets = pop_sets
 

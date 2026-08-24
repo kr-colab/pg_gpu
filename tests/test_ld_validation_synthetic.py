@@ -106,8 +106,8 @@ class TestLDValidationSynthetic:
         for i, sample_name in enumerate(vcf['samples']):
             pop = pop_assignments.get(sample_name, None)
             if pop in pop_sets:
-                pop_sets[pop].append(i)
-                pop_sets[pop].append(i + n_samples)
+                pop_sets[pop].append(2 * i)
+                pop_sets[pop].append(2 * i + 1)
 
         h_gpu.sample_sets = pop_sets
 
@@ -198,8 +198,8 @@ class TestLDValidationSynthetic:
         for i, sample_name in enumerate(vcf['samples']):
             pop = pop_assignments.get(sample_name, None)
             if pop in pop_sets:
-                pop_sets[pop].append(i)
-                pop_sets[pop].append(i + n_samples)
+                pop_sets[pop].append(2 * i)
+                pop_sets[pop].append(2 * i + 1)
 
         h_gpu.sample_sets = pop_sets
 
