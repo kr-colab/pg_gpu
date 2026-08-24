@@ -168,10 +168,42 @@ extern "C" __global__
 void allele_counts(const signed char* hap, int n_hap, int n_var,
                    long long stride0, long long stride1, int K,
                    long long* out_ac, long long* out_n) {
+    // Per-thread histograms live in shared memory, laid out (allele, tid)
+    // so consecutive threads hit consecutive banks. Tallying in shared
+    // costs one 4-byte RMW per element where the old version paid a
+    // 16-byte global round trip -- that alone was a ~17x bandwidth
+    // amplification over the 1-byte reads.
+    extern __shared__ int cnt[];
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    for (int a = 0; a < K; a++) cnt[a * blockDim.x + tid] = 0;
+    if (j >= n_var) return;
+    int nv = 0;
+    for (int i = 0; i < n_hap; i++) {
+        signed char v = hap[i * stride0 + j * stride1];
+        if (v >= 0) {
+            nv++;
+            if (v < K) cnt[v * blockDim.x + tid]++;
+        }
+    }
+    long long base = (long long)j * K;
+    for (int a = 0; a < K; a++)
+        out_ac[base + a] = (long long)cnt[a * blockDim.x + tid];
+    out_n[j] = nv;
+}
+''', 'allele_counts')
+
+
+# Fallback for allele counts too wide for a shared-memory histogram (a
+# per-thread row would blow the 48 KB block budget). Same contract; the
+# output row doubles as the histogram, one global RMW per element.
+_allele_counts_kernel_widek = cp.RawKernel(r'''
+extern "C" __global__
+void allele_counts_widek(const signed char* hap, int n_hap, int n_var,
+                         long long stride0, long long stride1, int K,
+                         long long* out_ac, long long* out_n) {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j >= n_var) return;
-    // One thread owns variant j's output row, so no atomics are needed:
-    // the row doubles as this thread's histogram. Zero it, then tally.
     long long base = (long long)j * K;
     for (int a = 0; a < K; a++) out_ac[base + a] = 0;
     int nv = 0;
@@ -179,12 +211,12 @@ void allele_counts(const signed char* hap, int n_hap, int n_var,
         signed char v = hap[i * stride0 + j * stride1];
         if (v >= 0) {
             nv++;
-            if (v < K) out_ac[base + v]++;  // v < K guaranteed when K == max+1
+            if (v < K) out_ac[base + v]++;
         }
     }
     out_n[j] = nv;
 }
-''', 'allele_counts')
+''', 'allele_counts_widek')
 
 
 def allele_counts(hap, n_alleles=None):
@@ -228,8 +260,15 @@ def allele_counts(hap, n_alleles=None):
     s0, s1 = hap.strides
     threads = _THREADS_PER_BLOCK
     blocks = (n_var + threads - 1) // threads
-    _allele_counts_kernel((blocks,), (threads,),
-                          (hap, n_hap, n_var, s0, s1, K, out_ac, out_n))
+    shared_bytes = K * threads * 4
+    if shared_bytes <= 48 * 1024:
+        _allele_counts_kernel((blocks,), (threads,),
+                              (hap, n_hap, n_var, s0, s1, K, out_ac, out_n),
+                              shared_mem=shared_bytes)
+    else:
+        _allele_counts_kernel_widek((blocks,), (threads,),
+                                    (hap, n_hap, n_var, s0, s1, K,
+                                     out_ac, out_n))
     return out_ac, out_n
 
 
