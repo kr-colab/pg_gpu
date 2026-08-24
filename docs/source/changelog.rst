@@ -10,7 +10,7 @@ Sites with more than two alleles are now handled correctly
 Statistics used to lump every alternate allele into one "non-reference"
 group. That is fine when a site has two alleles and wrong when it has
 three or four. Each allele is now counted on its own, which is what
-``tskit`` does. See :doc:`missing_data` for what this means in
+``tskit`` does. See :doc:`multiallelic` for what this means in
 practice.
 
 **If your data only has two alleles per site, nothing here changes your

@@ -67,7 +67,8 @@ calibration check. A few directions to extend:
   ``average_patterson_f3`` for the F3 admixture test; the two share
   the ratio-of-sums structure, so the wrapper code is interchangeable.
   Note that :math:`D` is only defined on sites with two alleles, so it
-  skips multiallelic sites and warns about how many. If your data has
+  skips multiallelic sites and warns about how many (see
+  :doc:`../multiallelic`). If your data has
   many of those, ``admixture.patterson_f4`` tests the same four-population
   signal and uses every site.
 * **Different demographic model.** Edit the ``msprime`` model to add
