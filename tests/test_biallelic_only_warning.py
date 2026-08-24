@@ -63,12 +63,12 @@ def test_is_userwarning_subclass():
 
 
 def test_helper_warns_with_count_and_context():
-    with pytest.warns(BiallelicOnlyWarning, match=r"foo\.bar .*dropped 3 multiallelic"):
+    with pytest.warns(BiallelicOnlyWarning, match=r"foo\.bar .*3 multiallelic site\(s\) dropped"):
         _warn_biallelic_only(3, context="foo.bar")
 
 
 def test_helper_accepts_numpy_scalar_count():
-    with pytest.warns(BiallelicOnlyWarning, match="dropped 7 multiallelic"):
+    with pytest.warns(BiallelicOnlyWarning, match="7 multiallelic site.s. dropped"):
         _warn_biallelic_only(np.int64(7), context="ctx")
 
 
@@ -92,7 +92,7 @@ class TestFromVcfWarns:
             "1\t200\t.\tA\tT,G\t.\tPASS\t.\tGT\t2|1\t0|0",   # triallelic -> dropped
             "1\t300\t.\tA\tT\t.\tPASS\t.\tGT\t0|1\t1|0",     # biallelic
         ])
-        with pytest.warns(BiallelicOnlyWarning, match="dropped 1 multiallelic"):
+        with pytest.warns(BiallelicOnlyWarning, match="1 multiallelic site.s. dropped"):
             gm = GenotypeMatrix.from_vcf(vcf)
         assert gm.num_variants == 2   # the multiallelic site is dropped
 
@@ -117,7 +117,7 @@ class TestFromVcfWarns:
             "1\t400\t.\tA\tT\t.\tPASS\t.\tGT\t0|0\t0|0",       # mono {0} -> 0, 0
             "1\t500\t.\tA\tT,G\t.\tPASS\t.\tGT\t0|1\t2|0",     # {0,1,2} -> dropped
         ])
-        with pytest.warns(BiallelicOnlyWarning, match="dropped 1 multiallelic"):
+        with pytest.warns(BiallelicOnlyWarning, match="1 multiallelic site.s. dropped"):
             gm = GenotypeMatrix.from_vcf(vcf)
         assert gm.num_variants == 4
         np.testing.assert_array_equal(_host(gm.positions), [100, 200, 300, 400])
@@ -135,7 +135,7 @@ class TestFromHaplotypeMatrixWarns:
                         [0, 2, 0],
                         [1, 0, 0]], dtype=np.int8)
         hm = HaplotypeMatrix(hap, np.array([100, 200, 300]), 0, 400)
-        with pytest.warns(BiallelicOnlyWarning, match="dropped 1 multiallelic"):
+        with pytest.warns(BiallelicOnlyWarning, match="1 multiallelic site.s. dropped"):
             gm = GenotypeMatrix.from_haplotype_matrix(hm)
         assert gm.num_variants == 2
         # paired sums of the two retained {0,1} sites; no bogus >2 dosage
@@ -240,7 +240,7 @@ class TestPattersonDWarns:
             [0, 1, 2, 0, 1, 0, 1, 0],   # triallelic (0,1,2) -> dropped
             [1, 0, 1, 0, 1, 0, 1, 0],   # biallelic
         ])
-        with pytest.warns(BiallelicOnlyWarning, match="dropped 1 multiallelic"):
+        with pytest.warns(BiallelicOnlyWarning, match="1 multiallelic site.s. dropped"):
             admixture.patterson_d(hm, "A", "B", "C", "D")
 
     def test_no_warn_when_biallelic(self):
@@ -267,4 +267,4 @@ class TestPattersonDWarns:
             admixture.moving_patterson_d(hm, "A", "B", "C", "D", size=2)
         bo = [w for w in rec if issubclass(w.category, BiallelicOnlyWarning)]
         assert len(bo) == 1
-        assert "dropped 2 multiallelic" in str(bo[0].message)
+        assert "2 multiallelic site(s) dropped" in str(bo[0].message)

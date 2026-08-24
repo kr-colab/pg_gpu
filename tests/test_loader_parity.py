@@ -133,10 +133,12 @@ class TestMultiallelicParity:
         path = str(tmp_path / "m.vcz.zarr")
         write_vcz(path, _MULTI_CG, _MULTI_POS, samples=_SAMPLES, contig_name="1")
 
-        with pytest.warns(BiallelicOnlyWarning, match="dropped 1 multiallelic"):
+        with pytest.warns(BiallelicOnlyWarning,
+                          match="1 multiallelic site.s. recoded"):
             eager = GenotypeMatrix.from_zarr(path, streaming="never")
         streaming = GenotypeMatrix.from_zarr(path, streaming="always")
-        with pytest.warns(BiallelicOnlyWarning, match="dropped 1 multiallelic"):
+        with pytest.warns(BiallelicOnlyWarning,
+                          match="first affected chunk"):
             strm = streaming.materialize()
 
         np.testing.assert_array_equal(_host(eager.genotypes), expected)
@@ -148,7 +150,8 @@ class TestMultiallelicParity:
     def test_from_vcf_drops_the_site(self, tmp_path):
         vcf = _write_vcf_from_cg(
             tmp_path / "m.vcf", _MULTI_CG, _MULTI_POS, _SAMPLES)
-        with pytest.warns(BiallelicOnlyWarning, match="dropped 1 multiallelic"):
+        with pytest.warns(BiallelicOnlyWarning,
+                          match="1 multiallelic site.s. dropped"):
             from_vcf = GenotypeMatrix.from_vcf(vcf)
         # from_vcf drops the multiallelic site entirely (5 kept, not 6)...
         assert from_vcf.num_variants == 5

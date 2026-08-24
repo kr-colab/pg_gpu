@@ -35,7 +35,7 @@ from pg_gpu import (
 from pg_gpu.genotype_matrix import GenotypeMatrix
 
 # ── Config ───────────────────────────────────────────────────────────────
-ZARR_PATH = "/sietch_colab/data_share/Ag1000G/Ag3.0/vcf/AgamP3.phased.zarr"
+ZARR_PATH = "/sietch_colab/data_share/Ag1000G/Ag3.0/vcf/phased_vcf/AgamP3.phased.zarr"
 ACC_PATH = "/sietch_colab/data_share/Ag1000G/Ag3.0/vcf/agp3.is_accessible.txt.npz"
 CHROM = "3R"
 REGION_START = None  # None = full arm
@@ -150,6 +150,7 @@ def bench(fn, n_iter=N_ITER, n_warmup=1, sync_gpu=True):
         try:
             fn()
         except Exception:
+            traceback.print_exc()
             return None
         if sync_gpu:
             cp.cuda.Stream.null.synchronize()
@@ -162,6 +163,7 @@ def bench(fn, n_iter=N_ITER, n_warmup=1, sync_gpu=True):
         try:
             fn()
         except Exception:
+            traceback.print_exc()
             return None
         if sync_gpu:
             cp.cuda.Stream.null.synchronize()

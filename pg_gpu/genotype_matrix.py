@@ -618,6 +618,7 @@ class GenotypeMatrix:
         )
         from ._warnings import _warn_biallelic_only
         _warn_biallelic_only(gm._n_multiallelic_recoded,
+                             action="recoded to all-missing rows",
                              context="GenotypeMatrix.from_zarr")
         if fields:
             gm.fields = read_qc_fields(

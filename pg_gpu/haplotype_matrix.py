@@ -596,8 +596,8 @@ class HaplotypeMatrix:
             (suitable for large-scale stores that do not fit
             entirely in GPU memory). ``'always'`` forces streaming;
             ``'never'`` forces a single-shot load (and raises
-            ``MemoryError`` if the matrix would not fit in free GPU
-            memory). ``'auto'`` (default) checks the projected
+            ``MemoryError`` when the matrix would exceed half the
+            free GPU memory -- the same check ``'auto'`` uses). ``'auto'`` (default) checks the projected
             footprint of the haplotype matrix against free GPU
             memory and picks streaming when the full matrix would
             consume more than half the device. Scikit-allel-formatted
