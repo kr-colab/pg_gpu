@@ -194,7 +194,10 @@ Pairwise / cross-window statistics need every variant in scope at the
 same time and **cannot** run chunk-by-chunk: `h.pairwise_r2`,
 `h.locate_unlinked`, `h.windowed_r_squared`'s full r² heatmap form,
 `relatedness.grm`, and `relatedness.ibs`. Calling these on a
-`StreamingHaplotypeMatrix` raises. The escape hatch is `.materialize`:
+`StreamingHaplotypeMatrix` raises. The escape hatch is `.materialize`.
+`grm` / `ibs` take a `GenotypeMatrix` only, so materialize a genotype
+stream (`GenotypeMatrix.from_zarr(..., streaming='always')`) for those
+two -- a materialized haplotype stream still raises `TypeError`:
 
 ```python
 # Pull a 5 Mb sub-region into one eager HaplotypeMatrix on the GPU.
@@ -370,7 +373,8 @@ h_filtered = h.filter_variants_by_missing(max_missing_freq=0.2)  # ≤20% missin
 pi = diversity.pi(h)                          # include mode
 pi = diversity.pi(h, missing_data='exclude')  # exclude mode
 
-# Drop sites with three or more distinct alleles (allele codes preserved)
+# Drop sites with three or more distinct alleles (allele codes preserved).
+# restrict_to_segregating() instead drops sites where nothing varies.
 h_bi = h.restrict_to_biallelic()
 ```
 
@@ -524,6 +528,7 @@ DataFrame, concatenate with a `chrom` column, and facet with
 from pg_gpu import divergence
 
 fst   = divergence.fst(h, 'pop1', 'pop2')        # Hudson FST (default)
+fst_t = divergence.fst(h, 'pop1', 'pop2', method='tskit')  # tskit-matching
 dxy   = divergence.dxy(h, 'pop1', 'pop2')
 da    = divergence.da(h, 'pop1', 'pop2')
 pbs   = divergence.pbs(h, 'pop1', 'pop2', 'pop3', window_size=50)
@@ -613,6 +618,18 @@ coords, explained = decomposition.pca(h, n_components=10)
 # Randomized PCA (faster for large datasets)
 coords, explained = decomposition.randomized_pca(h, n_components=20)
 
+# Diploid-dosage PCA on a GenotypeMatrix (binomial-variance scaling,
+# matches scikit-allel's Patterson scaler): pca_dosage /
+# randomized_pca_dosage.
+from pg_gpu import GenotypeMatrix, relatedness
+gm = GenotypeMatrix.from_haplotype_matrix(h)
+coords_d, expl_d = decomposition.pca_dosage(gm, n_components=10)
+
+# tskit-matching genetic relatedness. sample_sets is a list of row-index
+# groups (not pop names); default is one set per haplotype.
+grel = relatedness.genetic_relatedness(
+    h, [h.sample_sets['pop1'], h.sample_sets['pop2']])
+
 # PCoA (distance-based)
 dist = decomposition.pairwise_distance(h)
 coords_pcoa, pcoa_var = decomposition.pcoa(dist, n_components=10)
@@ -693,6 +710,8 @@ resampled block indices are applied to both — required for correctness:
 
 ```python
 T, B = admixture.patterson_f3(h, 'C', 'A', 'B')
+# patterson_f4(h, 'A', 'B', 'C', 'D') returns one per-variant array;
+# its scalar is the plain sum, no denominator.
 # Bin per-variant T and B into block-sized chunks. Trivial bp-window
 # binning works for genome-wide F3; for fine-grained block sizes use
 # np.add.reduceat with block boundaries from h.positions.
@@ -737,6 +756,6 @@ Notes:
 4. **Matrices live on the GPU.** Loaders (`from_vcf`, `from_zarr`) return GPU-resident matrices; all stat functions also auto-`transfer_to_gpu()` on the eager classes if a caller hand-constructed one from numpy. You almost never need to call the transfer methods yourself. To hand a result to pandas / seaborn / matplotlib, call `.get()` on the returned cupy array — that's the device-to-host step. `StreamingHaplotypeMatrix` has no `transfer_to_*` methods (it manages chunk-by-chunk residency); pass it straight to the stat functions.
 5. **Selection scan output shape**: `ihs` / `nsl` return `(n_variants,)` on {0,1}-coded data and `(n_variants, K-1)` (one column per alternate allele code) otherwise. `h.restrict_to_biallelic()` gives the classic 1-D scan on {0,1} codes, but it preserves codes -- a surviving `{0,2}` site still forces the 2-D form. `standardize_by_allele_count` takes 1-D input; standardize each column against its own allele count.
 6. **`span_normalize`**: default `True`; requires `chrom_start` / `chrom_end`, an `accessible_bed`, or `h.set_accessible_mask(...)` for meaningful per-base estimates.
-7. **Streaming dispatch**: `streaming='never'` raises `MemoryError` when the matrix would exceed 50 % of free GPU memory. Use `streaming='auto'` for unknown-size loads — `windowed_analysis`, `diversity.*`, `sfs.sfs` / `joint_sfs`, and `selection.*` dispatch on the streaming matrix automatically. Pairwise / cross-window kernels (`pairwise_r2`, `locate_unlinked`, the full-r² heatmap form of `windowed_r_squared`, `grm`, `ibs`) cannot run streaming — call `.materialize(region=(lo, hi))` to pull a sub-region into an eager matrix for those.
+7. **Streaming dispatch**: `streaming='never'` raises `MemoryError` when the matrix would exceed 50 % of free GPU memory. Use `streaming='auto'` for unknown-size loads — `windowed_analysis`, `diversity.*`, `sfs.sfs` / `joint_sfs`, and `selection.*` dispatch on the streaming matrix automatically. Pairwise / cross-window kernels (`pairwise_r2`, `locate_unlinked`, the full-r² heatmap form of `windowed_r_squared`, `grm`, `ibs`) cannot run streaming — call `.materialize(region=(lo, hi))` to pull a sub-region into an eager matrix for those. `grm` / `ibs` take a `GenotypeMatrix` only: materialize a genotype stream, not a haplotype stream, for those two.
 8. **`fields=` is eager-only**: passing `fields=['DP', 'GQ', ...]` raises `NotImplementedError` whenever the load takes the streaming path (always under `streaming='always'`; under `streaming='auto'` only when the matrix would not fit eagerly). For larger regions, skip the loader and read `call_<TAG>` / `variant_<TAG>` directly with `zarr.open(...)`.
 9. **Shared GPUs**: if CuPy lands on a saturated device the load OOMs even when other GPUs are free. Set `CUDA_VISIBLE_DEVICES=N` before importing pg_gpu.
