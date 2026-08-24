@@ -12,10 +12,43 @@ from typing import Optional
 from .accessible import AccessibleMask, resolve_accessible_mask
 
 
+def _biallelic_and_alt(ac):
+    """Per-site biallelic mask and alt-allele index from allele counts.
+
+    ``ac`` is an ``(n_var, K)`` allele-count matrix in any array namespace.
+    Biallelic = at most two distinct present alleles. Allele 0 is the reference;
+    ``alt`` is the highest-index present allele > 0, which the 0/1/2 dosage counts --
+    code-independent, so {0,2} and reference-absent {1,2} sites work, while {0,1}
+    stays bit-identical (including a site fixed for allele 1). A site with no alt
+    allele present (all reference / all missing) gets the out-of-range sentinel ``K``
+    so its dosage counts to 0 and never matches the -1 missing code.
+    """
+    xp = cp if isinstance(ac, cp.ndarray) else np
+    present = ac > 0
+    biallelic = present.sum(axis=1) <= 2
+    K = ac.shape[1]
+    if K <= 1:
+        return biallelic, xp.full(ac.shape[0], K)
+    alt_present = present[:, 1:]                                  # alleles 1..K-1
+    has_alt = alt_present.any(axis=1)
+    highest_alt = K - 1 - alt_present[:, ::-1].argmax(axis=1)     # highest present > 0
+    alt = xp.where(has_alt, highest_alt, K)
+    return biallelic, alt
+
+
 class GenotypeMatrix:
     """Diploid genotype matrix with values 0 (hom ref), 1 (het), 2 (hom alt).
 
     Shape: (n_individuals, n_variants). Missing data encoded as -1.
+
+    Biallelic by construction: values are alt-allele dosage (0/1/2), so this
+    structure cannot represent multiallelic genotypes. ``from_vcf`` and
+    ``from_haplotype_matrix`` keep sites with at most two distinct present
+    alleles -- so {0,1}, {0,2}, and reference-absent {1,2} are all kept, with the
+    dosage counting the alt allele -- and drop sites with three or more distinct
+    present alleles, emitting a ``BiallelicOnlyWarning`` with the
+    dropped-site count. For multiallelic data use the allele-index
+    ``HaplotypeMatrix``.
 
     Parameters
     ----------
@@ -54,7 +87,7 @@ class GenotypeMatrix:
         self._accessible_mask = None
         self.chrom_start = chrom_start
         self.chrom_end = chrom_end
-        self._sample_sets = sample_sets
+        self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
         self.samples = samples
         # See HaplotypeMatrix.fields for the shape contract.
@@ -130,6 +163,24 @@ class GenotypeMatrix:
 
     @sample_sets.setter
     def sample_sets(self, sample_sets):
+        """
+        Set the sample sets.
+
+        Each value must be a list, tuple, or one-dimensional integer
+        array of individual row numbers within the
+        matrix, without duplicates. Rows are individuals here, so no
+        pairing applies. The dict is stored as given, not copied; mutating
+        it afterwards is not re-validated.
+        """
+        if sample_sets is None:
+            self._sample_sets = None
+            return
+        if not isinstance(sample_sets, dict):
+            raise ValueError("sample_sets must be a dictionary")
+        from ._warnings import check_sample_set_rows
+        n_rows = self._genotypes.shape[0]
+        for key, value in sample_sets.items():
+            check_sample_set_rows(f"sample_sets[{key!r}]", value, n_rows)
         self._sample_sets = sample_sets
 
     @property
@@ -251,7 +302,11 @@ class GenotypeMatrix:
         """Convert a HaplotypeMatrix to a GenotypeMatrix.
 
         Pairs consecutive haplotypes (0,1), (2,3), ... as diploid individuals.
-        Genotype = sum of paired haplotypes (0, 1, or 2).
+        Each genotype is the count of the site's alt allele in the pair (0, 1, or
+        2); a pair with any missing haplotype is -1. Only biallelic sites (at most
+        two distinct present alleles) are kept -- sites with three or more
+        distinct present alleles cannot be a 0/1/2 dosage and are dropped with a
+        BiallelicOnlyWarning.
 
         Parameters
         ----------
@@ -267,41 +322,64 @@ class GenotypeMatrix:
             raise ValueError(
                 f"Need even number of haplotypes for diploid conversion, got {n_hap}")
 
+        if hap_matrix.device == 'CPU':
+            hap_matrix.transfer_to_gpu()
         hap = hap_matrix.haplotypes
-        xp = cp if isinstance(hap, cp.ndarray) else np
+        positions = hap_matrix.positions
+
+        # Biallelic = at most two distinct present alleles; the dosage counts the
+        # alt (highest present allele > 0), so {0,2} and reference-absent {1,2}
+        # sites are handled correctly and {0,1} is unchanged. Sites with >= 3
+        # alleles cannot be a dosage and are dropped with a warning; positions
+        # shares hap's array namespace, so the same mask indexes both.
+        from ._memutil import allele_counts
+        ac, _ = allele_counts(hap)
+        biallelic, alt = _biallelic_and_alt(ac)
+        n_dropped = int((~biallelic).sum())
+        if n_dropped:
+            from ._warnings import _warn_biallelic_only
+            _warn_biallelic_only(
+                n_dropped, context="GenotypeMatrix.from_haplotype_matrix")
+            hap = hap[:, biallelic]
+            positions = positions[biallelic]
+            alt = alt[biallelic]
 
         h1 = hap[0::2]  # even indices
         h2 = hap[1::2]  # odd indices
         n_ind = h1.shape[0]
         n_var = h1.shape[1]
 
-        # Chunk over variants to avoid OOM from boolean intermediates
-        geno = xp.empty((n_ind, n_var), dtype=xp.int8)
-        if xp is cp:
-            free_mem = cp.cuda.Device().mem_info[0]
-            # Each variant needs ~4 * n_ind bytes for intermediates
-            chunk = max(1, int(free_mem * 0.3 / (n_ind * 4)))
-        else:
-            chunk = n_var
+        # Dosage = per-individual count of the alt allele (0/1/2); a pair with any
+        # missing haplotype -> -1. Chunk over variants to bound GPU memory.
+        geno = cp.empty((n_ind, n_var), dtype=cp.int8)
+        free_mem = cp.cuda.Device().mem_info[0]
+        chunk = max(1, int(free_mem * 0.3 / (n_ind * 4)))
 
         for vs in range(0, n_var, chunk):
             ve = min(vs + chunk, n_var)
             c1 = h1[:, vs:ve]
             c2 = h2[:, vs:ve]
+            a = alt[vs:ve][None, :]
             missing = (c1 < 0) | (c2 < 0)
-            geno[:, vs:ve] = (xp.maximum(c1, 0) + xp.maximum(c2, 0)).astype(xp.int8)
+            geno[:, vs:ve] = ((c1 == a).astype(cp.int8) + (c2 == a).astype(cp.int8))
             geno[:, vs:ve][missing] = -1
 
         # remap sample_sets: haplotype indices -> individual indices
         new_sample_sets = None
         if hap_matrix._sample_sets is not None:
+            from ._warnings import check_paired_rows
             new_sample_sets = {}
             for name, indices in hap_matrix._sample_sets.items():
+                # The i // 2 collapse assumes each set carries whole
+                # individuals; a set holding one gamete of a sample would
+                # silently become that whole individual here.
+                check_paired_rows(
+                    indices, f"GenotypeMatrix.from_haplotype_matrix({name})")
                 # map haplotype indices to individual indices
                 ind_indices = sorted(set(i // 2 for i in indices))
                 new_sample_sets[name] = ind_indices
 
-        return cls(geno, hap_matrix.positions, hap_matrix.chrom_start,
+        return cls(geno, positions, hap_matrix.chrom_start,
                    hap_matrix.chrom_end, sample_sets=new_sample_sets,
                    n_total_sites=hap_matrix.n_total_sites,
                    accessible_mask=hap_matrix.accessible_mask)
@@ -383,16 +461,23 @@ class GenotypeMatrix:
         pos = callset['variants/POS']
         samples = list(callset['samples'])
 
-        from ._warnings import check_diploid_encoding
+        from ._warnings import check_diploid_encoding, _warn_biallelic_only
         check_diploid_encoding(gt, sample_names=samples, source=f"VCF '{path}'")
 
-        # Filter to biallelic sites (max allele index <= 1)
-        is_biallelic = np.all(gt <= 1, axis=(1, 2)) | np.all(gt < 0, axis=(1, 2))
-        gt_array = allel.GenotypeArray(gt)
-        ac = gt_array.count_alleles()
-        is_biallelic = ac.is_biallelic_01()
+        # Biallelic = at most two distinct present alleles; the dosage counts the
+        # alt (highest present allele > 0), so {0,2} and reference-absent {1,2}
+        # sites are handled correctly and {0,1} is unchanged. Only sites with
+        # three or more distinct present alleles are dropped (with a warning);
+        # monomorphic and all-missing sites are retained, matching
+        # from_haplotype_matrix. count_alleles ignores missing (-1), giving an
+        # (n_variants, n_alleles) count matrix.
+        ac = np.asarray(allel.GenotypeArray(gt).count_alleles())
+        is_biallelic, alt = _biallelic_and_alt(ac)
+        _warn_biallelic_only(int(np.sum(~is_biallelic)),
+                             context="GenotypeMatrix.from_vcf")
         gt = gt[is_biallelic]
         pos = pos[is_biallelic]
+        alt = alt[is_biallelic]
 
         qc_fields = (_resolve_qc_fields_vcf(callset, tag_to_path, unknown_tags)
                      if fields else {})
@@ -402,9 +487,9 @@ class GenotypeMatrix:
         for tag, arr in qc_fields.items():
             qc_fields[tag] = arr[is_biallelic]
 
-        # sum alleles to get alt count (0/1/2)
-        geno = np.sum(gt, axis=2).astype(np.int8)  # (n_variants, n_samples)
-        # handle missing (-1 in either allele)
+        # Dosage = per-genotype count of the alt allele (0/1/2); a call with any
+        # missing allele (-1) -> -1.
+        geno = (gt == alt[:, None, None]).sum(axis=2).astype(np.int8)
         missing = np.any(gt < 0, axis=2)
         geno[missing] = -1
 
@@ -476,7 +561,7 @@ class GenotypeMatrix:
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
-                backend=backend,
+                backend=backend, accessible_bed=accessible_bed,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits;
@@ -498,7 +583,7 @@ class GenotypeMatrix:
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
-                backend=backend, source=source,
+                backend=backend, source=source, accessible_bed=accessible_bed,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
@@ -531,6 +616,10 @@ class GenotypeMatrix:
             n_total_sites=n_total_sites,
             samples=list(samples) if samples else None,
         )
+        from ._warnings import _warn_biallelic_only
+        _warn_biallelic_only(gm._n_multiallelic_recoded,
+                             action="recoded to all-missing rows",
+                             context="GenotypeMatrix.from_zarr")
         if fields:
             gm.fields = read_qc_fields(
                 path, fields,
@@ -558,7 +647,8 @@ class GenotypeMatrix:
 
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
-                         prefetch, backend="auto", source=None):
+                         prefetch, backend="auto", source=None,
+                         accessible_bed=None):
         from .streaming_matrix import (
             StreamingGenotypeMatrix, _pick_chunk_fetcher,
         )
@@ -570,9 +660,19 @@ class GenotypeMatrix:
         else:
             source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
+
+        # Resolve the accessible BED once over the source's variant-position
+        # bounds so every chunk is filtered to accessible variants, matching
+        # the eager path's mask-filtered .genotypes view (grm/ibs read that
+        # view, so streaming and eager see the same variant set).
+        from .accessible import resolve_streaming_accessible_mask
+        accessible_mask = resolve_streaming_accessible_mask(
+            accessible_bed, source, region)
+
         return StreamingGenotypeMatrix(
             source, fetcher,
             chunk_bp=chunk_bp, prefetch=prefetch,
+            accessible_mask=accessible_mask,
         )
 
     def filter(self, variants=None, genotypes=None,
@@ -730,6 +830,12 @@ class GenotypeMatrix:
             population labels.
         pops : list of str, optional
             Populations to include. If None, includes all found.
+
+        Notes
+        -----
+        Each population lists individual indices, one per sample. This differs
+        from ``HaplotypeMatrix.load_pop_file``, which lists haplotype rows and
+        so gives two entries per sample.
         """
         if self.samples is None:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
@@ -753,35 +859,44 @@ class GenotypeMatrix:
             if pop in pop_sets:
                 pop_sets[pop].append(i)
 
-        self.sample_sets = pop_sets
+        # A population with no member in this matrix resolves empty --
+        # routine when the matrix holds a sample subset of the pop file's
+        # cohort. Drop it rather than fail the whole load, but say so: a
+        # silently vanishing population sends the user's next error to the
+        # statistic call instead of here.
+        dropped = sorted(p for p, rows in pop_sets.items() if not rows)
+        if dropped:
+            import warnings
+            warnings.warn(
+                f"pop file populations with no member in this matrix "
+                f"dropped: {', '.join(dropped)}", stacklevel=2)
+        self.sample_sets = {p: rows for p, rows in pop_sets.items() if rows}
 
-    def apply_biallelic_filter(self):
-        """Filter to biallelic variant sites.
+    def restrict_to_segregating(self):
+        """Drop monomorphic (non-segregating) sites.
 
-        Keeps variants where both ref and alt alleles are present
-        among non-missing individuals.
+        The matrix is already biallelic by construction (0/1/2 dosage), so this
+        does not classify alleles. It keeps only sites still segregating among the
+        non-missing individuals: the alt allele is present but not fixed
+        (0 < total alt dosage < 2 * n_called) and at least two individuals are
+        called.
 
         Returns
         -------
         GenotypeMatrix
         """
-        xp = cp if self._device == 'GPU' else np
+        if self._device == 'CPU':
+            self.transfer_to_gpu()
         geno = self.genotypes
         valid = geno >= 0
-        geno_clean = xp.where(valid, geno, 0)
-        alt_counts = xp.sum(geno_clean, axis=0)
-        n_valid = xp.sum(valid, axis=0)
+        geno_clean = cp.where(valid, geno, 0)
+        alt_counts = cp.sum(geno_clean, axis=0)
+        n_valid = cp.sum(valid, axis=0)
         max_alt = 2 * n_valid
         keep = (alt_counts > 0) & (alt_counts < max_alt) & (n_valid >= 2)
-
-        if self._device == 'GPU':
-            keep_idx = cp.where(keep)[0]
-            new_geno = self.genotypes[:, keep_idx]
-            new_pos = self.positions[keep_idx]
-        else:
-            keep_np = keep if isinstance(keep, np.ndarray) else keep.get()
-            new_geno = self.genotypes[:, keep_np]
-            new_pos = self.positions[keep_np]
+        keep_idx = cp.where(keep)[0]
+        new_geno = self.genotypes[:, keep_idx]
+        new_pos = self.positions[keep_idx]
 
         return GenotypeMatrix(new_geno, new_pos,
                               self.chrom_start, self.chrom_end,

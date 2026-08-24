@@ -33,12 +33,12 @@ def load():
     n_s = hm.num_haplotypes // 2  # diploid sample count
 
     # Map diploid sample indices to haplotype indices:
-    # diploid i -> haplotype i (allele 1) and haplotype i + n_samples (allele 2)
+    # diploid i -> haplotypes 2i (allele 1) and 2i + 1 (allele 2)
     def dip_to_hap(dip_indices):
         hap = []
         for i in dip_indices:
-            hap.append(i)
-            hap.append(i + n_s)
+            hap.append(2 * i)
+            hap.append(2 * i + 1)
         return hap
 
     hm.sample_sets = {

@@ -25,16 +25,19 @@ What's in the box
 
 * **Diversity** -- :math:`\pi`, Watterson's :math:`\theta`,
   Tajima's D, Fay-Wu's H, Zeng's E, Achaz framework theta estimators,
-  heterozygosity, AFS.
-* **Divergence** -- F\ :sub:`ST` (Hudson / Weir-Cockerham / Nei),
+  heterozygosity.
+* **Frequency spectra** -- folded and unfolded, one or two
+  populations, with projection to a smaller sample size.
+* **Divergence** -- F\ :sub:`ST` (Hudson / tskit / Weir-Cockerham / Nei),
   d\ :sub:`xy`, d\ :sub:`a`, PBS, S\ :sub:`nn`, G\ :sub:`min`, dd, Z\ :sub:`x`.
 * **Selection** -- iHS, nSL, XP-EHH, XP-nSL, EHH decay, Garud's H.
 * **LD** -- pairwise r\ :sup:`2`, ZnS, omega, sigma_D\ :sup:`2`,
   windowed LD decay, two-population moments-LD compatible with
   ``moments.LD``.
-* **Admixture** -- Patterson's F2 / F3 / D, with block-jackknife
+* **Admixture** -- Patterson's F2 / F3 / F4 / D, with block-jackknife
   wrappers.
-* **Structure** -- PCA, randomized PCA, PCoA, GRM,
+* **Structure** -- PCA on haplotypes or on diploid genotypes (each with
+  a faster approximate version), PCoA, relatedness matrices (GRM, IBS),
   local PCA / lostruct.
 * **Resampling** -- general-purpose ``block_jackknife`` and
   ``block_bootstrap`` (including the ratio-of-sums case).

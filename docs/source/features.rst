@@ -63,14 +63,12 @@ Diversity Statistics
    * - ``inbreeding_coefficient``
      - Wright's F per variant
      - Wright (1951)
-   * - ``allele_frequency_spectrum``
-     - Allele frequency spectrum
-     -
    * - ``max_daf``
-     - Maximum derived allele frequency
+     - Frequency of the most common alternate allele at a site
      -
    * - ``daf_histogram``
-     - Derived allele frequency histogram
+     - Histogram of alternate-allele frequencies, scaled to sum to 1, with
+       one entry per alternate allele present
      -
    * - ``diplotype_frequency_spectrum``
      - Diplotype (multi-locus genotype) frequency spectrum
@@ -90,8 +88,12 @@ Divergence Statistics
      - Description
      - Reference
    * - ``fst_hudson``
-     - Hudson's FST
+     - Hudson's FST. The usual choice.
      - Hudson et al. (1992)
+   * - ``fst_tskit``
+     - Same ingredients as Hudson's, combined the way tskit does it.
+       Use this if you want to match ``TreeSequence.Fst``.
+     -
    * - ``fst_weir_cockerham``
      - Weir & Cockerham's FST (method of moments)
      - Weir & Cockerham (1984)
@@ -189,10 +191,12 @@ Selection Scans
      - Description
      - Reference
    * - ``ihs``
-     - Integrated Haplotype Score
+     - Integrated Haplotype Score. Each alternate allele is scored against
+       the reference separately -- see the note below.
      - Voight et al. (2006)
    * - ``nsl``
-     - Number of Segregating Sites by Length
+     - Number of Segregating Sites by Length. Scores each alternate allele
+       separately, same as ``ihs``.
      - Ferrer-Admetlla et al. (2014)
    * - ``xpehh``
      - Cross-population Extended Haplotype Homozygosity
@@ -210,6 +214,32 @@ Selection Scans
      - Extended Haplotype Homozygosity decay
      - Sabeti et al. (2002)
 
+``ihs`` and ``nsl`` ask whether one allele sits on unusually long
+shared haplotypes. When a site has more than one alternate allele,
+they score each alternate against the reference separately.
+
+That changes the shape of what you get back. With ordinary two-allele
+data you get one score per site, as usual::
+
+   scores = selection.nsl(h)      # shape (n_variants,)
+
+If any site in the matrix has more than two alleles, you get one column
+per alternate allele instead::
+
+   scores = selection.nsl(h)      # shape (n_variants, n_alt_alleles)
+   scores[:, 0]                   # scores for allele 1
+   scores[:, 1]                   # scores for allele 2
+
+An entry is ``NaN`` where that allele is not present at that site, or
+where it was filtered out by ``min_maf``. The ``min_maf`` cutoff is
+applied to each alternate allele's own frequency, so a common allele is
+never missed just because it has a high allele number.
+
+``xpehh``, ``xpnsl``, ``ehh_decay``, and Garud's H compare whole
+haplotypes rather than focusing on one allele, so they are unaffected
+and always return their usual shape. Windowed ``mean_nsl`` averages all
+the scores in a window, across sites and alleles alike.
+
 Site Frequency Spectrum
 -----------------------
 
@@ -224,7 +254,8 @@ Site Frequency Spectrum
      - Unfolded SFS
      -
    * - ``sfs_folded``
-     - Folded SFS (minor allele counts)
+     - Folded SFS (minor allele counts). Returned as ``float64`` -- see
+       :ref:`sfs-conventions`.
      -
    * - ``sfs_scaled``
      - Scaled unfolded SFS
@@ -236,7 +267,8 @@ Site Frequency Spectrum
      - Joint SFS (two populations)
      -
    * - ``joint_sfs_folded``
-     - Folded joint SFS
+     - Folded joint SFS. Folded once per site using the overall minor
+       allele; shape ``(n1 + 1, n2 + 1)``.
      -
    * - ``joint_sfs_scaled``
      - Scaled joint SFS
@@ -267,8 +299,13 @@ Admixture and F-Statistics
    * - ``patterson_f3``
      - F3 admixture test
      - Patterson et al. (2012)
+   * - ``patterson_f4``
+     - F4: tests whether four populations fit a given tree. Matches
+       ``TreeSequence.f4``. Works on sites with any number of alleles.
+     - Patterson et al. (2012)
    * - ``patterson_d``
-     - Patterson's D (ABBA-BABA)
+     - Patterson's D (ABBA-BABA). Only works on two-allele sites; others
+       are skipped, and a warning tells you how many.
      - Patterson et al. (2012)
    * - ``moving_patterson_f3``
      - Windowed F3
@@ -344,13 +381,25 @@ Dimensionality Reduction and Distance
      - Description
      - Reference
    * - ``pca``
-     - Principal Component Analysis (GPU-accelerated SVD)
-     - Patterson et al. (2006)
+     - PCA with one point per haplotype. Gives every allele its own
+       column, so it works with any number of alleles. Takes a
+       ``HaplotypeMatrix``.
+     -
    * - ``randomized_pca``
-     - Randomized PCA (truncated SVD approximation)
+     - Faster approximate version of ``pca``
+     - Halko et al. (2011)
+   * - ``pca_dosage``
+     - PCA with one point per individual, counting alternate alleles as
+       0, 1, or 2. The classical version, matching scikit-allel. Takes a
+       ``GenotypeMatrix``.
+     - Patterson et al. (2006)
+   * - ``randomized_pca_dosage``
+     - Faster approximate version of ``pca_dosage``
      - Halko et al. (2011)
    * - ``pairwise_distance``
-     - Pairwise genetic distance (Euclidean, cityblock, etc.)
+     - Genetic distance between each pair of haplotypes, based on how
+       many sites they differ at (``euclidean``, ``sqeuclidean``,
+       ``cityblock``)
      -
    * - ``pcoa``
      - Principal Coordinate Analysis (classical MDS)
@@ -368,6 +417,38 @@ Dimensionality Reduction and Distance
      - Extreme-cluster selection in a 2D MDS embedding (Welzl MEC)
      - Li & Ralph (2019)
 
+There are two PCAs because there are two genuinely different things
+people mean by "PCA of genetic data", and they need different input.
+``pca`` works on haplotypes and handles any number of alleles;
+``pca_dosage`` works on diploid genotypes and is the classical version
+you will find in textbooks and in scikit-allel. Each one raises a
+``TypeError`` if handed the other's matrix, naming the one you want.
+
+The reason ``pca`` cannot simply use the allele numbers is that they are
+arbitrary labels. Whether an allele is called ``2`` or ``3`` carries no
+meaning, but arithmetic on those numbers would treat ``3`` as bigger
+than ``2``. So ``pca`` gives every allele its own column instead, which
+makes the result independent of how the alleles were numbered.
+
+``local_pca``, ``lostruct``, and ``local_pca_jackknife`` use the same
+approach as ``pca`` and also take haplotypes. Because of that they no
+longer match the R ``lostruct`` package number for number: pg_gpu keeps
+one column per allele where R keeps one per site, and the two center
+the data differently, which shifts the scale of the eigenvalues.
+
+The directions the components point in still agree with R closely
+(correlations above 0.999 in the test suite), so window-to-window
+comparisons, the MDS plot, and outlier detection all behave the same.
+It is the absolute eigenvalue scale that differs, not the structure you
+would read off the plot.
+
+``pairwise_distance`` counts, for each pair of haplotypes, how many
+sites they differ at (skipping sites where either is missing). Call
+that count :math:`m`. Then ``cityblock`` and ``sqeuclidean`` both
+return :math:`m`, and ``euclidean`` returns :math:`\sqrt{m}`. Counting
+mismatches this way means the answer does not depend on how the alleles
+were numbered. Any other metric raises ``NotImplementedError``.
+
 Relatedness and Kinship
 -----------------------
 
@@ -378,12 +459,39 @@ Relatedness and Kinship
    * - Function
      - Description
      - Reference
+   * - ``genetic_relatedness``
+     - How much two groups of samples share alleles, relative to the
+       average across groups. Matches
+       ``TreeSequence.genetic_relatedness``. Takes a ``HaplotypeMatrix``.
+     -
    * - ``grm``
-     - Genetic Relationship Matrix
+     - Genetic Relationship Matrix (GCTA). Takes a ``GenotypeMatrix``.
      - Yang et al. (2011)
    * - ``ibs``
-     - Pairwise Identity by State proportions
+     - Pairwise Identity by State proportions (PLINK). Takes a
+       ``GenotypeMatrix``.
      -
+
+``genetic_relatedness`` is the general-purpose one. It already counts
+alleles separately, so it works on multiallelic sites without any
+special handling. You choose what a "sample" means by grouping
+haplotypes:
+
+* leave the grouping out and every haplotype is its own sample, giving
+  a haplotype-by-haplotype matrix;
+* group haplotypes in pairs to get relatedness between individuals;
+* group them by population to get relatedness between populations.
+
+``grm`` and ``ibs`` are the two classic diploid measures -- the GCTA
+relationship matrix and PLINK-style identity by state. Both need a
+``GenotypeMatrix`` (or a streaming one). Handing them haplotypes raises
+a ``TypeError`` that points you at the alternative. To use them on
+haplotype data, convert first::
+
+   gm = GenotypeMatrix.from_haplotype_matrix(h)
+   k = grm(gm)
+
+Or use ``genetic_relatedness`` instead, which needs no conversion.
 
 Distance Distribution Statistics
 ---------------------------------
@@ -396,7 +504,10 @@ Distance Distribution Statistics
      - Description
      - Reference
    * - ``pairwise_diffs``
-     - Pairwise Hamming distances (haploid or diploid)
+     - Number of sites at which each pair differs, skipping sites where
+       either one is missing. The haplotype version compares alleles
+       directly, so it works with any number of alleles; the diploid
+       version works on two-allele sites only.
      -
    * - ``dist_var``
      - Variance of pairwise distance distribution
@@ -447,8 +558,10 @@ What runs on a streaming matrix:
      - Same per-chunk accumulation, but the joint SFS is projected (via hypergeometric sampling) to a small target grid as it is built, so the full ``(n1+1, n2+1)`` histogram is never materialized.
    * - ``HaplotypeMatrix.compute_ld_statistics_gpu_single_pop`` / ``_two_pops``
      - Variant-pair statistics within ``max_bp_dist`` are summed per chunk into the bp bins. Pairs that fall on opposite sides of a chunk boundary would be missed by naive per-chunk sums, so the last ``max_bp_dist`` of one chunk is carried forward and paired with the start of the next, counted exactly once. Returns moments-LD ``DD``, ``Dz``, ``pi²`` (3 stats single-pop, 15 stats two-pop).
-   * - ``relatedness.ibs``, ``relatedness.grm``
+   * - ``relatedness.ibs``, ``relatedness.grm`` (``StreamingGenotypeMatrix``)
      - Streamed along the variant axis; the individual axis is tiled into row blocks. ``(n_ind, n_ind)`` accumulators live on host so the output can exceed GPU memory. ``grm`` is a two-pass operation (first to calculate chromosome-wide allele frequencies, second to accumulate a per-chunk outer product).
+   * - ``relatedness.genetic_relatedness`` (``StreamingHaplotypeMatrix``)
+     - One pass along the variants, adding each chunk's contribution into an ``(n, n)`` result kept in CPU memory -- the same approach as the streaming GRM and IBS above.
    * - ``StreamingHaplotypeMatrix.materialize(region, sample_subset)``
      - Pulls one sub-region (and optionally a subset of haplotypes) of the chromosome into GPU memory for kernels that need every variant simultaneously -- ``pairwise_r2``, Garud's H, or any custom recipe. 
    * - ``zarr_io.allel_zarr_to_vcz``
@@ -458,7 +571,9 @@ Fused Windowed Statistics
 -------------------------
 
 The ``windowed_analysis()`` function computes statistics across all genomic
-windows in a single GPU pass via fused CUDA kernels.
+windows in a single GPU pass via fused CUDA kernels. That fast path
+needs ``missing_data='include'``. With any other setting pg_gpu quietly
+falls back to a slower route that produces the same numbers.
 
 .. list-table::
    :header-rows: 1
@@ -473,10 +588,14 @@ windows in a single GPU pass via fused CUDA kernels.
    * - ``tajimas_d``
      - Tajima's D per window
    * - ``segregating_sites``
-     - Segregating site count per window
+     - Number of mutations per window (a site with 3 alleles counts as 2)
    * - ``singletons``
-     - Singleton count per window
-   * - ``fst``
+     - Number of alternate alleles seen exactly once in the window
+   * - ``theta_h``, ``fay_wu_h``
+     - Fay & Wu's theta_H and H per window
+   * - ``max_daf``
+     - Frequency of the most common alternate allele in the window
+   * - ``fst``, ``fst_hudson``
      - Hudson's FST per window
    * - ``fst_wc``
      - Weir-Cockerham FST per window
@@ -486,7 +605,39 @@ windows in a single GPU pass via fused CUDA kernels.
      - Net divergence per window
    * - ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``
      - Garud's H statistics per window
+   * - ``haplotype_count``
+     - Number of distinct haplotypes per window
    * - ``mean_nsl``
-     - Mean nSL per window
+     - Mean nSL per window, averaged over every finite (site, allele) score
+   * - ``zns``, ``omega``, ``mu_ld``
+     - Per-window LD summaries
+   * - ``mu_var``, ``mu_sfs``, ``daf_hist``
+     - Features used by RAiSD and diploSHIC. ``daf_hist`` is a histogram
+       of alternate-allele frequencies in the window, scaled to sum to 1.
+       ``mu_sfs`` is the fraction of variable alleles sitting at the very
+       low or very high end of the frequency range, and is 0.0 for a
+       window with nothing variable in it. Both need
+       ``missing_data='include'``.
+   * - ``snp_dist_mean``, ``snp_dist_var``, ``snp_dist_min``, ``snp_dist_max``
+     - Inter-SNP spacing summaries per window
+   * - ``dist_var``, ``dist_skew``, ``dist_kurt``
+     - Moments of the pairwise-distance distribution per window
    * - ``local_pca``
      - Per-window local PCA (lostruct); returns a ``LocalPCAResult`` with eigvals, eigvecs, and window metadata
+
+The rule to expect is that a windowed statistic gives the same answer
+as calling the plain function on just that window's variants. Alleles
+are counted separately here too, the same as everywhere else. There is
+one known exception:
+
+* When data is missing, the windowed neutrality tests (``tajimas_d``,
+  ``normalized_fay_wu_h``, ``zeng_e``, ``zeng_dh``) use the full sample
+  size in their variance formula, while the plain versions use an
+  average of the per-site sample sizes. Without missing data the two
+  agree.
+
+One more limit: the windowed kernels can handle at most 8 alleles at a
+single site. Anything beyond that is skipped, and a
+``MultiallelicCapWarning`` tells you how many sites that affected. DNA
+has 4 bases, so in practice this never comes up. The plain
+``diversity`` and ``divergence`` functions have no such limit.

@@ -226,9 +226,8 @@ class ZarrGenotypeSource:
                     np.empty(0, np.int64))
         zlo, zhi = self._zarr_row_range(lo, hi)
 
-        is_p1 = hap_cols >= self.num_diploids
-        dip_idx = np.where(is_p1, hap_cols - self.num_diploids, hap_cols)
-        ploidy = is_p1.astype(np.int64)
+        dip_idx = hap_cols // 2
+        ploidy = hap_cols % 2
         unique_dips, inv = np.unique(dip_idx, return_inverse=True)
 
         # Group sorted unique_dips into contiguous diploid-axis runs.
@@ -301,15 +300,14 @@ class ZarrGenotypeSource:
             return empty, np.empty(0, np.int64)
         zlo, zhi = self._zarr_row_range(lo, hi)
 
-        # The haplotype axis indexes a flat (n_dip * 2) layout where hap j
-        # = (ploidy j // n_dip, dip j % n_dip). VCZ stores (n_var, n_dip, 2)
-        # so we have to translate each requested hap index into (dip, ploidy)
+        # Haplotype rows follow the canonical order, so hap j belongs to
+        # dip j // 2 at ploidy j % 2. VCZ stores (n_var, n_dip, 2) so we have
+        # to translate each requested hap index into (dip, ploidy)
         # and feed unique dips through oindex (zarr's oindex on a 3-D axis
         # does not de-duplicate, and requesting the same dip twice would
         # double-decompress its sample chunk).
-        is_p1 = hap_cols >= self.num_diploids
-        dip_idx = np.where(is_p1, hap_cols - self.num_diploids, hap_cols)
-        ploidy = is_p1.astype(np.int64)
+        dip_idx = hap_cols // 2
+        ploidy = hap_cols % 2
         unique_dips, inv = np.unique(dip_idx, return_inverse=True)
 
         block_host = np.asarray(
@@ -391,12 +389,12 @@ class ZarrGenotypeSource:
                 continue
             pop_to_dips.setdefault(pop, []).append(i)
 
-        # Map diploid indices to haplotype-axis indices: dip i lives at
-        # haps i (ploidy 0) and i + num_diploids (ploidy 1). Matches the
-        # layout build_haplotype_matrix produces and load_pop_file expects.
-        n_dip = self.num_diploids
+        # Map diploid indices to haplotype-axis indices: under the canonical
+        # row order dip i lives at haps 2i (ploidy 0) and 2i+1 (ploidy 1),
+        # which is what build_haplotype_matrix produces and load_pop_file
+        # expects.
         pop_cols = {}
         for pop, dips in pop_to_dips.items():
             dips = np.asarray(sorted(dips), dtype=np.int64)
-            pop_cols[pop] = np.concatenate([dips, dips + n_dip])
+            pop_cols[pop] = np.stack([2 * dips, 2 * dips + 1], axis=1).ravel()
         return pop_cols

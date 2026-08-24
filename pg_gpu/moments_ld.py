@@ -1,9 +1,11 @@
 """
 Integration layer: GPU-accelerated LD statistics for moments inference.
 
-Drop-in replacement for moments.LD.Parsing.compute_ld_statistics() using
-pg_gpu's GPU kernels. Output format is identical to moments, so downstream
-inference (bootstrap_data, optimize_log_lbfgsb, Godambe) works unchanged.
+Mirrors moments.LD.Parsing.compute_ld_statistics() using pg_gpu's GPU kernels;
+the output format is identical, so downstream inference (bootstrap_data,
+optimize_log_lbfgsb, Godambe) works unchanged. Results match moments on {0,1}-
+coded input; unlike moments' is_biallelic_01 filter, this keeps sites biallelic
+in the sample but coded {0,2} or reference-absent {1,2}.
 
 Supports 1-4 populations.
 
@@ -40,14 +42,18 @@ from . import ld_statistics
 def compute_ld_statistics(
     vcf_file=None, rec_map_file=None, pop_file=None, pops=None,
     r_bins=None, bp_bins=None, use_genotypes=True,
-    report=True, ac_filter=True, haplotype_matrix=None,
+    report=True, haplotype_matrix=None,
     genotype_matrix=None, accessible_bed=None,
     pop_assignment=None,
 ):
-    """GPU-accelerated drop-in replacement for moments.LD.Parsing.compute_ld_statistics.
+    """GPU LD statistics in the moments.LD.Parsing.compute_ld_statistics output format.
 
-    Accepts the same arguments as the moments version so existing pipelines
-    can switch by changing only the import::
+    Accepts the same arguments as the moments version, minus ``ac_filter``:
+    this pipeline always restricts to biallelic
+    segregating sites with arbitrary allele coding (two present alleles): {0,2}
+    and reference-absent {1,2} sites are kept and recoded, whereas moments'
+    is_biallelic_01 drops them. Results match moments only when the input is
+    already {0,1}-coded. The example below mirrors the moments call::
 
         # moments (CPU):
         import moments.LD
@@ -114,8 +120,6 @@ def compute_ld_statistics(
         on both the pg_gpu and moments sides of any comparison.
     report : bool
         Print progress.
-    ac_filter : bool
-        Apply biallelic filter.
     haplotype_matrix : HaplotypeMatrix, optional
         Pre-loaded HaplotypeMatrix (skips VCF loading and GPU transfer).
     genotype_matrix : GenotypeMatrix, optional
@@ -163,8 +167,6 @@ def compute_ld_statistics(
                 print(f"Loading {vcf_file} (genotypes) ...")
             gm = GenotypeMatrix.from_vcf(vcf_file)
             gm.load_pop_file(pop_file, pops=pops)
-            if ac_filter:
-                gm = gm.apply_biallelic_filter()
             if accessible_bed is not None and not gm.has_accessible_mask:
                 gm.set_accessible_mask(accessible_bed)
             gm.transfer_to_gpu()
@@ -186,8 +188,6 @@ def compute_ld_statistics(
                 print(f"Loading {vcf_file} ...")
             hm = HaplotypeMatrix.from_vcf(vcf_file)
             hm.load_pop_file(pop_file, pops=pops)
-            if ac_filter:
-                hm = hm.apply_biallelic_filter()
             if accessible_bed is not None and not hm.has_accessible_mask:
                 hm.set_accessible_mask(accessible_bed)
             hm.transfer_to_gpu()
@@ -311,8 +311,14 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
         count_fn = _compute_genotype_counts_for_pairs
         stat_fn = compute_multi_pop_statistics_batch_geno
     else:
-        pos = mat.positions
-        data_matrix = mat.haplotypes
+        # Keep exactly-two-present (biallelic + segregating) sites, any coding;
+        # the 0/1 indicator recodes {0,2}/{1,2} so the tally counts the alt.
+        from ._memutil import allele_counts
+        ac, _ = allele_counts(mat.haplotypes)
+        keep = (ac > 0).sum(axis=1) == 2
+        keep_idx = cp.where(keep)[0]
+        pos = mat.positions[keep_idx]
+        data_matrix = mat._biallelic_indicator()[:, keep_idx]
         count_fn = _compute_counts_for_pairs
         stat_fn = None  # handled by 2-pop fast path or multi-pop
 
@@ -331,7 +337,7 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
     # Genetic-distance lookup: filter once outside the loop so fancy-indexing
     # on the keep-mask doesn't repeat per chunk.
     if gen_dists_gpu is not None:
-        gen_dists_lookup = gen_dists_gpu[keep_idx] if use_genotypes else gen_dists_gpu
+        gen_dists_lookup = gen_dists_gpu[keep_idx]
     else:
         gen_dists_lookup = None
 
@@ -379,25 +385,40 @@ def _compute_heterozygosity(mat, pops, use_genotypes=False):
     """Compute H_i_j statistics on GPU for N populations (moments convention).
 
     Works with both haplotype and genotype data by converting to allele
-    counts with the haploid sample size convention.
+    counts with the haploid sample size convention. The haplotype branch
+    restricts to the same exactly-two-present-allele site set as
+    ``_compute_ld_sums`` and counts the alt allele on the 0/1 indicator, so
+    every allele coding ({0,1}, {0,2}, reference-absent {1,2}) gives the same
+    H, and a missing call leaves both the alt count and the per-site sample
+    size, matching the genotype branch's valid mask.
     """
     num_pops = len(pops)
+
+    if not use_genotypes:
+        # _biallelic_indicator transfers a CPU-resident matrix to the GPU,
+        # so it must run before allele_counts sees mat.haplotypes.
+        indicator = mat._biallelic_indicator()
+        from ._memutil import allele_counts
+        ac, _ = allele_counts(mat.haplotypes)
+        keep_idx = cp.where((ac > 0).sum(axis=1) == 2)[0]
+        indicator = indicator[:, keep_idx]
 
     alt_counts = []
     ref_counts = []
     hap_sizes = []
     for pop in pops:
         pidx = mat.sample_sets[pop]
+        if isinstance(pidx, list):
+            pidx = cp.array(pidx, dtype=cp.int32)
         if use_genotypes:
-            if isinstance(pidx, list):
-                pidx = cp.array(pidx, dtype=cp.int32)
             pop_data = mat.genotypes[pidx, :]
             valid = pop_data >= 0
             alt = cp.sum(cp.where(valid, pop_data, 0).astype(cp.int32), axis=0).astype(cp.float64)
             n_hap = 2.0 * cp.sum(valid, axis=0).astype(cp.float64)
         else:
-            alt = cp.sum(cp.maximum(mat.haplotypes[pidx, :], 0).astype(cp.int32), axis=0).astype(cp.float64)
-            n_hap = cp.float64(len(pidx)) * cp.ones_like(alt)
+            pop_ind = indicator[pidx, :]
+            alt = cp.sum(pop_ind == 1, axis=0).astype(cp.float64)
+            n_hap = cp.sum(pop_ind >= 0, axis=0).astype(cp.float64)
         alt_counts.append(alt)
         ref_counts.append(n_hap - alt)
         hap_sizes.append(n_hap)

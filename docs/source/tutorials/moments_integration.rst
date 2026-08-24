@@ -24,14 +24,20 @@ in practice is *parsing* the LD statistics from genotype data: for
 \binom{P+2}{2})`, which on whole-genome data is hours-to-days on a
 CPU. Inference itself, by contrast, takes seconds.
 
-``pg_gpu.moments_ld.compute_ld_statistics`` is a drop-in replacement
-for ``moments.LD.Parsing.compute_ld_statistics``. Same arguments, same
-output dictionary structure -- only the parsing step runs on the GPU.
-Everything downstream (bootstrap variance-covariance, Demes /
-parametric inference, Godambe confidence intervals) uses ``moments``
-unchanged. The validation tests run pg_gpu's parser against
-``moments``'s on the same VCFs and confirm machine precision agreement
-(max relative error :math:`< 10^{-11}`).
+``pg_gpu.moments_ld.compute_ld_statistics`` mirrors the arguments and
+output dictionary structure of ``moments.LD.Parsing.compute_ld_statistics``,
+with only the parsing step on the GPU. Everything downstream (bootstrap
+variance-covariance, Demes / parametric inference, Godambe confidence
+intervals) uses ``moments`` unchanged. On ``{0, 1}``-coded input the two
+agree to machine precision (max relative error :math:`< 10^{-11}`), as the
+validation tests confirm.
+
+They differ on one input class by design. pg_gpu keeps every site that is
+biallelic in the sample, whatever its allele coding, so a site whose two
+observed alleles are ``{0, 2}`` (or reference-absent ``{1, 2}``) is counted;
+``moments``'s ``is_biallelic_01`` input filter drops such sites. Restrict a
+VCF to ``{0, 1}``-coded sites before parsing if you need site-for-site
+agreement on data that contains them.
 
 .. important::
 

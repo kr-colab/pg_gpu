@@ -38,6 +38,129 @@ def _stream_concat(streaming_hm):
 
 class TestStreamingFromZarr:
 
+    def test_genetic_relatedness_rejects_genotype_stream(self, vcz_store):
+        """A genotype stream must get the clean TypeError, not an
+        AttributeError from whichever haplotype attribute reads first."""
+        from pg_gpu import GenotypeMatrix, relatedness
+        path, _ = vcz_store
+        gs = GenotypeMatrix.from_zarr(path, streaming="always",
+                                      chunk_bp=5_000)
+        for kwargs in ({}, {'sample_sets': [[0, 1], [2, 3]]}):
+            with pytest.raises(TypeError, match="requires a HaplotypeMatrix"):
+                relatedness.genetic_relatedness(gs, **kwargs)
+
+    def test_pop_assignment_yields_individual_row_sets(self, vcz_store,
+                                                        tmp_path):
+        """The stream stored pop-file sets in haplotype coordinates while
+        its chunks hold individual rows, so chunk construction raised once
+        sample_sets grew validation."""
+        from pg_gpu import GenotypeMatrix
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        half = n_dip // 2
+        popfile = tmp_path / "pops.tsv"
+        lines = ["sample\tpop"] + [
+            f"s{i}\t{'p1' if i < half else 'p2'}" for i in range(n_dip)]
+        popfile.write_text("\n".join(lines) + "\n")
+
+        stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                          chunk_bp=5_000,
+                                          pop_assignment=str(popfile))
+        sets = stream.sample_sets
+        assert sorted(int(i) for i in sets['p1']) == list(range(half))
+        assert sorted(int(i) for i in sets['p2']) == list(range(half, n_dip))
+        for _, _, chunk in stream.iter_gpu_chunks():
+            assert max(int(i) for i in chunk.sample_sets['p2']) < n_dip
+            break
+
+    def test_grm_runs_with_pop_assignment(self, vcz_store, tmp_path):
+        from pg_gpu import GenotypeMatrix, relatedness
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        popfile = tmp_path / "pops.tsv"
+        lines = ["sample\tpop"] + [f"s{i}\tp1" for i in range(n_dip)]
+        popfile.write_text("\n".join(lines) + "\n")
+        stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                          chunk_bp=5_000,
+                                          pop_assignment=str(popfile))
+        g = relatedness.grm(stream)
+        assert g.shape == (n_dip, n_dip)
+
+    def test_materialize_subset_speaks_individual_rows(self, vcz_store,
+                                                       tmp_path):
+        """A genotype stream's subset and its sample_sets share the
+        individual row space, so feeding a population's own rows back as
+        the subset is the supported idiom. Both used to disagree: the
+        sets moved to individual rows while the subset still meant
+        haplotype columns, silently selecting the wrong samples."""
+        from pg_gpu import GenotypeMatrix
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        half = n_dip // 2
+        popfile = tmp_path / "pops.tsv"
+        lines = ["sample\tpop"] + [
+            f"s{i}\t{'p1' if i < half else 'p2'}" for i in range(n_dip)]
+        popfile.write_text("\n".join(lines) + "\n")
+        stream = GenotypeMatrix.from_zarr(path, streaming="always",
+                                          chunk_bp=5_000,
+                                          pop_assignment=str(popfile))
+
+        # The documented idiom: a population's rows as the subset.
+        m = stream.materialize(sample_subset=list(stream.sample_sets['p2']))
+        assert m.num_individuals == n_dip - half
+        assert sorted(int(i) for i in m.sample_sets['p2']) == list(
+            range(n_dip - half))
+        assert 'p1' not in m.sample_sets
+        for rows in m.sample_sets.values():
+            assert max(int(i) for i in rows) < m.num_individuals
+
+    def test_materialize_subset_is_validated(self, vcz_store, tmp_path):
+        """The subset obeys the same rules as a sample_sets value."""
+        from pg_gpu import GenotypeMatrix
+        path, hm = vcz_store
+        stream_h = HaplotypeMatrix.from_zarr(path, streaming="always",
+                                             chunk_bp=5_000)
+        with pytest.raises(ValueError, match="duplicate"):
+            stream_h.materialize(sample_subset=[0, 1, 0, 1])
+        with pytest.raises(ValueError, match="rows 0"):
+            stream_h.materialize(sample_subset=[0, 10**6])
+        stream_g = GenotypeMatrix.from_zarr(path, streaming="always",
+                                            chunk_bp=5_000)
+        with pytest.raises(ValueError, match="duplicate"):
+            stream_g.materialize(sample_subset=[0, 0, 2, 3])
+
+    def test_cupy_sample_subset_works_on_both_classes(self, vcz_store):
+        from pg_gpu import GenotypeMatrix
+        path, _ = vcz_store
+        hs = HaplotypeMatrix.from_zarr(path, streaming="always",
+                                       chunk_bp=5_000)
+        m = hs.materialize(sample_subset=cp.arange(4))
+        assert m.num_haplotypes == 4
+        gs = GenotypeMatrix.from_zarr(path, streaming="always",
+                                      chunk_bp=5_000)
+        m = gs.materialize(sample_subset=cp.arange(4))
+        assert m.num_individuals == 4
+
+    def test_stream_setter_validates_in_own_row_space(self, vcz_store):
+        """Assigning sample_sets on a stream validates like the eager
+        classes; the bare assignment used to carry garbage into every
+        chunk and out through materialize."""
+        from pg_gpu import GenotypeMatrix
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        stream_h = HaplotypeMatrix.from_zarr(path, streaming="always",
+                                             chunk_bp=5_000)
+        with pytest.raises(ValueError, match="rows 0"):
+            stream_h.sample_sets = {'p': [0, 10**6]}
+        stream_h.sample_sets = {'p': [0, 1, 2, 3]}
+
+        stream_g = GenotypeMatrix.from_zarr(path, streaming="always",
+                                            chunk_bp=5_000)
+        # Individual rows: n_dip is one past the end for this stream.
+        with pytest.raises(ValueError, match=f"rows 0..{n_dip - 1}"):
+            stream_g.sample_sets = {'p': [0, n_dip]}
+        stream_g.sample_sets = {'p': [0, 1]}
+
     def test_streaming_always_returns_streaming_class(self, vcz_store):
         path, _ = vcz_store
         hm = HaplotypeMatrix.from_zarr(path, streaming="always", chunk_bp=5_000)
@@ -251,14 +374,12 @@ class TestMaterialize:
 
     def test_pairwise_r2_via_materialize(self, vcz_store):
         # The intended user pattern: streaming hm -> .materialize(region=)
-        # -> pairwise_r2(). Asserts the composition produces a finite
-        # (n_var x n_var) matrix with the kernel's diagonal zeroed.
-        # r2 values are not bounded to [0, 1] in this test because the
-        # msprime fixture uses the default Jukes-Cantor mutation model;
-        # pg_gpu's binary-allele assumptions in pairwise_r2 inflate the
-        # numerator at triallelic sites (tracked in kr-colab/pg_gpu#100).
-        # The streaming -> materialize -> pairwise_r2 composition is what
-        # this test is for; the r2 numerics are validated elsewhere.
+        # -> pairwise_r2(). Asserts the composition produces an (n_var x n_var)
+        # matrix with the kernel's diagonal zeroed. The msprime fixture uses the
+        # default Jukes-Cantor model, so it has multiallelic sites: pairwise_r2 is
+        # biallelic-only and returns NaN for their rows/cols, while the biallelic
+        # pairs stay finite. The composition is what this test is for; the r2
+        # numerics are validated elsewhere.
         path, _ = vcz_store
         stream = HaplotypeMatrix.from_zarr(path, streaming="always",
                                             chunk_bp=5_000)
@@ -266,7 +387,7 @@ class TestMaterialize:
         r2 = sub.pairwise_r2()
         n_var = sub.haplotypes.shape[1]
         assert r2.shape == (n_var, n_var)
-        assert bool(cp.isfinite(r2).all()), "pairwise_r2 returned NaN / inf"
+        assert bool(cp.isfinite(r2).any()), "no finite biallelic r2 values"
         assert float(cp.abs(cp.diag(r2)).sum()) == 0.0
 
     def test_sample_subset_requires_even(self, vcz_store):
@@ -276,6 +397,41 @@ class TestMaterialize:
         with pytest.raises(ValueError, match="even count"):
             stream.materialize(region=(10_000, 20_000),
                                sample_subset=[0, 1, 2])  # odd
+
+
+class TestMaterializeSampleSetRenumbering:
+    """materialize(sample_subset=...) renumbers sample_sets into the
+    subset; it used to carry full-matrix row numbers onto a smaller
+    matrix."""
+
+    def _stream_with_pops(self, vcz_store, tmp_path):
+        path, hm = vcz_store
+        n_dip = hm.num_haplotypes // 2
+        half = n_dip // 2
+        popfile = tmp_path / "pops.tsv"
+        lines = ["sample\tpop"] + [
+            f"s{i}\t{'p1' if i < half else 'p2'}" for i in range(n_dip)]
+        popfile.write_text("\n".join(lines) + "\n")
+        stream = HaplotypeMatrix.from_zarr(path, streaming="always",
+                                           chunk_bp=5_000,
+                                           pop_assignment=str(popfile))
+        return stream, half
+
+    def test_subset_sets_are_renumbered(self, vcz_store, tmp_path):
+        stream, half = self._stream_with_pops(vcz_store, tmp_path)
+        # Samples 0 and 1 from p1, sample `half` from p2, whole samples.
+        sub = [0, 1, 2, 3, 2 * half, 2 * half + 1]
+        m = stream.materialize(sample_subset=sub)
+        assert m.num_haplotypes == 6
+        assert sorted(int(i) for i in m.sample_sets['p1']) == [0, 1, 2, 3]
+        assert sorted(int(i) for i in m.sample_sets['p2']) == [4, 5]
+
+    def test_population_absent_from_subset_is_dropped(self, vcz_store,
+                                                      tmp_path):
+        stream, half = self._stream_with_pops(vcz_store, tmp_path)
+        m = stream.materialize(sample_subset=[0, 1, 2, 3])
+        assert 'p2' not in m.sample_sets
+        assert sorted(int(i) for i in m.sample_sets['p1']) == [0, 1, 2, 3]
 
 
 class TestChunkFetcherABC:

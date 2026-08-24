@@ -138,11 +138,11 @@ Selection Scan Pipeline
 
    from pg_gpu import selection
 
-   # iHS with standardization by allele count
-   ihs_raw = selection.ihs(h)
-
-   # Get allele counts for binned standardization
-   dac = np.sum(h.haplotypes.get(), axis=0)
+   # Restrict to sites with two alleles in the sample, scan, then
+   # standardize the scores by each site's derived-allele count.
+   h_bi = h.restrict_to_biallelic()
+   ihs_raw = selection.ihs(h_bi)
+   dac = np.sum(h_bi.haplotypes.get() > 0, axis=0)
    ihs_std, bins = selection.standardize_by_allele_count(ihs_raw, dac)
 
    # Cross-population scans
@@ -189,13 +189,22 @@ PCA and Dimensionality Reduction
 
    from pg_gpu import decomposition
 
-   # GPU-accelerated PCA (up to 56x faster than allel)
-   coords, var_ratio = decomposition.pca(h, n_components=10,
-                                          scaler='patterson')
+   # Multi-allele haploid PCA: eigendecomposition of the genetic relatedness
+   # matrix, keeping all alleles (multiallelic-correct). Takes a HaplotypeMatrix.
+   coords, var_ratio = decomposition.pca(h, n_components=10)
 
-   # Randomized PCA for very large datasets
+   # Randomized approximation for very large datasets
    coords, var_ratio = decomposition.randomized_pca(
        h, n_components=10, random_state=42)
+
+   # Diploid dosage PCA standardized by binomial variance (center each biallelic
+   # variant's dosage, scale by sqrt(p(1-p))). Takes a GenotypeMatrix; has a
+   # randomized counterpart.
+   from pg_gpu import GenotypeMatrix
+   g = GenotypeMatrix.from_haplotype_matrix(h)  # pair haplotypes as diploids
+   coords, var_ratio = decomposition.pca_dosage(g, n_components=10)
+   coords, var_ratio = decomposition.randomized_pca_dosage(
+       g, n_components=10, random_state=42)
 
    # Pairwise genetic distance (batched for memory safety)
    dist = decomposition.pairwise_distance(h, metric='euclidean')

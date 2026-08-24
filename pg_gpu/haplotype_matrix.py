@@ -151,6 +151,20 @@ class HaplotypeMatrix:
     labels. Supports GPU-accelerated computation of diversity, divergence,
     selection, and LD statistics.
 
+    Row order
+    ---------
+    Rows are gametes, and for diploid data the two gametes of one sample are
+    adjacent: sample ``i`` owns rows ``2i`` and ``2i + 1``. Every loader
+    produces this order and every consumer that reconstructs individuals --
+    ``GenotypeMatrix.from_haplotype_matrix``, ``relatedness.ibs``,
+    ``divergence.fst_weir_cockerham``, ``diversity.heterozygosity_observed``,
+    ``diversity.inbreeding_coefficient``, genotype-mode LD, and the
+    ``to_zarr`` writer -- assumes it. ``sample_sets`` therefore lists both
+    gametes of each member, e.g. sample 3 contributes ``[6, 7]``.
+
+    Statistics that treat rows as independent gametes are unaffected by the
+    order; only the ones above pair rows.
+
     Parameters
     ----------
     genotypes : ndarray, shape (n_haplotypes, n_variants)
@@ -205,7 +219,7 @@ class HaplotypeMatrix:
         self._accessible_mask = None
         self.chrom_start = chrom_start
         self.chrom_end = chrom_end
-        self._sample_sets = sample_sets
+        self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
         self.samples = samples  # diploid sample names from VCF
         # Optional per-variant (n_var,) and per-genotype (n_var, n_samples)
@@ -303,13 +317,24 @@ class HaplotypeMatrix:
     def sample_sets(self, sample_sets: dict):
         """
         Set the sample sets.
+
+        Each value must be a list, tuple, or one-dimensional integer
+        array of haplotype row numbers within the
+        matrix, without duplicates. Lists that do not pair rows into
+        individuals are accepted here -- gamete statistics take any list --
+        and the statistics that reconstruct individuals warn when they
+        meet one. The dict is stored as given, not copied; mutating it
+        afterwards is not re-validated.
         """
+        if sample_sets is None:
+            self._sample_sets = None
+            return
         if not isinstance(sample_sets, dict):
             raise ValueError("sample_sets must be a dictionary")
-        # check that the values are lists
+        from ._warnings import check_sample_set_rows
+        n_rows = self._haplotypes.shape[0]
         for key, value in sample_sets.items():
-            if not isinstance(value, list):
-                raise ValueError("values in sample_sets must be lists")
+            check_sample_set_rows(f"sample_sets[{key!r}]", value, n_rows)
         self._sample_sets = sample_sets
 
     @property
@@ -486,10 +511,11 @@ class HaplotypeMatrix:
                                source=f"VCF '{path}'")
         num_variants, num_samples, _ = genotypes.shape
 
-        haplotypes = np.empty((num_variants, 2 * num_samples), dtype=genotypes.dtype)
-        haplotypes[:, :num_samples] = genotypes[:, :, 0]
-        haplotypes[:, num_samples:] = genotypes[:, :, 1]
-        haplotypes = haplotypes.T
+        # Ploidy is the fastest-varying axis of (n_var, n_samples, 2), so
+        # merging the trailing axes interleaves each sample's two gametes and
+        # lands directly on the canonical row order.
+        haplotypes = np.asarray(genotypes).reshape(
+            num_variants, 2 * num_samples).T
 
         positions = np.array(vcf['variants/POS'])
         sample_names = list(vcf['samples'])
@@ -570,8 +596,8 @@ class HaplotypeMatrix:
             (suitable for large-scale stores that do not fit
             entirely in GPU memory). ``'always'`` forces streaming;
             ``'never'`` forces a single-shot load (and raises
-            ``MemoryError`` if the matrix would not fit in free GPU
-            memory). ``'auto'`` (default) checks the projected
+            ``MemoryError`` when the matrix would exceed half the
+            free GPU memory -- the same check ``'auto'`` uses). ``'auto'`` (default) checks the projected
             footprint of the haplotype matrix against free GPU
             memory and picks streaming when the full matrix would
             consume more than half the device. Scikit-allel-formatted
@@ -629,7 +655,7 @@ class HaplotypeMatrix:
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
-                backend=backend,
+                backend=backend, accessible_bed=accessible_bed,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits; 'auto'
@@ -652,7 +678,7 @@ class HaplotypeMatrix:
             return cls._build_streaming(
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
-                source=source, backend=backend,
+                source=source, backend=backend, accessible_bed=accessible_bed,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
@@ -719,7 +745,8 @@ class HaplotypeMatrix:
 
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
-                         prefetch, source=None, backend="auto"):
+                         prefetch, source=None, backend="auto",
+                         accessible_bed=None):
         from .streaming_matrix import (
             HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
             _pick_chunk_fetcher,
@@ -736,9 +763,20 @@ class HaplotypeMatrix:
             # zarr store.
             source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
+
+        # Resolve an accessible BED once over the source's variant-position
+        # bounds and hand it to the streaming matrix, so span-normalized
+        # reductions (genetic_relatedness) divide by accessible bases the same
+        # way the eager path does, and every chunk is filtered to accessible
+        # variants.
+        from .accessible import resolve_streaming_accessible_mask
+        accessible_mask = resolve_streaming_accessible_mask(
+            accessible_bed, source, region)
+
         return StreamingHaplotypeMatrix(
             source, fetcher,
             chunk_bp=chunk_bp, prefetch=prefetch,
+            accessible_mask=accessible_mask,
         )
 
     def to_zarr(self, zarr_path: str, format: str = 'vcz',
@@ -812,8 +850,8 @@ class HaplotypeMatrix:
         n_hap, n_var = hap.shape
         n_samples = n_hap // 2
         gt = np.empty((n_var, n_samples, 2), dtype=hap.dtype)
-        gt[:, :, 0] = hap[:n_samples, :].T
-        gt[:, :, 1] = hap[n_samples:, :].T
+        gt[:, :, 0] = hap[0::2, :].T
+        gt[:, :, 1] = hap[1::2, :].T
         return gt
 
     def load_pop_file(self, pop_assignment, pops: list = None):
@@ -833,11 +871,16 @@ class HaplotypeMatrix:
             labels.
         pops : list of str, optional
             Populations to include. If None, includes all found populations.
+
+        Notes
+        -----
+        Each population's entry lists haplotype rows, not samples, so a member
+        contributes both of its gametes (sample ``i`` gives ``2i`` and
+        ``2i + 1``).
         """
         if self.samples is None:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
 
-        n_samples = len(self.samples)
         if isinstance(pop_assignment, dict):
             pop_map = {str(k): str(v) for k, v in pop_assignment.items() if v}
         else:
@@ -853,23 +896,30 @@ class HaplotypeMatrix:
         if pops is None:
             pops = sorted(found_pops)
 
-        # Block ordering: ploidy-0 indices first, then ploidy-1 indices.
-        # _get_genotype_data and _get_diploid_genotypes split the
-        # haplotype axis at hap.shape[0] // 2 to recover diploid pairs,
-        # which only gives correct pairing under this layout. Matches
-        # what ZarrGenotypeSource produces from a pop file too, so the
-        # streaming and eager paths agree.
+        # Canonical row order: sample i owns haplotype rows 2i and 2i+1, so a
+        # population's index list holds both gametes of each of its samples.
         pop_dips = {p: [] for p in pops}
         for i, name in enumerate(self.samples):
             pop = pop_map.get(name)
             if pop in pop_dips:
                 pop_dips[pop].append(i)
         pop_sets = {
-            p: dips + [d + n_samples for d in dips]
+            p: [h for d in dips for h in (2 * d, 2 * d + 1)]
             for p, dips in pop_dips.items()
         }
 
-        self.sample_sets = pop_sets
+        # A population with no member in this matrix resolves empty --
+        # routine when the matrix holds a sample subset of the pop file's
+        # cohort. Drop it rather than fail the whole load, but say so: a
+        # silently vanishing population sends the user's next error to the
+        # statistic call instead of here.
+        dropped = sorted(p for p, rows in pop_sets.items() if not rows)
+        if dropped:
+            import warnings
+            warnings.warn(
+                f"pop file populations with no member in this matrix "
+                f"dropped: {', '.join(dropped)}", stacklevel=2)
+        self.sample_sets = {p: rows for p, rows in pop_sets.items() if rows}
 
     @classmethod
     def from_ts(cls, ts: tskit.TreeSequence, device: str = 'CPU',
@@ -1100,72 +1150,92 @@ class HaplotypeMatrix:
             accessible_mask=sliced_mask,
         )
 
-    def apply_biallelic_filter(self) -> "HaplotypeMatrix":
+    def restrict_to_biallelic(self) -> "HaplotypeMatrix":
+        """Restrict to biallelic sites (drop >=3-allele), preserving allele codes.
+
+        Keeps sites with at most two distinct present alleles, allele codes
+        unchanged, so {0,1}, {0,2}, and reference-absent {1,2} are all retained;
+        sites with three or more distinct present alleles are dropped.
         """
-        Apply biallelic filter to remove variants that are not strictly biallelic.
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        from ._memutil import allele_counts
+        from .genotype_matrix import _biallelic_and_alt
 
-        This filter matches the behavior of moments' get_genotypes function, which uses
-        is_biallelic_01() to remove variants that:
-        1. Have more than 2 alleles present in the data
-        2. Don't have both reference (0) and alternate (1) alleles present
-
-        This is the actual filtering that moments does by default, not an AC filter.
-
-        Returns:
-            HaplotypeMatrix: A new HaplotypeMatrix instance with filtered variants.
-
-        Note:
-            This replicates moments' is_biallelic_01() filtering behavior.
-        """
-        if self.device == 'GPU':
-            xp = cp
-        else:
-            xp = np
-
-        # For biallelic filtering, we need to check across ALL haplotypes
-        # Count alleles for each variant across all samples
-        n_variants = self.num_variants
-
-        # Count occurrences of each allele value (ignoring missing = -1)
-        alt_count = xp.sum(self.haplotypes == 1, axis=0)
-        ref_count = xp.sum(self.haplotypes == 0, axis=0)
-        multiallelic_count = xp.sum(self.haplotypes >= 2, axis=0)
-
-        # A variant is biallelic if:
-        # 1. No multiallelic alleles (2+) are present
-        # 2. Both reference (0) and alternate (1) alleles are present
-        # Missing data (-1) is ignored — a site with only 0, 1, and -1 is biallelic
-        is_biallelic = (multiallelic_count == 0) & (ref_count > 0) & (alt_count > 0)
-
-        keep_mask = is_biallelic
-
-        # Get indices of variants to keep
-        keep_indices = xp.where(keep_mask)[0]
-
-        # Create filtered HaplotypeMatrix
-        filtered_haplotypes = self.haplotypes[:, keep_indices]
-        filtered_positions = self.positions[keep_indices]
-
-        # Update chromosome boundaries if needed
-        if len(keep_indices) > 0:
-            new_chrom_start = int(filtered_positions[0].get()) if self.device == 'GPU' else int(filtered_positions[0])
-            new_chrom_end = int(filtered_positions[-1].get()) if self.device == 'GPU' else int(filtered_positions[-1])
-        else:
-            new_chrom_start = self.chrom_start
-            new_chrom_end = self.chrom_end
-
-        # Create new instance with same sample sets
-        filtered_matrix = HaplotypeMatrix(
-            filtered_haplotypes,
-            filtered_positions,
-            chrom_start=new_chrom_start,
-            chrom_end=new_chrom_end,
+        ac, _ = allele_counts(self.haplotypes)
+        biallelic, _ = _biallelic_and_alt(ac)
+        keep = cp.where(biallelic)[0]
+        if keep.shape[0] == 0:
+            # get_subset builds a valid 0-variant matrix; the constructor rejects empty
+            return self.get_subset(keep)
+        hap = self.haplotypes[:, keep]
+        positions = self.positions[keep]
+        # Dropping sites does not shrink the chromosome: keep the parent
+        # bounds so span-normalized statistics keep their denominator,
+        # like the GenotypeMatrix filters.
+        return HaplotypeMatrix(
+            hap, positions,
+            chrom_start=self.chrom_start,
+            chrom_end=self.chrom_end,
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
             accessible_mask=self.accessible_mask,
         )
 
-        return filtered_matrix
+    def restrict_to_segregating(self) -> "HaplotypeMatrix":
+        """Drop non-segregating (monomorphic) sites.
+
+        Keeps sites with at least two distinct alleles present among the
+        non-missing haplotypes (any coding).
+        """
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        from ._memutil import allele_counts
+
+        ac, _ = allele_counts(self.haplotypes)
+        keep = cp.where((ac > 0).sum(axis=1) >= 2)[0]
+        if keep.shape[0] == 0:
+            # get_subset builds a valid 0-variant matrix; the constructor rejects empty
+            return self.get_subset(keep)
+        hap = self.haplotypes[:, keep]
+        positions = self.positions[keep]
+        # Dropping sites does not shrink the chromosome: keep the parent
+        # bounds so span-normalized statistics keep their denominator,
+        # like the GenotypeMatrix filters.
+        return HaplotypeMatrix(
+            hap, positions,
+            chrom_start=self.chrom_start,
+            chrom_end=self.chrom_end,
+            sample_sets=self._sample_sets,
+            n_total_sites=self.n_total_sites,
+            accessible_mask=self.accessible_mask,
+        )
+
+    def _biallelic_indicator(self) -> cp.ndarray:
+        """0/1 alt-indicator array for the current sites; -1 for missing.
+
+        ``1`` where a haplotype carries the alt allele (highest present allele),
+        ``0`` for the other allele. On {0,1} data this is the identity.
+        """
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        from ._memutil import allele_counts
+        from .genotype_matrix import _biallelic_and_alt
+
+        hap = self.haplotypes
+        ac, _ = allele_counts(hap)
+        _, alt = _biallelic_and_alt(ac)
+        ind = (hap == alt[None, :]).astype(cp.int8)
+        ind[hap < 0] = -1
+        return ind
+
+    def _biallelic_mask(self) -> cp.ndarray:
+        """Boolean ``(n_variants,)`` mask, True where <=2 distinct alleles present."""
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        from ._memutil import allele_counts
+        ac, _ = allele_counts(self.haplotypes)
+        return (ac > 0).sum(axis=1) <= 2
 
     ####### Missing data methods #######
     def is_missing(self, axis=None):
@@ -1460,10 +1530,10 @@ class HaplotypeMatrix:
         # haplotype matrix so the original is untouched.
         if genotypes_arr is not None:
             # (n_var, n_samples) -> (2 * n_samples, n_var): both
-            # haplotype rows for a sample share its genotype mask.
+            # haplotype rows for a sample share its genotype mask, and under
+            # the canonical row order those rows are adjacent.
             per_sample_keep = genotypes_arr.T  # (n_samples, n_var)
-            hap_keep = xp.concatenate([per_sample_keep, per_sample_keep],
-                                      axis=0)
+            hap_keep = xp.repeat(per_sample_keep, 2, axis=0)
             haps = xp.where(hap_keep, haps_src, np.int8(-1))
         else:
             haps = haps_src
@@ -1552,15 +1622,6 @@ class HaplotypeMatrix:
             }
 
     ####### some polymorphism statistics #######
-    def allele_frequency_spectrum(self) -> cp.ndarray:
-        """
-        Calculate the allele frequency spectrum for a haplotype matrix.
-
-        Note: This method is deprecated. Use diversity.allele_frequency_spectrum() instead.
-        """
-        from . import diversity
-        return diversity.allele_frequency_spectrum(self)
-
     def diversity(self, span_normalize=True) -> float:
         """
         Calculate the nucleotide diversity (π) for the haplotype matrix.
@@ -1605,7 +1666,7 @@ class HaplotypeMatrix:
         ----------
         hap_clean : cupy.ndarray, optional
             Pre-cleaned haplotype submatrix (missing set to 0). If None,
-            uses self.haplotypes.
+            derived from this matrix's 0/1 biallelic indicator.
         valid_mask : cupy.ndarray, optional
             Validity mask (1 where not missing). Must be provided iff
             hap_clean is provided.
@@ -1621,9 +1682,9 @@ class HaplotypeMatrix:
             self.transfer_to_gpu()
 
         if hap_clean is None:
-            hap = self.haplotypes
-            valid_mask = (hap >= 0).astype(cp.float64)
-            hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+            ind = self._biallelic_indicator()
+            valid_mask = (ind >= 0).astype(cp.float64)
+            hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
 
         n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
         p = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
@@ -1636,8 +1697,18 @@ class HaplotypeMatrix:
         return D, p
 
     def pairwise_LD_v(self) -> cp.ndarray:
-        """Pairwise linkage disequilibrium (D statistic) via matrix multiply."""
+        """Pairwise linkage disequilibrium (D statistic) via matrix multiply.
+
+        NaN for any pair involving a multiallelic (>2 distinct present alleles)
+        site; D is computed on biallelic sites only.
+        """
+        from ._warnings import _warn_biallelic_only
+        bmask = self._biallelic_mask()
+        _warn_biallelic_only(int((~bmask).sum()), context="pairwise_LD_v")
         D, _ = self._pairwise_ld_core()
+        bad = ~bmask
+        D[bad, :] = cp.nan
+        D[:, bad] = cp.nan
         cp.fill_diagonal(D, 0)
         return D
 
@@ -1657,21 +1728,43 @@ class HaplotypeMatrix:
         Returns
         -------
         cupy.ndarray, float64, shape (n_variants, n_variants)
+            NaN for any pair involving a monomorphic or multiallelic
+            (>2 distinct present alleles) site; r-squared is computed on
+            biallelic sites only.
         """
         if estimator == 'rogers_huff':
+            from .genotype_matrix import GenotypeMatrix
             from .ld_statistics import _rogers_huff_pairwise_r
-            r_full = _rogers_huff_pairwise_r(self)
-            r2 = r_full ** 2
-            r2 = cp.where(cp.isnan(r2), 0.0, r2)
+
+            # Rogers-Huff r is a diploid-dosage correlation: pair adjacent
+            # haplotypes into 0/1/2 dosages. The conversion keeps sites with
+            # at most two distinct present alleles (the _biallelic_mask
+            # criterion) and drops the rest with a warning; dropped sites
+            # come back as NaN rows/columns, like the 'r2' branch.
+            keep = self._biallelic_mask()
+            gm = GenotypeMatrix.from_haplotype_matrix(self)
+            r2_kept = _rogers_huff_pairwise_r(gm) ** 2
+            if gm.num_variants == self.num_variants:
+                r2 = r2_kept
+            else:
+                idx = cp.where(keep)[0]
+                r2 = cp.full((self.num_variants, self.num_variants), cp.nan)
+                r2[cp.ix_(idx, idx)] = r2_kept
             cp.fill_diagonal(r2, 0)
             return r2
         if estimator != 'r2':
             raise ValueError(
                 f"Unknown estimator: {estimator!r} "
                 f"(expected 'r2' or 'rogers_huff')")
+        from ._warnings import _warn_biallelic_only
+        bmask = self._biallelic_mask()
+        _warn_biallelic_only(int((~bmask).sum()), context="pairwise_r2")
         D, p = self._pairwise_ld_core()
         denom_squared = cp.outer(p * (1 - p), p * (1 - p))
-        r2 = cp.where(denom_squared > 0, (D ** 2) / denom_squared, 0)
+        r2 = cp.where(denom_squared > 0, (D ** 2) / denom_squared, cp.nan)
+        bad = ~bmask
+        r2[bad, :] = cp.nan
+        r2[:, bad] = cp.nan
         cp.fill_diagonal(r2, 0)
         return r2
 
@@ -1693,18 +1786,25 @@ class HaplotypeMatrix:
         Returns
         -------
         ndarray, bool, shape (n_variants,)
-            True for variants in approximate linkage equilibrium.
+            True for variants in approximate linkage equilibrium. Multiallelic
+            (>2 distinct present alleles) sites are returned False and excluded
+            from the r^2 computation, which is restricted to biallelic sites.
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
+        from ._warnings import _warn_biallelic_only
         m = self.num_variants
-        hap = self.haplotypes
-        valid_mask = (hap >= 0).astype(cp.float64)
-        hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+        bmask = self._biallelic_mask().get()
+        _warn_biallelic_only(int((~bmask).sum()), context="locate_unlinked")
+        ind = self._biallelic_indicator()
+        valid_mask = (ind >= 0).astype(cp.float64)
+        hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
 
-        # pruning state kept on CPU to avoid per-scalar GPU transfers
-        loc = np.ones(m, dtype=bool)
+        # pruning state kept on CPU to avoid per-scalar GPU transfers.
+        # Multiallelic sites start False: excluded from every active window
+        # (so they never contaminate r^2) and returned as not-unlinked.
+        loc = bmask.copy()
 
         for w_start in range(0, m, step):
             w_end = min(w_start + size, m)
@@ -1754,7 +1854,9 @@ class HaplotypeMatrix:
             ``'r2'`` (default) -- naive haplotype r² from frequency
             counts. ``'rogers_huff'`` -- Rogers-Huff r² on diploid
             0/1/2 dosages obtained by pairing adjacent haplotypes;
-            matches :func:`scikit-allel.rogers_huff_r` ** 2.
+            sites with three or more present alleles are dropped
+            before binning. Matches
+            :func:`scikit-allel.rogers_huff_r` ** 2.
 
         Returns
         -------
@@ -1766,31 +1868,48 @@ class HaplotypeMatrix:
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
-        pos = self.positions
-        if not isinstance(pos, cp.ndarray):
-            pos = cp.array(pos)
-
-        m = self.num_variants
-
         if estimator == 'rogers_huff':
             if pop is not None:
                 raise NotImplementedError(
                     "windowed_r_squared(estimator='rogers_huff', pop=...) "
                     "is not yet implemented; pass the full matrix or "
                     "subset to the desired haplotypes first.")
+            from .genotype_matrix import GenotypeMatrix
             from pg_gpu.ld_statistics import _rogers_huff_pairwise_r
-            r_full = _rogers_huff_pairwise_r(self)
+
+            # Pair adjacent haplotypes into 0/1/2 dosages; sites with three
+            # or more present alleles are dropped with a warning and vanish
+            # from the bins, like the 'r2' branch's biallelic restriction.
+            gm = GenotypeMatrix.from_haplotype_matrix(self)
+            m = gm.num_variants
+            pos = gm.positions
+            r_full = _rogers_huff_pairwise_r(gm)
             iu = cp.triu_indices(m, k=1)
             r2_vals = (r_full[iu]) ** 2
         elif estimator == 'r2':
-            # compute counts and r² via tally
-            counts_arr, n_valid = self.tally_gpu_haplotypes(pop=pop)
+            # Biallelic-restrict (drop >=3-allele, warn once) and tally on the
+            # 0/1 indicator so {0,2}/{1,2} codings are handled; per-bin output
+            # makes the site drop invisible.
+            from ._warnings import _warn_biallelic_only
             from pg_gpu import ld_statistics
+            biallelic = self.restrict_to_biallelic()
+            _warn_biallelic_only(
+                self.num_variants - biallelic.num_variants,
+                context="windowed_r_squared")
+            m = biallelic.num_variants
+            pos = biallelic.positions
+            ind = biallelic._biallelic_indicator()
+            if pop is not None:
+                ind = ind[biallelic.sample_sets[pop], :]
+            counts_arr, n_valid = biallelic._tally_pairs_impl(ind)
             r2_vals = ld_statistics.r_squared(counts_arr, n_valid=n_valid)
         else:
             raise ValueError(
                 f"Unknown estimator: {estimator!r} "
                 f"(expected 'r2' or 'rogers_huff')")
+
+        if not isinstance(pos, cp.ndarray):
+            pos = cp.array(pos)
 
         # pair distances
         idx_i, idx_j = cp.triu_indices(m, k=1)
@@ -1851,93 +1970,60 @@ class HaplotypeMatrix:
         else:
             X = self.haplotypes
 
-        # Check if there's any missing data
+        return self._tally_pairs_impl(X)
+
+    def _tally_pairs_impl(self, X):
+        """Pairwise ``[n11, n10, n01, n00]`` tallies over all upper-triangle
+        pairs of a 0/1 array (``-1`` missing). Contracts the sample axis via
+        ``X.T @ X`` when no data is missing (peak memory O(m^2)); falls back to
+        the per-pair reduction otherwise.
+        """
         has_missing = cp.any(X == -1)
-
         if has_missing:
-            # Use the missing data implementation
             return self._tally_gpu_haplotypes_with_missing_impl(X)
-        else:
-            # Use the faster non-missing implementation
-            m = X.shape[1]  # number of variants
 
-            # Count ones per variant
-            ones_per_variant = cp.sum(X, axis=0)
-
-            # Compute n11 matrix
-            n11_mat = X.T @ X
-
-            # Get indices for upper triangle
-            idx_i, idx_j = cp.triu_indices(m, k=1)
-
-            # Compute counts
-            n11_pairs = n11_mat[idx_i, idx_j]
-            n10_pairs = ones_per_variant[idx_i] - n11_pairs
-            n01_pairs = ones_per_variant[idx_j] - n11_pairs
-            n00_pairs = X.shape[0] - (n11_pairs + n10_pairs + n01_pairs)
-
-            # Stack all results
-            counts = cp.stack([n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1)
-
-            return counts, None
+        m = X.shape[1]
+        ones_per_variant = cp.sum(X, axis=0)
+        n11_mat = X.T @ X
+        idx_i, idx_j = cp.triu_indices(m, k=1)
+        n11_pairs = n11_mat[idx_i, idx_j]
+        n10_pairs = ones_per_variant[idx_i] - n11_pairs
+        n01_pairs = ones_per_variant[idx_j] - n11_pairs
+        n00_pairs = X.shape[0] - (n11_pairs + n10_pairs + n01_pairs)
+        counts = cp.stack([n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1)
+        return counts, None
 
     def _tally_gpu_haplotypes_with_missing_impl(self, X):
+        """Missing-aware pairwise ``[n11, n10, n01, n00]`` tallies and n_valid.
+
+        Only haplotypes non-missing (``!= -1``) at both loci are counted. Each
+        count is a sample-contracting matmul of 0/1 indicator planes: e.g.
+        ``n11 = (X==1).T @ (X==1)``, so peak memory is O(m^2) and there is no
+        per-pair loop. ``n01`` is the transpose of the ``n10`` matrix.
         """
-        Internal implementation of computing pairwise haplotype tallies with missing data support.
+        m = X.shape[1]
+        A1 = (X == 1).astype(cp.float64)
+        A0 = (X == 0).astype(cp.float64)
+        Vd = (X != -1).astype(cp.float64)
 
-        For each variant pair, only counts haplotypes where both variants are non-missing.
-        Missing data is encoded as -1 in the haplotype matrix.
+        M11 = A1.T @ A1
+        M10 = A1.T @ A0
+        M00 = A0.T @ A0
+        MV = Vd.T @ Vd
+        del A1, A0, Vd
 
-        Parameters:
-            X (cp.ndarray): Haplotype matrix to process
-
-        Returns:
-            tuple: (counts, n_valid) where:
-                - counts: Array of shape (#pairs, 4) containing [n11, n10, n01, n00] for each variant pair
-                - n_valid: Array of shape (#pairs,) containing the number of valid haplotypes for each pair
-        """
-
-        m = X.shape[1]  # number of variants
-        n_haps = X.shape[0]  # number of haplotypes
-
-        # Create missing mask for each variant (True where data is missing)
-        missing_mask = (X == -1)
-
-        # Get indices for upper triangle
         idx_i, idx_j = cp.triu_indices(m, k=1)
-        n_pairs = len(idx_i)
+        n11_pairs = M11[idx_i, idx_j]
+        n10_pairs = M10[idx_i, idx_j]
+        n01_pairs = M10[idx_j, idx_i]          # (X==0)_i & (X==1)_j
+        n00_pairs = M00[idx_i, idx_j]
+        n_valid = MV[idx_i, idx_j]
+        del M11, M10, M00, MV
 
-        # Initialize arrays for results
-        n11_pairs = cp.zeros(n_pairs, dtype=cp.int32)
-        n10_pairs = cp.zeros(n_pairs, dtype=cp.int32)
-        n01_pairs = cp.zeros(n_pairs, dtype=cp.int32)
-        n00_pairs = cp.zeros(n_pairs, dtype=cp.int32)
-        n_valid = cp.zeros(n_pairs, dtype=cp.int32)
-
-        # Process pairs (this could be optimized with custom kernels)
-        for pair_idx in range(n_pairs):
-            i = idx_i[pair_idx]
-            j = idx_j[pair_idx]
-
-            # Create valid mask for this pair (where both variants are non-missing)
-            valid_mask = ~(missing_mask[:, i] | missing_mask[:, j])
-            n_valid[pair_idx] = cp.sum(valid_mask)
-
-            if n_valid[pair_idx] > 0:
-                # Extract valid haplotypes for this pair
-                valid_haps_i = X[valid_mask, i]
-                valid_haps_j = X[valid_mask, j]
-
-                # Count haplotype combinations
-                n11_pairs[pair_idx] = cp.sum((valid_haps_i == 1) & (valid_haps_j == 1))
-                n10_pairs[pair_idx] = cp.sum((valid_haps_i == 1) & (valid_haps_j == 0))
-                n01_pairs[pair_idx] = cp.sum((valid_haps_i == 0) & (valid_haps_j == 1))
-                n00_pairs[pair_idx] = cp.sum((valid_haps_i == 0) & (valid_haps_j == 0))
-
-        # Stack all results
-        counts = cp.stack([n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1)
-
-        return counts, n_valid
+        counts = cp.stack(
+            [n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1
+        ).astype(cp.int32)
+        return counts, n_valid.astype(cp.int32)
 
     def tally_gpu_haplotypes_two_pops_with_missing(self, pop1: str, pop2: str):
         """
@@ -2099,7 +2185,6 @@ class HaplotypeMatrix:
         self,
         bp_bins,
         raw=False,
-        ac_filter=True,
         chunk_size='auto'
     ):
         """
@@ -2116,8 +2201,6 @@ class HaplotypeMatrix:
         raw : bool, optional
             If True, return raw sums of statistics across pairs in each bin.
             If False (default), return means.
-        ac_filter : bool, optional
-            If True (default), apply biallelic filtering before computation.
         chunk_size : int or 'auto', optional
             Number of pairs to process per chunk. If 'auto' (default),
             automatically estimates optimal size based on available GPU memory.
@@ -2135,28 +2218,29 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_single_pop(bp_bins)
         >>> stats[(0.0, 10000.0)]  # (DD, Dz, pi2) for first bin
         """
-        if ac_filter:
-            filtered_self = self.apply_biallelic_filter()
-            return filtered_self.compute_ld_statistics_gpu_single_pop(
-                bp_bins=bp_bins, raw=raw, ac_filter=False, chunk_size=chunk_size
-            )
         if self.device == 'CPU':
             self.transfer_to_gpu()
+        from ._warnings import _warn_biallelic_only
+        biallelic = self.restrict_to_biallelic()
+        _warn_biallelic_only(
+            self.num_variants - biallelic.num_variants,
+            context="compute_ld_statistics_gpu_single_pop")
+        seg = biallelic.restrict_to_segregating()
 
         bp_bins_arr = np.array(bp_bins)
         max_dist = float(bp_bins_arr[-1])
         n_bins = len(bp_bins_arr) - 1
         bp_bins_cp = cp.array(bp_bins_arr)
         if chunk_size == 'auto':
-            chunk_size = _estimate_ld_chunk_size(self.num_haplotypes)
+            chunk_size = _estimate_ld_chunk_size(seg.num_haplotypes)
 
-        pos = self.positions
+        pos = seg.positions
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
         bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
         _accumulate_pair_bins(
-            self.haplotypes, pos, bp_bins_cp, n_bins,
+            seg._biallelic_indicator(), pos, bp_bins_cp, n_bins,
             max_dist, int(chunk_size), n_tail=0,
             bin_sums=bin_sums, bin_counts=bin_counts,
             pop1_indices=None, pop2_indices=None,
@@ -2170,7 +2254,6 @@ class HaplotypeMatrix:
         pop1: str,
         pop2: str,
         raw=False,
-        ac_filter=True,
         chunk_size='auto'
     ):
         """
@@ -2191,8 +2274,6 @@ class HaplotypeMatrix:
         raw : bool, optional
             If True, return raw sums of statistics across pairs in each bin.
             If False (default), return means.
-        ac_filter : bool, optional
-            If True (default), apply biallelic filtering before computation.
         chunk_size : int or 'auto', optional
             Number of pairs to process per chunk. If 'auto' (default),
             automatically estimates optimal size based on available GPU memory.
@@ -2213,33 +2294,33 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_two_pops(bp_bins, 'pop1', 'pop2')
         >>> stats[(0.0, 10000.0)]['DD_0_0']  # D^2 for pop1 in first bin
         """
-        if ac_filter:
-            filtered_self = self.apply_biallelic_filter()
-            return filtered_self.compute_ld_statistics_gpu_two_pops(
-                bp_bins=bp_bins, pop1=pop1, pop2=pop2, raw=raw,
-                ac_filter=False, chunk_size=chunk_size
-            )
         if self.device == 'CPU':
             self.transfer_to_gpu()
+        from ._warnings import _warn_biallelic_only
+        biallelic = self.restrict_to_biallelic()
+        _warn_biallelic_only(
+            self.num_variants - biallelic.num_variants,
+            context="compute_ld_statistics_gpu_two_pops")
+        seg = biallelic.restrict_to_segregating()
 
         bp_bins_arr = np.array(bp_bins)
         max_dist = float(bp_bins_arr[-1])
         n_bins = len(bp_bins_arr) - 1
         bp_bins_cp = cp.array(bp_bins_arr)
-        pop1_indices = self._sample_sets[pop1]
-        pop2_indices = self._sample_sets[pop2]
+        pop1_indices = seg._sample_sets[pop1]
+        pop2_indices = seg._sample_sets[pop2]
         if chunk_size == 'auto':
             chunk_size = _estimate_ld_chunk_size(
                 max(len(pop1_indices), len(pop2_indices))
             )
 
-        pos = self.positions
+        pos = seg.positions
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
         bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
         bin_counts = cp.zeros(n_bins, dtype=cp.float64)
         _accumulate_pair_bins(
-            self.haplotypes, pos, bp_bins_cp, n_bins,
+            seg._biallelic_indicator(), pos, bp_bins_cp, n_bins,
             max_dist, int(chunk_size), n_tail=0,
             bin_sums=bin_sums, bin_counts=bin_counts,
             pop1_indices=pop1_indices, pop2_indices=pop2_indices,
@@ -2349,8 +2430,7 @@ def _accumulate_pair_bins(
         )
 
 
-def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
-                          chunk_size):
+def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, chunk_size):
     """Chunk-streamed dispatch for ``compute_ld_statistics_gpu_single_pop``."""
     bp_bins_arr = np.array(bp_bins)
     max_dist = float(bp_bins_arr[-1])
@@ -2363,11 +2443,13 @@ def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
     bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
     bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
+    n_dropped = 0
     tail_haps, tail_pos = None, None
     for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
-        if ac_filter:
-            chunk_hm = chunk_hm.apply_biallelic_filter()
-        chunk_haps = chunk_hm.haplotypes
+        biallelic = chunk_hm.restrict_to_biallelic()
+        n_dropped += chunk_hm.num_variants - biallelic.num_variants
+        chunk_hm = biallelic.restrict_to_segregating()
+        chunk_haps = chunk_hm._biallelic_indicator()
         chunk_pos = chunk_hm.positions
         if not isinstance(chunk_pos, cp.ndarray):
             chunk_pos = cp.array(chunk_pos)
@@ -2385,11 +2467,14 @@ def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, ac_filter,
         tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
         del stitched_haps, stitched_pos, chunk_haps, chunk_pos
 
+    from ._warnings import _warn_biallelic_only
+    _warn_biallelic_only(
+        n_dropped, context="compute_ld_statistics_gpu_single_pop")
     return _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw)
 
 
 def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
-                        ac_filter, chunk_size):
+                        chunk_size):
     """Chunk-streamed dispatch for ``compute_ld_statistics_gpu_two_pops``."""
     bp_bins_arr = np.array(bp_bins)
     max_dist = float(bp_bins_arr[-1])
@@ -2406,11 +2491,13 @@ def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
     bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
     bin_counts = cp.zeros(n_bins, dtype=cp.float64)
 
+    n_dropped = 0
     tail_haps, tail_pos = None, None
     for _, _, chunk_hm in streaming_hm.iter_gpu_chunks():
-        if ac_filter:
-            chunk_hm = chunk_hm.apply_biallelic_filter()
-        chunk_haps = chunk_hm.haplotypes
+        biallelic = chunk_hm.restrict_to_biallelic()
+        n_dropped += chunk_hm.num_variants - biallelic.num_variants
+        chunk_hm = biallelic.restrict_to_segregating()
+        chunk_haps = chunk_hm._biallelic_indicator()
         chunk_pos = chunk_hm.positions
         if not isinstance(chunk_pos, cp.ndarray):
             chunk_pos = cp.array(chunk_pos)
@@ -2428,6 +2515,9 @@ def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
         tail_haps, tail_pos = _new_tail(stitched_haps, stitched_pos, max_dist)
         del stitched_haps, stitched_pos, chunk_haps, chunk_pos
 
+    from ._warnings import _warn_biallelic_only
+    _warn_biallelic_only(
+        n_dropped, context="compute_ld_statistics_gpu_two_pops")
     return _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw)
 
 

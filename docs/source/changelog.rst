@@ -1,8 +1,217 @@
 Changelog
 =========
 
-v0.1.0 (Current)
------------------
+Unreleased
+----------
+
+Sites with more than two alleles are now handled correctly
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Statistics used to lump every alternate allele into one "non-reference"
+group. That is fine when a site has two alleles and wrong when it has
+three or four. Each allele is now counted on its own, which is what
+``tskit`` does. See :doc:`missing_data` for what this means in
+practice.
+
+**If your data only has two alleles per site, nothing here changes your
+results**, except where the next section says so.
+
+* Diversity and frequency spectra: :math:`\pi`, ``theta_w`` /
+  ``theta_h`` / ``theta_l``, ``tajimas_d``, ``fay_wus_h``, ``zeng_e``,
+  ``segregating_sites``, ``singleton_count``,
+  ``heterozygosity_expected``, and every SFS function.
+  ``segregating_sites`` now counts mutations rather than variable
+  sites, so a site with three alleles counts as 2. ``theta_w`` and
+  Tajima's D use that count too.
+* Divergence: ``dxy``, ``da``, ``fst_hudson``, ``fst_nei``,
+  ``fst_weir_cockerham``, and ``pbs``. Added ``fst_tskit``, also
+  available as ``fst(method='tskit')``.
+* Admixture: ``patterson_f2`` and ``patterson_f3``. Added
+  ``patterson_f4``. ``patterson_d`` only works on two-allele sites and
+  now says so.
+* Selection: ``ihs`` and ``nsl`` score each alternate allele against
+  the reference separately, so they return one column per alternate
+  allele when a site has more than two. ``min_maf`` now applies to each
+  allele's own frequency. The promotion is matrix-wide: one site with a
+  third allele anywhere makes the whole return two-dimensional, so
+  ``plt.plot(pos, ihs)`` and ``np.argmax(ihs)`` change meaning; filter
+  with ``restrict_to_biallelic`` first for the flat scan. A matrix with
+  no alternate allele at all returns all ``NaN``.
+* Distances: pairwise distances count how many sites two haplotypes
+  differ at, instead of doing arithmetic on the allele numbers.
+  ``decomposition.pairwise_distance`` uses the same count.
+* Relatedness: added ``genetic_relatedness``, which matches
+  ``tskit``'s function of the same name.
+* Windowed analysis: every windowed statistic now gives the same answer
+  as running the plain function on that window's variants.
+* LD statistics operate on only sites with two present alleles, but allow
+  arbitrary integer coding. This is a break from parity with ``moments.LD``,
+  which restricts to sites with ``{0, 1}`` coding only.
+  ``pairwise_r2`` keeps its full square shape and returns dropped sites
+  as ``NaN`` rows and columns, ``windowed_r_squared`` drops their pairs
+  from its bins, and ``locate_unlinked`` returns ``False`` for them.
+  ``moments_ld.compute_ld_statistics`` computes its heterozygosity
+  terms on the same site set and 0/1 recoding as its LD sums, so both
+  halves of the output describe the same sites.
+
+Results that change even for two-allele data
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Read this section if you are comparing against older pg_gpu results.
+
+* Haplotype rows now follow one order everywhere: sample ``i`` owns rows
+  ``2i`` and ``2i + 1``. ``from_ts`` already used this order, while
+  ``from_vcf`` and ``from_zarr`` grouped all of the first gametes ahead of
+  the second ones. Statistics that reconstruct individuals -- ``ibs``,
+  ``grm``, ``fst_weir_cockerham``, ``heterozygosity_observed``,
+  ``GenotypeMatrix.from_haplotype_matrix``, and genotype-mode LD -- now
+  read the same order the loaders write, so their values change for data
+  loaded from VCF or zarr. Statistics that treat rows as independent
+  gametes are unaffected, as long as the same rows are selected.
+  ``sample_sets`` built by ``load_pop_file`` now lists ``2i`` and
+  ``2i + 1`` for each member, and hand-written index lists that assumed
+  the previous order need updating.
+* Row lists are validated at assignment and at resolution: assigning
+  ``sample_sets`` and passing a row list as a population argument both
+  raise ``ValueError`` for out-of-range or duplicated rows instead of
+  silently producing wrong numbers. The statistics that pair rows into
+  individuals (``fst_weir_cockerham``, ``heterozygosity_observed``,
+  windowed ``fst_wc``, and ``GenotypeMatrix.from_haplotype_matrix``)
+  warn when a list does not carry each sample's two rows adjacently;
+  gamete statistics accept any list, as before. An empty set also
+  raises -- a population must name at least one row, matching tskit --
+  and ``load_pop_file`` drops a population with no member in the matrix
+  instead of storing it empty. Duplicates are a hard error, so
+  bootstrapping over individuals by repeating rows in a set is not
+  possible; resample windows or blocks instead.
+* Streaming matrices follow one row space end to end: a stream's
+  ``sample_sets`` and ``materialize(sample_subset=...)`` both speak
+  haplotype rows on a haplotype stream and individual rows on a genotype
+  stream, so ``materialize(sample_subset=stream.sample_sets[pop])``
+  works on either class. This changes what a genotype stream's
+  ``sample_subset`` means: it took haplotype columns before and takes
+  individual rows now, so callers that passed columns must halve their
+  values. The genotype stream's sets previously held
+  haplotype columns that indexed past its individual axis. Assigning
+  ``sample_sets`` on a stream validates like the eager classes, and pop
+  files validate once at stream construction.
+* Windowed ``fst_wc`` now gives the same estimate as
+  ``divergence.fst_weir_cockerham``. It used to treat the data as haploid
+  and lump every alternate allele together, so it returned a different
+  number from the plain function on the same variants. Expect windowed
+  values to move: the old ones were off by a small fixed amount, which is
+  under a few percent once FST is above about 0.02 and much larger when
+  FST is near zero. The plain function is unchanged.
+* Frequency spectra: sites where nothing varies no longer contribute,
+  folded spectra are returned as ``float64`` rather than integers, and
+  ``joint_sfs_folded`` returns a full ``(n1 + 1, n2 + 1)`` grid folded
+  by the site's overall minor allele.
+* ``pca`` and ``randomized_pca`` now take haplotypes and give every
+  allele its own column. The old diploid behavior is now
+  ``pca_dosage`` / ``randomized_pca_dosage``, which take a
+  ``GenotypeMatrix``. The ``scaler`` argument is gone, and each
+  function raises a ``TypeError`` on the wrong matrix type.
+  ``pca`` accumulates its Gram over variant chunks when the standardized
+  matrix would not fit in GPU memory, so the exact decomposition runs at
+  any matrix size.
+  ``local_pca`` and ``lostruct`` changed the same way. They no longer
+  match the R ``lostruct`` package number for number -- the eigenvalue
+  scale differs -- though the component directions still agree closely,
+  so plots and outlier detection are unaffected. Window eigenvectors
+  are sign-aligned against the previous window, so individual entries
+  can flip sign relative to older output, and ``LocalPCAResult`` no
+  longer carries a ``scaler`` field.
+* ``grm`` and ``ibs`` now require a ``GenotypeMatrix`` and reject
+  haplotypes. ``grm(GenotypeMatrix, population=...)`` used to raise an
+  error and now works.
+* Windowed ``daf_hist`` is now a histogram normalized to sum to 1, and
+  windowed ``mu_sfs`` divides by the number of variable sites and
+  returns 0.0 instead of NaN for an empty window.
+* In ``windowed_statistics``, ``singletons`` now counts only alternate
+  alleles seen once (it used to also count reference alleles seen
+  once), and ``segregating_sites`` counts mutations.
+* ``dxy(span_normalize=False)`` and ``da(span_normalize=False)`` return
+  the raw sum, matching every other statistic. They used to divide by
+  the number of sites.
+* The biallelic and segregating filters keep the parent matrix's
+  chromosome bounds. The old filter moved the bounds to the first and
+  last surviving variant, which quietly changed the denominator of any
+  span-normalized statistic computed afterwards.
+* ``decomposition.pairwise_distance`` supports ``euclidean``,
+  ``sqeuclidean``, and ``cityblock``. Other metrics now raise
+  ``NotImplementedError``, and passing a ``GenotypeMatrix`` raises a
+  ``TypeError``.
+* ``pairwise_r2`` returns ``NaN`` instead of ``0`` for a pair whose
+  r-squared is undefined (a site where nothing varies), with either
+  estimator. Reductions over the matrix need ``nanmean`` /
+  ``nanargmax`` now.
+* ``windowed_analysis`` with exactly two populations names the
+  two-population columns the same way on every path (``fst_hudson``);
+  the non-fused fallback used to suffix them
+  (``fst_hudson_pop1_pop2``).
+* ``fst_weir_cockerham`` with a population holding a single row
+  returns 0 (after the unpaired-rows warning) where it used to fall
+  back to a haploid estimate. One row is half an individual and gives
+  the diploid analysis no within-population variance to estimate.
+
+Bug fixes
+~~~~~~~~~
+
+* Pairwise distances treated a missing genotype as if it were a
+  reference homozygote, so a missing call could count as a difference.
+  Missing data is now skipped on both sides of the calculation.
+* ``GenotypeMatrix.from_zarr`` ignored ``accessible_bed`` when
+  streaming, so streaming ``grm`` and ``ibs`` silently used every
+  variant while the non-streaming path filtered correctly. Both now
+  apply the mask, and results agree exactly.
+* The three ``GenotypeMatrix`` loaders disagreed about which sites to
+  keep and how to build genotype values, so the same data could give
+  different matrices. They now share one definition. Sites showing only
+  alleles ``0`` and ``2``, or only ``1`` and ``2``, are kept rather
+  than dropped, and sites where nothing varies are kept too.
+
+New warnings
+~~~~~~~~~~~~
+
+* ``BiallelicOnlyWarning`` -- something that only works on two-allele
+  sites threw multiallelic sites away, and tells you how many. Comes
+  from ``patterson_d``, the ``GenotypeMatrix`` loaders and
+  ``from_haplotype_matrix``, and the LD statistics that restrict to
+  two-allele sites (``zns``, ``omega``, ``pairwise_r2``,
+  ``pairwise_LD_v``, ``locate_unlinked``, ``windowed_r_squared``).
+* ``UnpairedRowsWarning`` -- a statistic that pairs rows into
+  individuals got a population list that does not keep each sample's
+  two rows together. The row-validation entry above says when it
+  fires.
+* ``MultiallelicCapWarning`` -- a windowed calculation skipped sites
+  with more than 8 alleles. You will not see this with DNA.
+
+Removed
+~~~~~~~
+
+* ``diversity.allele_frequency_spectrum`` and
+  ``HaplotypeMatrix.allele_frequency_spectrum``. Use the ``sfs`` module
+  instead.
+* The ``scaler`` argument on the PCA functions.
+* ``apply_biallelic_filter`` on both matrix classes. Use
+  ``restrict_to_biallelic``, which keeps sites with at most two
+  distinct present alleles whatever their coding -- including sites
+  where nothing varies, which the old filter dropped -- or
+  ``restrict_to_segregating`` to drop the non-varying ones.
+* The ``ac_filter`` argument on
+  ``compute_ld_statistics_gpu_single_pop`` / ``..._two_pops`` (eager
+  and streaming) and ``moments_ld.compute_ld_statistics``. The LD
+  pipeline always restricts to two-present-allele sites now.
+* ``HaplotypeMatrix`` input to ``rogers_huff_r`` /
+  ``rogers_huff_r_squared``. Rogers-Huff r is a diploid dosage
+  correlation: convert with ``GenotypeMatrix.from_haplotype_matrix``
+  first, or call ``pairwise_r2(estimator='rogers_huff')`` on the
+  haplotype matrix, which converts internally.
+* The ``genotype_matrix_or_haplotype_matrix`` keyword on ``grm`` and
+  ``ibs``; the parameter is named ``genotype_matrix`` now.
+
+v0.1.0
+------
 
 First public release of pg_gpu.
 

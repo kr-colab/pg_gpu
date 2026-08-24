@@ -35,7 +35,7 @@ from pg_gpu import (
 from pg_gpu.genotype_matrix import GenotypeMatrix
 
 # ── Config ───────────────────────────────────────────────────────────────
-ZARR_PATH = "/sietch_colab/data_share/Ag1000G/Ag3.0/vcf/AgamP3.phased.zarr"
+ZARR_PATH = "/sietch_colab/data_share/Ag1000G/Ag3.0/vcf/phased_vcf/AgamP3.phased.zarr"
 ACC_PATH = "/sietch_colab/data_share/Ag1000G/Ag3.0/vcf/agp3.is_accessible.txt.npz"
 CHROM = "3R"
 REGION_START = None  # None = full arm
@@ -110,8 +110,8 @@ def load_data(skip_allel=False):
     assert ploidy == 2
 
     haplotypes = np.empty((n_variants, 2 * n_samples), dtype=gt.dtype)
-    haplotypes[:, :n_samples] = gt[:, :, 0]
-    haplotypes[:, n_samples:] = gt[:, :, 1]
+    haplotypes[:, 0::2] = gt[:, :, 0]
+    haplotypes[:, 1::2] = gt[:, :, 1]
     haplotypes = haplotypes.T
 
     chrom_start = REGION_START if REGION_START is not None else int(positions[0])
@@ -150,6 +150,7 @@ def bench(fn, n_iter=N_ITER, n_warmup=1, sync_gpu=True):
         try:
             fn()
         except Exception:
+            traceback.print_exc()
             return None
         if sync_gpu:
             cp.cuda.Stream.null.synchronize()
@@ -162,6 +163,7 @@ def bench(fn, n_iter=N_ITER, n_warmup=1, sync_gpu=True):
         try:
             fn()
         except Exception:
+            traceback.print_exc()
             return None
         if sync_gpu:
             cp.cuda.Stream.null.synchronize()
@@ -253,8 +255,8 @@ def main():
     benchmarks.append(("diversity.inbreeding_coefficient",
         lambda: diversity.inbreeding_coefficient(hm, population="pop1"),
         allel_fn(['g'], lambda: np.nanmean(allel.inbreeding_coefficient(_allel_cache['g'].subset(sel1=list(range(N_DIP_PER_POP))))))))
-    benchmarks.append(("diversity.allele_freq_spectrum",
-        lambda: diversity.allele_frequency_spectrum(hm, population="pop1"),
+    benchmarks.append(("sfs.sfs",
+        lambda: sfs.sfs(hm, population="pop1"),
         allel_fn(['g'], lambda: allel.sfs(_allel_cache['g'].count_alleles(subpop=pop1_dip)[:, 1]))))
     benchmarks.append(("diversity.segregating_sites",
         lambda: diversity.segregating_sites(hm, population="pop1"),
@@ -355,7 +357,7 @@ def main():
     # --- Decomposition ---
     # randomized_pca needs O(n_hap * n_var * 8) intermediates; OOM at full-arm scale
     benchmarks.append(("decomposition.randomized_pca",
-        lambda: decomposition.randomized_pca(hm, n_components=4, scaler="patterson"),
+        lambda: decomposition.randomized_pca(hm, n_components=4),
         None))
 
     # --- Relatedness ---

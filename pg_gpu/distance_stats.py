@@ -21,7 +21,8 @@ def _extract_upper_triangle(mat):
     return result.get() if hasattr(result, 'get') else result
 
 
-def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
+def _pairwise_diffs_matrix_gpu(hap, missing_data='include',
+                               return_joint_valid=False):
     """Compute full pairwise Hamming distance matrix on GPU.
 
     Internal helper returning the raw cupy distance matrix. Used by
@@ -32,6 +33,15 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     chunks to GPU on-the-fly so the full matrix never needs to reside
     on GPU at once.
 
+    Multiallelic-correct Hamming: the number of DIFFERING jointly-valid sites is
+    ``joint_valid - same``, where ``same`` counts sites at which the two
+    haplotypes carry the same allele, summed over allele values via one-hot
+    indicators (``same = sum_v I_v @ I_v.T``, ``I_v[h,s] = 1 if hap[h,s] == v``).
+    This generalizes the biallelic ``sum_i + sum_j - 2*X@X.T`` gram identity
+    (which silently assumes ``v^2 = v``) to any number of alleles, and reduces
+    to it exactly on ``{0, 1}`` data. Missing entries (``-1``) match no allele
+    value and are excluded from ``joint_valid``, so they never contribute.
+
     Parameters
     ----------
     hap : numpy.ndarray or cupy.ndarray, shape (n_haplotypes, n_variants)
@@ -39,41 +49,52 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     missing_data : str
         'include' - raw counts at jointly non-missing sites
         'normalize' - per-site average (divide by jointly valid count)
+    return_joint_valid : bool
+        When True, also return the (n_hap, n_hap) count of jointly non-missing
+        sites per pair, so a caller can apply its own normalization with the
+        same counts. Default False (existing callers are unchanged).
 
     Returns
     -------
     diffs_mat : cupy.ndarray, float64, shape (n_hap, n_hap)
         Pairwise distance matrix on GPU.
+    joint_valid : cupy.ndarray, float64, shape (n_hap, n_hap)
+        Only returned when ``return_joint_valid`` is True.
     """
     from ._memutil import estimate_variant_chunk_size
 
     n_hap, n_var = hap.shape
     is_numpy = isinstance(hap, np.ndarray)
     chunk_size = estimate_variant_chunk_size(n_hap, bytes_per_element=8,
-                                             n_intermediates=2)
+                                             n_intermediates=3)
 
-    gram = cp.zeros((n_hap, n_hap), dtype=cp.float64)
-    row_sums = cp.zeros(n_hap, dtype=cp.float64)
-    need_valid = missing_data == 'normalize'
-    joint_valid = cp.zeros((n_hap, n_hap), dtype=cp.float64) if need_valid else None
+    # One-hot Hamming over K allele values, K matmuls per chunk; K is the
+    # number of distinct allele values, typically small.
+    max_allele = int(hap.max()) if hap.size else -1
+    n_alleles = max(max_allele + 1, 0)
+
+    matches = cp.zeros((n_hap, n_hap), dtype=cp.float64)
+    joint_valid = cp.zeros((n_hap, n_hap), dtype=cp.float64)
 
     for start in range(0, n_var, chunk_size):
         end = min(start + chunk_size, n_var)
         h_chunk = cp.asarray(hap[:, start:end]) if is_numpy else hap[:, start:end]
-        x_chunk = cp.where(h_chunk >= 0, h_chunk, 0).astype(cp.float64)
-        row_sums += cp.sum(x_chunk, axis=1)
-        gram += x_chunk @ x_chunk.T
-        if need_valid:
-            v_chunk = (h_chunk >= 0).astype(cp.float64)
-            joint_valid += v_chunk @ v_chunk.T
-            del v_chunk
-        del h_chunk, x_chunk
+        v_chunk = (h_chunk >= 0).astype(cp.float64)
+        joint_valid += v_chunk @ v_chunk.T
+        # sites where both carry allele v (missing is -1, matches no v >= 0)
+        for v in range(n_alleles):
+            iv = (h_chunk == v).astype(cp.float64)
+            matches += iv @ iv.T
+            del iv
+        del h_chunk, v_chunk
 
-    diffs_mat = row_sums[:, None] + row_sums[None, :] - 2.0 * gram
+    diffs_mat = joint_valid - matches
 
-    if joint_valid is not None:
+    if missing_data == 'normalize':
         diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
 
+    if return_joint_valid:
+        return diffs_mat, joint_valid
     return diffs_mat
 
 
@@ -81,8 +102,9 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
                            missing_data='include'):
     """Compute pairwise Hamming distances between haplotypes on GPU.
 
-    Uses a single matrix multiply: for 0/1 data,
-    diffs_ij = sum_i + sum_j - 2 * (X @ X.T)_ij.
+    Per-site average allele differences over jointly non-missing sites,
+    multiallelic-correct (one-hot indicators per allele value; see
+    ``_pairwise_diffs_matrix_gpu``).
 
     Parameters
     ----------
@@ -123,6 +145,13 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
 
     For 0/1/2 genotypes, uses indicator matrices: matches = I0.T@I0 +
     I1.T@I1 + I2.T@I2, then diffs = n_var - matches.
+
+    Biallelic only: the input is a ``GenotypeMatrix`` of 0/1/2 alt-allele dosage,
+    which is a biallelic representation by construction (multiallelic sites are
+    filtered/collapsed when the matrix is built). For multiallelic data, use the
+    allele-index haplotype path (``pairwise_diffs_haploid`` /
+    ``divergence.pairwise_distance_matrix`` on a ``HaplotypeMatrix``), which is
+    multiallelic-correct.
 
     Parameters
     ----------

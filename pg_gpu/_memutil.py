@@ -2,6 +2,9 @@
 
 import cupy as cp
 
+# Threads per block for the one-thread-per-variant fused kernels.
+_THREADS_PER_BLOCK = 256
+
 
 def estimate_variant_chunk_size(n_hap, bytes_per_element=4, n_intermediates=3,
                                  memory_fraction=0.4):
@@ -84,111 +87,112 @@ def free_gpu_pool():
     cp.get_default_memory_pool().free_all_blocks()
 
 
-def chunked_sum_int32(hap, axis=0):
-    """Sum haplotype matrix along axis 0 using int32 chunks.
 
-    Avoids creating a full int32 copy of the matrix by processing
-    variant columns in chunks.
-
-    Parameters
-    ----------
-    hap : cupy.ndarray, int8, shape (n_hap, n_var)
-
-    Returns
-    -------
-    cupy.ndarray, int64, shape (n_var,)
-    """
-    n_hap, n_var = hap.shape
-    chunk_size = estimate_variant_chunk_size(n_hap, bytes_per_element=4,
-                                             n_intermediates=1)
-    result = cp.empty(n_var, dtype=cp.int64)
-    for start in range(0, n_var, chunk_size):
-        end = min(start + chunk_size, n_var)
-        result[start:end] = cp.sum(hap[:, start:end].astype(cp.int32), axis=0)
-    return result
-
-
-_dac_and_n_kernel = cp.RawKernel(r'''
+_allele_counts_kernel = cp.RawKernel(r'''
 extern "C" __global__
-void dac_and_n(const signed char* hap, int n_hap, int n_var,
-               long long stride0, long long stride1,
-               long long* out_dac, long long* out_n) {
+void allele_counts(const signed char* hap, int n_hap, int n_var,
+                   long long stride0, long long stride1, int K,
+                   long long* out_ac, long long* out_n) {
+    // Per-thread histograms live in shared memory, laid out (allele, tid)
+    // so consecutive threads hit consecutive banks. Tallying in shared
+    // costs one 4-byte RMW per element; a global int64 tally would pay a
+    // 16-byte round trip per 1-byte read, a ~17x bandwidth amplification.
+    extern __shared__ int cnt[];
     int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+    for (int a = 0; a < K; a++) cnt[a * blockDim.x + tid] = 0;
     if (j >= n_var) return;
-    int d = 0, nv = 0;
+    int nv = 0;
     for (int i = 0; i < n_hap; i++) {
         signed char v = hap[i * stride0 + j * stride1];
-        if (v >= 0) nv++;
-        if (v > 0) d++;
+        if (v >= 0) {
+            nv++;
+            if (v < K) cnt[v * blockDim.x + tid]++;
+        }
     }
-    out_dac[j] = d;
+    long long base = (long long)j * K;
+    for (int a = 0; a < K; a++)
+        out_ac[base + a] = (long long)cnt[a * blockDim.x + tid];
     out_n[j] = nv;
 }
-''', 'dac_and_n')
+''', 'allele_counts')
 
 
-def dac_and_n(hap):
-    """Compute derived allele counts and valid counts via fused CUDA kernel.
+# Fallback for allele counts too wide for a shared-memory histogram (a
+# per-thread row would blow the 48 KB block budget). Same contract; the
+# output row doubles as the histogram, one global RMW per element.
+_allele_counts_kernel_widek = cp.RawKernel(r'''
+extern "C" __global__
+void allele_counts_widek(const signed char* hap, int n_hap, int n_var,
+                         long long stride0, long long stride1, int K,
+                         long long* out_ac, long long* out_n) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= n_var) return;
+    long long base = (long long)j * K;
+    for (int a = 0; a < K; a++) out_ac[base + a] = 0;
+    int nv = 0;
+    for (int i = 0; i < n_hap; i++) {
+        signed char v = hap[i * stride0 + j * stride1];
+        if (v >= 0) {
+            nv++;
+            if (v < K) out_ac[base + v]++;
+        }
+    }
+    out_n[j] = nv;
+}
+''', 'allele_counts_widek')
 
-    Single-pass kernel: reads each element once, no intermediate arrays.
-    Counts non-reference alleles (hap > 0) as derived, handling
-    multiallelic sites correctly.
+
+def allele_counts(hap, n_alleles=None):
+    """Compute per-allele sample counts and valid counts via fused CUDA kernel.
+
+    Single-pass kernel: one thread per variant reads each element once and
+    tallies a per-allele histogram directly into its own output row (no
+    intermediate array, no atomics). This is the multiallelic-correct
+    counting primitive: allele ``a`` at a site gets its own count, rather
+    than all non-reference alleles being collapsed into one derived
+    class.
 
     Parameters
     ----------
     hap : cupy.ndarray, int8, shape (n_hap, n_var)
+        Allele indices (0 = reference/ancestral, 1.. = alternate), -1 missing.
+    n_alleles : int, optional
+        Output width ``K`` (number of allele columns). If None, derived as
+        ``max(hap) + 1`` via a one-shot reduction. Pass a global value when
+        several calls (e.g. per population) must produce aligned matrices;
+        it must be at least ``max(hap) + 1`` (counts for larger indices are
+        dropped from ``ac`` but still counted in ``n_valid``).
 
     Returns
     -------
-    dac : cupy.ndarray, int64, shape (n_var,)
-        Derived (non-reference) allele count per site.
+    ac : cupy.ndarray, int64, shape (n_var, K)
+        Per-allele sample count; column ``a`` is the count of allele ``a``.
     n_valid : cupy.ndarray, int64, shape (n_var,)
-        Number of non-missing haplotypes per site.
+        Number of non-missing haplotypes per site (== ac.sum(axis=1) when
+        n_alleles covers the true allele range).
     """
     n_hap, n_var = hap.shape
-    out_dac = cp.empty(n_var, dtype=cp.int64)
+    if n_alleles is None:
+        K = (max(int(hap.max()), 0) + 1) if hap.size else 1
+    else:
+        K = int(n_alleles)
+    if n_var == 0:
+        return cp.empty((0, K), dtype=cp.int64), cp.empty(0, dtype=cp.int64)
+    out_ac = cp.empty((n_var, K), dtype=cp.int64)
     out_n = cp.empty(n_var, dtype=cp.int64)
     s0, s1 = hap.strides
-    threads = 256
+    threads = _THREADS_PER_BLOCK
     blocks = (n_var + threads - 1) // threads
-    _dac_and_n_kernel((blocks,), (threads,),
-                      (hap, n_hap, n_var, s0, s1, out_dac, out_n))
-    return out_dac, out_n
+    shared_bytes = K * threads * 4
+    if shared_bytes <= 48 * 1024:
+        _allele_counts_kernel((blocks,), (threads,),
+                              (hap, n_hap, n_var, s0, s1, K, out_ac, out_n),
+                              shared_mem=shared_bytes)
+    else:
+        _allele_counts_kernel_widek((blocks,), (threads,),
+                                    (hap, n_hap, n_var, s0, s1, K,
+                                     out_ac, out_n))
+    return out_ac, out_n
 
 
-# Backward-compatible alias
-chunked_dac_and_n = dac_and_n
-
-
-def chunked_matmul_accumulate(X, chunk_size=None):
-    """Compute X @ X.T by accumulating partial outer products.
-
-    Splits X along columns (variant axis) to control memory.
-    Result is exact (no approximation).
-
-    Parameters
-    ----------
-    X : cupy.ndarray, shape (n, m)
-    chunk_size : int, optional
-        Columns per chunk. Auto-estimated if None.
-
-    Returns
-    -------
-    cupy.ndarray, shape (n, n)
-    """
-    n, m = X.shape
-    if chunk_size is None:
-        free = cp.cuda.Device().mem_info[0]
-        # Each chunk needs (n, chunk) working memory + (n, n) output
-        output_bytes = n * n * 8  # float64
-        budget = int(free * 0.4) - output_bytes
-        per_col = n * 8  # float64
-        chunk_size = max(1, budget // per_col)
-
-    result = cp.zeros((n, n), dtype=cp.float64)
-    for start in range(0, m, chunk_size):
-        end = min(start + chunk_size, m)
-        chunk = X[:, start:end]
-        result += chunk @ chunk.T
-
-    return result

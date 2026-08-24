@@ -247,34 +247,34 @@ def d_prime(counts: cp.ndarray,
 
 
 def _prepare_segregating(mat, missing_data='include'):
-    """Filter to segregating sites and return cleaned arrays.
+    """Filter to segregating sites and return cleaned 0/1 arrays.
 
     Returns (hap_clean, valid_mask, m) or (None, None, 0) if < 2 sites.
+    Operates on the biallelic 0/1 indicator, so {0,2} / reference-absent {1,2}
+    codings are handled; callers restrict to biallelic first.
     """
     if hasattr(mat, 'device') and mat.device == 'CPU':
         mat.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        hap = mat.haplotypes
-        missing_per_var = cp.sum(hap < 0, axis=0)
+        missing_per_var = cp.sum(mat.haplotypes < 0, axis=0)
         valid = cp.where(missing_per_var == 0)[0]
         mat = mat.get_subset(valid)
 
-    hap = mat.haplotypes
-    dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0)
-    n_valid_per_site = cp.sum((hap >= 0).astype(cp.int32), axis=0)
+    ind = mat._biallelic_indicator()
+    dac = cp.sum(ind == 1, axis=0)
+    n_valid_per_site = cp.sum(ind >= 0, axis=0)
     seg = (dac > 0) & (dac < n_valid_per_site)
     seg_idx = cp.where(seg)[0]
-    if len(seg_idx) < mat.num_variants:
-        mat = mat.get_subset(seg_idx)
+    if len(seg_idx) < ind.shape[1]:
+        ind = ind[:, seg_idx]
 
-    hap = mat.haplotypes
-    m = hap.shape[1]
+    m = ind.shape[1]
     if m < 2:
         return None, None, 0
 
-    valid_mask = (hap >= 0).astype(cp.float64)
-    hap_clean = cp.where(hap >= 0, hap, 0).astype(cp.float64)
+    valid_mask = (ind >= 0).astype(cp.float64)
+    hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
     return hap_clean, valid_mask, m
 
 
@@ -364,47 +364,29 @@ def _resolve_ld_estimator(estimator: str, is_hap_matrix: bool) -> str:
 
 
 def _dosage_from_matrix(matrix) -> "cp.ndarray":
-    """Return a ``(n_samples, n_variants)`` float64 dosage array.
+    """Return the ``(n_samples, n_variants)`` float64 alt-dosage of a GenotypeMatrix.
 
-    For a ``HaplotypeMatrix`` (n_haplotypes, n_variants) of 0/1, adjacent
-    haplotypes are paired into 0/1/2 dosages
-    (sample 0 = haplotypes 0,1; sample 1 = haplotypes 2,3; ...).
-    For a ``GenotypeMatrix`` (n_samples, n_variants), the genotypes are
-    used directly. Raises ``ValueError`` if missing values (-1) are
-    present, matching the convention of
-    ``scikit-allel.rogers_huff_r``.
+    Rogers-Huff r is a diploid-dosage correlation, so it requires a
+    ``GenotypeMatrix`` (0/1/2, biallelic by construction). Raises ``TypeError``
+    for any other input and ``ValueError`` if missing values (-1) are present,
+    matching the convention of ``scikit-allel.rogers_huff_r``.
     """
-    from .haplotype_matrix import HaplotypeMatrix
     from .genotype_matrix import GenotypeMatrix
 
-    if isinstance(matrix, HaplotypeMatrix):
-        if matrix.device == 'CPU':
-            matrix.transfer_to_gpu()
-        hap = matrix.haplotypes
-        if (hap < 0).any():
-            raise ValueError(
-                "rogers_huff_r: input HaplotypeMatrix contains missing "
-                "values (-1). Rogers-Huff r expects strict 0/1/2 dosage "
-                "input; drop or impute missing sites first.")
-        n_hap = hap.shape[0]
-        if n_hap % 2 != 0:
-            raise ValueError(
-                f"rogers_huff_r: HaplotypeMatrix has an odd number of "
-                f"haplotypes ({n_hap}); cannot pair into diploids.")
-        return (hap[0::2, :] + hap[1::2, :]).astype(cp.float64)
-    if isinstance(matrix, GenotypeMatrix):
-        if matrix.device == 'CPU':
-            matrix.transfer_to_gpu()
-        g = matrix.genotypes
-        if (g < 0).any():
-            raise ValueError(
-                "rogers_huff_r: input GenotypeMatrix contains missing "
-                "values (-1). Rogers-Huff r expects strict 0/1/2 dosage "
-                "input; drop or impute missing sites first.")
-        return g.astype(cp.float64)
-    raise TypeError(
-        f"rogers_huff_r: expected HaplotypeMatrix or GenotypeMatrix; "
-        f"got {type(matrix).__name__}")
+    if not isinstance(matrix, GenotypeMatrix):
+        raise TypeError(
+            "rogers_huff_r is the diploid dosage correlation and requires a "
+            "GenotypeMatrix; convert a HaplotypeMatrix first with "
+            "GenotypeMatrix.from_haplotype_matrix.")
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    g = matrix.genotypes
+    if (g < 0).any():
+        raise ValueError(
+            "rogers_huff_r: input GenotypeMatrix contains missing values (-1). "
+            "Rogers-Huff r expects strict 0/1/2 dosage input; drop or impute "
+            "missing sites first.")
+    return g.astype(cp.float64)
 
 
 def _tile_rogers_huff_r(g_i: "cp.ndarray", g_j: "cp.ndarray",
@@ -453,7 +435,7 @@ def _rogers_huff_pairwise_r(matrix, tile_size: Optional[int] = None
 
     Parameters
     ----------
-    matrix : HaplotypeMatrix or GenotypeMatrix
+    matrix : GenotypeMatrix
     tile_size : int, optional
         Block size B. Defaults to ``min(n_variants, 1024)`` which
         keeps each tile <= 8 MB at float64 for typical sample sizes.
@@ -498,10 +480,10 @@ def rogers_huff_r(matrix, tile_size: Optional[int] = None) -> "cp.ndarray":
 
     Parameters
     ----------
-    matrix : HaplotypeMatrix or GenotypeMatrix
-        Diploid input. ``HaplotypeMatrix`` rows are paired into 0/1/2
-        dosages; ``GenotypeMatrix`` genotypes are used directly. Both
-        must be free of -1 missing sentinels (raise otherwise).
+    matrix : GenotypeMatrix
+        Diploid 0/1/2 dosage (biallelic by construction). Must be free of
+        -1 missing sentinels (raises otherwise). Convert a HaplotypeMatrix
+        with ``GenotypeMatrix.from_haplotype_matrix`` first.
     tile_size : int, optional
         GPU tile size. Defaults to ``min(n_variants, 1024)``.
 
@@ -676,6 +658,23 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
     return total / (m * (m - 1))
 
 
+def _drop_undefined_sites(r2_matrix):
+    """Drop sites whose r2 is undefined for every pair.
+
+    ``pairwise_r2`` marks a monomorphic or multiallelic site by NaN-ing its
+    whole row and column, so excluding undefined pairs is the same as dropping
+    those sites -- what the object-input path already does before reducing.
+    No-op on a finite matrix. Assumes undefined entries arrive as whole
+    rows/cols (all this package produces); a scattered NaN would propagate.
+    """
+    finite = ~cp.isnan(r2_matrix)
+    cp.fill_diagonal(finite, False)
+    good = cp.where(cp.any(finite, axis=1))[0]
+    if int(good.shape[0]) == r2_matrix.shape[0]:
+        return r2_matrix
+    return r2_matrix[cp.ix_(good, good)]
+
+
 def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     """Kelly's ZnS: mean pairwise r-squared across all SNP pairs.
 
@@ -715,7 +714,12 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
 
     # Streaming path for HaplotypeMatrix: O(B²) memory instead of O(m²)
     if is_hm:
-        return _zns_tiled(r2_matrix_or_matrix, _md)
+        from ._warnings import _warn_biallelic_only
+        biallelic = r2_matrix_or_matrix.restrict_to_biallelic()
+        _warn_biallelic_only(
+            r2_matrix_or_matrix.num_variants - biallelic.num_variants,
+            context="zns")
+        return _zns_tiled(biallelic, _md)
 
     if estimator == 'sigma_d2':
         raise ValueError(
@@ -723,6 +727,9 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
             "not a pre-computed r² array")
 
     r2_matrix = _resolve_r2_matrix(r2_matrix_or_matrix, missing_data)
+    # Undefined (monomorphic/multiallelic) sites carry NaN rows/cols; drop them
+    # so the mean is over defined pairs, matching the object-input path.
+    r2_matrix = _drop_undefined_sites(r2_matrix)
 
     m = r2_matrix.shape[0]
     if m < 2:
@@ -798,6 +805,14 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     is_hm = isinstance(r2_matrix_or_matrix, HaplotypeMatrix)
     estimator = _resolve_ld_estimator(estimator, is_hm)
 
+    if is_hm:
+        from ._warnings import _warn_biallelic_only
+        biallelic = r2_matrix_or_matrix.restrict_to_biallelic()
+        _warn_biallelic_only(
+            r2_matrix_or_matrix.num_variants - biallelic.num_variants,
+            context="omega")
+        r2_matrix_or_matrix = biallelic
+
     if estimator == 'sigma_d2':
         if not is_hm:
             raise ValueError(
@@ -806,6 +821,10 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
                                            missing_data=missing_data)
     else:
         r2_matrix = _resolve_r2_matrix(r2_matrix_or_matrix, missing_data)
+
+    # Undefined (monomorphic/multiallelic) sites carry NaN rows/cols; drop them
+    # so the block means are over defined pairs, matching the object-input path.
+    r2_matrix = _drop_undefined_sites(r2_matrix)
 
     m = r2_matrix.shape[0]
     if m < 5:
@@ -817,29 +836,16 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     # 2D prefix sums on upper triangle
     S = cp.cumsum(cp.cumsum(r2, axis=0), axis=1)
 
-    def block_sum(r_start, r_end, c_start, c_end):
-        """Sum of S[r_start:r_end, c_start:c_end] via inclusion-exclusion."""
-        val = S[r_end - 1, c_end - 1]
-        if r_start > 0:
-            val -= S[r_start - 1, c_end - 1]
-        if c_start > 0:
-            val -= S[r_end - 1, c_start - 1]
-        if r_start > 0 and c_start > 0:
-            val += S[r_start - 1, c_start - 1]
-        return val
-
     # partition points l = 3..m-2 (matching diploSHIC)
     l_vals = cp.arange(3, m - 1)
 
     # left block: upper triangle pairs (i,j) with i < j < l
-    # = sum of r2[0:l, 0:l] upper triangle = block_sum(0, l, 0, l)
     left_sum = S[l_vals - 1, l_vals - 1]
 
     # total upper triangle sum
     total_upper = S[m - 1, m - 1]
 
     # cross block: pairs (i,j) with i < l and j >= l
-    # = block_sum(0, l, l, m)
     cross_sum = S[l_vals - 1, m - 1] - left_sum
 
     # right block: pairs (i,j) with i >= l and j > i (upper triangle of right block)
@@ -954,9 +960,9 @@ def _resolve_r2_matrix(r2_matrix_or_matrix, missing_data='include'):
         # diploSHIC marks monomorphic pairs as -1 and skips them in ZnS/Omega.
         # We match this by excluding monomorphic sites entirely.
         if isinstance(mat, HaplotypeMatrix):
-            hap = mat.haplotypes
-            dac = cp.sum(cp.maximum(hap, 0).astype(cp.int32), axis=0)
-            n_valid = cp.sum((hap >= 0).astype(cp.int32), axis=0)
+            ind = mat._biallelic_indicator()
+            dac = cp.sum(ind == 1, axis=0)
+            n_valid = cp.sum(ind >= 0, axis=0)
             seg = (dac > 0) & (dac < n_valid)
             seg_idx = cp.where(seg)[0]
             if len(seg_idx) < mat.num_variants:

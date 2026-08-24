@@ -18,7 +18,18 @@ def simple_ts():
         samples=50, sequence_length=100_000,
         recombination_rate=1e-8, population_size=10_000,
         random_seed=42, ploidy=2)
-    return msprime.sim_mutations(ts, rate=1e-8, random_seed=42)
+    ts = msprime.sim_mutations(ts, rate=1e-8, random_seed=42)
+    # These tests assert scalar diversity == FrequencySpectrum (SFS) values.
+    # That equivalence only holds on biallelic data: at multiallelic sites the
+    # scalar mutation-count Watterson and the per-allele SFS diverge
+    # (kr-colab/pg_gpu#100). Nothing above forces biallelic (the default JC
+    # mutation model can produce triallelic sites), so guard it explicitly --
+    # if a future rate/seed change adds a >2-allele site this fails loudly
+    # rather than letting the equivalence break silently.
+    G = ts.genotype_matrix()
+    assert all(np.unique(G[i]).size <= 2 for i in range(ts.num_sites)), \
+        "test_achaz fixture must stay biallelic (see kr-colab/pg_gpu#100)"
+    return ts
 
 
 @pytest.fixture

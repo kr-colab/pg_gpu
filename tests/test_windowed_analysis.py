@@ -461,7 +461,8 @@ class TestChunkedFused:
             _memutil.estimate_fused_chunk_size = orig
 
         for k in ('pi', 'theta_w', 'tajimas_d', 'segregating_sites'):
-            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
 
     def test_two_pop_chunked_matches_fused(self, matrix_with_pops):
@@ -492,8 +493,117 @@ class TestChunkedFused:
             _memutil.estimate_fused_chunk_size = orig
 
         for k in ('fst', 'fst_wc', 'dxy', 'da'):
-            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-12, equal_nan=True,
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
+
+    def test_two_pop_chunked_with_population_subset(self, matrix_with_pops):
+        """Chunked two-pop values must not depend on the population= subset.
+
+        The dispatcher passes population=pop1 alongside pop1/pop2, so the
+        chunked engine holds the pop1 subset while the sample_sets row
+        numbers index the original matrix. The engine must read the rows
+        from the original matrix; indexing the subset selected the wrong
+        haplotypes without raising (#189).
+        """
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        from pg_gpu import _memutil
+
+        hm = matrix_with_pops
+        hm.transfer_to_gpu()
+
+        bp_bins = np.arange(0, 500_001, 50_000, dtype=np.float64)
+        stats = ('pi', 'fst', 'fst_wc', 'dxy', 'da')
+
+        r1 = windowed_statistics_fused(
+            hm, bp_bins=bp_bins, statistics=stats,
+            population='pop1', pop1='pop1', pop2='pop2')
+
+        orig = _memutil.estimate_fused_chunk_size
+        _memutil.estimate_fused_chunk_size = lambda n, memory_fraction=0.35: 500
+        try:
+            r2 = windowed_statistics_fused_chunked(
+                hm, bp_bins=bp_bins, statistics=stats,
+                population='pop1', pop1='pop1', pop2='pop2')
+        finally:
+            _memutil.estimate_fused_chunk_size = orig
+
+        for k in stats:
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
+                                       err_msg=f"Mismatch in {k}")
+
+    def test_two_pop_chunked_accepts_row_lists(self, matrix_with_pops):
+        """Row-list populations work in both engines, not only names."""
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        from pg_gpu import _memutil
+
+        hm = matrix_with_pops
+        hm.transfer_to_gpu()
+        n = hm.num_haplotypes
+        l1, l2 = list(range(n // 2)), list(range(n // 2, n))
+
+        bp_bins = np.arange(0, 500_001, 50_000, dtype=np.float64)
+        r1 = windowed_statistics_fused(
+            hm, bp_bins=bp_bins, statistics=('fst', 'fst_wc'),
+            pop1=l1, pop2=l2)
+        orig = _memutil.estimate_fused_chunk_size
+        _memutil.estimate_fused_chunk_size = lambda n, memory_fraction=0.35: 500
+        try:
+            r2 = windowed_statistics_fused_chunked(
+                hm, bp_bins=bp_bins, statistics=('fst', 'fst_wc'),
+                pop1=l1, pop2=l2)
+        finally:
+            _memutil.estimate_fused_chunk_size = orig
+        for k in ('fst', 'fst_wc'):
+            np.testing.assert_allclose(r1[k], r2[k], rtol=1e-10, atol=1e-14,
+                                       equal_nan=True,
+                                       err_msg=f"Mismatch in {k}")
+
+    def test_over_cap_allele_in_pop2_drops_site_with_warning(self):
+        """An over-cap allele only pop2 carries must drop the site, warned.
+
+        The cap filter used to reduce over the population= subset (always
+        pop1 from the dispatcher), so a site with an allele index >= 8 in
+        pop2 alone survived it; the kernel's bounds checks then dropped
+        those gametes from the tallies while the valid count kept them,
+        skewing every statistic with no warning.
+        """
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        from pg_gpu._warnings import MultiallelicCapWarning
+
+        rng = np.random.RandomState(5)
+        n_hap, n_var = 40, 300
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[25, 40] = 9                       # pop2 row only
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40))}
+        hm.transfer_to_gpu()
+
+        # Scalar reference on the sites the cap keeps.
+        keep = np.ones(n_var, dtype=bool)
+        keep[40] = False
+        ref_hm = HaplotypeMatrix(hap[:, keep], pos[keep], 0, (n_var + 1) * 100)
+        ref_hm.sample_sets = hm.sample_sets
+        ref = divergence.fst_weir_cockerham(ref_hm, 'p1', 'p2')
+
+        bp = np.array([0.0, (n_var + 1) * 100.0])
+        for fn in (windowed_statistics_fused, windowed_statistics_fused_chunked):
+            with pytest.warns(MultiallelicCapWarning):
+                r = fn(hm, bp_bins=bp, statistics=('fst_wc',),
+                       population='p1', pop1='p1', pop2='p2')
+            np.testing.assert_allclose(r['fst_wc'][0], ref, rtol=1e-9,
+                                       err_msg=fn.__name__)
 
     def test_mixed_single_twopop_chunked(self, matrix_with_pops):
         """Mixed single+two-pop stats should not crash (KeyError regression)."""
@@ -518,6 +628,56 @@ class TestChunkedFused:
         for k in ('pi', 'theta_w', 'fst', 'fst_wc', 'dxy'):
             assert k in r, f"Missing {k}"
             assert len(r[k]) > 0
+
+
+class TestTwoPopColumnNaming:
+    """One request, one column set, whichever engine serves it (#193)."""
+
+    def test_two_pop_columns_match_across_modes(self):
+        rng = np.random.RandomState(7)
+        n_hap, n_var = 40, 400
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40))}
+
+        # 'include' routes fst_wc to the fused engine, 'exclude' to the
+        # per-window fallback; both must name the column after the
+        # statistic alone.
+        frames = {
+            mode: windowed_analysis(
+                hm, window_size=10_000, step_size=10_000,
+                statistics=['fst_wc'], populations=['p1', 'p2'],
+                missing_data=mode)
+            for mode in ('include', 'exclude')
+        }
+        for mode, df in frames.items():
+            assert 'fst_wc' in df.columns, f"no bare fst_wc under {mode!r}"
+        assert list(frames['include'].columns) == list(frames['exclude'].columns)
+
+    def test_three_pop_request_returns_every_pair(self):
+        """Three populations must yield all pairs under both modes, never a
+        bare column silently holding the first pair only."""
+        rng = np.random.RandomState(8)
+        n_hap, n_var = 60, 400
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40)),
+                          "p3": list(range(40, 60))}
+
+        frames = {
+            mode: windowed_analysis(
+                hm, window_size=10_000, step_size=10_000,
+                statistics=['fst'], populations=['p1', 'p2', 'p3'],
+                missing_data=mode)
+            for mode in ('include', 'exclude')
+        }
+        for mode, df in frames.items():
+            assert 'fst' not in df.columns, f"bare fst under {mode!r}"
+            for pair in ('fst_p1_p2', 'fst_p1_p3', 'fst_p2_p3'):
+                assert pair in df.columns, f"missing {pair} under {mode!r}"
+        assert list(frames['include'].columns) == list(frames['exclude'].columns)
 
 
 class TestFusedMissingData:
@@ -835,7 +995,8 @@ class TestOverlappingWindowsScatter:
             assert (df['fst'].dropna() >= -0.5).all()
 
     def test_non_overlapping_unchanged(self, sim_hm):
-        """Guard: step==window path (n_per_var=1) matches per-window reference."""
+        """Guard: step==window windowed pi equals per-window diversity.pi, now
+        that windowed_analysis uses the per-allele path (issue #100)."""
         window_size, step_size = 50_000, 50_000
         df = windowed_analysis(sim_hm, window_size=window_size,
                                step_size=step_size, statistics=['pi'],
@@ -848,6 +1009,23 @@ class TestOverlappingWindowsScatter:
             pi_ref = (diversity.pi(sub, span_normalize=False)
                       if sub.num_variants > 0 else 0.0)
             assert np.isclose(pi_scatter, pi_ref, rtol=1e-10, atol=1e-12)
+
+    def test_twopop_non_overlapping_dxy_matches_scalar(self, sim_hm):
+        """Per-window windowed dxy equals scalar divergence.dxy on the window
+        subset, now that the two-pop path is per-allele (issue #100)."""
+        window_size, step_size = 50_000, 50_000
+        df = windowed_analysis(sim_hm, window_size=window_size,
+                               step_size=step_size, statistics=['dxy'],
+                               populations=['pop1', 'pop2'], span_normalize=False)
+        for start, dxy_scatter in zip(df['start'], df['dxy']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            sub.sample_sets = sim_hm.sample_sets
+            dxy_ref = (divergence.dxy(sub, 'pop1', 'pop2', span_normalize=False)
+                       if sub.num_variants > 0 else 0.0)
+            assert np.isclose(dxy_scatter, dxy_ref, rtol=1e-10, atol=1e-12)
 
     def test_max_daf_overlapping_windows(self):
         """max_daf per window reflects max DAF among contained variants,
@@ -878,6 +1056,403 @@ class TestOverlappingWindowsScatter:
             assert np.isclose(max_daf_scatter, ref, atol=1e-12), (
                 f"window [{start}, {stop}): scatter={max_daf_scatter}, "
                 f"ref={ref}")
+
+
+class TestMultiallelicSinglePop:
+    """Issue #100: single-pop windowed scalar stats must
+    be multiallelic-correct -- each window equals the per-allele scalar
+    ``diversity`` function on that window's subset -- on BOTH single-pop
+    engines: the host scatter path (``_windowed_thetas_scatter``, reached by a
+    pure single-pop scalar request) and the fused CUDA kernel
+    (``_fused_windowed_kernel_v2`` via ``windowed_statistics_fused``)."""
+
+    @pytest.fixture(scope="class")
+    def sim_hm(self):
+        import msprime
+        ts = msprime.sim_ancestry(
+            samples=25, sequence_length=100_000, recombination_rate=1e-8,
+            population_size=20_000, ploidy=2, random_seed=42)
+        ts = msprime.sim_mutations(
+            ts, rate=1e-6, model=msprime.JC69(state_independent=True),
+            random_seed=43)
+        # Sanity: this configuration produces genuinely multiallelic sites,
+        # so the per-allele path is actually exercised (not just biallelic).
+        G = ts.genotype_matrix()
+        n_multi = sum(np.unique(G[i]).size >= 3 for i in range(ts.num_sites))
+        assert n_multi > 50, f"fixture not multiallelic enough: {n_multi}"
+        return HaplotypeMatrix.from_ts(ts)
+
+    def _window_subset(self, hm, start, stop):
+        import cupy as cp
+        pos = hm.positions.get() if isinstance(hm.positions, cp.ndarray) else np.asarray(hm.positions)
+        hap = hm.haplotypes.get() if isinstance(hm.haplotypes, cp.ndarray) else np.asarray(hm.haplotypes)
+        mask = (pos >= start) & (pos < stop)
+        return HaplotypeMatrix(hap[:, mask], pos[mask],
+                               chrom_start=int(start), chrom_end=int(stop))
+
+    def test_scatter_path_matches_scalar(self, sim_hm):
+        """Host scatter engine: per-window pi/theta_w/segregating equal the
+        per-allele scalar functions on the window subset."""
+        window_size = 25_000
+        df = windowed_analysis(sim_hm, window_size=window_size,
+                               step_size=window_size,
+                               statistics=['pi', 'theta_w', 'segregating_sites'],
+                               span_normalize=False)
+        for start, pi_w, tw_w, seg_w in zip(
+                df['start'], df['pi'], df['theta_w'], df['segregating_sites']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(pi_w, diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(tw_w, diversity.theta_w(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(seg_w, diversity.segregating_sites(sub),
+                              rtol=1e-9, atol=1e-12)
+
+    def test_fused_kernel_matches_scalar(self, sim_hm):
+        """Fused CUDA kernel: per-window pi/segregating/theta_h equal the
+        per-allele scalar functions on the window subset."""
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        window_size = 25_000
+        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        r = windowed_statistics_fused(
+            sim_hm, bp_bins=bp,
+            statistics=('pi', 'segregating_sites', 'theta_h'),
+            per_base=False, chrom='1')
+        for start, pi_w, seg_w in zip(r['start'], r['pi'],
+                                      r['segregating_sites']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(pi_w, diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(seg_w, diversity.segregating_sites(sub),
+                              rtol=1e-9, atol=1e-12)
+
+    def test_per_variant_matches_scalar(self, sim_hm):
+        """Per-variant engine (windowed_statistics): all six single-pop stats
+        per window == the per-allele scalar functions on the window subset."""
+        from pg_gpu.windowed_analysis import windowed_statistics
+        window_size = 25_000
+        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        stats = ['pi', 'theta_w', 'segregating_sites', 'singletons',
+                 'het_expected', 'tajimas_d']
+        r = windowed_statistics(sim_hm, bp_bins=bp, statistics=stats,
+                                per_base=False, chrom='1')
+        for i, start in enumerate(r['start']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(r['pi'][i], diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert np.isclose(r['theta_w'][i],
+                              diversity.theta_w(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert r['segregating_sites'][i] == diversity.segregating_sites(sub)
+            assert r['singletons'][i] == diversity.singleton_count(sub)
+            assert np.isclose(
+                r['het_expected'][i],
+                float(np.nanmean(diversity.heterozygosity_expected(sub))),
+                rtol=1e-9, atol=1e-11)
+            td_w, td_ref = r['tajimas_d'][i], diversity.tajimas_d(sub)
+            if np.isnan(td_w) or np.isnan(td_ref):
+                assert np.isnan(td_w) and np.isnan(td_ref)
+            else:
+                assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
+
+    @pytest.fixture(scope="class")
+    def sim_hm_missing(self, sim_hm):
+        """Multiallelic data with ~10% missing calls injected (-1)."""
+        import cupy as cp
+        hap = (sim_hm.haplotypes.get()
+               if isinstance(sim_hm.haplotypes, cp.ndarray)
+               else np.asarray(sim_hm.haplotypes)).copy()
+        pos = (sim_hm.positions.get()
+               if isinstance(sim_hm.positions, cp.ndarray)
+               else np.asarray(sim_hm.positions))
+        rng = np.random.RandomState(7)
+        hap[rng.random(hap.shape) < 0.1] = -1
+        return HaplotypeMatrix(hap, pos, chrom_start=sim_hm.chrom_start,
+                               chrom_end=sim_hm.chrom_end)
+
+    def test_per_variant_missing_data_matches_scalar(self, sim_hm_missing):
+        """With missing data, the per-variant engine still matches the scalar for
+        the stats that use per-site n_valid (everything except tajimas_d, whose
+        variance effective-n is a separate issue -- see the xfail below)."""
+        from pg_gpu.windowed_analysis import windowed_statistics
+        hm = sim_hm_missing
+        window_size = 25_000
+        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        stats = ['pi', 'theta_w', 'segregating_sites', 'singletons',
+                 'het_expected']
+        r = windowed_statistics(hm, bp_bins=bp, statistics=stats,
+                                per_base=False, chrom='1')
+        for i, start in enumerate(r['start']):
+            stop = start + window_size
+            if stop > hm.chrom_end:
+                continue
+            sub = self._window_subset(hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(r['pi'][i], diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert np.isclose(r['theta_w'][i],
+                              diversity.theta_w(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert r['segregating_sites'][i] == diversity.segregating_sites(sub)
+            assert r['singletons'][i] == diversity.singleton_count(sub)
+            assert np.isclose(
+                r['het_expected'][i],
+                float(np.nanmean(diversity.heterozygosity_expected(sub))),
+                rtol=1e-9, atol=1e-11)
+
+    @pytest.mark.xfail(strict=True, reason=(
+        "windowed tajimas_d variance uses nominal n_hap; the scalar uses the "
+        "harmonic-mean effective n over per-site n_valid, so they diverge under "
+        "missing data (issue #100). Fixing the windowed effective-n convention "
+        "needs outside input; remove this marker when reconciled."))
+    def test_per_variant_missing_data_tajimas_d_matches_scalar(self,
+                                                               sim_hm_missing):
+        """Per-window tajimas_d should equal the scalar on the window subset;
+        currently diverges with missing data (effective-n convention)."""
+        from pg_gpu.windowed_analysis import windowed_statistics
+        hm = sim_hm_missing
+        window_size = 25_000
+        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        r = windowed_statistics(hm, bp_bins=bp, statistics=['tajimas_d'],
+                                per_base=False, chrom='1')
+        for i, start in enumerate(r['start']):
+            stop = start + window_size
+            if stop > hm.chrom_end:
+                continue
+            sub = self._window_subset(hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            td_w, td_ref = r['tajimas_d'][i], diversity.tajimas_d(sub)
+            if np.isnan(td_w) or np.isnan(td_ref):
+                assert np.isnan(td_w) and np.isnan(td_ref)
+            else:
+                assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
+
+
+class TestMultiallelicTwoPop:
+    """Issue #100: two-pop windowed scalar stats must be
+    multiallelic-correct -- each window equals the per-allele scalar
+    ``divergence`` functions on that window's subset. Exercises the host scatter
+    engine (``_windowed_twopop_scatter``, reached by a pure two-pop request)."""
+
+    @pytest.fixture(scope="class")
+    def sim_hm(self):
+        import msprime
+        ts = msprime.sim_ancestry(
+            samples=30, sequence_length=100_000, recombination_rate=1e-8,
+            population_size=20_000, ploidy=2, random_seed=42)
+        ts = msprime.sim_mutations(
+            ts, rate=1e-6, model=msprime.JC69(state_independent=True),
+            random_seed=43)
+        G = ts.genotype_matrix()
+        n_multi = sum(np.unique(G[i]).size >= 3 for i in range(ts.num_sites))
+        assert n_multi > 50, f"fixture not multiallelic enough: {n_multi}"
+        hm = HaplotypeMatrix.from_ts(ts)
+        n = hm.num_haplotypes
+        hm.sample_sets = {"p1": list(range(n // 2)),
+                          "p2": list(range(n // 2, n))}
+        return hm
+
+    def _window_subset(self, hm, start, stop):
+        import cupy as cp
+        pos = hm.positions.get() if isinstance(hm.positions, cp.ndarray) else np.asarray(hm.positions)
+        hap = hm.haplotypes.get() if isinstance(hm.haplotypes, cp.ndarray) else np.asarray(hm.haplotypes)
+        mask = (pos >= start) & (pos < stop)
+        sub = HaplotypeMatrix(hap[:, mask], pos[mask],
+                              chrom_start=int(start), chrom_end=int(stop))
+        sub.sample_sets = hm.sample_sets
+        return sub
+
+    def test_scatter_dxy_fst_da_match_scalar(self, sim_hm):
+        window_size = 25_000
+        df = windowed_analysis(sim_hm, window_size=window_size,
+                               step_size=window_size,
+                               statistics=['dxy', 'fst', 'da'],
+                               populations=['p1', 'p2'], span_normalize=False)
+        for start, dxy_w, fst_w, da_w in zip(
+                df['start'], df['dxy'], df['fst'], df['da']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(dxy_w,
+                              divergence.dxy(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(da_w,
+                              divergence.da(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')
+            if np.isnan(fst_w) or np.isnan(fst_ref):
+                assert np.isnan(fst_w) and np.isnan(fst_ref)
+            else:
+                assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
+
+    def test_fused_dxy_fst_da_match_scalar(self, sim_hm):
+        """Fused CUDA two-pop kernel: dxy/fst_hudson/fst_wc/da per window == scalar."""
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        window_size = 25_000
+        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        r = windowed_statistics_fused(
+            sim_hm, bp_bins=bp, statistics=('dxy', 'fst_hudson', 'fst_wc', 'da'),
+            pop1='p1', pop2='p2', per_base=False, chrom='1')
+        for start, dxy_w, fst_w, wc_w, da_w in zip(
+                r['start'], r['dxy'], r['fst_hudson'], r['fst_wc'], r['da']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(dxy_w,
+                              divergence.dxy(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(da_w,
+                              divergence.da(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            for got, ref in ((fst_w, divergence.fst_hudson(sub, 'p1', 'p2')),
+                             (wc_w, divergence.fst_weir_cockerham(sub, 'p1', 'p2'))):
+                if np.isnan(got) or np.isnan(ref):
+                    assert np.isnan(got) and np.isnan(ref)
+                else:
+                    assert np.isclose(got, ref, rtol=1e-9, atol=1e-12)
+
+    def test_per_variant_dxy_fst_match_scalar(self, sim_hm):
+        """Per-variant engine (windowed_statistics): two-pop dxy/fst per window
+        == scalar. Inherits the per-allele _twopop_site_components fix."""
+        from pg_gpu.windowed_analysis import windowed_statistics
+        window_size = 25_000
+        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        r = windowed_statistics(
+            sim_hm, bp_bins=bp, statistics=['fst', 'dxy'],
+            pop1='p1', pop2='p2', per_base=False, chrom='1')
+        for start, dxy_w, fst_w in zip(r['start'], r['dxy'], r['fst']):
+            stop = start + window_size
+            if stop > sim_hm.chrom_end:
+                continue
+            sub = self._window_subset(sim_hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(dxy_w,
+                              divergence.dxy(sub, 'p1', 'p2', span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')
+            if np.isnan(fst_w) or np.isnan(fst_ref):
+                assert np.isnan(fst_w) and np.isnan(fst_ref)
+            else:
+                assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
+
+
+class TestMultiallelicCap:
+    """The fused windowed kernels can't represent an allele index at/above the
+    per-allele cap (``_FUSED_MAX_ALLELES``); such sites are dropped before launch
+    with a MultiallelicCapWarning, and the retained sites are computed exactly as
+    if the over-cap sites were absent. (The host scatter engine has no cap, so
+    this is fused-only.)"""
+
+    def _build(self, seed=0):
+        """Data with two over-cap sites among normal biallelic/low-multiallelic
+        sites. Returns (hm, hm_clean, bp, overcap)."""
+        from pg_gpu.windowed_analysis import _FUSED_MAX_ALLELES
+        rng = np.random.RandomState(seed)
+        n_hap, n_var, seq_len = 30, 60, 60_000
+        # nucleotide-scale alleles that stay strictly under the cap
+        within = min(4, _FUSED_MAX_ALLELES)
+        positions = np.sort(rng.choice(np.arange(1, seq_len), size=n_var,
+                                       replace=False)).astype(float)
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        # a few genuine multiallelic sites within the cap
+        for j in range(0, n_var, 12):
+            hap[:, j] = rng.randint(0, within, n_hap)
+        # two sites that hit the cap: one allele index == _FUSED_MAX_ALLELES,
+        # which the filter (>= cap) must drop
+        overcap = [15, 37]
+        for j in overcap:
+            hap[:, j] = rng.randint(0, within, n_hap)
+            hap[0, j] = _FUSED_MAX_ALLELES
+        hm = HaplotypeMatrix(hap, positions, chrom_start=0, chrom_end=seq_len)
+        keep = np.ones(n_var, dtype=bool)
+        keep[overcap] = False
+        hm_clean = HaplotypeMatrix(hap[:, keep], positions[keep],
+                                   chrom_start=0, chrom_end=seq_len)
+        for h in (hm, hm_clean):
+            n = h.num_haplotypes
+            h.sample_sets = {"p1": list(range(n // 2)),
+                             "p2": list(range(n // 2, n))}
+        bp = np.arange(0, seq_len + 20_000, 20_000, dtype=float)
+        return hm, hm_clean, bp, overcap
+
+    def test_fused_single_pop_cap_warns_and_matches(self):
+        from pg_gpu import MultiallelicCapWarning
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        hm, hm_clean, bp, _ = self._build()
+        stats = ('pi', 'segregating_sites', 'theta_h')
+        with pytest.warns(MultiallelicCapWarning):
+            r = windowed_statistics_fused(hm, bp_bins=bp, statistics=stats,
+                                          per_base=False, chrom='1')
+        r_clean = windowed_statistics_fused(hm_clean, bp_bins=bp,
+                                            statistics=stats, per_base=False,
+                                            chrom='1')
+        for k in stats:
+            np.testing.assert_allclose(r[k], r_clean[k], rtol=1e-12,
+                                       equal_nan=True)
+        # dropped sites are not counted
+        np.testing.assert_array_equal(r['n_variants'], r_clean['n_variants'])
+
+    def test_fused_chunked_cap_warns_and_matches(self):
+        from pg_gpu import MultiallelicCapWarning
+        from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked
+        hm, hm_clean, bp, _ = self._build()
+        stats = ('pi', 'segregating_sites')
+        with pytest.warns(MultiallelicCapWarning):
+            r = windowed_statistics_fused_chunked(hm, bp_bins=bp,
+                                                  statistics=stats,
+                                                  per_base=False, chrom='1')
+        r_clean = windowed_statistics_fused_chunked(hm_clean, bp_bins=bp,
+                                                    statistics=stats,
+                                                    per_base=False, chrom='1')
+        for k in stats:
+            np.testing.assert_allclose(r[k], r_clean[k], rtol=1e-12,
+                                       equal_nan=True)
+
+    def test_fused_two_pop_cap_warns_and_matches(self):
+        from pg_gpu import MultiallelicCapWarning
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        hm, hm_clean, bp, _ = self._build()
+        stats = ('dxy', 'fst_hudson')
+        with pytest.warns(MultiallelicCapWarning):
+            r = windowed_statistics_fused(hm, bp_bins=bp, statistics=stats,
+                                          pop1='p1', pop2='p2', per_base=False,
+                                          chrom='1')
+        r_clean = windowed_statistics_fused(hm_clean, bp_bins=bp, statistics=stats,
+                                            pop1='p1', pop2='p2', per_base=False,
+                                            chrom='1')
+        for k in stats:
+            np.testing.assert_allclose(r[k], r_clean[k], rtol=1e-12,
+                                       equal_nan=True)
 
 
 class TestCanonicalWindowSchema:

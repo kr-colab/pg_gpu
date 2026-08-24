@@ -57,10 +57,33 @@ diploid genotypes; haploid and polyploid stores are rejected.
    :members: iter_chunks
    :show-inheritance:
 
+.. autofunction:: pg_gpu.zarr_io.allel_zarr_to_vcz
+
+Warnings
+--------
+
+pg_gpu warns you when it silently changes or skips some of your data.
+Each kind of warning has its own class, so you can turn off just the one
+you have already understood and leave the rest on::
+
+   import warnings
+   from pg_gpu import BiallelicOnlyWarning
+   warnings.filterwarnings("ignore", category=BiallelicOnlyWarning)
+
+.. autoclass:: pg_gpu.BiallelicOnlyWarning
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.MultiallelicCapWarning
+   :show-inheritance:
+
 .. autoclass:: pg_gpu.MemoryLimitedWarning
    :show-inheritance:
 
-.. autofunction:: pg_gpu.zarr_io.allel_zarr_to_vcz
+.. autoclass:: pg_gpu.HaploidDataWarning
+   :show-inheritance:
+
+.. autoclass:: pg_gpu.BadlyChunkedWarning
+   :show-inheritance:
 
 LD Statistics
 -------------
@@ -111,7 +134,6 @@ Core Functions
 .. autofunction:: pg_gpu.diversity.theta_w
 .. autofunction:: pg_gpu.diversity.tajimas_d
 .. autofunction:: pg_gpu.diversity.haplotype_diversity
-.. autofunction:: pg_gpu.diversity.allele_frequency_spectrum
 .. autofunction:: pg_gpu.diversity.segregating_sites
 .. autofunction:: pg_gpu.diversity.singleton_count
 .. autofunction:: pg_gpu.diversity.fay_wus_h
@@ -144,6 +166,7 @@ Core Functions
 
 .. autofunction:: pg_gpu.divergence.fst
 .. autofunction:: pg_gpu.divergence.fst_hudson
+.. autofunction:: pg_gpu.divergence.fst_tskit
 .. autofunction:: pg_gpu.divergence.fst_weir_cockerham
 .. autofunction:: pg_gpu.divergence.fst_nei
 .. autofunction:: pg_gpu.divergence.dxy
@@ -155,6 +178,15 @@ Convenience Functions
 .. autofunction:: pg_gpu.divergence.divergence_stats
 .. autofunction:: pg_gpu.divergence.pairwise_fst
 .. autofunction:: pg_gpu.divergence.pbs
+
+Component-Level Access
+~~~~~~~~~~~~~~~~~~~~~~
+
+Raw per-site difference and comparison counts, for callers doing their
+own aggregation. See :doc:`missing_data` for worked usage.
+
+.. autofunction:: pg_gpu.divergence.dxy_components
+.. autofunction:: pg_gpu.diversity.pi_components
 
 Distance-Based Two-Population Statistics
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -243,6 +275,7 @@ Per-Variant Statistics
 
 .. autofunction:: pg_gpu.admixture.patterson_f2
 .. autofunction:: pg_gpu.admixture.patterson_f3
+.. autofunction:: pg_gpu.admixture.patterson_f4
 .. autofunction:: pg_gpu.admixture.patterson_d
 
 Windowed Statistics
@@ -265,6 +298,8 @@ PCA
 
 .. autofunction:: pg_gpu.decomposition.pca
 .. autofunction:: pg_gpu.decomposition.randomized_pca
+.. autofunction:: pg_gpu.decomposition.pca_dosage
+.. autofunction:: pg_gpu.decomposition.randomized_pca_dosage
 
 Distance
 ~~~~~~~~
@@ -307,6 +342,7 @@ or want to recompute one stage with different parameters.
 Relatedness and Kinship
 -----------------------
 
+.. autofunction:: pg_gpu.relatedness.genetic_relatedness
 .. autofunction:: pg_gpu.relatedness.grm
 .. autofunction:: pg_gpu.relatedness.ibs
 
@@ -336,7 +372,7 @@ Two-population (one kernel launch for all):
 
 - ``fst`` -- Hudson's FST (ratio of averages)
 - ``fst_hudson`` -- alias for ``fst``
-- ``fst_wc`` -- Weir-Cockerham FST (haploid)
+- ``fst_wc`` -- Weir-Cockerham FST
 - ``dxy`` -- absolute divergence
 - ``da`` -- net divergence (Dxy - mean within-pop pi)
 
@@ -371,6 +407,8 @@ Distance Distribution Statistics
 ---------------------------------
 
 .. autofunction:: pg_gpu.distance_stats.pairwise_diffs
+.. autofunction:: pg_gpu.distance_stats.pairwise_diffs_haploid
+.. autofunction:: pg_gpu.distance_stats.pairwise_diffs_diploid
 .. autofunction:: pg_gpu.distance_stats.dist_moments
 .. autofunction:: pg_gpu.distance_stats.dist_var
 .. autofunction:: pg_gpu.distance_stats.dist_skew

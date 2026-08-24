@@ -70,8 +70,8 @@ class TestHaplotypeCounting:
 
             # Define populations
             pop_sets = {
-                "pop0": [0, 1, 4, 5],  # ind0 and ind1 haplotypes
-                "pop1": [2, 3, 6, 7]   # ind2 and ind3 haplotypes
+                "pop0": [0, 1, 2, 3],  # ind0 and ind1 haplotypes
+                "pop1": [4, 5, 6, 7]   # ind2 and ind3 haplotypes
             }
             h_gpu.sample_sets = pop_sets
 

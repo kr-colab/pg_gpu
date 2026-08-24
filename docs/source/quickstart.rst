@@ -43,11 +43,16 @@ manually via ``sample_sets``:
    # From a population file (uses stored sample names)
    h.load_pop_file("pops.txt")
 
-   # Or manually
+   # Or manually. These are haplotype rows, not samples: sample i is rows
+   # 2i and 2i + 1, so pop1 here is samples 0 and 1, not samples 0 to 3.
    h.sample_sets = {
        "pop1": [0, 1, 2, 3],
        "pop2": [4, 5, 6, 7]
    }
+
+   # For a list of samples, take both rows of each
+   samples = [0, 1, 5]
+   h.sample_sets = {"pop1": [r for s in samples for r in (2 * s, 2 * s + 1)]}
 
 Working with Zarr
 ~~~~~~~~~~~~~~~~~~
@@ -131,13 +136,14 @@ Diversity Statistics
    theta = diversity.theta_w(h, span_normalize=True)
    tajd = diversity.tajimas_d(h)
 
-   # Heterozygosity
+   # Heterozygosity -- per-variant arrays, shape (n_variants,)
    he = diversity.heterozygosity_expected(h)
    ho = diversity.heterozygosity_observed(h)
    f = diversity.inbreeding_coefficient(h)
 
-   # Allele frequency spectrum
-   afs = diversity.allele_frequency_spectrum(h)
+   # Allele frequency spectrum -- see the sfs module
+   from pg_gpu import sfs
+   afs = sfs.sfs(h)
 
    # Population-specific
    pi_pop1 = diversity.pi(h, population='pop1')
@@ -175,7 +181,12 @@ Divergence Statistics
 
    from pg_gpu import divergence
 
+   # There are four FST estimators. They use the same ingredients but
+   # combine them differently, so they give slightly different numbers.
+   # method= picks one: 'hudson' (default), 'tskit', 'weir_cockerham',
+   # or 'nei'. Use 'hudson' unless you have a reason not to.
    fst = divergence.fst(h, 'pop1', 'pop2')
+   fst_tskit = divergence.fst(h, 'pop1', 'pop2', method='tskit')
    dxy_val = divergence.dxy(h, 'pop1', 'pop2')
 
    # Population Branch Statistic (3 populations)
@@ -205,14 +216,16 @@ Selection Scans
 
    from pg_gpu import selection
 
-   # Integrated haplotype score
+   # Integrated haplotype score: one value per site for ordinary
+   # two-allele data. If any site has more than two alleles you get one
+   # column per alternate allele instead -- see the Features page.
    ihs_scores = selection.ihs(h)
    ihs_std = selection.standardize(ihs_scores)
 
    # Cross-population EHH
    xpehh_scores = selection.xpehh(h, 'pop1', 'pop2')
 
-   # nSL (no distance weighting)
+   # nSL (no distance weighting); same output shape rule as ihs
    nsl_scores = selection.nsl(h)
 
    # Garud's H statistics
@@ -237,7 +250,13 @@ Site Frequency Spectrum
 
    # Joint SFS (two populations)
    j = sfs.joint_sfs(h, 'pop1', 'pop2')
-   j_folded = sfs.joint_sfs_folded(h, 'pop1', 'pop2')
+   j_folded = sfs.joint_sfs_folded(h, 'pop1', 'pop2')  # (n1+1, n2+1), float64
+
+If a site has more than one alternate allele, each one gets counted
+separately rather than being lumped together. Sites where nothing
+varies are left out. See :ref:`sfs-conventions` for the details --
+including a few that change the answer even for ordinary two-allele
+data.
 
 Admixture / F-Statistics
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -261,7 +280,14 @@ combine-and-jackknife step for you.
        h, 'test_pop', 'source1', 'source2')
    f3_star = np.nansum(f3_numer) / np.nansum(f3_denom)
 
+   # Patterson's F4: tests whether four populations fit a given tree
+   f4 = admixture.patterson_f4(h, 'popA', 'popB', 'popC', 'popD')
+
    # Patterson's D (ABBA-BABA): per-site numerator and denominator.
+   # D only works on sites with two alleles. Sites with more are
+   # skipped, and a warning tells you how many. If that matters for
+   # your data, use patterson_f4 above -- it measures the same signal
+   # and handles every site.
    d_numer, d_denom = admixture.patterson_d(
        h, 'popA', 'popB', 'popC', 'popD')
 
@@ -329,13 +355,37 @@ PCA and Distance
 
 .. code-block:: python
 
-   from pg_gpu import decomposition
+pg_gpu has two PCAs. Pick based on what your samples are:
 
-   # PCA (GPU-accelerated SVD)
+* **One point per haplotype:** use ``pca`` (or ``randomized_pca`` for a
+  faster approximation) on a ``HaplotypeMatrix``. Every allele gets its
+  own column, so this works no matter how many alleles a site has, and
+  at any ploidy.
+
+* **One point per individual:** use ``pca_dosage`` (or
+  ``randomized_pca_dosage``) on a ``GenotypeMatrix``. This is the
+  classical diploid PCA, counting each individual's alternate alleles
+  as 0, 1, or 2 and scaling each variant by how variable it is. It
+  gives the same answer as scikit-allel.
+
+Passing the wrong matrix type raises a ``TypeError`` that tells you
+which function you wanted.
+
+.. code-block:: python
+
+   from pg_gpu import decomposition, GenotypeMatrix
+
+   # One point per haplotype
    coords, var_ratio = decomposition.pca(h, n_components=10)
 
-   # Randomized PCA (faster for large datasets)
+   # Same thing, approximated -- much faster on large datasets
    coords, var_ratio = decomposition.randomized_pca(h, n_components=10)
+
+   # One point per individual
+   gm = GenotypeMatrix.from_haplotype_matrix(h)
+   coords, var_ratio = decomposition.pca_dosage(gm, n_components=10)
+   coords, var_ratio = decomposition.randomized_pca_dosage(
+       gm, n_components=10)
 
    # Pairwise genetic distance
    dist = decomposition.pairwise_distance(h, metric='euclidean')
@@ -432,10 +482,20 @@ automatically routes through fused kernels when possible.
 
 Supported fused windowed statistics:
 
-- **Single-pop**: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``
+- **Single-pop**: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``, ``theta_h``, ``fay_wu_h``, ``max_daf``
 - **Two-pop**: ``fst``, ``fst_hudson``, ``fst_wc``, ``dxy``, ``da``
-- **Selection**: ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``, ``mean_nsl``
+- **Selection**: ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``, ``haplotype_count``, ``mean_nsl``
+- **LD**: ``zns``, ``omega``, ``mu_ld``
+- **diploSHIC / RAiSD**: ``mu_var``, ``mu_sfs``, ``daf_hist``, ``snp_dist_mean``, ``snp_dist_var``, ``snp_dist_min``, ``snp_dist_max``, ``dist_var``, ``dist_skew``, ``dist_kurt``
 - **Structure**: ``local_pca`` (lostruct); returns a ``LocalPCAResult`` rather than a scalar-stat DataFrame. See the `Local PCA / lostruct`_ section.
+
+The single-pass fused kernels need ``missing_data='include'``. With any
+other setting pg_gpu falls back to a slower route that computes the
+same values, so your results do not change -- only the speed.
+
+A windowed statistic should give you the same number as calling the
+plain function on just that window's variants. See :doc:`features` for
+the one case where that is not quite true.
 
 For advanced usage with custom bin edges, use ``windowed_statistics_fused()``
 directly:
@@ -458,7 +518,7 @@ the same call works on either container:
 
 .. code-block:: python
 
-   from pg_gpu import GenotypeMatrix
+   from pg_gpu import GenotypeMatrix, distance_stats
 
    # Convert from haploid (pairs consecutive haplotypes)
    gm = GenotypeMatrix.from_haplotype_matrix(h)

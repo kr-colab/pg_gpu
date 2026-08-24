@@ -47,7 +47,11 @@ class TestSFSComparison:
         # allel: pass n explicitly to match full-size output
         dac = np.sum(hap, axis=0)
         expected = allel.sfs(dac, n=n)
-        np.testing.assert_array_equal(result, expected)
+        # sfs.sfs is now the per-allele polarised SFS (tskit convention): both
+        # fixed classes (bins 0 and n) are excluded, whereas allel.sfs includes
+        # them. Compare the segregating interior; assert the endpoints are dropped.
+        np.testing.assert_array_equal(result[1:n], expected[1:n])
+        assert result[0] == 0 and result[n] == 0
 
     def test_sfs_folded(self, single_pop_data):
         matrix, hap = single_pop_data
@@ -88,15 +92,11 @@ class TestJointSFSComparison:
         expected = allel.joint_sfs(dac1, dac2, n1=n1, n2=n2)
         np.testing.assert_array_equal(result, expected)
 
-    def test_joint_sfs_folded(self, two_pop_data):
-        matrix, hap, n1, n2 = two_pop_data
-        result = sfs.joint_sfs_folded(matrix, 'pop1', 'pop2')
-        dac1 = np.sum(hap[:n1], axis=0)
-        dac2 = np.sum(hap[n1:], axis=0)
-        ac1 = np.column_stack([n1 - dac1, dac1])
-        ac2 = np.column_stack([n2 - dac2, dac2])
-        expected = allel.joint_sfs_folded(ac1, ac2)
-        np.testing.assert_array_equal(result, expected)
+    # NOTE: joint_sfs_folded / joint_sfs_folded_scaled deliberately do NOT match
+    # scikit-allel. The 2D fold is the one place tskit and allel disagree even on
+    # biallelic data -- allel folds each axis independently, tskit folds the site
+    # as a unit by the global minor. We pin to tskit (see the ledger). Parity is
+    # tested in test_multiallelic.py::TestJointSFS::test_joint_sfs_folded_matches_tskit.
 
     def test_joint_sfs_scaled(self, two_pop_data):
         matrix, hap, n1, n2 = two_pop_data
@@ -104,16 +104,6 @@ class TestJointSFSComparison:
         dac1 = np.sum(hap[:n1], axis=0)
         dac2 = np.sum(hap[n1:], axis=0)
         expected = allel.joint_sfs_scaled(dac1, dac2, n1=n1, n2=n2)
-        np.testing.assert_array_almost_equal(result, expected)
-
-    def test_joint_sfs_folded_scaled(self, two_pop_data):
-        matrix, hap, n1, n2 = two_pop_data
-        result = sfs.joint_sfs_folded_scaled(matrix, 'pop1', 'pop2')
-        dac1 = np.sum(hap[:n1], axis=0)
-        dac2 = np.sum(hap[n1:], axis=0)
-        ac1 = np.column_stack([n1 - dac1, dac1])
-        ac2 = np.column_stack([n2 - dac2, dac2])
-        expected = allel.joint_sfs_folded_scaled(ac1, ac2)
         np.testing.assert_array_almost_equal(result, expected)
 
 

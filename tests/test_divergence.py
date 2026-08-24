@@ -239,12 +239,14 @@ class TestDivergenceStats:
         # Compute all statistics
         stats = divergence.divergence_stats(
             matrix, 'popA', 'popB',
-            statistics=['fst', 'fst_hudson', 'fst_wc', 'fst_nei', 'dxy', 'da', 'pi1', 'pi2']
+            statistics=['fst', 'fst_hudson', 'fst_tskit', 'fst_wc', 'fst_nei',
+                        'dxy', 'da', 'pi1', 'pi2']
         )
 
         # Check all statistics are present
         assert 'fst' in stats
         assert 'fst_hudson' in stats
+        assert 'fst_tskit' in stats
         assert 'fst_wc' in stats
         assert 'fst_nei' in stats
         assert 'dxy' in stats

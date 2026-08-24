@@ -7,6 +7,7 @@ import numpy as np
 import cupy as cp
 from pg_gpu import HaplotypeMatrix
 from pg_gpu import diversity
+from pg_gpu import sfs
 
 
 class TestNucleotideDiversity:
@@ -216,16 +217,19 @@ class TestAlleleFrequencySpectrum:
         positions = np.arange(n_variants) * 1000
         matrix = HaplotypeMatrix(haplotypes, positions)
 
-        afs = diversity.allele_frequency_spectrum(matrix)
+        afs = sfs.sfs(matrix)
 
         if isinstance(afs, np.ndarray):
             afs = np.asarray(afs)
 
-        # Should have 25 sites with 0 copies and 25 with n_samples copies
-        assert afs[0] == 25  # Sites with 0 derived alleles
-        assert afs[n_samples] == 25  # Sites with all derived alleles
-        # All other frequencies should be 0
-        assert np.sum(afs[1:n_samples]) == 0
+        # Per-allele polarised SFS (issue #100): both fixed classes are excluded,
+        # matching tskit. A monomorphic-ancestral site has no derived allele
+        # (bin 0), and a fully-derived site is monomorphic-derived (bin n) -- so
+        # neither contributes and the whole spectrum is empty here. (Invariant
+        # counting is a separate concern: FrequencySpectrum's n_total_sites.)
+        assert afs[0] == 0
+        assert afs[n_samples] == 0
+        assert np.sum(afs) == 0
 
     def test_afs_singletons(self):
         """Test AFS with singleton sites."""
@@ -240,7 +244,7 @@ class TestAlleleFrequencySpectrum:
         positions = np.arange(n_variants) * 1000
         matrix = HaplotypeMatrix(haplotypes, positions)
 
-        afs = diversity.allele_frequency_spectrum(matrix)
+        afs = sfs.sfs(matrix)
 
         if isinstance(afs, np.ndarray):
             afs = np.asarray(afs)
@@ -451,7 +455,7 @@ class TestGPUCalculations:
         assert isinstance(seg_sites, int)
 
         # AFS should return GPU array
-        afs = diversity.allele_frequency_spectrum(matrix)
+        afs = sfs.sfs(matrix)
         assert isinstance(afs, np.ndarray)
 
 
@@ -603,3 +607,16 @@ class TestHaplotypeDiversity:
         assert abs(h_div_pop1 - h_div_allel_pop1) < 1e-10
         assert abs(h_div_pop2 - h_div_allel_pop2) < 1e-10
         assert abs(h_div_all - h_div_allel_all) < 1e-10
+
+
+def test_diversity_stats_key_order_matches_request():
+    """The result dict lists keys in the caller's order, whatever the
+    process hash seed, so DataFrame columns built from it are stable."""
+    hap = np.random.default_rng(5).integers(0, 2, (12, 80), dtype=np.int8)
+    pos = np.arange(1, 81, dtype=np.int64) * 100
+    hm = HaplotypeMatrix(cp.asarray(hap), cp.asarray(pos))
+    for order in (['pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'],
+                  ['tajimas_d', 'theta_l', 'pi', 'segregating_sites'],
+                  ['theta_h', 'pi']):
+        res = diversity.diversity_stats(hm, statistics=order)
+        assert list(res) == order

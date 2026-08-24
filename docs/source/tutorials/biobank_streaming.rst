@@ -92,8 +92,12 @@ Statistics that combine across chunks naturally:
   does not fit (``sfs.project_joint_sfs``),
 * moments-LD pair bins (``DD``, ``Dz``, ``pi2``, derived
   :math:`\sigma_D^2`),
-* identity by state (``relatedness.ibs``) and the genetic
-  relationship matrix (``relatedness.grm``).
+* relatedness between samples or groups of samples
+  (``relatedness.genetic_relatedness``), which runs on a streaming
+  ``HaplotypeMatrix``,
+* identity by state (``relatedness.ibs``) and the genetic relationship
+  matrix (``relatedness.grm``). These are diploid measures, so they need
+  a streaming ``GenotypeMatrix`` rather than a haplotype one.
 
 Statistics that need every variant present at the same time --
 pairwise :math:`r^2` heatmaps, Garud's H hash tables -- cannot be
@@ -118,8 +122,8 @@ functions:
 
 .. code-block:: python
 
-   from pg_gpu import HaplotypeMatrix, windowed_analysis, sfs
-   from pg_gpu.relatedness import ibs, grm
+   from pg_gpu import HaplotypeMatrix, GenotypeMatrix, windowed_analysis, sfs
+   from pg_gpu.relatedness import genetic_relatedness, ibs, grm
 
    stream = HaplotypeMatrix.from_zarr(
        "biobank/chr15.vcz",
@@ -156,10 +160,18 @@ functions:
    )
 
    # Pairwise relatedness. The variant axis is streamed; the
-   # (n_indiv, n_indiv) output lives in CPU memory so the result
-   # itself can be larger than the GPU can hold.
-   ibs_mat = ibs(stream)
-   grm_mat = grm(stream)
+   # (n, n) output lives in CPU memory so the result itself can be
+   # larger than the GPU can hold.
+
+   # Sample-set relatedness works directly on the haplotype stream.
+   rel = genetic_relatedness(stream)
+
+   # grm and ibs are diploid measures, so they need a GenotypeMatrix.
+   # Open the same store as one rather than converting after the fact.
+   gstream = GenotypeMatrix.from_zarr("biobank/chr15.vcz",
+                                       streaming="always")
+   ibs_mat = ibs(gstream)
+   grm_mat = grm(gstream)
 
 The same code run on a fully loaded ``HaplotypeMatrix`` is
 unchanged -- the only difference is which kind of object
@@ -169,6 +181,19 @@ The ``pop_assignment`` kwarg accepts a path to a TSV, a dict mapping
 sample to population, a numpy array of labels (one per sample), or
 the name of a zarr key in the store that holds a 1-D population
 array. See ``HaplotypeMatrix.from_zarr`` for the full list.
+
+``from_zarr`` also takes ``accessible_bed`` on the streaming path. The
+mask is resolved once at load and attached to every chunk as it is
+produced, so both variant filtering and the span used for
+normalization match what you would get from a fully loaded matrix
+built from the same store:
+
+.. code-block:: python
+
+   stream = HaplotypeMatrix.from_zarr(
+       "biobank/chr15.vcz", streaming="always",
+       accessible_bed="chr15.accessible.bed",
+   )
 
 Pulling a sub-region into memory for kernels that need every variant at once
 ----------------------------------------------------------------------------

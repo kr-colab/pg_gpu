@@ -19,7 +19,7 @@ def sample_vcf():
         random_seed=42,
         ploidy=2
     )
-    ts = msprime.sim_mutations(ts, rate=0.01)
+    ts = msprime.sim_mutations(ts, rate=0.01, random_seed=42)
     # Create a temporary file
     with tempfile.NamedTemporaryFile(suffix='.vcf', delete=False) as tmp:
         # Write VCF to temporary file
@@ -373,12 +373,14 @@ def test_transfer_to_cpu():
 
 
 def test_allele_frequency_spectrum(sample_vcf):
-    """Test calculation of allele frequency spectrum."""
+    """Test calculation of the SFS (formerly HaplotypeMatrix.allele_frequency_spectrum,
+    removed in the issue #100 consolidation; the SFS now lives in the sfs module)."""
+    from pg_gpu import sfs as sfs_mod
     hap_matrix = HaplotypeMatrix.from_vcf(sample_vcf)
-    afs = hap_matrix.allele_frequency_spectrum()
+    afs = sfs_mod.sfs(hap_matrix)
     assert isinstance(afs, np.ndarray)
     assert afs.ndim == 1
-    # AFS has n+1 bins for frequencies 0 to n
+    # SFS has n+1 bins for frequencies 0 to n
     assert afs.size == hap_matrix.num_haplotypes + 1
 
 def test_diversity(sample_vcf):
@@ -429,3 +431,283 @@ def test_pairwise_LD_v_transfers():
     assert isinstance(D, cp.ndarray)
     # Check that D is symmetric (D should equal its transpose).
     assert cp.allclose(D, D.T)
+
+
+class TestSampleSetsValidation:
+    """sample_sets rejects lists no matrix can serve (#201)."""
+
+    def _hm(self, n_hap=8, n_var=10):
+        hap = np.zeros((n_hap, n_var), dtype=np.int8)
+        return HaplotypeMatrix(hap, np.arange(1, n_var + 1), 0, n_var + 1)
+
+    def test_out_of_range_raises(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="rows 0..7"):
+            hm.sample_sets = {'p': [0, 1, 999]}
+        with pytest.raises(ValueError, match="row -1"):
+            hm.sample_sets = {'p': [-1, 0]}
+
+    def test_duplicates_raise(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="duplicate"):
+            hm.sample_sets = {'p': [0, 0, 1, 2]}
+
+    def test_non_integer_raises(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="integer"):
+            hm.sample_sets = {'p': [0.5, 1.5]}
+
+    def test_constructor_validates_too(self):
+        hap = np.zeros((4, 5), dtype=np.int8)
+        with pytest.raises(ValueError, match="rows 0..3"):
+            HaplotypeMatrix(hap, np.arange(1, 6), 0, 6,
+                            sample_sets={'p': [99]})
+
+    def test_legitimate_assignments_pass(self):
+        hm = self._hm()
+        # Overlap across keys is allowed; only within-set duplication is not.
+        hm.sample_sets = {'p1': [0, 1, 2, 3], 'p2': [2, 3, 4, 5]}
+        hm.sample_sets = None
+        assert list(hm.sample_sets) == ['all']
+
+    def test_empty_set_raises(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="at least one"):
+            hm.sample_sets = {'p': []}
+
+    def test_dict_value_gets_clean_error(self):
+        hm = self._hm()
+        with pytest.raises(ValueError, match="list, tuple, or 1-D"):
+            hm.sample_sets = {'p': {'a': 1}}
+        with pytest.raises(ValueError, match="integer row numbers"):
+            hm.sample_sets = {'p': [[0, 1], [2]]}
+
+    def test_genotype_matrix_validates_individual_rows(self):
+        from pg_gpu.genotype_matrix import GenotypeMatrix
+        gm = GenotypeMatrix(np.zeros((4, 5), dtype=np.int8),
+                            np.arange(1, 6), 0, 6)
+        with pytest.raises(ValueError, match="rows 0..3"):
+            gm.sample_sets = {'p': [0, 7]}
+        gm.sample_sets = {'p': [0, 3]}
+
+
+class TestUnpairedRowsWarning:
+    """Pairing consumers warn on lists that do not pair into individuals."""
+
+    def _hm(self, n_hap=12, n_var=60, seed=3):
+        rng = np.random.RandomState(seed)
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(1, n_var + 1) * 10, 0,
+                             (n_var + 1) * 10)
+        return hm
+
+    def _assert_quiet(self, fn):
+        import warnings as w
+        from pg_gpu._warnings import UnpairedRowsWarning
+        with w.catch_warnings(record=True) as rec:
+            w.simplefilter("always")
+            fn()
+        assert not [r for r in rec if issubclass(r.category,
+                                                 UnpairedRowsWarning)]
+
+    def test_scalar_wc_warns_on_gamete_stride(self):
+        from pg_gpu import divergence
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6], 'p2': [8, 9, 10, 11]}
+        with pytest.warns(UnpairedRowsWarning, match="individuals 0 and 1"):
+            divergence.fst_weir_cockerham(hm, 'p1', 'p2')
+
+    def test_scalar_wc_warns_on_odd_list(self):
+        from pg_gpu import divergence
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 1, 2], 'p2': [8, 9, 10, 11]}
+        with pytest.warns(UnpairedRowsWarning, match="drops the last one"):
+            divergence.fst_weir_cockerham(hm, 'p1', 'p2')
+
+    def test_scalar_wc_warns_on_cross_pairing(self):
+        # Sorted parity would pass this list; consumer-order pairing must not.
+        from pg_gpu import divergence
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 1, 3], 'p2': [8, 9, 10, 11]}
+        with pytest.warns(UnpairedRowsWarning):
+            divergence.fst_weir_cockerham(hm, 'p1', 'p2')
+
+    def test_scalar_wc_quiet_on_correct_pairings(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        # Adjacent pairs in any pair order, and swapped within a pair, are
+        # all the same partition.
+        for p1 in ([0, 1, 2, 3], [2, 3, 0, 1], [1, 0, 3, 2]):
+            hm.sample_sets = {'p1': p1, 'p2': [8, 9, 10, 11]}
+            self._assert_quiet(
+                lambda: divergence.fst_weir_cockerham(hm, 'p1', 'p2'))
+
+    def test_gamete_statistics_stay_quiet(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6], 'p2': [8, 9, 10, 11]}
+        self._assert_quiet(lambda: divergence.fst_hudson(hm, 'p1', 'p2'))
+        self._assert_quiet(lambda: divergence.dxy(hm, 'p1', 'p2'))
+
+    def test_het_observed_warns_on_gamete_stride(self):
+        from pg_gpu import diversity
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6]}
+        with pytest.warns(UnpairedRowsWarning):
+            diversity.heterozygosity_observed(hm, population='p1')
+
+    def test_windowed_fst_wc_warns_and_fst_alone_does_not(self):
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6], 'p2': [8, 9, 10, 11]}
+        hm.transfer_to_gpu()
+        bp = np.array([0.0, 700.0])
+        with pytest.warns(UnpairedRowsWarning):
+            windowed_statistics_fused(hm, bp_bins=bp, statistics=('fst_wc',),
+                                      pop1='p1', pop2='p2')
+        self._assert_quiet(
+            lambda: windowed_statistics_fused(hm, bp_bins=bp,
+                                              statistics=('fst',),
+                                              pop1='p1', pop2='p2'))
+
+    def test_load_pop_file_output_is_quiet(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        hm.samples = [f's{i}' for i in range(6)]
+        hm.load_pop_file({f's{i}': ('p1' if i < 3 else 'p2')
+                          for i in range(6)})
+        self._assert_quiet(
+            lambda: divergence.fst_weir_cockerham(hm, 'p1', 'p2'))
+
+
+class TestDirectListValidation:
+    """Row lists passed as population arguments are validated at resolution,
+    not only at sample_sets assignment."""
+
+    def _hm(self, n_hap=12, n_var=60, seed=3):
+        rng = np.random.RandomState(seed)
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        return HaplotypeMatrix(hap, np.arange(1, n_var + 1) * 10, 0,
+                               (n_var + 1) * 10)
+
+    def test_out_of_range_direct_lists_raise(self):
+        from pg_gpu import diversity, divergence
+        hm = self._hm()
+        with pytest.raises(ValueError, match="rows 0"):
+            diversity.pi(hm, population=[0, 1, 999999])
+        with pytest.raises(ValueError, match="rows 0"):
+            divergence.fst_hudson(hm, [0, 1], [2, 999999])
+
+    def test_duplicate_direct_list_raises(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        with pytest.raises(ValueError, match="duplicate"):
+            divergence.fst_weir_cockerham(hm, [0, 0, 1, 1], [8, 9, 10, 11])
+
+    def test_cupy_array_populations_work(self):
+        from pg_gpu import divergence
+        hm = self._hm()
+        hm.transfer_to_gpu()
+        v = divergence.fst_weir_cockerham(hm, cp.arange(4), cp.arange(8, 12))
+        ref = divergence.fst_weir_cockerham(hm, [0, 1, 2, 3], [8, 9, 10, 11])
+        assert np.isclose(v, ref)
+
+    def test_generator_population_works(self):
+        from pg_gpu import diversity
+        hm = self._hm()
+        v = diversity.heterozygosity_observed(hm,
+                                              population=(i for i in range(4)))
+        ref = diversity.heterozygosity_observed(hm, population=[0, 1, 2, 3])
+        assert cp.allclose(cp.asarray(v), cp.asarray(ref))
+
+    def test_chunked_windowed_fst_wc_warns_on_stride(self):
+        from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6], 'p2': [8, 9, 10, 11]}
+        hm.transfer_to_gpu()
+        bp = np.array([0.0, 700.0])
+        with pytest.warns(UnpairedRowsWarning):
+            windowed_statistics_fused_chunked(hm, bp_bins=bp,
+                                              statistics=('fst_wc',),
+                                              pop1='p1', pop2='p2')
+
+    def test_from_haplotype_matrix_warns_on_gamete_set(self):
+        from pg_gpu.genotype_matrix import GenotypeMatrix
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6]}
+        hm.transfer_to_gpu()
+        with pytest.warns(UnpairedRowsWarning):
+            GenotypeMatrix.from_haplotype_matrix(hm)
+
+    def test_genetic_relatedness_list_of_lists_validated(self):
+        from pg_gpu import relatedness
+        hm = self._hm()
+        hm.transfer_to_gpu()
+        with pytest.raises(ValueError, match="rows 0"):
+            relatedness.genetic_relatedness(
+                hm, sample_sets=[[0, 1], [2, 999999]])
+
+    def test_unknown_population_name_gives_value_error(self):
+        """Every engine agrees on the unknown-name error, not KeyError."""
+        from pg_gpu import diversity
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused,
+            windowed_statistics_fused_chunked,
+        )
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 1, 2, 3], 'p2': [8, 9, 10, 11]}
+        hm.transfer_to_gpu()
+        with pytest.raises(ValueError, match="not found"):
+            diversity.heterozygosity_observed(hm, population='nope')
+        bp = np.array([0.0, 700.0])
+        for fn in (windowed_statistics_fused, windowed_statistics_fused_chunked):
+            with pytest.raises(ValueError, match="not found"):
+                fn(hm, bp_bins=bp, statistics=('fst_wc',),
+                   pop1='p1', pop2='nope')
+
+    def test_genetic_relatedness_wrong_type_gives_type_error(self):
+        """Validation must not shadow the dispatch TypeError."""
+        from pg_gpu import relatedness
+        from pg_gpu.genotype_matrix import GenotypeMatrix
+        gm = GenotypeMatrix(np.zeros((4, 5), dtype=np.int8),
+                            np.arange(1, 6), 0, 6)
+        with pytest.raises(TypeError, match="requires a HaplotypeMatrix"):
+            relatedness.genetic_relatedness(gm, sample_sets=[[0, 1], [2, 3]])
+
+    def test_genetic_relatedness_empty_set_gives_value_error(self):
+        from pg_gpu import relatedness
+        hm = self._hm()
+        hm.transfer_to_gpu()
+        with pytest.raises(ValueError, match="at least one"):
+            relatedness.genetic_relatedness(hm, sample_sets=[[0, 1], []])
+
+    def test_load_pop_file_drops_absent_population_with_warning(self):
+        hm = self._hm()
+        hm.samples = [f's{i}' for i in range(6)]
+        with pytest.warns(UserWarning, match="dropped: ghost"):
+            hm.load_pop_file({'s0': 'p1', 's1': 'p1', 's2': 'p2',
+                              's3': 'p2', 'zz': 'ghost'})
+        assert 'ghost' not in hm.sample_sets
+        assert sorted(hm.sample_sets) == ['p1', 'p2']
+
+    def test_nested_list_population_gets_clean_error(self):
+        """The pairing check stays silent on malformed input so the
+        validating chokepoint raises the proper error, at every site."""
+        from pg_gpu import diversity
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        hm = self._hm()
+        hm.sample_sets = {'p2': [8, 9, 10, 11]}
+        hm.transfer_to_gpu()
+        with pytest.raises(ValueError, match="one-dimensional"):
+            diversity.heterozygosity_observed(hm, population=[[0, 1], [2, 3]])
+        with pytest.raises(ValueError, match="one-dimensional"):
+            windowed_statistics_fused(hm, bp_bins=np.array([0.0, 700.0]),
+                                      statistics=('fst_wc',),
+                                      pop1=[[0, 1], [2, 3]], pop2='p2')

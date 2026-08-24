@@ -479,7 +479,8 @@ class TestStreamingHostSyncCount:
     The dispatcher path also includes pre-existing infrastructure host
     syncs that are NOT part of issue #91 -- ``WindowIterator.get_subset``
     does an ``.all()`` bounds check (2 transfers/window) and
-    ``_prepare_matrix`` does a has-missing check (1 transfer/window).
+    ``_prepare_centered`` enumerates present alleles via ``argwhere``
+    (1 transfer/window).
     Plus 1 fixed transfer from iterator init and 3 fixed bulk transfers
     at the end of the dispatcher. So the post-fix expected rate is
     3 transfers/window + ~4 fixed = ~3.4 per window for the
@@ -491,7 +492,7 @@ class TestStreamingHostSyncCount:
     3.5-per-window assertion below.
 
     If the unrelated infrastructure syncs in ``get_subset`` /
-    ``_prepare_matrix`` are later optimized away, the post-fix rate
+    ``_prepare_centered`` are later optimized away, the post-fix rate
     drops further and this test still passes.
     """
 

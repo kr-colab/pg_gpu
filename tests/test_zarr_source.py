@@ -8,6 +8,8 @@ import zarr
 from pg_gpu import HaplotypeMatrix
 from pg_gpu.zarr_source import ZarrGenotypeSource
 
+from .conftest import canonical_hap_rows
+
 
 def _simulate_hm(n_samples=20, seq_length=50_000, seed=42):
     """Build a HaplotypeMatrix with msprime, matching test_zarr_io.py's style."""
@@ -128,12 +130,9 @@ class TestSliceRegion:
         path, hm = vcz_store
         src = ZarrGenotypeSource(path)
         gt, pos = src.slice_region(0, src.mappable_hi)
-        # Reproduce the existing eager from_zarr layout (ploidy 0 then ploidy 1
-        # along the hap axis); compare to the original HaplotypeMatrix bytes.
-        n_dip = src.num_diploids
-        haps = np.empty((gt.shape[0], 2 * n_dip), dtype=gt.dtype)
-        haps[:, :n_dip] = gt[:, :, 0]
-        haps[:, n_dip:] = gt[:, :, 1]
+        # Reproduce the canonical row order and compare to the original
+        # HaplotypeMatrix bytes.
+        haps = canonical_hap_rows(gt).T
         np.testing.assert_array_equal(haps.T, np.asarray(hm.haplotypes))
 
     def test_empty_region(self, vcz_store):
@@ -152,18 +151,15 @@ class TestSliceSubsample:
         src = ZarrGenotypeSource(path)
         gt_full, _ = src.slice_region(0, src.mappable_hi)
 
-        # Pick a haplotype subset that crosses the ploidy-0/ploidy-1
-        # boundary so we exercise the (dip, ploidy) translation.
-        n_dip = src.num_diploids
-        cols = np.array([0, 1, 2, n_dip, n_dip + 1], dtype=np.int64)
+        # Mix both gametes of some samples with a single gamete of another so
+        # the (dip, ploidy) translation is exercised in both parities.
+        cols = np.array([0, 1, 2, 5, 8], dtype=np.int64)
 
         gm_sub, _ = src.slice_subsample(0, src.mappable_hi, cols)
         # Build the expected (n_var, len(cols)) from gt_full.
         expected = np.empty((gt_full.shape[0], len(cols)), dtype=gt_full.dtype)
         for j, c in enumerate(cols):
-            ploidy = 1 if c >= n_dip else 0
-            dip = c - n_dip if c >= n_dip else c
-            expected[:, j] = gt_full[:, dip, ploidy]
+            expected[:, j] = gt_full[:, c // 2, c % 2]
         np.testing.assert_array_equal(gm_sub, expected)
 
     def test_empty_region(self, vcz_store):
@@ -178,8 +174,7 @@ class TestSliceSubsample:
         import cupy as cp
         path, _ = vcz_store
         src = ZarrGenotypeSource(path)
-        n_dip = src.num_diploids
-        cols = np.array([0, 1, 2, n_dip, n_dip + 1], dtype=np.int64)
+        cols = np.array([0, 1, 2, 5, 8], dtype=np.int64)
         gm_host, pos_host = src.slice_subsample(
             0, src.mappable_hi, cols, to_gpu=False
         )
@@ -230,9 +225,8 @@ class TestPopAssignmentResolution:
         path, _ = vcz_store
         src = ZarrGenotypeSource(path, pop_assignment=pop_tsv)
         assert set(src.pop_cols.keys()) == {"pop1", "pop2"}
-        n_dip = src.num_diploids
-        # pop1 = first 10 diploids -> haps [0..10) plus [n_dip..n_dip+10)
-        expected1 = np.concatenate([np.arange(10), np.arange(10) + n_dip])
+        # pop1 = first 10 diploids -> haps [0..20), both gametes of each
+        expected1 = np.arange(2 * 10)
         np.testing.assert_array_equal(np.sort(src.pop_cols["pop1"]), expected1)
 
     def test_auto_load_companion(self, vcz_store, pop_tsv, tmp_path, capsys):
@@ -272,9 +266,8 @@ class TestPopAssignmentResolution:
                                   for i in range(20)},
         )
         assert set(src.pop_cols.keys()) == {"pop1", "pop2"}
-        # pop1 = first 5 diploids -> haps [0..5) plus [n_dip..n_dip+5)
-        n_dip = src.num_diploids
-        expected1 = np.concatenate([np.arange(5), np.arange(5) + n_dip])
+        # pop1 = first 5 diploids -> haps [0..10), both gametes of each
+        expected1 = np.arange(2 * 5)
         np.testing.assert_array_equal(np.sort(src.pop_cols["pop1"]),
                                        expected1)
 
@@ -284,8 +277,7 @@ class TestPopAssignmentResolution:
         labels = np.array(["pop1"] * 12 + ["pop2"] * 8)
         src = ZarrGenotypeSource(path, pop_assignment=labels)
         assert set(src.pop_cols.keys()) == {"pop1", "pop2"}
-        n_dip = src.num_diploids
-        expected1 = np.concatenate([np.arange(12), np.arange(12) + n_dip])
+        expected1 = np.arange(2 * 12)
         np.testing.assert_array_equal(np.sort(src.pop_cols["pop1"]),
                                        expected1)
 

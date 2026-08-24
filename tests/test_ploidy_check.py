@@ -179,8 +179,8 @@ def test_normal_vcf_loads_without_warning(simple_vcf_file):
 
 def _to_vcz(hap, tmp_path, name="store.vcz"):
     """Write a (n_hap, n_var) haplotype matrix to a VCZ store and return its
-    path. The matrix is paired into diploids as (hap[i], hap[i + n_samples]),
-    so a first half equal to the second half yields homozygous individuals."""
+    path. The matrix is paired into diploids as (hap[2i], hap[2i + 1]), so
+    equal adjacent rows yield homozygous individuals."""
     path = str(tmp_path / name)
     hm = HaplotypeMatrix(np.asarray(hap, dtype=np.int8),
                          np.arange(1, hap.shape[1] + 1) * 100, 100,
@@ -192,10 +192,10 @@ def _to_vcz(hap, tmp_path, name="store.vcz"):
 
 @pytest.fixture
 def pseudo_diploid_vcz(tmp_path):
-    # First half of rows == second half -> every individual is homozygous;
-    # the alternate allele is present, so it is polymorphic but never het.
+    # Each row repeated adjacently -> every individual is homozygous; the
+    # alternate allele is present, so it is polymorphic but never het.
     block = _i8([[1, 0], [0, 1], [1, 1]])  # 3 samples, 2 variants
-    return _to_vcz(np.vstack([block, block]), tmp_path)
+    return _to_vcz(np.repeat(block, 2, axis=0), tmp_path)
 
 
 def test_haplotype_from_zarr_warns_pseudo_diploid(pseudo_diploid_vcz):

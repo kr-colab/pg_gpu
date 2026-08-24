@@ -122,6 +122,9 @@ filterwarnings = [
     "ignore::zarr.errors.UnstableSpecificationWarning",
     "ignore::zarr.errors.ZarrDeprecationWarning",
     "ignore:The `compressor` argument is deprecated:UserWarning:zarr",
+    # Runtime-visible loader diagnostic; the dedicated tests assert it via local
+    # pytest.warns / simplefilter, which override this global ignore.
+    "ignore::pg_gpu._warnings.BiallelicOnlyWarning",
 ]
 
 [tool.ruff]

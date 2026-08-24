@@ -246,3 +246,34 @@ def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):
         raise ValueError(
             "Could not determine mask range from BED and chromosome bounds")
     return bed_to_mask(mask_or_path, chrom=chrom, length=length, offset=offset)
+
+
+def resolve_streaming_accessible_mask(accessible_bed, source, region=None):
+    """Resolve an accessible BED over a streaming source's variant bounds.
+
+    Both streaming loaders (haplotype and genotype) resolve the same mask
+    once over the source's position span and hand it to the streaming
+    matrix, so per-chunk variant filtering -- and, for span-normalized
+    reductions, the accessible-base denominator -- matches the eager path.
+    ``mappable_hi`` is one past the last variant, so the inclusive last
+    position is ``mappable_hi - 1``.
+
+    Parameters
+    ----------
+    accessible_bed : str, path-like, numpy.ndarray, AccessibleMask, or None
+        Passthrough to ``resolve_accessible_mask``. ``None`` returns ``None``.
+    source : ZarrGenotypeSource
+        Streaming source; supplies ``mappable_lo``/``mappable_hi``/``chrom``.
+    region : str, optional
+        ``"chrom:start-end"`` region string; its contig overrides
+        ``source.chrom`` for matching a BED file's contig name.
+
+    Returns
+    -------
+    AccessibleMask or None
+    """
+    if accessible_bed is None:
+        return None
+    chrom = region.split(':')[0] if region else source.chrom
+    return resolve_accessible_mask(
+        accessible_bed, source.mappable_lo, source.mappable_hi - 1, chrom)
