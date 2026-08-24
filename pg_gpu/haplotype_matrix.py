@@ -1433,7 +1433,19 @@ class HaplotypeMatrix:
             return self
         if len(valid) == 0:
             return self.get_subset(valid)
-        return self.get_subset(valid)
+        # Dropping incomplete sites does not shrink the chromosome or
+        # change its accessibility: keep the parent bounds and mask like
+        # the restrict_to_* filters, so span-normalized statistics keep
+        # their denominator. The no-missing path above returns self with
+        # the same context; get_subset alone would strip it.
+        return HaplotypeMatrix(
+            hap[:, valid], self.positions[valid],
+            chrom_start=self.chrom_start,
+            chrom_end=self.chrom_end,
+            sample_sets=self._sample_sets,
+            n_total_sites=self.n_total_sites,
+            accessible_mask=self.accessible_mask,
+        )
 
     def filter_variants_by_missing(self, max_missing_freq=0.1):
         """
