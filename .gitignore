@@ -1,7 +1,6 @@
 
 # pixi environments
 .pixi
-pixi.lock
 *.egg-info
 
 # conda environments
@@ -26,8 +25,6 @@ commit_message.txt
 *.png
 *.csv
 !examples/data/*.csv
-# generated conversion artifact of the tracked im-parsing-example.vcf
-examples/data/*.h5
 
 CLAUDE.md
 TODO_*.md
@@ -47,3 +44,4 @@ htmlcov/
 .coverage
 .coverage.*
 coverage.xml
+diff-coverage.html

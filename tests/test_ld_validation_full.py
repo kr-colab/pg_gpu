@@ -62,6 +62,7 @@ class TestLDValidationFull:
             pops=pops,
             bp_bins=bp_bins,
             use_genotypes=False,
+            use_h5=False,
             report=False  # Quiet for tests
         )
 
