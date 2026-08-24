@@ -13,6 +13,7 @@ GPU-accelerated population genetics statistics for Python.
    quickstart
    api
    missing_data
+   multiallelic
    examples
    tutorials
    workflows
