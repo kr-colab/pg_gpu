@@ -750,6 +750,10 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
     Returned by ``HaplotypeMatrix.from_zarr`` when the requested
     matrix does not fit eagerly on the GPU. See ``_StreamingMatrixBase``
     for the iteration / materialize / sample_sets contract.
+
+    Every statistic call walks the region from disk again, so N calls
+    cost N full passes; batch work into one pass where possible, or
+    ``materialize`` a sub-region for repeated calls on the same data.
     """
 
     @property
@@ -838,8 +842,6 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
         # The pop file resolves to haplotype columns, but this stream's
         # rows are individuals. Both of a sample's gametes floor-divide to
         # its individual, so the unique halves are the individual rows.
-        # Before this mapping the chunks carried haplotype-numbered sets
-        # that indexed past the individual axis.
         return {p: np.unique(np.asarray(cols) // 2)
                 for p, cols in pop_cols.items()}
 
@@ -859,8 +861,14 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
             m._sample_sets = sets
         if m._n_multiallelic_recoded and not self._biallelic_warned:
             from ._warnings import _warn_biallelic_only
-            _warn_biallelic_only(m._n_multiallelic_recoded,
-                                 context="GenotypeMatrix.from_zarr (streaming)")
+            # The count covers only the chunk that trips the latch; a full
+            # region count would need a whole extra pass over the store.
+            _warn_biallelic_only(
+                m._n_multiallelic_recoded,
+                context="GenotypeMatrix.from_zarr (streaming; count is for "
+                        "the first affected chunk, later chunks recode "
+                        "silently)",
+                action="recoded to all-missing rows")
             self._biallelic_warned = True
         return m
 

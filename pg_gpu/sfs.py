@@ -21,8 +21,7 @@ def _per_allele_counts(matrix, n_alleles=None):
     K defaults to the site-local maximum allele index + 1; pass ``n_alleles``
     for a fixed/global width (e.g. to align populations for the joint SFS).
     Multiallelic-correct: each allele is counted separately. This is the sole
-    counting primitive for every SFS in this module (the old collapsed
-    ``dac_and_n`` wrappers were removed once all variants went per-allele).
+    counting primitive for every SFS in this module.
     """
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()

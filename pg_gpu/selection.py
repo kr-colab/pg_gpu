@@ -320,7 +320,8 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
         derived allele ``j+1`` (NaN where that allele or the ancestral allele
         is absent at a site). ``standardize_by_allele_count`` takes 1-D input,
         so standardize each derived-allele column separately, pairing column
-        ``j`` with that allele's per-site derived count.
+        ``j`` with that allele's per-site derived count. A matrix with no
+        alternate allele at all gives ``(n_variants,)``, all NaN.
 
     Notes
     -----
@@ -356,9 +357,9 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
         return np.full(matrix.num_variants, np.nan)
 
     # One pair-walk scores every derived allele at once -- the shared-suffix
-    # state never depends on the focal choice, so the per-allele passes this
-    # replaced were re-buying the same O(pairs x variants) traffic to change
-    # one comparison.
+    # state never depends on the focal choice, so separate per-allele passes
+    # would repeat the same O(pairs x variants) traffic to change one
+    # comparison.
     nsl0_fwd, nsla_fwd = _nsl01_scan_gpu(hap, max_focal=max_allele)
     nsl0_rev, nsla_rev = _nsl01_scan_gpu(hap[::-1], max_focal=max_allele)
     nsl0 = nsl0_fwd + nsl0_rev[::-1]
@@ -485,7 +486,9 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
         derived allele ``j+1`` (NaN where that allele or the ancestral allele
         is absent, or the allele is MAF-filtered). ``standardize_by_allele_count``
         takes 1-D input, so standardize each derived-allele column separately,
-        pairing column ``j`` with that allele's per-site derived count.
+        pairing column ``j`` with that allele's per-site derived count. A
+        matrix with no alternate allele at all gives ``(n_variants,)``,
+        all NaN.
 
     Notes
     -----
@@ -538,9 +541,9 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     # Biallelic data has a single derived allele and returns a 1-D array
     # identical to the classic iHS.
     # One pair-walk scores every derived allele at once -- the shared-suffix
-    # state never depends on the focal choice, so the per-allele passes this
-    # replaced were re-buying the same O(pairs x variants) traffic to change
-    # one comparison.
+    # state never depends on the focal choice, so separate per-allele passes
+    # would repeat the same O(pairs x variants) traffic to change one
+    # comparison.
     ihh0_fwd, ihha_fwd = _ihh01_scan_hist_gpu(
         hap, gaps_gpu, ac, min_ehh, include_edges)
     ihh0_rev, ihha_rev = _ihh01_scan_hist_gpu(
@@ -549,8 +552,8 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     ihha = ihha_fwd + ihha_rev[::-1, :]
     scores = cp.log(ihha / ihh0[:, None])
 
-    # Per-allele MAF, formerly applied inside each scan pass: the focal
-    # allele's own frequency among valid haplotypes. Reduces to
+    # Per-allele MAF gate on the focal allele's own frequency among valid
+    # haplotypes. Reduces to
     # min(n0, n1)/(n0 + n1) on biallelic sites and makes a common allele
     # with index >= 2 visible to the filter.
     nv = cp.maximum(n_valid.astype(cp.float64), 1.0)

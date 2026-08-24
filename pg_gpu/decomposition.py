@@ -166,7 +166,9 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population subset.
     n_iter : int
-        Number of power iterations for accuracy.
+        Number of power iterations. The default trades accuracy for
+        speed on flat spectra; raise it (10-20) when leading eigenvalues
+        are close.
     random_state : int, optional
         Random seed for reproducibility.
     missing_data : str
@@ -189,14 +191,14 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     n_samples, n_variants = X.shape
     n_components = min(n_components, n_samples, max(n_variants, 1))
 
-    # randomized SVD on GPU
-    if random_state is not None:
-        cp.random.seed(random_state)
+    # randomized SVD on GPU; a local generator leaves the process-global
+    # CuPy RNG untouched when a seed is given
+    rng = cp.random.RandomState(random_state) if random_state is not None else cp.random
 
     # random projection
     k = n_components + 10  # oversampling
     k = min(k, min(n_samples, max(n_variants, 1)))
-    Omega = cp.random.randn(n_variants, k, dtype=cp.float64)
+    Omega = rng.randn(n_variants, k, dtype=cp.float64)
     Y = X @ Omega
 
     # power iteration for accuracy
@@ -211,8 +213,8 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     Uhat, S, Vt = cp.linalg.svd(B, full_matrices=False)
     U = Q @ Uhat
 
-    # S are singular values of X; the pca Gram is X @ X.T / n_segregating
-    # (proportion=True), so coords scale by 1 / sqrt(n_segregating).
+    # S are singular values of X; the Gram is X @ X.T / n_segregating,
+    # so coords scale by 1 / sqrt(n_segregating).
     coords = U[:, :n_components] * S[:n_components]
     if n_segregating > 0:
         coords = coords / cp.sqrt(n_segregating)
@@ -240,9 +242,8 @@ def _prepare_dosage(genotype_matrix, population=None, missing_data='include'):
         matrix.transfer_to_gpu()
 
     geno = matrix.genotypes
-    # Subset individuals inline (the shared get_population_matrix is haplotype
-    # granularity; genotype/haplotype population subsetting is unified in the
-    # type-domain-consistency follow-up).
+    # Subset individuals inline: the shared get_population_matrix speaks
+    # haplotype rows, not individual rows.
     if population is not None:
         if isinstance(population, str):
             if matrix.sample_sets is None or population not in matrix.sample_sets:
@@ -340,7 +341,9 @@ def randomized_pca_dosage(genotype_matrix,
     population : str or list, optional
         Population subset.
     n_iter : int
-        Number of power iterations for accuracy.
+        Number of power iterations. The default trades accuracy for
+        speed on flat spectra; raise it (10-20) when leading eigenvalues
+        are close.
     random_state : int, optional
         Random seed for reproducibility.
     missing_data : str
@@ -363,12 +366,13 @@ def randomized_pca_dosage(genotype_matrix,
     n_samples, n_variants = X.shape
     n_components = min(n_components, n_samples, max(n_variants, 1))
 
-    if random_state is not None:
-        cp.random.seed(random_state)
+    # A local generator leaves the process-global CuPy RNG untouched when
+    # a seed is given.
+    rng = cp.random.RandomState(random_state) if random_state is not None else cp.random
 
     # random projection
     k = min(n_components + 10, n_samples, max(n_variants, 1))
-    Omega = cp.random.randn(n_variants, k, dtype=cp.float64)
+    Omega = rng.randn(n_variants, k, dtype=cp.float64)
     Y = X @ Omega
 
     # power iteration for accuracy
@@ -462,8 +466,7 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
 
     # Scale the mismatch count to the full variant span when missing sites reduce
     # the jointly-valid count (raw * n_var / n_joint). With no missing data
-    # joint_valid == n_var, so d == m. On biallelic {0,1} data m equals the old
-    # raw sum, so this is bit-identical to the previous per-metric formula.
+    # joint_valid == n_var, so d == m, the plain mismatch count.
     d = cp.where(joint_valid > 0, m * n_var / joint_valid, 0.0)
     if metric == 'euclidean':
         d = cp.sqrt(d)
@@ -738,8 +741,7 @@ def _local_pca_streaming(matrix, iterator, k, missing_data,
     """
     n_samples = matrix.num_haplotypes
     # Global allele width, computed once, so the per-window standardization does
-    # not pay an int(hap.max()) host sync per window (keeps the streaming sync
-    # footprint at the pre-reframe level).
+    # not pay an int(hap.max()) host sync per window.
     n_alleles_all = int(matrix.haplotypes.max()) + 1 if matrix.num_variants else 1
 
     if tile_size is None:

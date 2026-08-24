@@ -68,8 +68,8 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include',
     chunk_size = estimate_variant_chunk_size(n_hap, bytes_per_element=8,
                                              n_intermediates=3)
 
-    # One-hot Hamming over K allele values. K matmuls/chunk (vs 1 for the old
-    # binary-only gram trick); K is the number of allele values, typically small.
+    # One-hot Hamming over K allele values, K matmuls per chunk; K is the
+    # number of distinct allele values, typically small.
     max_allele = int(hap.max()) if hap.size else -1
     n_alleles = max(max_allele + 1, 0)
 

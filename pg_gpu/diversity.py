@@ -187,86 +187,6 @@ def _achaz_variance(w1_name, w2_name, n, S):
     return alpha_n * S / a1 + beta_n * S * (S - 1) / (a1 ** 2 + a2)
 
 
-def _site_contribution(name, d, n_safe, seg, n_valid, n_hap, dac=None):
-    """Compute per-site contribution for a theta estimator on GPU.
-
-    LEGACY (collapsed, biallelic) path: derived alleles are lumped into a single
-    ``dac`` count, so this is not multiallelic-correct. The scalar diversity path
-    now uses the per-allele ``_ac_contribution``; this function is retained only
-    for ``windowed_analysis``, which still imports it.
-
-    Parameters
-    ----------
-    name : str
-        Estimator name.
-    d, n_safe : cupy.ndarray, float64
-        Derived allele count (float) and safe sample size per site.
-    seg : cupy.ndarray, bool
-        Segregating site mask.
-    n_valid : cupy.ndarray, int64
-        Per-site valid sample count (for watterson lookup).
-    n_hap : int
-        Total haplotype count (for harmonic number lookup).
-    dac : cupy.ndarray, int64, optional
-        Integer derived allele count (for exact comparisons like == 1).
-        If None, uses d cast to int64.
-
-    Returns
-    -------
-    cupy.ndarray, float64, shape (n_variants,)
-        Per-site contribution (zero for non-segregating sites).
-    """
-    if dac is None:
-        dac = d.astype(cp.int64)
-
-    if name in ('pi', 'theta_pi'):
-        return cp.where(seg, 2 * d * (n_safe - d) / (n_safe * (n_safe - 1)), 0.0)
-    elif name in ('watterson', 'theta_s'):
-        a1_inv = _get_a1_inv(n_hap)
-        return cp.where(seg, a1_inv[n_valid], 0.0)
-    elif name == 'theta_h':
-        return cp.where(seg, 2 * d * d / (n_safe * (n_safe - 1)), 0.0)
-    elif name == 'theta_l':
-        return cp.where(seg, d / (n_safe - 1), 0.0)
-    elif name == 'eta1':
-        # Singletons only: dac == 1
-        a1_inv = _get_a1_inv(n_hap)
-        return cp.where(seg & (dac == 1), a1_inv[n_valid], 0.0)
-    elif name == 'eta1_star':
-        # Singletons + (n-1)-tons
-        a1_inv = _get_a1_inv(n_hap)
-        is_edge = (dac == 1) | (dac == n_valid - 1)
-        return cp.where(seg & is_edge, a1_inv[n_valid], 0.0)
-    elif name == 'minus_eta1':
-        not_sing = dac >= 2
-        a1m1_gpu = _get_minus_eta1_norm(n_hap)
-        return cp.where(seg & not_sing, a1m1_gpu[n_valid], 0.0)
-    elif name == 'minus_eta1_star':
-        interior = (dac >= 2) & (dac <= n_valid - 2)
-        norm_gpu = _get_minus_eta1_star_norm(n_hap)
-        return cp.where(seg & interior, norm_gpu[n_valid], 0.0)
-    else:
-        raise ValueError(f"Unknown estimator: {name}. Use FrequencySpectrum "
-                         f"for custom weight functions.")
-
-
-def _prepare_dac(matrix):
-    """Compute dac, n_valid, and derived quantities on GPU.
-
-    Returns (dac, n_valid, d, n_safe, seg, n_hap) — the shared
-    intermediate arrays used by all theta estimator paths.
-    """
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-    from ._memutil import dac_and_n
-    dac, n_valid = dac_and_n(matrix.haplotypes)
-    n = n_valid.astype(cp.float64)
-    d = dac.astype(cp.float64)
-    seg = (dac > 0) & (dac < n_valid) & (n_valid >= 2)
-    n_safe = cp.maximum(n, 2.0)
-    return dac, n_valid, d, n_safe, seg, matrix.num_haplotypes
-
-
 def _prepare_allele_counts(matrix):
     """Compute per-allele counts and valid counts on GPU.
 
@@ -545,8 +465,9 @@ def project_sfs(sfs, n_from, n_to):
 # FrequencySpectrum: power-user class for SFS analysis
 # ---------------------------------------------------------------------------
 
-# Weight functions for SFS dot-product path (used by FrequencySpectrum.theta
-# for custom callables; built-in names use _site_contribution instead).
+# Weight functions for the SFS dot-product path, used by
+# FrequencySpectrum.theta for custom callables; the built-in estimator
+# names go through the per-allele _ac_contribution path.
 def _weights_watterson(n):
     w = np.zeros(n + 1)
     a1 = np.sum(1.0 / np.arange(1, n))
@@ -1543,9 +1464,8 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     if ac.shape[1] < 2:  # no derived alleles present anywhere
         return 0.0
     n_valid = n_valid_i.astype(cp.float64)
-    # Per-allele DAF: the frequency of each individual derived allele. NOTE
-    # (issue #100): "max DAF" is the frequency of the single most common derived
-    # allele, not the total non-ancestral fraction of the sample.
+    # Per-allele DAF: "max DAF" is the frequency of the single most common
+    # derived allele, not the total non-ancestral fraction of the sample.
     freq = ac[:, 1:].astype(cp.float64) / cp.maximum(n_valid[:, None], 1.0)
     present = ac[:, 1:] > 0
     if missing_data == 'exclude':
@@ -1643,10 +1563,9 @@ def daf_histogram(matrix, n_bins: int = 20,
     from ._memutil import allele_counts
     ac, n_valid_i = allele_counts(matrix.haplotypes)
     n_valid = n_valid_i.astype(cp.float64)
-    # Per-allele DAF: each derived allele contributes its own frequency. NOTE
-    # (issue #100): this histograms individual derived-allele frequencies (was
-    # the per-site total non-ancestral fraction), and only present derived
-    # alleles are binned (no 0-frequency spike from monomorphic sites).
+    # Per-allele DAF: each derived allele contributes its own frequency,
+    # and only present derived alleles are binned (no 0-frequency spike
+    # from monomorphic sites).
     freq = ac[:, 1:].astype(cp.float64) / cp.maximum(n_valid[:, None], 1.0)
     present = ac[:, 1:] > 0
     if missing_data == 'exclude':
@@ -1820,9 +1739,8 @@ def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
     n = matrix.haplotypes.shape[0]
     ac_f = ac.astype(cp.float64)
 
-    # He = 1 - sum_a p_a^2 over ALL alleles (per-allele; reduces to 2p(1-p) for
-    # biallelic). The old 2p(1-p) with p = total-derived collapsed multiallelic
-    # alleles into one class (issue #100).
+    # He = 1 - sum_a p_a^2 over ALL alleles; reduces to 2p(1-p) on
+    # biallelic sites.
     if missing_data == 'include':
         p_sq = (ac_f ** 2).sum(axis=1) / cp.maximum(n_valid, 1.0) ** 2
         he = cp.where(n_valid >= 2, 1.0 - p_sq, cp.nan)

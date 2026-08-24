@@ -46,13 +46,16 @@ CORNERS_PATH = DATA_DIR / "lostruct_reference_corners.json"
 # centering) that shifts the eigenvalue scale and perturbs eigenvector VALUES at
 # the ~1e-3 level; the top-k eigenvector DIRECTIONS still match R to |corr| >~
 # 0.999 (see test_parity_eigenvectors_subspace_corr, which is kept live). The
-# bit-tight value/scale pins below are xfailed pending a decision in review on
-# whether to keep the all-allele lostruct or restore strict R-lostruct parity.
+# bit-tight value/scale pins below are xfailed: they compare against frozen R
+# references generated under R-lostruct's binary standardization, which the
+# all-allele form cannot reproduce bit-tight.
 _R_PARITY_XFAIL = pytest.mark.xfail(
-    reason="lostruct moved to the all-allele centered (tskit) standardization; "
-           "the frozen R references match in subspace but not in eigenvalue "
-           "scale / bit-tight eigenvector values. Revisit in review.",
-    strict=False,
+    reason="lostruct uses the all-allele centered (tskit) standardization; "
+           "the frozen R references agree in subspace (corr > 0.999) but "
+           "not in eigenvalue scale or bit-tight eigenvector values, and "
+           "will not until they are regenerated for the new "
+           "standardization.",
+    strict=True,
 )
 
 
@@ -172,7 +175,6 @@ def test_parity_eigenvectors_sign_aligned(pg_local_pca_result):
 # conventions are nearly orthogonal (|corr| ~ 0.1), a genuine divergence rather
 # than a scale/noise artifact. For genealogical structure (e.g. a simulated
 # sweep) the two agree to |corr| ~ 1; the divergence is structure-type-dependent.
-# See the PR discussion.
 
 
 # ---------------------------------------------------------------------------

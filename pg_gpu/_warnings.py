@@ -219,19 +219,22 @@ class BiallelicOnlyWarning(UserWarning):
     """
 
 
-def _warn_biallelic_only(n_dropped, *, context, stacklevel=3):
-    """Emit ``BiallelicOnlyWarning`` that ``context`` dropped ``n_dropped`` sites.
+def _warn_biallelic_only(n_dropped, *, context, stacklevel=3, action="dropped"):
+    """Emit ``BiallelicOnlyWarning`` that ``context`` handled ``n_dropped`` sites.
 
     A no-op when ``n_dropped`` is 0, so callers can pass a raw count
     unconditionally. ``context`` names the operation that restricted to biallelic
-    (e.g. ``"GenotypeMatrix.from_vcf"``, ``"patterson_d"``) and leads the message.
+    (e.g. ``"GenotypeMatrix.from_vcf"``, ``"patterson_d"``) and leads the
+    message. ``action`` says what happened to the sites: the default
+    ``"dropped"`` fits filtering paths; the zarr loaders pass
+    ``"recoded to all-missing rows"`` because they keep every row.
     """
     n_dropped = int(n_dropped)
     if n_dropped <= 0:
         return
     warnings.warn(
-        f"{context} is defined on biallelic sites; dropped {n_dropped} "
-        f"multiallelic site(s). To silence:\n"
+        f"{context} is defined on biallelic sites; {n_dropped} "
+        f"multiallelic site(s) {action}. To silence:\n"
         "    import warnings\n"
         "    from pg_gpu import BiallelicOnlyWarning\n"
         "    warnings.filterwarnings('ignore', category=BiallelicOnlyWarning)",
