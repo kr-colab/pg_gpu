@@ -62,9 +62,13 @@ def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
 CANONICAL_WINDOW_PREFIX = (
     'chrom', 'start', 'end', 'center', 'n_variants', 'window_id')
 
-# Number of bins in the windowed daf_hist feature (columns daf_bin_0 ..
-# daf_bin_{_DAF_N_BINS - 1}) emitted by the fused engine.
-_DAF_N_BINS = 20
+# Fused stats scattered per variant into windows; they share the window
+# membership arrays built in windowed_statistics_fused, and the chunked
+# engine delegates them to the non-chunked function.
+_PER_SITE_SCATTER_STATS = ('mean_nsl', 'daf_hist', 'mu_sfs')
+
+# Frequency bins of the windowed daf_hist columns (daf_bin_0 .. daf_bin_19).
+N_DAF_BINS = 20
 
 
 def _init_window_results(chrom, win_starts_bp, win_stops_bp, n_variants):
@@ -372,28 +376,23 @@ class WindowIterator:
 
     def _iter_bp_windows(self) -> Iterator[WindowData]:
         """Iterate over fixed base pair windows."""
-        # Window bounds come from the first and last variant, so a matrix with
-        # no variants -- a region that covers none, for example -- has no
-        # windows to yield.
+        # A matrix with no variants -- a region that covers none, for
+        # example -- has no windows to yield, and no fallback bounds.
         if len(self.positions_np) == 0:
             return
-        chrom_start = int(self.positions_np[0])
-        chrom_end = int(self.positions_np[-1])
+        chrom_start, chrom_end = _bp_grid_bounds(self.matrix,
+                                                 self.positions_np)
+        win_starts, win_stops = _bp_window_grid(
+            chrom_start, chrom_end,
+            self.params.window_size, self.params.step_size)
 
-        window_id = 0
-        start = chrom_start
-
-        while start < chrom_end:
-            end = start + self.params.window_size
-            center = (start + end) // 2
-
-            # Find variants in window
-            mask = (self.positions_np >= start) & (self.positions_np < end)
-            variant_indices = np.where(mask)[0]
-
-            if len(variant_indices) > 0:
+        for window_id, (start, end) in enumerate(zip(win_starts, win_stops)):
+            start, end = int(start), int(end)
+            # Variants in the right-open [start, end); positions are sorted.
+            lo, hi = np.searchsorted(self.positions_np, (start, end))
+            if hi > lo:
                 # Extract window matrix
-                window_matrix = self.matrix.get_subset(variant_indices)
+                window_matrix = self.matrix.get_subset(np.arange(lo, hi))
                 # Set correct chromosome coordinates for span normalization
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1  # end is exclusive in our window definition
@@ -403,14 +402,11 @@ class WindowIterator:
                     chrom=1,  # TODO: Handle multiple chromosomes
                     start=start,
                     end=end,
-                    center=center,
+                    center=(start + end) // 2,
                     matrix=window_matrix,
-                    n_variants=len(variant_indices),
+                    n_variants=hi - lo,
                     window_id=window_id
                 )
-
-            window_id += 1
-            start += self.params.step_size
 
     def _iter_snp_windows(self) -> Iterator[WindowData]:
         """Iterate over fixed SNP count windows."""
@@ -480,10 +476,12 @@ class WindowIterator:
         if self.params.window_type == 'bp':
             if len(self.positions_np) == 0:
                 return 0
-            chrom_start = int(self.positions_np[0])
-            chrom_end = int(self.positions_np[-1])
-            return max(1, (chrom_end - chrom_start - self.params.window_size) //
-                      self.params.step_size + 1)
+            chrom_start, chrom_end = _bp_grid_bounds(self.matrix,
+                                                     self.positions_np)
+            win_starts, _ = _bp_window_grid(
+                chrom_start, chrom_end,
+                self.params.window_size, self.params.step_size)
+            return len(win_starts)
         elif self.params.window_type == 'snp':
             n_variants = len(self.positions_np)
             if n_variants <= self.params.window_size:
@@ -676,6 +674,38 @@ class WindowedAnalyzer:
                 yield pd.DataFrame(batch_results)
 
 
+def _bp_grid_bounds(matrix, positions):
+    """Bounds of the bp window grid.
+
+    The matrix's chromosome coordinates win when set; the first and last
+    variant are the fallback. Every windowed engine anchors with this one
+    rule, so they all tile the same grid for the same matrix -- anchoring
+    at the first variant instead would shift every window of a region- or
+    subset-derived matrix whose chrom_start sits before its first variant.
+    """
+    chrom_start = (int(matrix.chrom_start) if matrix.chrom_start is not None
+                   else int(positions[0]))
+    chrom_end = (int(matrix.chrom_end) if matrix.chrom_end is not None
+                 else int(positions[-1]))
+    return chrom_start, chrom_end
+
+
+def _bp_window_grid(chrom_start, chrom_end, window_size, step_size):
+    """Start/stop arrays of the bp window grid.
+
+    Starts run from chrom_start in steps of step_size while strictly below
+    chrom_end; each window spans window_size, and the trailing partial
+    window is clipped at chrom_end + 1: chrom_end is a base (the bounds
+    are inclusive), so the right-open trailing window keeps a variant
+    sitting exactly there and its span counts the bases that exist.
+    Shared by every windowed engine so the grids agree by construction.
+    """
+    win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
+                           dtype=np.float64)
+    return win_starts, np.minimum(win_starts + window_size,
+                                  int(chrom_end) + 1)
+
+
 def _build_scatter_indices(pos_cpu, chrom_start, chrom_end,
                            window_size, step_size):
     """Build window indices for scatter-add over (possibly overlapping) windows.
@@ -705,9 +735,8 @@ def _build_scatter_indices(pos_cpu, chrom_start, chrom_end,
     `values[:, None]` across n_per_var and raveling yields values aligned
     with win_idx_gpu / mask_gpu.
     """
-    win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
-                           dtype=np.float64)
-    win_stops = win_starts + window_size
+    win_starts, win_stops = _bp_window_grid(
+        chrom_start, chrom_end, window_size, step_size)
     n_windows = len(win_starts)
     n_per_var = int(np.ceil(window_size / step_size))
 
@@ -746,10 +775,20 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     else:
         matrix = haplotype_matrix
 
+    # Anchor the window grid before any missing-data filtering: a matrix
+    # without chromosome bounds falls back to its variant hull, which
+    # moves when a terminal site is incomplete, handing every statistic
+    # in a mixed request its own grid.
+    pos_cpu = cp.asnumpy(matrix.positions)
+    chrom_start, chrom_end = _bp_grid_bounds(matrix, pos_cpu)
+    if chrom_end <= chrom_start:
+        return pd.DataFrame()
+
     if missing_data == 'exclude':
         matrix = matrix.exclude_missing_sites()
         if matrix.num_variants == 0:
             return pd.DataFrame()
+        pos_cpu = cp.asnumpy(matrix.positions)
 
     from .diversity import _prepare_allele_counts, _ac_contribution
     ac, n_valid, n_hap = _prepare_allele_counts(matrix)
@@ -760,16 +799,6 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     alleles_present = (ac > 0).sum(axis=1)
     mut = cp.where(has_data, cp.maximum(alleles_present - 1, 0), 0).astype(cp.float64)
 
-    pos = matrix.positions
-    if isinstance(pos, cp.ndarray):
-        pos_cpu = pos.get()
-    else:
-        pos_cpu = np.asarray(pos)
-
-    chrom_start = (matrix.chrom_start if matrix.chrom_start is not None
-                   else int(pos_cpu[0]))
-    chrom_end = (matrix.chrom_end if matrix.chrom_end is not None
-                 else int(pos_cpu[-1]))
     (win_starts, win_stops, n_windows, n_per_var,
      k_safe, contains, win_idx_gpu, mask_gpu) = _build_scatter_indices(
         pos_cpu, chrom_start, chrom_end, window_size, step_size)
@@ -788,7 +817,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     n_variants_per_window = np.bincount(
         k_safe[contains], minlength=n_windows)
     results = _init_window_results(
-        chrom, win_starts, np.minimum(win_stops, chrom_end),
+        chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
     # Span for normalization
@@ -802,7 +831,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             total_span = chrom_end - chrom_start
             spans = (win_stops - win_starts) * matrix.n_total_sites / total_span
         else:
-            spans = np.minimum(win_stops, chrom_end) - win_starts
+            spans = win_stops - win_starts
         # Windows with zero span (fully inaccessible) divide to NaN rather
         # than 0 — the per-base rate is undefined, not zero. Clamp for
         # safe division and carry the zero-span mask for post-processing.
@@ -972,6 +1001,13 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     mat1 = get_population_matrix(haplotype_matrix, pop1_name)
     mat2 = get_population_matrix(haplotype_matrix, pop2_name)
 
+    # Anchor the window grid before any missing-data filtering, so this
+    # engine tiles the same grid as every other statistic in the request.
+    pos_cpu = cp.asnumpy(haplotype_matrix.positions)
+    chrom_start, chrom_end = _bp_grid_bounds(haplotype_matrix, pos_cpu)
+    if chrom_end <= chrom_start:
+        return pd.DataFrame()
+
     if missing_data == 'exclude':
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1_name, pop2_name])
@@ -979,22 +1015,11 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             return pd.DataFrame()
         mat1 = get_population_matrix(haplotype_matrix, pop1_name)
         mat2 = get_population_matrix(haplotype_matrix, pop2_name)
+        pos_cpu = cp.asnumpy(haplotype_matrix.positions)
 
     hap1 = mat1.haplotypes
     hap2 = mat2.haplotypes
 
-    pos = haplotype_matrix.positions
-    if isinstance(pos, cp.ndarray):
-        pos_cpu = pos.get()
-    else:
-        pos_cpu = np.asarray(pos)
-
-    chrom_start = (haplotype_matrix.chrom_start
-                   if haplotype_matrix.chrom_start is not None
-                   else int(pos_cpu[0]))
-    chrom_end = (haplotype_matrix.chrom_end
-                 if haplotype_matrix.chrom_end is not None
-                 else int(pos_cpu[-1]))
     (win_starts, win_stops, n_windows, n_per_var,
      k_safe, contains, win_idx_gpu, mask_gpu) = _build_scatter_indices(
         pos_cpu, chrom_start, chrom_end, window_size, step_size)
@@ -1012,7 +1037,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     n_variants_per_window = np.bincount(
         k_safe[contains], minlength=n_windows)
     results = _init_window_results(
-        chrom, win_starts, np.minimum(win_stops, chrom_end),
+        chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
     # Span normalization
@@ -1025,7 +1050,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             total_span = chrom_end - chrom_start
             spans = (win_stops - win_starts) * haplotype_matrix.n_total_sites / total_span
         else:
-            spans = np.minimum(win_stops, chrom_end) - win_starts
+            spans = win_stops - win_starts
         # Windows with zero span (fully inaccessible) divide to NaN rather
         # than 0 — the per-base rate is undefined, not zero. Clamp for
         # safe division and carry the zero-span mask for post-processing.
@@ -1354,19 +1379,14 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             positions = positions.get()
         positions = np.asarray(positions)
 
-        chrom_start = haplotype_matrix.chrom_start
-        chrom_end = haplotype_matrix.chrom_end
-        if chrom_start is None:
-            chrom_start = int(positions[0])
-        if chrom_end is None:
-            chrom_end = int(positions[-1])
-        chrom_start = int(chrom_start)
-        chrom_end = int(chrom_end)
+        chrom_start, chrom_end = _bp_grid_bounds(haplotype_matrix, positions)
 
         # Build window start/stop arrays (supports overlapping windows)
-        win_starts = np.arange(chrom_start, chrom_end, step_size,
-                               dtype=np.float64)
-        win_stops = win_starts + window_size
+        win_starts, win_stops = _bp_window_grid(
+            chrom_start, chrom_end, window_size, step_size)
+        # A zero-span matrix (one variant, no bounds) tiles no windows.
+        if len(win_starts) == 0:
+            return pd.DataFrame()
         # Build equivalent bp_bins for _compute_window_ranges
         bp_bins = np.concatenate([win_starts, [win_stops[-1]]])
 
@@ -2050,6 +2070,10 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         _warn_fused_allele_cap(int((~cap_keep).sum()))
         hap = hap[cap_keep]
         positions = positions[cap_keep]
+        # Everything below that slices by variant-index ranges or counts
+        # per site (Garud, per-window LD, the per-site scatter stats) must
+        # see the same variant set the kernel arrays hold.
+        matrix = matrix.get_subset(cp.where(cap_keep)[0])
     else:
         cap_keep = None
     n_total_var = hap.shape[0]
@@ -2269,17 +2293,47 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                                win_start, win_stop, n_windows, statistics,
                                results)
 
-    # Per-site stats binned into windows via scatter_add
-    bin_idx = cp.searchsorted(we_gpu, positions)
-    in_range = (bin_idx >= 0) & (bin_idx < n_windows)
+    # Per-site stats binned into windows via scatter_add. A variant belongs
+    # to window w iff ws[w] <= pos < we[w] -- the same right-open rule
+    # win_start / win_stop and n_variants use. Searching the window ENDS
+    # would put a variant sitting exactly on a boundary (pos == a window end
+    # == the next window's start) in the lower window, disagreeing with
+    # n_variants. Windows may also overlap (step < window), where a variant
+    # belongs to every window covering it, not just one. Both window
+    # families here have nondecreasing starts and ends, so the member
+    # windows of a variant are the consecutive run [k_lo, k_hi]: k_hi is
+    # the last window whose start is <= pos, k_lo the first whose end is
+    # > pos. Row j of site_win holds candidate k_hi - j; site_ok masks the
+    # rows outside the run. For contiguous windows the run has length one
+    # and the arrays stay (1, n_var).
+    if any(s in statistics for s in _PER_SITE_SCATTER_STATS):
+        k_hi = cp.searchsorted(ws_gpu, positions, side='right') - 1
+        k_lo = cp.searchsorted(we_gpu, positions, side='right')
+        # n_per_var is grid geometry, not data: coverage depth (windows j
+        # with ws[j] <= x < we[j]) is maximized at a window start, and the
+        # window arrays are already on the host. An upper bound on any
+        # variant's run length; site_ok masks unused rows.
+        depth = (np.searchsorted(ws_cpu, ws_cpu, side='right')
+                 - np.searchsorted(we_cpu, ws_cpu, side='right'))
+        n_per_var = max(1, int(depth.max(initial=0)))
+        site_win = (k_hi[None, :]
+                    - cp.arange(n_per_var, dtype=cp.int64)[:, None])
+        # site_win <= k_hi <= n_windows - 1 by construction, so k_lo is the
+        # only bound that can exclude a candidate (k_lo >= 0 also rules out
+        # the negative rows below the first window).
+        site_ok = site_win >= k_lo[None, :]
+
+        def _expand(v):
+            """Zero-copy view of a per-variant array at site_win's shape."""
+            return cp.broadcast_to(v, site_win.shape)
 
     # Shared per-allele counts (used by daf_hist and mu_sfs). Per-derived-allele,
     # per-site n_valid -- the same convention as diversity.daf_histogram / mu_sfs,
     # so the windowed values equal the scalar over each window (include mode).
-    ac_daf = nv_daf = None
     if any(s in statistics for s in ('daf_hist', 'mu_sfs')):
         from ._memutil import allele_counts
         ac_daf, nv_daf = allele_counts(matrix.haplotypes)   # (n_var, K), (n_var,)
+        derived = ac_daf[:, 1:]                             # (n_var, K-1)
 
     if 'mean_nsl' in statistics:
         from . import selection as sel
@@ -2288,16 +2342,14 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         # score sees the full region before being binned into windows. Over a
         # StreamingHaplotypeMatrix this runs per chunk, truncating the scan at
         # chunk boundaries (see _stream_windowed_analysis).
-        # nsl() returns (n_var,) for biallelic data and (n_var, n_derived) when
-        # multiallelic focal sites are present; average every finite
-        # (site, allele) score falling in each window.
+        # nsl() returns (n_var,) for biallelic data and (n_var, n_derived)
+        # when multiallelic focal sites are present; average every finite
+        # (site, allele) score in every window the site belongs to.
         nsl_2d = cp.asarray(sel.nsl(matrix)).reshape(matrix.num_variants, -1)
-        m = nsl_2d.shape[1]
-        vals_flat = nsl_2d.reshape(-1)
-        bin_flat = cp.repeat(bin_idx, m)
-        inrange_flat = cp.repeat(in_range, m)
-        valid = cp.isfinite(vals_flat) & inrange_flat
-        results['mean_nsl'] = _windowed_mean(vals_flat, bin_flat, valid, n_windows)
+        vals, wins = cp.broadcast_arrays(nsl_2d[None, :, :],
+                                         site_win[:, :, None])
+        valid = cp.isfinite(vals) & site_ok[:, :, None]
+        results['mean_nsl'] = _windowed_mean(vals, wins, valid, n_windows)
 
     # SNP distance stats per window
     snp_dist_stats = {'snp_dist_mean', 'snp_dist_var', 'snp_dist_min',
@@ -2343,41 +2395,40 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # allele (freq = count / n_valid), scattered into (window, bin) and
     # normalized per window -- matching diversity.daf_histogram.
     if 'daf_hist' in statistics:
-        n_daf_bins = _DAF_N_BINS
-        derived = ac_daf[:, 1:]                                  # (n_var, K-1)
-        n_der = derived.shape[1]
         nv = cp.maximum(nv_daf.astype(cp.float64), 1.0)[:, None]
-        freq = (derived.astype(cp.float64) / nv).reshape(-1)     # per (site, allele)
-        # keep present derived alleles at in-range, non-missing sites
-        keep = ((derived > 0) & (nv_daf[:, None] > 0)
-                & in_range[:, None]).reshape(-1)
-        bin_rep = cp.repeat(bin_idx, n_der)                      # site's window
-        composite = cp.where(keep, bin_rep * n_daf_bins
-                             + diversity._daf_bin_index(freq, n_daf_bins), 0)
-        flat = _scatter_sum(keep.astype(cp.float64), composite,
-                            n_windows * n_daf_bins)
-        hist_matrix = flat.get().reshape(n_windows, n_daf_bins)
+        freq = derived.astype(cp.float64) / nv                   # per (site, allele)
+        dbin = diversity._daf_bin_index(freq, N_DAF_BINS)
+        # One entry per present derived allele at a non-missing site, in
+        # every window the site belongs to.
+        keep = (((derived > 0) & (nv_daf[:, None] > 0))[None, :, :]
+                & site_ok[:, :, None])
+        composite = site_win[:, :, None] * N_DAF_BINS + dbin[None, :, :]
+        member = composite[keep]
+        flat = _scatter_sum(cp.ones_like(member, dtype=cp.float64),
+                            member, n_windows * N_DAF_BINS)
+        hist_matrix = flat.get().reshape(n_windows, N_DAF_BINS)
         row_sum = hist_matrix.sum(axis=1, keepdims=True)
         hist_matrix = np.divide(hist_matrix, row_sum,
                                 out=np.zeros_like(hist_matrix),
                                 where=row_sum > 0)
-        for b in range(n_daf_bins):
+        for b in range(N_DAF_BINS):
             results[f'daf_bin_{b}'] = hist_matrix[:, b]
 
     # muSFS: fraction of segregating (site, allele) entries at the SFS edges
     # (singleton or n_valid-1), per-site n_valid -- matching diversity.mu_sfs.
     if 'mu_sfs' in statistics:
-        derived = ac_daf[:, 1:]
-        n_der = derived.shape[1]
         nvc = nv_daf[:, None]
-        is_seg = (derived > 0) & (derived < nvc) & in_range[:, None]
+        is_seg = (derived > 0) & (derived < nvc)                 # (n_var, K-1)
         is_edge = is_seg & ((derived == 1) | (derived == nvc - 1))
-        keep = cp.repeat(in_range, n_der)
-        bin_safe = cp.where(keep, cp.repeat(bin_idx, n_der), 0)
-        seg_sum = _scatter_sum(is_seg.reshape(-1).astype(cp.float64),
-                               bin_safe, n_windows).get()
-        edge_sum = _scatter_sum(is_edge.reshape(-1).astype(cp.float64),
-                                bin_safe, n_windows).get()
+        # The window index depends only on the site, so sum the per-allele
+        # counts per site first, then scatter into each membership.
+        seg_site = is_seg.sum(axis=1).astype(cp.float64)         # (n_var,)
+        edge_site = is_edge.sum(axis=1).astype(cp.float64)
+        member_win = site_win[site_ok]
+        seg_sum = _scatter_sum(_expand(seg_site)[site_ok], member_win,
+                               n_windows).get()
+        edge_sum = _scatter_sum(_expand(edge_site)[site_ok], member_win,
+                                n_windows).get()
         # matches diversity.mu_sfs, which returns 0.0 when a window has no
         # segregating (site, allele) entries (rather than NaN)
         results['mu_sfs'] = np.divide(edge_sum, seg_sum,
@@ -2818,7 +2869,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     # per-window).
     garud_stats = {'garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
                    'haplotype_count'}
-    scatter_stats = {'mean_nsl', 'daf_hist', 'mu_sfs', 'snp_dist_mean',
+    scatter_stats = {*_PER_SITE_SCATTER_STATS, 'snp_dist_mean',
                      'snp_dist_var', 'snp_dist_min', 'snp_dist_max',
                      'mu_var', 'zns', 'omega', 'mu_ld', 'dist_var',
                      'dist_skew', 'dist_kurt'}

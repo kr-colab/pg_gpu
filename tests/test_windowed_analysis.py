@@ -759,6 +759,19 @@ class TestFusedMissingData:
         self._compare_fused_vs_scatter(hm)
 
 
+def _leading_gap_hm(seq_len=100_000, first_pos=243):
+    """Haplotype matrix with chrom_start=0 and a first variant > 0."""
+    rng = np.random.RandomState(7)
+    positions = np.concatenate([
+        [first_pos],
+        np.sort(rng.choice(
+            np.arange(first_pos + 1, seq_len), size=499, replace=False)),
+    ])
+    hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+    return HaplotypeMatrix(hap, positions,
+                           chrom_start=0, chrom_end=seq_len)
+
+
 class TestChromStartZero:
     """Windows must be anchored at chrom_start=0, not the first variant position.
 
@@ -770,16 +783,7 @@ class TestChromStartZero:
     """
 
     def _simple_hm(self, seq_len=100_000, first_pos=243):
-        """Haplotype matrix with chrom_start=0 and a first variant > 0."""
-        rng = np.random.RandomState(7)
-        positions = np.concatenate([
-            [first_pos],
-            np.sort(rng.choice(
-                np.arange(first_pos + 1, seq_len), size=499, replace=False)),
-        ])
-        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
-        return HaplotypeMatrix(hap, positions,
-                               chrom_start=0, chrom_end=seq_len)
+        return _leading_gap_hm(seq_len, first_pos)
 
     def test_single_pop_windows_start_at_zero(self):
         hm = self._simple_hm()
@@ -1553,3 +1557,285 @@ class TestWindowedGarudCorrectness:
                                         err_msg=f"H123 window {w}")
             np.testing.assert_allclose(row["garud_h2h1"], h2h1_a, rtol=1e-9,
                                         err_msg=f"H2H1 window {w}")
+
+
+class TestFusedPerSiteWindowMembership:
+    """Per-site scatter stats land in the right-open [start, end) window
+    that n_variants uses, and in every window covering them when windows
+    overlap. Each window must equal the value recomputed from its own
+    variant slice."""
+
+    n_hap = 24
+    n_var = 120
+
+    @pytest.fixture
+    def data(self):
+        from pg_gpu.windowed_analysis import N_DAF_BINS
+        rng = np.random.RandomState(4)
+        hap = rng.randint(0, 2, (self.n_hap, self.n_var)).astype(np.int8)
+        # Evenly spaced positions put variants exactly on window boundaries
+        # (3000, 6000, 9000 for 3 kb windows).
+        pos = np.arange(self.n_var) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, self.n_var * 100)
+        dac = hap.sum(axis=0)
+        # The engine's own binning formula; the subject here is membership,
+        # not binning.
+        daf_bin = np.minimum((dac / self.n_hap * N_DAF_BINS).astype(int),
+                             N_DAF_BINS - 1)
+        return hm, pos, dac, daf_bin
+
+    def _check_window(self, row_hist, row_mu, member, dac, daf_bin, label,
+                      row_nsl=None, nsl_all=None):
+        from pg_gpu.windowed_analysis import N_DAF_BINS
+        exp_hist = np.bincount(daf_bin[member],
+                               minlength=N_DAF_BINS).astype(float)
+        if exp_hist.sum() > 0:
+            exp_hist = exp_hist / exp_hist.sum()   # daf_hist rows sum to 1
+        np.testing.assert_allclose(row_hist, exp_hist,
+                                   err_msg=f"daf_hist mismatch in {label}")
+        is_edge = (dac[member] == 1) | (dac[member] == self.n_hap - 1)
+        np.testing.assert_allclose(row_mu, is_edge.mean(), atol=1e-12,
+                                   err_msg=f"mu_sfs mismatch in {label}")
+        if nsl_all is None:
+            return
+        v = nsl_all[member]
+        v = v[np.isfinite(v)]
+        if len(v):
+            np.testing.assert_allclose(row_nsl, v.mean(), atol=1e-9,
+                                       err_msg=f"mean_nsl mismatch in {label}")
+
+    @pytest.mark.parametrize("window,step", [
+        pytest.param(3000, 3000, id="boundary-non-overlapping"),
+        pytest.param(100, 100, id="every-variant-on-a-boundary"),
+        pytest.param(2000, 1000, id="overlap-two-deep"),
+        pytest.param(3000, 1000, id="overlap-three-deep"),
+    ])
+    def test_window_matches_own_slice(self, data, window, step):
+        from pg_gpu import selection
+        from pg_gpu.windowed_analysis import N_DAF_BINS
+        hm, pos, dac, daf_bin = data
+        nsl_all = np.asarray(selection.nsl(hm))
+        wa = windowed_analysis(hm, window_size=window, step_size=step,
+                               statistics=['mu_sfs', 'daf_hist',
+                                           'mean_nsl', 'pi'])
+        assert len(wa) > 1
+        for _, row in wa.iterrows():
+            s, e = row['start'], row['end']
+            member = (pos >= s) & (pos < e)
+            assert int(member.sum()) == int(row['n_variants'])
+            if not member.any():
+                continue
+            hist = np.array([row[f'daf_bin_{b}'] for b in range(N_DAF_BINS)])
+            self._check_window(hist, row['mu_sfs'], member, dac, daf_bin,
+                               f"[{s}, {e})", row_nsl=row['mean_nsl'],
+                               nsl_all=nsl_all)
+
+    def test_direct_bp_bins_branch(self, data):
+        # Calling the fused function with explicit contiguous bp_bins
+        # exercises the branch without _win_starts/_win_stops.
+        from pg_gpu.windowed_analysis import (windowed_statistics_fused,
+                                              N_DAF_BINS)
+        hm, pos, dac, daf_bin = data
+        bp = np.array([0., 3000., 6000., 9000., 12000.])
+        res = windowed_statistics_fused(
+            hm, bp_bins=bp, statistics=('daf_hist', 'mu_sfs'),
+            per_base=False)
+        for wi in range(4):
+            member = (pos >= bp[wi]) & (pos < bp[wi + 1])
+            got_hist = np.array([res[f'daf_bin_{b}'][wi]
+                                 for b in range(N_DAF_BINS)])
+            self._check_window(got_hist, res['mu_sfs'][wi], member, dac,
+                               daf_bin, f"bp bin {wi}")
+
+
+class TestEngineGridAgreement:
+    """Both windowed engines tile the same grid for the same matrix,
+    anchored at the matrix chromosome bounds when they are set."""
+
+    def test_iterator_anchors_at_chrom_start(self):
+        hm = _leading_gap_hm()
+        it = WindowedAnalyzer(window_size=10_000, step_size=10_000,
+                              statistics=['pi'],
+                              progress_bar=False).compute(hm)
+        assert int(it['start'].iloc[0]) == 0
+        assert all(int(s) % 10_000 == 0 for s in it['start'])
+
+    def test_iterator_grid_matches_fused(self):
+        hm = _leading_gap_hm()
+        fused = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                                  statistics=['pi'])
+        it = WindowedAnalyzer(window_size=10_000, step_size=10_000,
+                              statistics=['pi'],
+                              progress_bar=False).compute(hm)
+        # The fused engine reports every window; the iterator skips empty
+        # ones. Compare on the non-empty rows.
+        nonempty = fused[fused['n_variants'] > 0].reset_index(drop=True)
+        assert list(nonempty['start'].astype(int)) == \
+            list(it['start'].astype(int))
+        assert list(nonempty['end'].astype(int)) == \
+            list(it['end'].astype(int))
+        assert list(nonempty['n_variants'].astype(int)) == \
+            list(it['n_variants'].astype(int))
+        np.testing.assert_allclose(it['pi'].values, nonempty['pi'].values,
+                                   rtol=1e-9)
+
+    def test_positions_fallback_without_chrom_bounds(self):
+        rng = np.random.RandomState(3)
+        pos = np.sort(rng.choice(np.arange(5_000, 50_000), 200,
+                                 replace=False))
+        hap = rng.randint(0, 2, (12, len(pos)), dtype=np.int8)
+        hm = HaplotypeMatrix(hap, pos)
+        it = WindowedAnalyzer(window_size=5_000, step_size=5_000,
+                              statistics=['pi'],
+                              progress_bar=False).compute(hm)
+        assert int(it['start'].iloc[0]) == int(pos[0])
+
+    def test_compute_region_tiles_from_region_start(self):
+        rng = np.random.RandomState(0)
+        n_var = 400
+        pos = np.sort(rng.choice(np.arange(1, 1_000_000), n_var,
+                                 replace=False))
+        hm = HaplotypeMatrix(
+            rng.randint(0, 2, (20, n_var)).astype(np.int8),
+            pos, 1, 999_999)
+        wa = WindowedAnalyzer(window_size=20_000, step_size=20_000,
+                              statistics=['pi'],
+                              progress_bar=False)
+        r1 = wa.compute_region(hm, '1', 200_000, 300_000)
+        r2 = wa.compute_region(hm, '1', 300_000, 400_000)
+        # Windows anchor at each region's start, so consecutive region
+        # calls tile without gaps or overlap.
+        assert list(r1['start'].astype(int)) == \
+            list(range(200_000, 300_000, 20_000))
+        assert list(r2['start'].astype(int)) == \
+            list(range(300_000, 400_000, 20_000))
+        in1 = int(((pos >= 200_000) & (pos < 300_000)).sum())
+        in2 = int(((pos >= 300_000) & (pos < 400_000)).sum())
+        assert int(r1['n_variants'].sum()) == in1
+        assert int(r2['n_variants'].sum()) == in2
+
+
+def _host(a):
+    return a.get() if hasattr(a, "get") else np.asarray(a)
+
+
+class TestOneGridAllModes:
+    """Every engine tiles the same grid whatever the missing-data mode, the
+    trailing window clips at the chromosome end (an inclusive base), and
+    degenerate inputs return empty results instead of crashing."""
+
+    def _two_pop_edge_missing(self):
+        rng = np.random.RandomState(11)
+        hap = rng.randint(0, 2, (12, 60)).astype(np.int8)
+        hap[0:6, 0:8] = -1     # pop1 missing at the left edge
+        hap[6:12, 52:] = -1    # pop2 missing at the right edge
+        pos = np.sort(rng.choice(np.arange(10, 9990), 60, replace=False))
+        hm = HaplotypeMatrix(hap, pos.astype(np.int64))
+        hm.sample_sets = {"p1": list(range(6)), "p2": list(range(6, 12))}
+        return hm
+
+    def test_mixed_exclude_asymmetric_missing_runs_on_one_grid(self):
+        hm = self._two_pop_edge_missing()
+        wa_ex = windowed_analysis(hm, window_size=1000, step_size=1000,
+                                  statistics=['pi', 'fst_hudson'],
+                                  populations=['p1', 'p2'],
+                                  missing_data='exclude')
+        wa_in = windowed_analysis(hm, window_size=1000, step_size=1000,
+                                  statistics=['pi', 'fst_hudson'],
+                                  populations=['p1', 'p2'],
+                                  missing_data='include')
+        assert list(wa_ex['start']) == list(wa_in['start'])
+        assert list(wa_ex['end']) == list(wa_in['end'])
+        assert 'fst_hudson' in wa_ex.columns and 'pi' in wa_ex.columns
+
+    def test_exclude_fst_lands_on_labeled_window(self):
+        from pg_gpu import divergence
+        hm = self._two_pop_edge_missing()
+        wa = windowed_analysis(hm, window_size=1000, step_size=1000,
+                               statistics=['fst_hudson'],
+                               populations=['p1', 'p2'],
+                               missing_data='exclude',
+                               span_normalize=False)
+        pos = _host(hm.positions)
+        complete = _host((hm.haplotypes >= 0).all(axis=0))
+        for _, row in wa.iterrows():
+            member = (pos >= row['start']) & (pos < row['end']) & complete
+            if member.sum() == 0:
+                continue
+            sub = hm.get_subset(np.where(member)[0])
+            sub.sample_sets = hm.sample_sets
+            expected = divergence.fst(sub, 'p1', 'p2')
+            got = row['fst_hudson']
+            if np.isnan(expected) and np.isnan(got):
+                continue
+            np.testing.assert_allclose(got, expected, rtol=1e-10,
+                                       err_msg=f"window {row['start']}")
+
+    def test_trailing_window_clips_across_engines(self):
+        from pg_gpu import diversity
+        rng = np.random.RandomState(7)
+        hap = rng.randint(0, 2, (10, 40)).astype(np.int8)
+        pos = np.sort(rng.choice(np.arange(1, 9990), 40, replace=False))
+        hm = HaplotypeMatrix(hap, pos.astype(np.int64), 0, 10000)
+        wa_f = windowed_analysis(hm, window_size=3000, step_size=3000,
+                                 statistics=['pi'])
+        assert int(wa_f['end'].iloc[-1]) == 10001
+        wa_it = WindowedAnalyzer(window_size=3000, step_size=3000,
+                                 statistics=['pi'],
+                                 progress_bar=False).compute(hm)
+        assert int(np.asarray(wa_it['end'])[-1]) == 10001
+        # per-base pi of the clipped window divides by the 1001 bases
+        # 9000..10000 that exist inside the inclusive bounds
+        member = (pos >= 9000) & (pos <= 10000)
+        sub = hm.get_subset(np.where(member)[0])
+        raw = diversity.pi(sub, span_normalize=False)
+        np.testing.assert_allclose(wa_f['pi'].iloc[-1], raw / 1001,
+                                   rtol=1e-10)
+
+    def test_allele_cap_drop_keeps_per_site_stats_aligned(self):
+        import warnings as _w
+        rng = np.random.RandomState(3)
+        hap = rng.randint(0, 2, (12, 40)).astype(np.int8)
+        hap[0, 5] = 9          # beyond the fused per-allele capacity
+        pos = (np.arange(40) * 100 + 50).astype(np.int64)
+        hm = HaplotypeMatrix(hap, pos, 0, 4000)
+        with _w.catch_warnings():
+            _w.simplefilter("ignore")
+            wa = windowed_analysis(hm, window_size=1000, step_size=1000,
+                                   statistics=['daf_hist', 'mu_sfs',
+                                               'mean_nsl'])
+        assert len(wa) == 4
+        assert np.isfinite(wa['mu_sfs']).all()
+        # the capped site is gone from its window's entries
+        from pg_gpu import diversity
+        sub = hm.get_subset(np.where((np.arange(40) != 5) & (pos < 1000))[0])
+        exp_mu = diversity.mu_sfs(sub)
+        np.testing.assert_allclose(wa['mu_sfs'].iloc[0], exp_mu, atol=1e-12)
+
+    def test_single_variant_no_bounds_returns_empty(self):
+        hm = HaplotypeMatrix(np.array([[0], [1], [1], [0]], dtype=np.int8),
+                             np.array([500], dtype=np.int64))
+        wa = windowed_analysis(hm, window_size=1000, step_size=1000,
+                               statistics=['pi'])
+        assert len(wa) == 0
+        wa_ex = windowed_analysis(hm, window_size=1000, step_size=1000,
+                                  statistics=['pi'],
+                                  missing_data='exclude')
+        assert len(wa_ex) == 0
+
+    def test_variant_at_chrom_end_membership(self):
+        # A variant at the inclusive chrom_end stays in a partial trailing
+        # window; on an aligned grid the right-open boundary excludes it.
+        hap = np.tile(np.array([[0], [1], [1], [0]], dtype=np.int8), (1, 5))
+        pos = np.array([100, 800, 1500, 2200, 2500], dtype=np.int64)
+        partial = HaplotypeMatrix(hap.copy(), pos, 0, 2500)
+        wa = windowed_analysis(partial, window_size=1000, step_size=1000,
+                               statistics=['pi'])
+        assert int(wa['n_variants'].sum()) == 5
+        assert int(wa['end'].iloc[-1]) == 2501
+        hap6 = np.tile(np.array([[0], [1], [1], [0]], dtype=np.int8), (1, 6))
+        pos6 = np.array([100, 800, 1500, 2200, 2500, 3000], dtype=np.int64)
+        aligned = HaplotypeMatrix(hap6, pos6, 0, 3000)
+        wa2 = windowed_analysis(aligned, window_size=1000, step_size=1000,
+                                statistics=['pi'])
+        assert int(wa2['n_variants'].sum()) == 5   # the 3000 variant is out

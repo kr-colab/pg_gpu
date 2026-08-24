@@ -201,3 +201,52 @@ class TestExcludeConsistency:
         dxy_inc = divergence.dxy(hm, "pop1", "pop2", missing_data='include')
         dxy_exc = divergence.dxy(hm, "pop1", "pop2", missing_data='exclude')
         assert abs(dxy_inc - dxy_exc) < 1e-10
+
+
+class TestExcludeKeepsMatrixContext:
+    """exclude_missing_sites keeps the parent chromosome bounds and
+    accessibility mask, like the restrict_to_* filters, so exclude-mode
+    span normalization divides by the chromosome, not the surviving
+    variant hull."""
+
+    def _hm(self):
+        rng = np.random.default_rng(17)
+        hap = rng.integers(0, 2, (10, 50), dtype=np.int8)
+        hap[0, 0] = -1            # first site incomplete (row in pop a)
+        hap[3, 49] = -1           # last site incomplete (row in pop a)
+        hap[8, 20] = -1           # mid site incomplete only in pop b
+        pos = (np.arange(50) * 190 + 200).astype(np.int64)  # 200..9510
+        return HaplotypeMatrix(hap, pos, 0, 10000)
+
+    def test_bounds_preserved(self):
+        h = self._hm()
+        ex = h.exclude_missing_sites()
+        assert ex.num_variants == 47
+        assert (ex.chrom_start, ex.chrom_end) == (0, 10000)
+
+    def test_bounds_preserved_with_populations(self):
+        h = self._hm()
+        h.sample_sets = {"a": list(range(6)), "b": list(range(6, 10))}
+        ex = h.exclude_missing_sites(populations=["a"])
+        assert ex.num_variants == 48   # only rows 0-5 checked
+        assert (ex.chrom_start, ex.chrom_end) == (0, 10000)
+
+    def test_mask_preserved(self):
+        from pg_gpu.accessible import AccessibleMask
+        h = self._hm()
+        h.set_accessible_mask(AccessibleMask(np.ones(10001, dtype=bool)))
+        ex = h.exclude_missing_sites()
+        assert ex.has_accessible_mask
+
+    def test_filter_by_missing_keeps_context(self):
+        h = self._hm()
+        f = h.filter_variants_by_missing(max_missing_freq=0.05)
+        assert f.num_variants == 47
+        assert (f.chrom_start, f.chrom_end) == (0, 10000)
+
+    def test_exclude_pi_uses_parent_span(self):
+        from pg_gpu import diversity
+        h = self._hm()
+        raw = diversity.pi(h, missing_data='exclude', span_normalize=False)
+        per_bp = diversity.pi(h, missing_data='exclude', span_normalize=True)
+        np.testing.assert_allclose(per_bp, raw / 10001, rtol=1e-12)
