@@ -76,11 +76,13 @@ class TestLDStatisticsGPU:
         # Create sample names
         samples = [f"ind{i}" for i in range(n_samples_per_pop * n_pops)]
 
-        # Create genotype array from haplotypes (samples x variants x 2)
+        # Create genotype array from haplotypes (samples x variants x 2). Each
+        # individual's two gametes are adjacent columns, so a population's
+        # individuals stay within its own LD block rather than mixing both.
         genotypes = np.zeros((n_samples_per_pop * n_pops, n_variants, 2), dtype=np.int8)
         for i in range(n_samples_per_pop * n_pops):
-            genotypes[i, :, 0] = haplotypes[:, i]
-            genotypes[i, :, 1] = haplotypes[:, i + n_samples_per_pop * n_pops]
+            genotypes[i, :, 0] = haplotypes[:, 2 * i]
+            genotypes[i, :, 1] = haplotypes[:, 2 * i + 1]
 
         # Create VCF for testing
         with tempfile.NamedTemporaryFile(mode='w', suffix='.vcf', delete=False) as f:
@@ -148,8 +150,7 @@ class TestLDStatisticsGPU:
         for i, sample_name in enumerate(vcf['samples']):
             pop = pop_assignments.get(sample_name)
             if pop in pop_sets:
-                # Add both haplotypes for this sample
-                pop_sets[pop].extend([i, i + n_samples])
+                pop_sets[pop].extend([2 * i, 2 * i + 1])
 
         h_gpu.sample_sets = pop_sets
 
@@ -222,7 +223,7 @@ class TestLDStatisticsGPU:
         for i, sample_name in enumerate(vcf['samples']):
             pop = pop_assignments.get(sample_name)
             if pop in pop_sets:
-                pop_sets[pop].extend([i, i + n_samples])
+                pop_sets[pop].extend([2 * i, 2 * i + 1])
 
         h_gpu.sample_sets = pop_sets
 
@@ -282,7 +283,7 @@ class TestLDStatisticsGPU:
         for i, sample_name in enumerate(vcf['samples']):
             pop = pop_assignments.get(sample_name)
             if pop in pop_sets:
-                pop_sets[pop].extend([i, i + n_samples])
+                pop_sets[pop].extend([2 * i, 2 * i + 1])
 
         h_gpu.sample_sets = pop_sets
 
