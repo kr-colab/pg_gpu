@@ -32,7 +32,11 @@ results**, except where the next section says so.
 * Selection: ``ihs`` and ``nsl`` score each alternate allele against
   the reference separately, so they return one column per alternate
   allele when a site has more than two. ``min_maf`` now applies to each
-  allele's own frequency.
+  allele's own frequency. The promotion is matrix-wide: one site with a
+  third allele anywhere makes the whole return two-dimensional, so
+  ``plt.plot(pos, ihs)`` and ``np.argmax(ihs)`` change meaning; filter
+  with ``restrict_to_biallelic`` first for the flat scan. A matrix with
+  no alternate allele at all returns all ``NaN``.
 * Distances: pairwise distances count how many sites two haplotypes
   differ at, instead of doing arithmetic on the allele numbers.
   ``decomposition.pairwise_distance`` uses the same count.
@@ -43,6 +47,12 @@ results**, except where the next section says so.
 * LD statistics operate on only sites with two present alleles, but allow
   arbitrary integer coding. This is a break from parity with ``moments.LD``,
   which restricts to sites with ``{0, 1}`` coding only.
+  ``pairwise_r2`` keeps its full square shape and returns dropped sites
+  as ``NaN`` rows and columns, ``windowed_r_squared`` drops their pairs
+  from its bins, and ``locate_unlinked`` returns ``False`` for them.
+  ``moments_ld.compute_ld_statistics`` computes its heterozygosity
+  terms on the same site set and 0/1 recoding as its LD sums, so both
+  halves of the output describe the same sites.
 
 Results that change even for two-allele data
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -104,7 +114,10 @@ Read this section if you are comparing against older pg_gpu results.
   ``local_pca`` and ``lostruct`` changed the same way. They no longer
   match the R ``lostruct`` package number for number -- the eigenvalue
   scale differs -- though the component directions still agree closely,
-  so plots and outlier detection are unaffected.
+  so plots and outlier detection are unaffected. Window eigenvectors
+  are sign-aligned against the previous window, so individual entries
+  can flip sign relative to older output, and ``LocalPCAResult`` no
+  longer carries a ``scaler`` field.
 * ``grm`` and ``ibs`` now require a ``GenotypeMatrix`` and reject
   haplotypes. ``grm(GenotypeMatrix, population=...)`` used to raise an
   error and now works.
@@ -121,6 +134,18 @@ Read this section if you are comparing against older pg_gpu results.
   ``sqeuclidean``, and ``cityblock``. Other metrics now raise
   ``NotImplementedError``, and passing a ``GenotypeMatrix`` raises a
   ``TypeError``.
+* ``pairwise_r2`` returns ``NaN`` instead of ``0`` for a pair whose
+  r-squared is undefined (a site where nothing varies), with either
+  estimator. Reductions over the matrix need ``nanmean`` /
+  ``nanargmax`` now.
+* ``windowed_analysis`` with exactly two populations names the
+  two-population columns the same way on every path (``fst_hudson``);
+  the non-fused fallback used to suffix them
+  (``fst_hudson_pop1_pop2``).
+* ``fst_weir_cockerham`` with a population holding a single row
+  returns 0 (after the unpaired-rows warning) where it used to fall
+  back to a haploid estimate. One row is half an individual and gives
+  the diploid analysis no within-population variance to estimate.
 
 Bug fixes
 ~~~~~~~~~
@@ -143,7 +168,14 @@ New warnings
 
 * ``BiallelicOnlyWarning`` -- something that only works on two-allele
   sites threw multiallelic sites away, and tells you how many. Comes
-  from ``patterson_d`` and the ``GenotypeMatrix`` loaders.
+  from ``patterson_d``, the ``GenotypeMatrix`` loaders and
+  ``from_haplotype_matrix``, and the LD statistics that restrict to
+  two-allele sites (``zns``, ``omega``, ``pairwise_r2``,
+  ``pairwise_LD_v``, ``locate_unlinked``, ``windowed_r_squared``).
+* ``UnpairedRowsWarning`` -- a statistic that pairs rows into
+  individuals got a population list that does not keep each sample's
+  two rows together. The row-validation entry above says when it
+  fires.
 * ``MultiallelicCapWarning`` -- a windowed calculation skipped sites
   with more than 8 alleles. You will not see this with DNA.
 
@@ -154,6 +186,22 @@ Removed
   ``HaplotypeMatrix.allele_frequency_spectrum``. Use the ``sfs`` module
   instead.
 * The ``scaler`` argument on the PCA functions.
+* ``apply_biallelic_filter`` on both matrix classes. Use
+  ``restrict_to_biallelic``, which keeps sites with at most two
+  distinct present alleles whatever their coding -- including sites
+  where nothing varies, which the old filter dropped -- or
+  ``restrict_to_segregating`` to drop the non-varying ones.
+* The ``ac_filter`` argument on
+  ``compute_ld_statistics_gpu_single_pop`` / ``..._two_pops`` (eager
+  and streaming) and ``moments_ld.compute_ld_statistics``. The LD
+  pipeline always restricts to two-present-allele sites now.
+* ``HaplotypeMatrix`` input to ``rogers_huff_r`` /
+  ``rogers_huff_r_squared``. Rogers-Huff r is a diploid dosage
+  correlation: convert with ``GenotypeMatrix.from_haplotype_matrix``
+  first, or call ``pairwise_r2(estimator='rogers_huff')`` on the
+  haplotype matrix, which converts internally.
+* The ``genotype_matrix_or_haplotype_matrix`` keyword on ``grm`` and
+  ``ibs``; the parameter is named ``genotype_matrix`` now.
 
 v0.1.0
 ------
