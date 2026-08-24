@@ -838,8 +838,6 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
         # The pop file resolves to haplotype columns, but this stream's
         # rows are individuals. Both of a sample's gametes floor-divide to
         # its individual, so the unique halves are the individual rows.
-        # Before this mapping the chunks carried haplotype-numbered sets
-        # that indexed past the individual axis.
         return {p: np.unique(np.asarray(cols) // 2)
                 for p, cols in pop_cols.items()}
 

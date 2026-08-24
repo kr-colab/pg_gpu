@@ -48,7 +48,8 @@ def compute_ld_statistics(
 ):
     """GPU LD statistics in the moments.LD.Parsing.compute_ld_statistics output format.
 
-    Accepts the same arguments as the moments version, but restricts to biallelic
+    Accepts the same arguments as the moments version, minus ``ac_filter``:
+    this pipeline always restricts to biallelic
     segregating sites with arbitrary allele coding (two present alleles): {0,2}
     and reference-absent {1,2} sites are kept and recoded, whereas moments'
     is_biallelic_01 drops them. Results match moments only when the input is

@@ -277,9 +277,8 @@ def _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
     from ._warnings import _warn_biallelic_only
     _warn_biallelic_only(int((~biallelic).sum()), context="patterson_d")
 
-    # Alt allele = highest-index present allele (== allele 1 for a {0,1} site,
-    # so this reduces to the previous behaviour on standard biallelic data);
-    # D is invariant to which of the two alleles is chosen.
+    # Alt allele = highest-index present allele (allele 1 for a {0,1}
+    # site); D is invariant to which of the two alleles is chosen.
     k = xa.shape[1]
     alt = cp.where(present, cp.arange(k)[None, :], -1).argmax(axis=1)[:, None]
 

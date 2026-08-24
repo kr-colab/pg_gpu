@@ -253,8 +253,8 @@ def main():
     benchmarks.append(("diversity.inbreeding_coefficient",
         lambda: diversity.inbreeding_coefficient(hm, population="pop1"),
         allel_fn(['g'], lambda: np.nanmean(allel.inbreeding_coefficient(_allel_cache['g'].subset(sel1=list(range(N_DIP_PER_POP))))))))
-    benchmarks.append(("diversity.allele_freq_spectrum",
-        lambda: diversity.allele_frequency_spectrum(hm, population="pop1"),
+    benchmarks.append(("sfs.sfs",
+        lambda: sfs.sfs(hm, population="pop1"),
         allel_fn(['g'], lambda: allel.sfs(_allel_cache['g'].count_alleles(subpop=pop1_dip)[:, 1]))))
     benchmarks.append(("diversity.segregating_sites",
         lambda: diversity.segregating_sites(hm, population="pop1"),
@@ -355,7 +355,7 @@ def main():
     # --- Decomposition ---
     # randomized_pca needs O(n_hap * n_var * 8) intermediates; OOM at full-arm scale
     benchmarks.append(("decomposition.randomized_pca",
-        lambda: decomposition.randomized_pca(hm, n_components=4, scaler="patterson"),
+        lambda: decomposition.randomized_pca(hm, n_components=4),
         None))
 
     # --- Relatedness ---

@@ -109,10 +109,10 @@ def build_genotype_matrix(gt, pos, *,
         when either ploidy on that variant was missing. A site with three or
         more distinct alleles present in the sample cannot be a 0/1/2 dosage,
         so its whole row is set to ``-1`` (present but fully missing), keeping
-        the row/chunk alignment the streaming path relies on. The number of
-        such recoded sites is
-        stashed on the result as ``_n_multiallelic_recoded`` for the caller
-        to surface as a BiallelicOnlyWarning (once per load).
+        the row/chunk alignment the streaming path relies on. The number
+        of such recoded sites is stashed on the result as
+        ``_n_multiallelic_recoded`` for the caller to surface as a
+        BiallelicOnlyWarning (once per load).
     """
     from .genotype_matrix import GenotypeMatrix, _biallelic_and_alt
     from ._memutil import allele_counts

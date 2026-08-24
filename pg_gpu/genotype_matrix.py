@@ -13,9 +13,9 @@ from .accessible import AccessibleMask, resolve_accessible_mask
 
 
 def _biallelic_and_alt(ac):
-    """Per-site biallelic mask and alt-allele index from an (n_var, K) allele-count
-    matrix (any array namespace).
+    """Per-site biallelic mask and alt-allele index from allele counts.
 
+    ``ac`` is an ``(n_var, K)`` allele-count matrix in any array namespace.
     Biallelic = at most two distinct present alleles. Allele 0 is the reference;
     ``alt`` is the highest-index present allele > 0, which the 0/1/2 dosage counts --
     code-independent, so {0,2} and reference-absent {1,2} sites work, while {0,1}
@@ -46,9 +46,9 @@ class GenotypeMatrix:
     ``from_haplotype_matrix`` keep sites with at most two distinct present
     alleles -- so {0,1}, {0,2}, and reference-absent {1,2} are all kept, with the
     dosage counting the alt allele -- and drop sites with three or more distinct
-    present alleles, emitting a ``BiallelicOnlyWarning`` with the dropped-site
-    count. For
-    multiallelic data use the allele-index ``HaplotypeMatrix``.
+    present alleles, emitting a ``BiallelicOnlyWarning`` with the
+    dropped-site count. For multiallelic data use the allele-index
+    ``HaplotypeMatrix``.
 
     Parameters
     ----------
@@ -884,23 +884,18 @@ class GenotypeMatrix:
         -------
         GenotypeMatrix
         """
-        xp = cp if self._device == 'GPU' else np
+        if self._device == 'CPU':
+            self.transfer_to_gpu()
         geno = self.genotypes
         valid = geno >= 0
-        geno_clean = xp.where(valid, geno, 0)
-        alt_counts = xp.sum(geno_clean, axis=0)
-        n_valid = xp.sum(valid, axis=0)
+        geno_clean = cp.where(valid, geno, 0)
+        alt_counts = cp.sum(geno_clean, axis=0)
+        n_valid = cp.sum(valid, axis=0)
         max_alt = 2 * n_valid
         keep = (alt_counts > 0) & (alt_counts < max_alt) & (n_valid >= 2)
-
-        if self._device == 'GPU':
-            keep_idx = cp.where(keep)[0]
-            new_geno = self.genotypes[:, keep_idx]
-            new_pos = self.positions[keep_idx]
-        else:
-            keep_np = keep if isinstance(keep, np.ndarray) else keep.get()
-            new_geno = self.genotypes[:, keep_np]
-            new_pos = self.positions[keep_np]
+        keep_idx = cp.where(keep)[0]
+        new_geno = self.genotypes[:, keep_idx]
+        new_pos = self.positions[keep_idx]
 
         return GenotypeMatrix(new_geno, new_pos,
                               self.chrom_start, self.chrom_end,

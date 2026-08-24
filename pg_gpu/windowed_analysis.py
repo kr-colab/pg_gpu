@@ -63,8 +63,7 @@ CANONICAL_WINDOW_PREFIX = (
     'chrom', 'start', 'end', 'center', 'n_variants', 'window_id')
 
 # Number of bins in the windowed daf_hist feature (columns daf_bin_0 ..
-# daf_bin_{_DAF_N_BINS - 1}) emitted by the fused engine. Fixed for now; making
-# it a caller parameter is deferred.
+# daf_bin_{_DAF_N_BINS - 1}) emitted by the fused engine.
 _DAF_N_BINS = 20
 
 
@@ -2025,7 +2024,6 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     hap_raw = matrix.haplotypes
     n_hap = hap_raw.shape[0]
-    n_total_var = hap_raw.shape[1]
     # transpose for coalesced kernel access: (n_total_var, n_hap)
     hap = cp.ascontiguousarray(hap_raw.T.astype(cp.int8))
 
@@ -2285,7 +2283,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     if 'mean_nsl' in statistics:
         from . import selection as sel
-        # matrix is already population-subsetted (line 1533); don't re-subset.
+        # matrix is already population-subsetted upstream; don't re-subset.
         # nSL is scanned once over this whole (eager) matrix, so each per-site
         # score sees the full region before being binned into windows. Over a
         # StreamingHaplotypeMatrix this runs per chunk, truncating the scan at
@@ -3322,9 +3320,9 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
         results['segregating_sites'] = seg_count.get().astype(int)
 
     if 'singletons' in statistics:
-        # Per-allele: derived alleles observed exactly once (unfolded, ==
-        # scalar singleton_count). The old (dac==1)|(dac==n-1) also counted
-        # ancestral-allele singletons (folded).
+        # Per-allele: derived alleles observed exactly once, matching the
+        # unfolded scalar singleton_count; ancestral-allele singletons do
+        # not count.
         n_sing = ((derived == 1).sum(axis=1) if derived.shape[1]
                   else cp.zeros(ac.shape[0], dtype=cp.int64))
         sing = cp.where(has_data, n_sing, 0).astype(cp.float64)
@@ -3342,8 +3340,7 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
 
     if 'tajimas_d' in statistics:
         # numerator = pi - theta_w (per-allele sums); Achaz (2009) variance from
-        # a single n_hap and mutation-count S, matching the scatter engine. (The
-        # effective-n-under-missing-data question is tracked separately.)
+        # a single n_hap and mutation-count S, matching the scatter engine.
         pi_sum_td = _scatter_sum(pi_contrib, bin_idx, n_windows)
         watt_sum_td = _scatter_sum(watt_contrib, bin_idx, n_windows)
         S = seg_count.get()
