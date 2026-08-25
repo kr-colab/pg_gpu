@@ -36,8 +36,13 @@ def parse_region(region):
         chrom, coords = ((None, region) if _BARE_SPAN.match(region)
                          else (region, ''))
     start_s, _, end_s = coords.partition('-')
-    start = int(start_s.replace(',', '')) if start_s else None
-    end = int(end_s.replace(',', '')) if end_s else None
+    try:
+        start = int(start_s.replace(',', '')) if start_s else None
+        end = int(end_s.replace(',', '')) if end_s else None
+    except ValueError:
+        raise ValueError(
+            f"bad region string {region!r}: expected 'chrom', 'chrom:start', "
+            f"or 'chrom:start-end'") from None
     return chrom or None, start, None if end is None else end + 1
 
 

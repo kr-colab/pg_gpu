@@ -278,6 +278,9 @@ class TestRegionQueries:
         assert parse_region("chr1:10-") == ("chr1", 10, None)
         assert parse_region("chr1") == ("chr1", None, None)
         assert parse_region("10-20") == (None, 10, 21)
+        assert parse_region(None) == (None, None, None)
+        with pytest.raises(ValueError, match="bad region string"):
+            parse_region("chr1:abc-def")
 
     @pytest.mark.parametrize("layout", ["vcz_store", "allel_store"])
     def test_open_ended_region(self, layout, request, hm):
