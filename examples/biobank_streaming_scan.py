@@ -212,6 +212,9 @@ def main():
     # subsample from one pop.
     if args.heatmap_region:
         _, lo, hi = parse_region(args.heatmap_region)
+        if lo is None or hi is None:
+            raise SystemExit("--heatmap-region needs both bounds, e.g. "
+                             "'1000000-2000000'")
     else:
         mid = stream.chrom_start + chrom_len // 2
         lo, hi = mid - 500_000, mid + 500_000

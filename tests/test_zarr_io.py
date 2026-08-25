@@ -13,6 +13,8 @@ from pg_gpu.zarr_io import (
     vcf_to_zarr, write_allel, write_vcz,
 )
 
+from .conftest import bgzip_index
+
 
 def _host(arr):
     """Bring an array back to the host for byte-equal comparison. from_zarr
@@ -66,6 +68,20 @@ def _simulate_hm(n_samples=10, seq_length=10_000, seed=42):
 @pytest.fixture
 def hm():
     return _simulate_hm()
+
+
+def _write_multi_contig_vcz(tmp_path):
+    """Two contigs of 50 all-reference sites each: chr1 at 1..50, chr2 at
+    51..100. Returns the store path."""
+    path = str(tmp_path / "multi.vcz.zarr")
+    store = zarr.open(path, mode='w')
+    n = 100
+    store.create_array('call_genotype', data=np.zeros((n, 5, 2), dtype=np.int8))
+    store.create_array('variant_position', data=np.arange(1, n + 1, dtype=np.int32))
+    store.create_array('variant_contig',
+                       data=np.array([0] * 50 + [1] * 50, dtype=np.int8))
+    store.create_array('contig_id', data=np.array(['chr1', 'chr2'], dtype='U'))
+    return path
 
 
 @pytest.fixture
@@ -253,25 +269,44 @@ class TestGenotypeMatrixRoundTrip:
 
 class TestRegionQueries:
 
-    def test_parse_region_is_inclusive_and_returns_half_open(self):
+    def test_parse_region_forms(self):
+        """Every samtools form parses; the end is inclusive and comes back
+        as a half-open stop; an open bound is None."""
         assert parse_region("chr1:10-20") == ("chr1", 10, 21)
+        assert parse_region("chr1:1,000-2,000") == ("chr1", 1000, 2001)
+        assert parse_region("chr1:10") == ("chr1", 10, None)
+        assert parse_region("chr1:10-") == ("chr1", 10, None)
+        assert parse_region("chr1") == ("chr1", None, None)
         assert parse_region("10-20") == (None, 10, 21)
+
+    @pytest.mark.parametrize("layout", ["vcz_store", "allel_store"])
+    def test_open_ended_region(self, layout, request, hm):
+        """'chrom:start' runs from start to the end of the chromosome."""
+        store = request.getfixturevalue(layout)
+        pos = _host(hm.positions)
+        start = int(pos[len(pos) // 2])
+        hm2 = HaplotypeMatrix.from_zarr(store, region=f"chr1:{start}")
+        assert int(_host(hm2.positions)[0]) == start
+        assert hm2.num_variants == int(np.sum(pos >= start))
 
     def test_vcz_multi_contig_no_region_raises(self, tmp_path):
         """Multi-contig VCZ without region should raise."""
-        path = str(tmp_path / "multi.vcz.zarr")
-        store = zarr.open(path, mode='w')
-        n = 100
-        gt = np.zeros((n, 5, 2), dtype=np.int8)
-        pos = np.arange(n, dtype=np.int32)
-        contig = np.array([0] * 50 + [1] * 50, dtype=np.int8)
-        store.create_array('call_genotype', data=gt)
-        store.create_array('variant_position', data=pos)
-        store.create_array('variant_contig', data=contig)
-        store.create_array('contig_id',
-                           data=np.array(['chr1', 'chr2'], dtype='U'))
+        path = _write_multi_contig_vcz(tmp_path)
         with pytest.raises(ValueError, match="contains 2 contigs"):
             HaplotypeMatrix.from_zarr(path)
+
+    def test_vcz_chrom_only_region_selects_contig(self, tmp_path):
+        """'chrom' alone picks that contig; 'chrom:start' runs to its end."""
+        path = _write_multi_contig_vcz(tmp_path)
+        hm = HaplotypeMatrix.from_zarr(path, region='chr2')
+        assert _host(hm.positions).tolist() == list(range(51, 101))
+        hm = HaplotypeMatrix.from_zarr(path, region='chr2:91')
+        assert _host(hm.positions).tolist() == list(range(91, 101))
+
+    def test_grouped_chrom_only_region(self, grouped_store):
+        pos = np.asarray(zarr.open(grouped_store, mode='r')['chr1/variants/POS'][:])
+        hm = HaplotypeMatrix.from_zarr(grouped_store, region='chr1')
+        np.testing.assert_array_equal(_host(hm.positions), pos)
 
     def test_vcz_bad_contig_raises(self, vcz_store):
         with pytest.raises(ValueError, match="not found"):
@@ -396,10 +431,7 @@ class TestVcfToZarr:
         with open(vcf_path, 'w') as f:
             ts.write_vcf(f)
 
-        # bgzip and index
-        import subprocess
-        subprocess.run(['bgzip', vcf_path], check=True)
-        subprocess.run(['tabix', '-p', 'vcf', vcf_path + '.gz'], check=True)
+        bgzip_index(vcf_path)
 
         zarr_path = str(tmp_path / "test.zarr")
         vcf_to_zarr(vcf_path + '.gz', zarr_path,
@@ -422,9 +454,7 @@ class TestVcfToZarr:
         with open(vcf_path, 'w') as f:
             ts.write_vcf(f)
 
-        import subprocess
-        subprocess.run(['bgzip', vcf_path], check=True)
-        subprocess.run(['tabix', '-p', 'vcf', vcf_path + '.gz'], check=True)
+        bgzip_index(vcf_path)
 
         zarr_path = str(tmp_path / "test2.zarr")
         icf_path = str(tmp_path / "custom_icf")
@@ -448,9 +478,7 @@ class TestVcfToZarr:
         with open(vcf_path, 'w') as f:
             ts.write_vcf(f)
 
-        import subprocess
-        subprocess.run(['bgzip', vcf_path], check=True)
-        subprocess.run(['tabix', '-p', 'vcf', vcf_path + '.gz'], check=True)
+        bgzip_index(vcf_path)
 
         zarr_path = str(tmp_path / "test3.zarr")
         HaplotypeMatrix.vcf_to_zarr(

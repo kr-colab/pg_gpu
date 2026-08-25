@@ -296,9 +296,11 @@ def _vcf_header_sample_count(path):
 
 
 def _region_span_bp(region):
-    """Width of a ``'chrom:start-end'`` string in bp, or 0 on a parse
-    failure. Used to decide whether a region argument is small enough
-    that VCF loading is the right tool even on a large file."""
+    """Width of a region string in bp: 0 when there is no region or it
+    does not parse, ``inf`` when it leaves a bound open (a whole
+    chromosome is not a small read). Used to decide whether a region
+    argument is small enough that VCF loading is the right tool even on
+    a large file."""
     if region is None:
         return 0
     from .zarr_io import parse_region
@@ -306,6 +308,8 @@ def _region_span_bp(region):
         _, start, stop = parse_region(region)
     except (ValueError, AttributeError, TypeError):
         return 0
+    if start is None or stop is None:
+        return float('inf')
     return max(0, stop - start)
 
 

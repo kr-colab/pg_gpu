@@ -84,7 +84,9 @@ def _load_ts_input(path, args):
     if args.region:
         # The chrom prefix, if any, is ignored: a tree sequence has one contig.
         _, start, stop = parse_region(args.region)
-        stop = min(stop, int(ts.sequence_length))
+        seq_len = int(ts.sequence_length)
+        start = 0 if start is None else start
+        stop = seq_len if stop is None else min(stop, seq_len)
         ts = ts.keep_intervals([[start, stop]], simplify=True)
 
     hm = HaplotypeMatrix.from_ts(ts, device="GPU")

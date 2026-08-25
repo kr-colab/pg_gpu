@@ -106,6 +106,18 @@ def sample_haplotype_counts():
     }
 
 
+def bgzip_index(vcf_path):
+    """bgzip ``vcf_path`` in place and tabix-index it; returns the ``.gz``
+    path. Skips the calling test when the htslib tools are not on PATH."""
+    import shutil
+    import subprocess
+    if shutil.which("bgzip") is None or shutil.which("tabix") is None:
+        pytest.skip("bgzip/tabix not on PATH")
+    subprocess.run(["bgzip", "-f", vcf_path], check=True)
+    subprocess.run(["tabix", "-f", "-p", "vcf", vcf_path + ".gz"], check=True)
+    return vcf_path + ".gz"
+
+
 def simulate_hm(n_samples=20, seq_length=100_000, seed=42,
                 mutation_model=None):
     """Build a small msprime-derived HaplotypeMatrix for tests.

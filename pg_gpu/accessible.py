@@ -277,6 +277,6 @@ def resolve_streaming_accessible_mask(accessible_bed, source, region=None):
     """
     if accessible_bed is None:
         return None
-    chrom = (parse_region(region)[0] if region else None) or source.chrom
+    chrom = parse_region(region)[0] or source.chrom
     return resolve_accessible_mask(
         accessible_bed, source.mappable_lo, source.mappable_hi - 1, chrom)

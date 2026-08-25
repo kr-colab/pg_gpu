@@ -83,6 +83,7 @@ as well as legacy scikit-allel zarr stores. The format is auto-detected on read.
 
    # Chromosome-grouped stores (e.g., Ag1000G) require a region
    h = HaplotypeMatrix.from_zarr("ag1000g.zarr", region="3L:1-10000000")
+   h = HaplotypeMatrix.from_zarr("ag1000g.zarr", region="3L")  # whole chromosome
 
 **Quick save/reload** (for intermediate results):
 

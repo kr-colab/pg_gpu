@@ -100,6 +100,14 @@ class TestConstruction:
         src = ZarrGenotypeSource(path, region=f"1:{p}-{p}")
         assert set(src.site_pos.tolist()) == {p}
 
+    def test_chrom_only_region_matches_contig_id(self, multi_contig_store):
+        path, _, hm2 = multi_contig_store
+        by_region = ZarrGenotypeSource(path, region="chrB")
+        by_id = ZarrGenotypeSource(path, contig_id="chrB")
+        np.testing.assert_array_equal(by_region.site_pos, by_id.site_pos)
+        np.testing.assert_array_equal(by_region.site_pos, np.asarray(hm2.positions))
+        assert by_region.chrom == "chrB"
+
     def test_multi_contig_requires_pick(self, multi_contig_store):
         path, _, _ = multi_contig_store
         with pytest.raises(ValueError, match="contigs"):
