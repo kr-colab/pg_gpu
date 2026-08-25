@@ -16,6 +16,7 @@ msprime = ">=1.0"
 h5py = ">=3.0"
 tqdm = ">=4.0"
 zarr = ">=2.16"
+dask = ">=2024.1"  # pre-2024 dask imports numpy.compat, removed in numpy 2
 pandoc = ">=3.9.0.2,<4"
 nbsphinx = ">=0.9.8,<0.10"
 
@@ -46,6 +47,8 @@ cuda = "12"
 [feature.dev.dependencies]
 pytest = ">=7.0"
 pytest-xdist = ">=3.0"
+pytest-cov = ">=4.0"
+diff-cover = ">=9.5"
 ipython = ">=8.0"
 ipykernel = ">=6.0"
 ruff = ">=0.4"
@@ -85,3 +88,15 @@ test = { cmd = "pytest tests/ -v" }
 test-parallel = { cmd = "pytest tests/ -v -n 10" }
 lint = { cmd = "ruff check pg_gpu/ tests/ examples/" }
 docs = { cmd = "make html", cwd = "docs" }
+
+# Coverage tooling runs in the moments env (a superset that also exercises the
+# moments-LD parity tests). Run: `pixi run coverage` then
+# `pixi run diff-coverage <base branch>`.
+[feature.moments.tasks]
+coverage = { cmd = "pytest tests/ --slow --cov --cov-report=term-missing --cov-report=html --cov-report=xml -n 10" }
+
+# `base` is substituted unquoted into the shell, so pass a plain git refname;
+# branch names containing shell metacharacters (& ; | ( )) will not work.
+[feature.moments.tasks.diff-coverage]
+cmd = "diff-cover coverage.xml --compare-branch={{ base }} --format html:diff-coverage.html"
+args = [{ arg = "base", default = "origin/main" }]

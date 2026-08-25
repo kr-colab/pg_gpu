@@ -123,9 +123,21 @@ filterwarnings = [
     "ignore::zarr.errors.ZarrDeprecationWarning",
     "ignore:The `compressor` argument is deprecated:UserWarning:zarr",
     # Runtime-visible loader diagnostic; the dedicated tests assert it via local
-    # pytest.warns / simplefilter, which override this global ignore.
-    "ignore::pg_gpu._warnings.BiallelicOnlyWarning",
+    # pytest.warns / simplefilter, which override this global ignore. Matched by
+    # message, not category, so pytest's warnings plugin does not import pg_gpu
+    # before pytest-cov starts measuring (which would drop module-level coverage).
+    "ignore:.* is defined on biallelic sites:UserWarning",
 ]
+
+[tool.coverage.run]
+source = ["pg_gpu"]
+# Record repo-relative file paths in .coverage / coverage.xml instead of
+# absolute ones, so the reports are portable across checkouts and CI (and
+# diff-cover can map the files).
+relative_files = true
+# Measure example scripts that tests launch in a child interpreter; pytest-cov 7
+# no longer instruments subprocesses automatically.
+patch = ["subprocess"]
 
 [tool.ruff]
 line-length = 120

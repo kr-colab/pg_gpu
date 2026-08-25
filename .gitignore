@@ -1,7 +1,6 @@
 
 # pixi environments
 .pixi
-pixi.lock
 *.egg-info
 
 # conda environments
@@ -39,3 +38,10 @@ docs/superpowers/
 # vim for the cool kids
 *.swp
 *.swo
+
+# coverage
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+diff-coverage.html

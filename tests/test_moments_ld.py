@@ -76,7 +76,7 @@ def moments_stats():
     """Compute moments reference stats once for the module."""
     return moments.LD.Parsing.compute_ld_statistics(
         VCF, pop_file=POP_FILE, pops=POPS,
-        bp_bins=BP_BINS, use_genotypes=False, report=False,
+        bp_bins=BP_BINS, use_genotypes=False, use_h5=False, report=False,
     )
 
 
@@ -100,7 +100,7 @@ def moments_stats_geno():
     """moments reference for the unphased genotype estimator."""
     return moments.LD.Parsing.compute_ld_statistics(
         VCF, pop_file=POP_FILE, pops=POPS,
-        bp_bins=BP_BINS, use_genotypes=True, report=False,
+        bp_bins=BP_BINS, use_genotypes=True, use_h5=False, report=False,
     )
 
 
