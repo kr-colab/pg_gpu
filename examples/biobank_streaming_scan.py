@@ -51,6 +51,7 @@ import numpy as np
 import pandas as pd
 
 from pg_gpu import HaplotypeMatrix, sfs, windowed_analysis
+from pg_gpu.zarr_io import parse_region
 
 # Per-window diversity / divergence scales: every bp here must divide
 # the streaming chunk_bp, otherwise the per-chunk windowed_analysis
@@ -78,7 +79,7 @@ def parse_args():
                         "of every window size (default 1 Mb, which "
                         "covers the 10 kb / 100 kb / 1 Mb scales).")
     p.add_argument("--heatmap-region", default=None,
-                   help="region 'start-end' bp to materialize for the "
+                   help="region 'start-end' bp (inclusive ends) to materialize for the "
                         "pairwise-r^2 heatmap (default: 1 Mb at chrom "
                         "midpoint)")
     p.add_argument("--heatmap-subsample", type=int, default=5_000,
@@ -210,7 +211,7 @@ def main():
     # simultaneously, so we materialize it eagerly with a haplotype
     # subsample from one pop.
     if args.heatmap_region:
-        lo, hi = (int(x) for x in args.heatmap_region.split("-"))
+        _, lo, hi = parse_region(args.heatmap_region)
     else:
         mid = stream.chrom_start + chrom_len // 2
         lo, hi = mid - 500_000, mid + 500_000

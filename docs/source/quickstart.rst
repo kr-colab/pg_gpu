@@ -23,7 +23,8 @@ use ``GenotypeMatrix`` (see "Phased to Unphased" below).
    # are loaded as 2*n_samples haplotypes -- treated as phased.
    h = HaplotypeMatrix.from_vcf("data.vcf.gz")
 
-   # Load a specific genomic region (requires tabix index)
+   # Load a region; both ends are inclusive, as in samtools
+   # (requires tabix index)
    h = HaplotypeMatrix.from_vcf("data.vcf.gz", region="chr1:1000000-2000000")
 
    # Load a subset of samples

@@ -38,6 +38,7 @@ import numpy as np
 import seaborn as sns
 
 from pg_gpu import HaplotypeMatrix, diversity, divergence, sfs, windowed_analysis
+from pg_gpu.zarr_io import parse_region
 
 
 VCF_EXTS = (".vcf", ".vcf.gz", ".bcf")
@@ -81,10 +82,10 @@ def _load_ts_input(path, args):
         ts = tskit.load(path)
 
     if args.region:
-        # Accept either 'start-end' or 'chrom:start-end' -- chrom is ignored.
-        rng = args.region.split(":")[-1]
-        start, end = (int(x) for x in rng.split("-"))
-        ts = ts.keep_intervals([[start, end]], simplify=True)
+        # The chrom prefix, if any, is ignored: a tree sequence has one contig.
+        _, start, stop = parse_region(args.region)
+        stop = min(stop, int(ts.sequence_length))
+        ts = ts.keep_intervals([[start, stop]], simplify=True)
 
     hm = HaplotypeMatrix.from_ts(ts, device="GPU")
 

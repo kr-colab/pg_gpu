@@ -301,12 +301,12 @@ def _region_span_bp(region):
     that VCF loading is the right tool even on a large file."""
     if region is None:
         return 0
-    from .zarr_io import _parse_region
+    from .zarr_io import parse_region
     try:
-        _, start, end = _parse_region(region)
+        _, start, stop = parse_region(region)
     except (ValueError, AttributeError, TypeError):
         return 0
-    return max(0, end - start)
+    return max(0, stop - start)
 
 
 def _format_warning_text(path, size_bytes, n_samples):

@@ -471,8 +471,9 @@ class HaplotypeMatrix:
         path : str
             Path to VCF/BCF file (optionally gzipped + tabix-indexed).
         region : str, optional
-            Genomic region to load, e.g. 'chr1:1000000-2000000'.
-            Requires the VCF to be bgzipped and tabix-indexed.
+            Genomic region to load, e.g. 'chr1:1000000-2000000'. Both
+            ends are inclusive, as in samtools. Requires the VCF to be
+            bgzipped and tabix-indexed.
         samples : list of str, optional
             Subset of samples to load. If None, loads all samples.
         include_invariant : bool
@@ -571,7 +572,8 @@ class HaplotypeMatrix:
         path : str
             Path to Zarr store directory.
         region : str, optional
-            Genomic region 'chrom:start-end' to load a subset.
+            Genomic region 'chrom:start-end' to load a subset. Both
+            ends are inclusive, as in samtools.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
         pop_assignment : str, numpy.ndarray, list, dict, or False, optional

@@ -68,7 +68,7 @@ class TestHeaderSampleCount:
 class TestRegionSpan:
 
     def test_parses_chrom_start_end(self):
-        assert _region_span_bp("chr1:1000-5000") == 4000
+        assert _region_span_bp("chr1:1000-5000") == 4001
 
     def test_none_is_zero(self):
         assert _region_span_bp(None) == 0

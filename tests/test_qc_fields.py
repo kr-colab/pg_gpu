@@ -105,7 +105,7 @@ def _write_grouped_with_qc(tmp_path, hm, name="qc_grouped.zarr"):
     gq = rng.integers(0, 99, size=(n_var, n_samples), dtype=np.int16)
     grp.create_array("variants/MQ", data=mq)
     grp.create_array("calldata/GQ", data=gq)
-    region = f"{chrom}:{int(pos[0])}-{int(pos[-1]) + 1}"
+    region = f"{chrom}:{int(pos[0])}-{int(pos[-1])}"
     return path, region, mq, gq
 
 
@@ -207,7 +207,7 @@ class TestHaplotypeMatrixFromZarrFields:
         pos = _host(hm.positions)
         lo = int(pos[len(pos) // 4])
         hi = int(pos[3 * len(pos) // 4])
-        region = f"chr1:{lo}-{hi + 1}"
+        region = f"chr1:{lo}-{hi}"
         loaded = HaplotypeMatrix.from_zarr(
             path, region=region, fields=["MQ", "GQ"], streaming="never")
         n_loaded = loaded.haplotypes.shape[1]

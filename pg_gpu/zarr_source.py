@@ -20,7 +20,7 @@ import cupy as cp
 import numpy as np
 import zarr
 
-from .zarr_io import _parse_region, detect_zarr_layout
+from .zarr_io import _region_mask, detect_zarr_layout, parse_region
 
 
 #: Maximum contiguous-run count before ``slice_subsample_gpu`` falls
@@ -38,8 +38,9 @@ class ZarrGenotypeSource:
     path : str
         Filesystem path to a VCZ zarr store.
     region : str, optional
-        ``'chrom:start-end'`` to restrict the source to a single
-        sub-region. The source is single-contig regardless: a
+        ``'chrom:start-end'`` (both ends inclusive, as in samtools) to
+        restrict the source to a single sub-region. The source is
+        single-contig regardless: a
         multi-contig store without ``region`` raises.
     pop_assignment : str, optional
         Tab-delimited file mapping ``sample`` -> ``pop`` (same format as
@@ -89,14 +90,14 @@ class ZarrGenotypeSource:
         all_pos = np.array(self._store["variant_position"])
 
         if region is not None:
-            chrom, start, end = _parse_region(region)
+            chrom, start, stop = parse_region(region)
             if chrom not in contig_ids:
                 raise ValueError(
                     f"Contig {chrom!r} not found in store. "
                     f"Available: {contig_ids}"
                 )
             contig_idx = contig_ids.index(chrom)
-            mask = (all_contigs == contig_idx) & (all_pos >= start) & (all_pos < end)
+            mask = (all_contigs == contig_idx) & _region_mask(all_pos, start, stop)
         else:
             unique_contigs = np.unique(all_contigs)
             if len(unique_contigs) > 1 and contig_id is None:

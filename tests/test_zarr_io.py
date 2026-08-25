@@ -9,7 +9,7 @@ import cupy as cp
 
 from pg_gpu import HaplotypeMatrix, GenotypeMatrix
 from pg_gpu.zarr_io import (
-    allel_zarr_to_vcz, detect_zarr_layout, read_genotypes,
+    allel_zarr_to_vcz, detect_zarr_layout, parse_region, read_genotypes,
     vcf_to_zarr, write_allel, write_vcz,
 )
 
@@ -253,13 +253,9 @@ class TestGenotypeMatrixRoundTrip:
 
 class TestRegionQueries:
 
-    def test_vcz_region(self, vcz_store, hm):
-        pos = hm.positions
-        mid = int(pos[len(pos) // 2])
-        region = f"chr1:{int(pos[0])}-{mid}"
-        hm2 = HaplotypeMatrix.from_zarr(vcz_store, region=region)
-        assert hm2.num_variants < hm.num_variants
-        assert np.all(hm2.positions < mid)
+    def test_parse_region_is_inclusive_and_returns_half_open(self):
+        assert parse_region("chr1:10-20") == ("chr1", 10, 21)
+        assert parse_region("10-20") == (None, 10, 21)
 
     def test_vcz_multi_contig_no_region_raises(self, tmp_path):
         """Multi-contig VCZ without region should raise."""
@@ -298,12 +294,32 @@ class TestRegionQueries:
         with pytest.raises(ValueError, match="not found"):
             HaplotypeMatrix.from_zarr(grouped_store, region='chrZ:1-100')
 
-    def test_allel_region(self, allel_store, hm):
-        pos = hm.positions
-        mid = int(pos[len(pos) // 2])
-        region = f"chr1:{int(pos[0])}-{mid}"
-        hm2 = HaplotypeMatrix.from_zarr(allel_store, region=region)
+    @pytest.mark.parametrize("layout", ["vcz_store", "allel_store"])
+    def test_region_end_is_inclusive(self, layout, request, hm):
+        """A variant sitting exactly at the region end is kept, as in
+        samtools, tabix, and bcftools."""
+        store = request.getfixturevalue(layout)
+        pos = _host(hm.positions)
+        end = int(pos[len(pos) // 2])
+        hm2 = HaplotypeMatrix.from_zarr(store, region=f"chr1:{int(pos[0])}-{end}")
         assert hm2.num_variants < hm.num_variants
+        assert int(_host(hm2.positions)[-1]) == end
+        assert hm2.num_variants == int(np.sum(pos <= end))
+
+    def test_grouped_region_end_is_inclusive(self, grouped_store):
+        pos = np.asarray(zarr.open(grouped_store, mode='r')['chr1/variants/POS'][:])
+        end = int(pos[len(pos) // 2])
+        hm2 = HaplotypeMatrix.from_zarr(grouped_store,
+                                        region=f"chr1:{int(pos[0])}-{end}")
+        assert int(_host(hm2.positions)[-1]) == end
+
+    @pytest.mark.parametrize("layout", ["vcz_store", "allel_store"])
+    def test_single_position_region(self, layout, request, hm):
+        """'chrom:p-p' names one position rather than an empty interval."""
+        store = request.getfixturevalue(layout)
+        p = int(_host(hm.positions)[3])
+        hm2 = HaplotypeMatrix.from_zarr(store, region=f"chr1:{p}-{p}")
+        assert set(_host(hm2.positions).tolist()) == {p}
 
 
 # ── Missing Data ────────────────────────────────────────────────────────
@@ -539,10 +555,11 @@ class TestAllelZarrToVcz:
         # equivalent positional slice of the source.
         src = zarr.open(allel_store, mode='r')
         src_pos = np.asarray(src['variants/POS'][:])
-        # Pick the middle 50% of the position range.
-        lo = int(np.quantile(src_pos, 0.25))
-        hi = int(np.quantile(src_pos, 0.75))
-        keep = (src_pos >= lo) & (src_pos < hi)
+        # Bound the region by two real variant positions so the
+        # inclusive end is exercised.
+        lo = int(src_pos[len(src_pos) // 4])
+        hi = int(src_pos[3 * len(src_pos) // 4])
+        keep = (src_pos >= lo) & (src_pos <= hi)
 
         out = str(tmp_path / "region.vcz")
         allel_zarr_to_vcz(allel_store, out, contig='chr1',
