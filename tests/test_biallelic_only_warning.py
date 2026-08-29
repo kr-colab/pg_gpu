@@ -63,7 +63,9 @@ def test_is_userwarning_subclass():
 
 
 def test_helper_warns_with_count_and_context():
-    with pytest.warns(BiallelicOnlyWarning, match=r"foo\.bar .*3 multiallelic site\(s\) dropped"):
+    # The full phrase is what pyproject.toml's error filter matches on.
+    with pytest.warns(BiallelicOnlyWarning,
+                      match=r"foo\.bar is defined on biallelic sites; 3 multiallelic site\(s\) dropped"):
         _warn_biallelic_only(3, context="foo.bar")
 
 

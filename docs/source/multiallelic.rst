@@ -191,8 +191,9 @@ Two orthogonal filters are available. ``restrict_to_biallelic()`` (on a
 ``HaplotypeMatrix``) keeps sites with at most two distinct present alleles,
 leaving the allele codes unchanged -- so ``{0,1}``, ``{0,2}`` and
 reference-absent ``{1,2}`` sites are all retained -- and drops sites with three
-or more alleles with a ``BiallelicOnlyWarning``. The LD statistics are defined on
-biallelic sites and apply this themselves, so you rarely need to call it directly:
+or more alleles without warning. The LD statistics are defined on biallelic
+sites and apply it themselves, warning when they do, so you rarely need to call
+it directly:
 
 .. code-block:: python
 

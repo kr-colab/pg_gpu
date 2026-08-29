@@ -13,13 +13,10 @@ from pg_gpu.zarr_source import ZarrGenotypeSource
 from .conftest import simulate_hm
 
 
-def _simulate_hm(n_samples=20, seq_length=50_000, seed=42):
-    return simulate_hm(n_samples=n_samples, seq_length=seq_length, seed=seed)
-
-
 @pytest.fixture
 def vcz_store(tmp_path):
-    hm = _simulate_hm()
+    hm = simulate_hm(n_samples=20, seq_length=50_000, seed=42,
+                     mutation_model='binary')
     hm.samples = [f"s{i}" for i in range(hm.num_haplotypes // 2)]
     path = str(tmp_path / "stream.vcz")
     hm.to_zarr(path, format="vcz", contig_name="1")
@@ -375,11 +372,8 @@ class TestMaterialize:
     def test_pairwise_r2_via_materialize(self, vcz_store):
         # The intended user pattern: streaming hm -> .materialize(region=)
         # -> pairwise_r2(). Asserts the composition produces an (n_var x n_var)
-        # matrix with the kernel's diagonal zeroed. The msprime fixture uses the
-        # default Jukes-Cantor model, so it has multiallelic sites: pairwise_r2 is
-        # biallelic-only and returns NaN for their rows/cols, while the biallelic
-        # pairs stay finite. The composition is what this test is for; the r2
-        # numerics are validated elsewhere.
+        # matrix with the kernel's diagonal zeroed. The composition is what this
+        # test is for; the r2 numerics are validated elsewhere.
         path, _ = vcz_store
         stream = HaplotypeMatrix.from_zarr(path, streaming="always",
                                             chunk_bp=5_000)

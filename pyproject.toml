@@ -122,11 +122,11 @@ filterwarnings = [
     "ignore::zarr.errors.UnstableSpecificationWarning",
     "ignore::zarr.errors.ZarrDeprecationWarning",
     "ignore:The `compressor` argument is deprecated:UserWarning:zarr",
-    # Runtime-visible loader diagnostic; the dedicated tests assert it via local
-    # pytest.warns / simplefilter, which override this global ignore. Matched by
-    # message, not category, so pytest's warnings plugin does not import pg_gpu
-    # before pytest-cov starts measuring (which would drop module-level coverage).
-    "ignore:.* is defined on biallelic sites:UserWarning",
+    # A multiallelic drop must be expected by the test that triggers it; any
+    # other drop fails the test. Matched by message, not category, so pytest's
+    # warnings plugin does not import pg_gpu before pytest-cov starts measuring
+    # (which would drop module-level coverage); a test pins the phrase.
+    "error:.* is defined on biallelic sites:UserWarning",
 ]
 
 [tool.coverage.run]

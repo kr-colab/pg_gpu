@@ -13,7 +13,7 @@ import cupy as cp
 import pytest
 import msprime
 
-from pg_gpu import HaplotypeMatrix, GenotypeMatrix, BiallelicOnlyWarning
+from pg_gpu import HaplotypeMatrix, GenotypeMatrix, BiallelicOnlyWarning, divergence
 from pg_gpu.ld_statistics import zns, omega
 
 
@@ -79,9 +79,10 @@ class TestRestrictMethods:
         # an all-multiallelic matrix has no biallelic sites: zns/omega return
         # their too-few-sites value (0.0) instead of raising "genotypes cannot
         # be empty" on the empty filter output
-        for est in ('auto', 'r2'):
-            assert zns(_hm(multi), estimator=est) == 0.0
-            assert omega(_hm(multi), estimator=est) == 0.0
+        with pytest.warns(BiallelicOnlyWarning):
+            for est in ('auto', 'r2'):
+                assert zns(_hm(multi), estimator=est) == 0.0
+                assert omega(_hm(multi), estimator=est) == 0.0
 
     def test_indicator_identity_and_recode(self):
         base = [[0, 0, 1], [1, 2, 2], [0, 0, 1], [1, 2, 2]]  # {0,1},{0,2},{1,2}
@@ -144,6 +145,7 @@ class TestGeneralCodingEquivalence:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.filterwarnings("ignore::pg_gpu._warnings.BiallelicOnlyWarning")
 class TestKeepShapeOutOfDomain:
 
     def _data(self):
@@ -182,6 +184,14 @@ class TestKeepShapeOutOfDomain:
 # ---------------------------------------------------------------------------
 
 
+def _with_two_pops(hm):
+    """Split the rows into two named populations for the composite statistics."""
+    half = hm.num_haplotypes // 2
+    hm.sample_sets = {'pop1': list(range(half)),
+                      'pop2': list(range(half, hm.num_haplotypes))}
+    return hm
+
+
 class TestWarning:
 
     def _multi(self, n_multi):
@@ -200,6 +210,7 @@ class TestWarning:
         lambda hm: zns(hm, estimator='r2'),
         lambda hm: omega(hm, estimator='r2'),
         lambda hm: hm.windowed_r_squared([0, 6000, 13000]),
+        lambda hm: divergence.zx(_with_two_pops(hm), 'pop1', 'pop2'),
     ])
     def test_warns_once(self, fn):
         with warnings.catch_warnings(record=True) as w:

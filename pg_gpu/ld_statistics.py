@@ -703,23 +703,20 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     -------
     float
         Mean r-squared (or mean sigma_D^2 when sigma_d2 is selected).
+
+    Notes
+    -----
+    A ``HaplotypeMatrix`` is first restricted to its own biallelic sites and
+    a ``BiallelicOnlyWarning`` reports how many were dropped; an input that
+    is already biallelic drops nothing and stays silent.
     """
     from .haplotype_matrix import HaplotypeMatrix
 
-    is_hm = isinstance(r2_matrix_or_matrix, HaplotypeMatrix)
-    estimator = _resolve_ld_estimator(estimator, is_hm)
-
-    # Map estimator to internal missing_data for backward compat with _zns_tiled
-    _md = 'project' if estimator == 'sigma_d2' else missing_data
-
-    # Streaming path for HaplotypeMatrix: O(B²) memory instead of O(m²)
-    if is_hm:
-        from ._warnings import _warn_biallelic_only
-        biallelic = r2_matrix_or_matrix.restrict_to_biallelic()
-        _warn_biallelic_only(
-            r2_matrix_or_matrix.num_variants - biallelic.num_variants,
-            context="zns")
-        return _zns_tiled(biallelic, _md)
+    if isinstance(r2_matrix_or_matrix, HaplotypeMatrix):
+        # Tiled path: O(B²) memory instead of O(m²).
+        biallelic = r2_matrix_or_matrix.restrict_to_biallelic(warn_context="zns")
+        return _zns_biallelic(biallelic, missing_data, estimator)
+    estimator = _resolve_ld_estimator(estimator, False)
 
     if estimator == 'sigma_d2':
         raise ValueError(
@@ -736,6 +733,15 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
         return 0.0
     total = cp.sum(r2_matrix) - cp.trace(r2_matrix)
     return float((total / (m * (m - 1))).get())
+
+
+def _zns_biallelic(hm, missing_data='include', estimator='auto'):
+    """``zns`` for a HaplotypeMatrix already restricted to biallelic sites:
+    no second restriction and no warning. ``divergence.zx`` restricts once
+    and calls this for each of its three terms."""
+    estimator = _resolve_ld_estimator(estimator, True)
+    # 'project' selects the sigma_d2 estimator inside _zns_tiled.
+    return _zns_tiled(hm, 'project' if estimator == 'sigma_d2' else missing_data)
 
 
 def _build_sigma_d2_matrix(mat, missing_data='include'):
@@ -799,6 +805,12 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     -------
     float
         Maximum omega value. Returns 0 if fewer than 5 SNPs.
+
+    Notes
+    -----
+    A ``HaplotypeMatrix`` is first restricted to its own biallelic sites and
+    a ``BiallelicOnlyWarning`` reports how many were dropped; an input that
+    is already biallelic drops nothing and stays silent.
     """
     from .haplotype_matrix import HaplotypeMatrix
 
@@ -806,12 +818,8 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     estimator = _resolve_ld_estimator(estimator, is_hm)
 
     if is_hm:
-        from ._warnings import _warn_biallelic_only
-        biallelic = r2_matrix_or_matrix.restrict_to_biallelic()
-        _warn_biallelic_only(
-            r2_matrix_or_matrix.num_variants - biallelic.num_variants,
-            context="omega")
-        r2_matrix_or_matrix = biallelic
+        r2_matrix_or_matrix = r2_matrix_or_matrix.restrict_to_biallelic(
+            warn_context="omega")
 
     if estimator == 'sigma_d2':
         if not is_hm:
