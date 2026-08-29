@@ -53,7 +53,8 @@ def parse_args():
                    help="path to VCF (.vcf, .vcf.gz, .bcf), zarr store, "
                         "or tree sequence (.trees, .tsz)")
     p.add_argument("--region",
-                   help="genomic region. VCF/zarr: '3R' or '3R:1-5000000'. "
+                   help="genomic region, both ends inclusive as in samtools. "
+                        "VCF/zarr: '3R', '3R:1000000', or '3R:1-5000000'. "
                         "Tree sequence: 'start-end' (chrom prefix optional, ignored)")
     p.add_argument("--pop-file",
                    help="tab-delimited file (sample, pop) -- VCF/zarr only")

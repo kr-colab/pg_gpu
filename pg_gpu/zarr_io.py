@@ -10,7 +10,7 @@ import numpy as np
 
 # A colon-less string is a bare span ('1000-2000') only if it looks like
 # one; anything else is a chromosome name.
-_BARE_SPAN = re.compile(r'^[\d,]+-[\d,]*$')
+_BARE_SPAN = re.compile(r'^[\d,_]+-[\d,_]*$')
 
 
 def parse_region(region):
@@ -18,7 +18,8 @@ def parse_region(region):
 
     Accepts the forms samtools, tabix, and bcftools do: ``'chrom'``,
     ``'chrom:start'``, ``'chrom:start-'``, and ``'chrom:start-end'``, with
-    optional thousands separators (``'chr1:1,000-2,000'``). Both ends are
+    optional thousands separators, comma or underscore
+    (``'chr1:1,000-2,000'``, ``'chr1:1_000-2_000'``). Both ends are
     inclusive, so ``'X:500-500'`` names one position. A bare
     ``'start-end'`` span with no chromosome is also accepted and returns
     ``chrom=None``.

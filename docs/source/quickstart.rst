@@ -85,6 +85,22 @@ as well as legacy scikit-allel zarr stores. The format is auto-detected on read.
    h = HaplotypeMatrix.from_zarr("ag1000g.zarr", region="3L:1-10000000")
    h = HaplotypeMatrix.from_zarr("ag1000g.zarr", region="3L")  # whole chromosome
 
+**Region strings** follow samtools, tabix, and bcftools, and every loader
+takes the same forms:
+
+* ``"3L"`` -- a whole chromosome, and the way to pick one contig out of a
+  multi-contig store.
+* ``"3L:1000000"`` or ``"3L:1000000-"`` -- from a position to the end of
+  the chromosome.
+* ``"3L:1000000-2000000"`` -- both ends inclusive, so a variant at
+  2,000,000 is kept.
+* Thousands separators are allowed: ``"3L:1,000,000-2,000,000"``.
+
+The ``(left, right)`` tuple that ``materialize`` takes and the windows
+``windowed_analysis`` returns stay half-open.
+``pg_gpu.zarr_io.parse_region`` turns a region string into that half-open
+form.
+
 **Quick save/reload** (for intermediate results):
 
 .. code-block:: python

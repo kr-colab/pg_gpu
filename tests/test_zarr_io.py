@@ -274,6 +274,7 @@ class TestRegionQueries:
         as a half-open stop; an open bound is None."""
         assert parse_region("chr1:10-20") == ("chr1", 10, 21)
         assert parse_region("chr1:1,000-2,000") == ("chr1", 1000, 2001)
+        assert parse_region("1_000-2_000") == (None, 1000, 2001)
         assert parse_region("chr1:10") == ("chr1", 10, None)
         assert parse_region("chr1:10-") == ("chr1", 10, None)
         assert parse_region("chr1") == ("chr1", None, None)

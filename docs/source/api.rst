@@ -17,6 +17,15 @@ GenotypeMatrix
    :undoc-members:
    :show-inheritance:
 
+Region strings
+--------------
+
+Every loader that takes ``region=`` parses it with this function: a whole
+contig (``'3L'``), an open end (``'3L:1000000'``), or both ends inclusive
+(``'3L:1-2000000'``).
+
+.. autofunction:: pg_gpu.zarr_io.parse_region
+
 Biobank-Scale Streaming
 -----------------------
 
@@ -56,8 +65,6 @@ diploid genotypes; haploid and polyploid stores are rejected.
 .. autoclass:: pg_gpu.streaming_matrix.HostChunkFetcher
    :members: iter_chunks
    :show-inheritance:
-
-.. autofunction:: pg_gpu.zarr_io.parse_region
 
 .. autofunction:: pg_gpu.zarr_io.allel_zarr_to_vcz
 
