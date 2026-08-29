@@ -44,7 +44,7 @@ python -m pip install -e ".[dev]"
 ```python
 from pg_gpu import HaplotypeMatrix, diversity, divergence, selection, sfs
 
-# Load from VCF
+# Load from VCF. Region strings are samtools-style; both ends are inclusive.
 hm = HaplotypeMatrix.from_vcf("data.vcf.gz", region="chr1:1-1000000")
 hm.load_pop_file("populations.txt")
 

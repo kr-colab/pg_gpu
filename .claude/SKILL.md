@@ -89,6 +89,9 @@ HaplotypeMatrix.vcf_to_zarr("data.vcf.gz", "data.zarr", worker_processes=8)
 # always pass streaming='auto' unless you've confirmed the materialized
 # matrix fits in <50% of free GPU memory -- see the next section.
 h = HaplotypeMatrix.from_zarr("data.zarr", streaming='auto')
+# Region strings are samtools-style: 'chr1' (whole contig, and how to pick
+# one out of a multi-contig store), 'chr1:5000' (position to contig end),
+# 'chr1:1-5000000' (both ends inclusive). Thousands separators are allowed.
 h = HaplotypeMatrix.from_zarr("data.zarr", region="chr1:1-5000000",
                               streaming='auto')
 ```

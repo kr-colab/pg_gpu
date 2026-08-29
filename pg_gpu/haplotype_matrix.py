@@ -1346,7 +1346,7 @@ class HaplotypeMatrix:
             > total genomic span > callable span
             'accessible' - Use accessible base count from mask (error if
             no mask set)
-            'per_base' - Use total genomic span (chrom_end - chrom_start)
+            'per_base' - Use total genomic span (chrom_end - chrom_start + 1)
             'per_variant' - Use number of variant sites
             'callable' - Use span from first to last variant position
             'total' - Alias for 'per_base' (backward compatibility)

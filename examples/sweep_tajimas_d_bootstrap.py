@@ -110,10 +110,12 @@ def main() -> None:
     print(f"  n_haplotypes={hap.shape[0]}  n_variants={hap.shape[1]}")
 
     # Build a HaplotypeMatrix from raw numpy. The constructor takes the
-    # (n_haplotypes, n_variants) matrix, variant positions, and the genomic
-    # region bounds [start, stop). For real data, prefer the loader class
-    # methods: HaplotypeMatrix.from_vcf / from_zarr / from_ts.
-    hm = HaplotypeMatrix(hap, positions, 0, SEQ_LEN)
+    # (n_haplotypes, n_variants) matrix, variant positions, and the
+    # chromosome bounds chrom_start / chrom_end, both inclusive, so the last
+    # base of a SEQ_LEN simulation is SEQ_LEN - 1 (as from_ts records it).
+    # For real data, prefer the loader class methods:
+    # HaplotypeMatrix.from_vcf / from_zarr / from_ts.
+    hm = HaplotypeMatrix(hap, positions, 0, SEQ_LEN - 1)
 
     # windowed_analysis runs one fused GPU kernel across all windows and
     # returns a pandas DataFrame with one row per window. Columns include

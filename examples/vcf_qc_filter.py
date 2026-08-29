@@ -65,9 +65,10 @@ def main():
                    help=f"Source VCZ (default: {DEFAULT_SRC}). "
                         "Any VCZ from bio2zarr will work.")
     p.add_argument("--region", type=str, default="X:1000000-5000000",
-                   help="chrom:start-end window of the source to load. "
-                        "Keep it under ~5 Mb to fit comfortably in memory; "
-                        "the full chromosome is 25 Mb / 5.3M variants.")
+                   help="chrom:start-end window of the source to load, both "
+                        "ends inclusive as in samtools. Keep it under ~5 Mb to "
+                        "fit comfortably in memory; the full chromosome is "
+                        "25 Mb / 5.3M variants.")
     p.add_argument("--min-ac", type=int, default=4,
                    help="Drop variants whose allele count is below this. "
                         "AC=1 are singletons, AC=2 doubletons; default 4 "
