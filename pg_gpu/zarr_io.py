@@ -2,16 +2,95 @@
 
 import os
 import shutil
+import re
 import sys
 
 import numpy as np
 
 
-def _parse_region(region):
-    """Parse 'chrom:start-end' into (chrom, start, end)."""
-    chrom, coords = region.split(':')
-    start, end = [int(x) for x in coords.split('-')]
-    return chrom, start, end
+# A colon-less string is a bare span ('1000-2000') only if it looks like
+# one; anything else is a chromosome name.
+_BARE_SPAN = re.compile(r'^[\d,]+-[\d,]*$')
+
+
+def parse_region(region):
+    """Parse a samtools-style region string into ``(chrom, start, stop)``.
+
+    Accepts the forms samtools, tabix, and bcftools do: ``'chrom'``,
+    ``'chrom:start'``, ``'chrom:start-'``, and ``'chrom:start-end'``, with
+    optional thousands separators (``'chr1:1,000-2,000'``). Both ends are
+    inclusive, so ``'X:500-500'`` names one position. A bare
+    ``'start-end'`` span with no chromosome is also accepted and returns
+    ``chrom=None``.
+
+    The returned ``stop`` is ``end + 1``, so ``(start, stop)`` is the
+    half-open interval the rest of pg_gpu works in (``slice_region``,
+    ``materialize``, windows) and ``positions < stop`` is the right test.
+    A bound the string leaves open is ``None``, and ``None`` itself
+    parses to ``(None, None, None)``.
+    """
+    if region is None:
+        return None, None, None
+    chrom, sep, coords = region.rpartition(':')
+    if not sep:
+        chrom, coords = ((None, region) if _BARE_SPAN.match(region)
+                         else (region, ''))
+    start_s, _, end_s = coords.partition('-')
+    try:
+        start = int(start_s.replace(',', '')) if start_s else None
+        end = int(end_s.replace(',', '')) if end_s else None
+    except ValueError:
+        raise ValueError(
+            f"bad region string {region!r}: expected 'chrom', 'chrom:start', "
+            f"or 'chrom:start-end'") from None
+    return chrom or None, start, None if end is None else end + 1
+
+
+def _region_mask(positions, start, stop):
+    """Boolean mask of ``positions`` inside the half-open ``[start, stop)``;
+    a ``None`` bound is open on that side."""
+    if start is None and stop is None:
+        return np.ones(len(positions), dtype=bool)
+    if start is None:
+        return positions < stop
+    if stop is None:
+        return positions >= start
+    return (positions >= start) & (positions < stop)
+
+
+def _vcz_contig_index(store, contig_arr, chrom):
+    """``(index, name)`` of ``chrom`` in a VCZ store's contig table, or of
+    the only contig with variants when ``chrom`` is ``None``.
+
+    Raises ``ValueError`` for an unknown name, or for ``None`` on a store
+    whose variants span more than one contig.
+    """
+    contig_ids = list(np.array(store['contig_id']))
+    if chrom is not None:
+        if chrom not in contig_ids:
+            raise ValueError(f"Contig {chrom!r} not found. Available: {contig_ids}")
+        idx = contig_ids.index(chrom)
+    elif contig_arr.size == 0:
+        idx = 0
+    else:
+        # min and max settle the single-contig case without sorting a
+        # copy of the whole variant axis.
+        idx = int(contig_arr.min())
+        if int(contig_arr.max()) != idx:
+            names = [contig_ids[i] for i in np.unique(contig_arr)]
+            raise ValueError(
+                f"Store contains {len(names)} contigs: {names}. "
+                "Pass region='chrom' or region='chrom:start-end' to select one."
+            )
+    return idx, (contig_ids[idx] if idx < len(contig_ids) else None)
+
+
+def _allel_group(store, chrom):
+    """The chromosome group ``chrom`` of a grouped scikit-allel store."""
+    if chrom is None or chrom not in store:
+        available = [k for k in store if hasattr(store[k], 'keys')]
+        raise ValueError(f"Chromosome {chrom!r} not found. Available: {available}")
+    return store[chrom]
 
 
 def normalize_pop_input(pop_assignment, *, zarr_path, sample_names,
@@ -144,7 +223,8 @@ def read_genotypes_vcz(store, region=None):
     store : zarr.Group
         Opened VCZ zarr store.
     region : str, optional
-        Genomic region 'chrom:start-end'.
+        Genomic region string; see ``parse_region`` for the accepted
+        forms.
 
     Returns
     -------
@@ -156,17 +236,14 @@ def read_genotypes_vcz(store, region=None):
         same indices to keep their slices aligned with the genotype
         matrix.
     """
+    contig_arr = np.array(store['variant_contig'])
+    chrom, start, stop = parse_region(region)
+    # On a whole-store read this call is the multi-contig guard: a store
+    # spanning several contigs needs a region to name one.
+    contig_idx, _ = _vcz_contig_index(store, contig_arr, chrom)
     if region is not None:
-        chrom, start, end = _parse_region(region)
-        contig_ids = list(np.array(store['contig_id']))
-        if chrom not in contig_ids:
-            raise ValueError(
-                f"Contig '{chrom}' not found. Available: {contig_ids}"
-            )
-        contig_idx = contig_ids.index(chrom)
-        contig_arr = np.array(store['variant_contig'])
         pos_arr = np.array(store['variant_position'])
-        mask = (contig_arr == contig_idx) & (pos_arr >= start) & (pos_arr < end)
+        mask = (contig_arr == contig_idx) & _region_mask(pos_arr, start, stop)
         indices = np.where(mask)[0]
         if len(indices) == 0:
             raise ValueError(f"No variants in region {region}")
@@ -174,15 +251,6 @@ def read_genotypes_vcz(store, region=None):
         positions = pos_arr[indices]
         variant_indices = indices
     else:
-        contig_arr = np.array(store['variant_contig'])
-        unique_contigs = np.unique(contig_arr)
-        if len(unique_contigs) > 1:
-            contig_ids = list(np.array(store['contig_id']))
-            names = [contig_ids[i] for i in unique_contigs]
-            raise ValueError(
-                f"Store contains {len(unique_contigs)} contigs: {names}. "
-                "Specify region='chrom:start-end' to select one."
-            )
         gt = np.array(store['call_genotype'])
         positions = np.array(store['variant_position'])
         variant_indices = None
@@ -221,8 +289,8 @@ def read_qc_fields(zarr_path, fields, variant_indices=None, region=None):
             # have already raised; return empty rather than introducing a
             # second error message.
             return {}
-        chrom = region.split(':')[0]
-        return _read_qc_fields_allel(store[chrom], fields, variant_indices)
+        return _read_qc_fields_allel(_allel_group(store, parse_region(region)[0]),
+                                     fields, variant_indices)
     return _read_qc_fields_allel(store, fields, variant_indices)
 
 
@@ -280,7 +348,8 @@ def read_genotypes_allel(store, region=None):
     store : zarr.Group
         Opened scikit-allel zarr store.
     region : str, optional
-        Genomic region 'chrom:start-end'.
+        Genomic region string; see ``parse_region`` for the accepted
+        forms.
 
     Returns
     -------
@@ -297,8 +366,8 @@ def read_genotypes_allel(store, region=None):
     variant_indices = None
 
     if region is not None:
-        _, start, end = _parse_region(region)
-        mask = (positions >= start) & (positions < end)
+        _, start, stop = parse_region(region)
+        mask = _region_mask(positions, start, stop)
         variant_indices = np.where(mask)[0]
         positions = positions[mask]
         gt = gt[mask]
@@ -317,31 +386,28 @@ def read_genotypes_allel_grouped(store, region):
     store : zarr.Group
         Opened zarr store with chromosome-level groups.
     region : str
-        Genomic region 'chrom:start-end'. Required for grouped stores.
+        Genomic region string; see ``parse_region`` for the accepted
+        forms.
+        Required for grouped stores.
 
     Returns
     -------
     dict
         Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples'.
     """
-    if region is None:
+    chrom, start, stop = parse_region(region)
+    if chrom is None:
         available = [k for k in store if hasattr(store[k], 'keys')]
         raise ValueError(
-            f"Grouped zarr store requires region='chrom:start-end'. "
-            f"Available groups: {available}"
+            f"Grouped zarr store requires region='chrom' or "
+            f"'chrom:start-end'. Available groups: {available}"
         )
-    chrom, start, end = _parse_region(region)
-    if chrom not in store:
-        available = [k for k in store if hasattr(store[k], 'keys')]
-        raise ValueError(
-            f"Chromosome '{chrom}' not found. Available: {available}"
-        )
-    grp = store[chrom]
+    grp = _allel_group(store, chrom)
     positions = np.array(grp['variants/POS'])
     gt = np.array(grp['calldata/GT'])
     samples = list(np.array(grp['samples'])) if 'samples' in grp else None
 
-    mask = (positions >= start) & (positions < end)
+    mask = _region_mask(positions, start, stop)
     variant_indices = np.where(mask)[0]
     positions = positions[mask]
     gt = gt[mask]
@@ -456,8 +522,9 @@ def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,
         the source is grouped and ``region`` does not name a contig.
         For flat stores, used as the ``contig_id`` label in the output.
     region : str, optional
-        ``"chrom:start-end"`` (or ``"start-end"`` on a flat store)
-        restricting the conversion to a position range.
+        Region string restricting the conversion to a position range;
+        see ``parse_region`` for the accepted forms, including a bare
+        ``"start-end"`` on a flat store.
     variant_chunk : int
         Source variants read per streaming pass. Larger amortizes zarr
         read overhead; smaller bounds host RAM at biobank sample counts.
@@ -489,11 +556,11 @@ def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,
             f"Expected scikit-allel layout at {allel_path}, got {layout}"
         )
 
+    chrom_from_region, lo, stop = parse_region(region)
+
     # Resolve which chromosome group to read (grouped) or use the root
     # (flat); derive the contig label that goes into the output.
     if layout == 'scikit-allel-grouped':
-        chrom_from_region = (region.split(':', 1)[0]
-                              if region and ':' in region else None)
         contig = contig or chrom_from_region
         if contig is None:
             available = [k for k in src if hasattr(src[k], 'keys')]
@@ -501,7 +568,7 @@ def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,
                 f"Grouped allel store requires contig=... "
                 f"Available: {available}"
             )
-        src_grp = src[contig]
+        src_grp = _allel_group(src, contig)
     else:
         src_grp = src
         if contig is None:
@@ -512,13 +579,13 @@ def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,
     n_var, n_samp, ploidy = gt_arr.shape
 
     if region:
-        span = region.split(':', 1)[-1] if ':' in region else region
-        lo, hi = (int(x) for x in span.split('-'))
         # Loading positions in full is fine -- they're int32, so even a
         # human-genome-scale chromosome (~10 M sites) is ~40 MB.
         pos_host = np.asarray(pos_arr[:])
-        lo_idx = int(np.searchsorted(pos_host, lo, side='left'))
-        hi_idx = int(np.searchsorted(pos_host, hi, side='left'))
+        lo_idx = (0 if lo is None
+                  else int(np.searchsorted(pos_host, lo, side='left')))
+        hi_idx = (n_var if stop is None
+                  else int(np.searchsorted(pos_host, stop, side='left')))
         if lo_idx == hi_idx:
             raise ValueError(f"No variants in region {region}")
         pos_out = pos_host[lo_idx:hi_idx]
@@ -598,7 +665,8 @@ def read_genotypes(path, region=None):
     path : str
         Path to zarr store directory.
     region : str, optional
-        Genomic region 'chrom:start-end'.
+        Genomic region string; see ``parse_region`` for the accepted
+        forms.
 
     Returns
     -------

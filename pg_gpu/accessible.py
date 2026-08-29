@@ -6,6 +6,8 @@ boolean array with offset-aware, O(1) range queries via prefix sums.
 
 import numpy as np
 
+from .zarr_io import parse_region
+
 
 class AccessibleMask:
     """Dense boolean mask over genomic coordinates with fast range queries.
@@ -265,7 +267,8 @@ def resolve_streaming_accessible_mask(accessible_bed, source, region=None):
     source : ZarrGenotypeSource
         Streaming source; supplies ``mappable_lo``/``mappable_hi``/``chrom``.
     region : str, optional
-        ``"chrom:start-end"`` region string; its contig overrides
+        ``"chrom:start-end"`` region string (both ends inclusive, as in
+        samtools); its contig overrides
         ``source.chrom`` for matching a BED file's contig name.
 
     Returns
@@ -274,6 +277,6 @@ def resolve_streaming_accessible_mask(accessible_bed, source, region=None):
     """
     if accessible_bed is None:
         return None
-    chrom = region.split(':')[0] if region else source.chrom
+    chrom = parse_region(region)[0] or source.chrom
     return resolve_accessible_mask(
         accessible_bed, source.mappable_lo, source.mappable_hi - 1, chrom)

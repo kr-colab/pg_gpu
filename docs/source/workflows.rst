@@ -64,7 +64,8 @@ The ``--pop-file`` argument expects a tab-delimited file with columns
 Arguments:
 
 * ``input`` -- VCF (``.vcf``, ``.vcf.gz``, ``.bcf``) or zarr store.
-* ``--region`` -- chromosome or ``chrom:start-end``.
+* ``--region`` -- chromosome or ``chrom:start-end``, both ends inclusive
+  as in samtools.
 * ``--pop-file`` -- tab-delimited (sample, pop). Optional.
 * ``--accessible-bed`` -- BED file of accessible regions. Optional.
 * ``--window-size`` -- bp window size (default: 100,000).

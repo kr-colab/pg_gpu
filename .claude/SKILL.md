@@ -58,7 +58,7 @@ set it for analysis runs.
 # Basic load
 h = HaplotypeMatrix.from_vcf("data.vcf.gz")
 
-# Specific region (requires .tbi index)
+# Specific region; both ends inclusive, as in samtools (requires .tbi index)
 h = HaplotypeMatrix.from_vcf("data.vcf.gz", region="chr1:1000000-2000000")
 
 # Subset of samples

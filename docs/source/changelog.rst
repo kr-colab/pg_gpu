@@ -71,6 +71,19 @@ Read this section if you are comparing against older pg_gpu results.
   ``sample_sets`` built by ``load_pop_file`` now lists ``2i`` and
   ``2i + 1`` for each member, and hand-written index lists that assumed
   the previous order need updating.
+* Region strings now include their end position, matching samtools,
+  tabix, and bcftools: ``region='X:1-1000000'`` keeps a variant at
+  1,000,000, and ``'X:500-500'`` names one position. The zarr loaders,
+  ``ZarrGenotypeSource``, and ``allel_zarr_to_vcz`` used to stop one
+  base short, so a variant on the window edge went missing;
+  ``from_vcf`` reads through tabix and was already inclusive. The
+  ``materialize(region=(left, right))`` tuple and windowed analysis
+  are unchanged: those intervals stay half-open, and
+  ``pg_gpu.zarr_io.parse_region`` turns a region string into that
+  half-open form. Every loader also takes the other samtools forms now:
+  ``'X'`` selects a whole chromosome from a multi-contig store,
+  ``'X:1000'`` runs from a position to the chromosome end, and
+  thousands separators (``'X:1,000-2,000'``) are allowed.
 * Row lists are validated at assignment and at resolution: assigning
   ``sample_sets`` and passing a row list as a population argument both
   raise ``ValueError`` for out-of-range or duplicated rows instead of

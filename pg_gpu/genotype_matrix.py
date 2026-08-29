@@ -10,6 +10,7 @@ import cupy as cp
 from typing import Optional
 
 from .accessible import AccessibleMask, resolve_accessible_mask
+from .zarr_io import parse_region
 
 
 def _biallelic_and_alt(ac):
@@ -607,7 +608,7 @@ class GenotypeMatrix:
                                source=f"zarr store '{path}'")
 
         n_total_sites = gt.shape[0] if include_invariant else None
-        chrom = region.split(':')[0] if region else None
+        chrom = parse_region(region)[0]
 
         gm = build_genotype_matrix(
             gt, positions,

@@ -90,7 +90,23 @@ class TestConstruction:
         first_half = full.site_pos[len(full.site_pos) // 2]
         src = ZarrGenotypeSource(path, region=f"1:0-{int(first_half)}")
         assert src.num_variants < full.num_variants
-        assert int(src.site_pos[-1]) < int(first_half)
+        # The end bound is inclusive, and first_half is a real site.
+        assert int(src.site_pos[-1]) == int(first_half)
+        assert src.num_variants == int(np.sum(full.site_pos <= first_half))
+
+    def test_single_position_region(self, vcz_store):
+        path, hm = vcz_store
+        p = int(np.asarray(hm.positions)[5])
+        src = ZarrGenotypeSource(path, region=f"1:{p}-{p}")
+        assert set(src.site_pos.tolist()) == {p}
+
+    def test_chrom_only_region_matches_contig_id(self, multi_contig_store):
+        path, _, hm2 = multi_contig_store
+        by_region = ZarrGenotypeSource(path, region="chrB")
+        by_id = ZarrGenotypeSource(path, contig_id="chrB")
+        np.testing.assert_array_equal(by_region.site_pos, by_id.site_pos)
+        np.testing.assert_array_equal(by_region.site_pos, np.asarray(hm2.positions))
+        assert by_region.chrom == "chrB"
 
     def test_multi_contig_requires_pick(self, multi_contig_store):
         path, _, _ = multi_contig_store

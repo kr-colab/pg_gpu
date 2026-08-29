@@ -6,6 +6,7 @@ import warnings
 from collections import Counter, OrderedDict
 
 from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask
+from .zarr_io import parse_region
 
 
 def _classify_vcf_qc_tags(path, tags):
@@ -85,6 +86,23 @@ def _resolve_qc_fields_vcf(callset, tag_to_path, unknown):
 #: for the haplotype matrix plus the working memory each statistic kernel
 #: needs (windowed scatter buffers, pairwise outputs, etc.).
 STREAMING_AUTO_EAGER_FRACTION = 0.5
+
+
+# Largest coordinate tabix accepts; stands in for an open end.
+_TABIX_MAX_POS = 2**31 - 1
+
+
+def _tabix_region(chrom, start, stop):
+    """Render parsed bounds as the ``'chrom'`` or ``'chrom:start-end'``
+    string tabix and scikit-allel accept: no thousands separators and no
+    open bounds. ``stop`` is half-open, as ``parse_region`` returns it."""
+    if chrom is None:
+        raise ValueError(
+            "a VCF region needs a chromosome, e.g. 'chr1:1000-2000'")
+    if start is None and stop is None:
+        return chrom
+    end = _TABIX_MAX_POS if stop is None else stop - 1
+    return f"{chrom}:{1 if start is None else start}-{end}"
 
 
 def _decide_streaming_mode(zarr_path, region, streaming, pop_assignment,
@@ -471,8 +489,10 @@ class HaplotypeMatrix:
         path : str
             Path to VCF/BCF file (optionally gzipped + tabix-indexed).
         region : str, optional
-            Genomic region to load, e.g. 'chr1:1000000-2000000'.
-            Requires the VCF to be bgzipped and tabix-indexed.
+            Genomic region to load: 'chrom', 'chrom:start', or
+            'chrom:start-end', e.g. 'chr1:1000000-2000000'. Both ends
+            are inclusive, as in samtools. Requires the VCF to be
+            bgzipped and tabix-indexed.
         samples : list of str, optional
             Subset of samples to load. If None, loads all samples.
         include_invariant : bool
@@ -493,6 +513,12 @@ class HaplotypeMatrix:
         """
         from ._warnings import _maybe_memory_warn
         _maybe_memory_warn(path, region=region)
+        # scikit-allel accepts 'chrom' and 'chrom:start-end' but not an
+        # open end or thousands separators, so the samtools forms are
+        # parsed once here and re-rendered.
+        chrom, start, stop = parse_region(region)
+        if region is not None:
+            region = _tabix_region(chrom, start, stop)
         if fields:
             tag_to_path, unknown_tags = _classify_vcf_qc_tags(path, fields)
             read_fields = _build_read_vcf_fields(tag_to_path.values())
@@ -527,16 +553,11 @@ class HaplotypeMatrix:
         # is BED accessible bases within [chrom_start, chrom_end].
         chrom_start = int(positions[0])
         chrom_end = int(positions[-1])
-        chrom = None
         if region is not None:
-            chrom_part, _, range_part = region.partition(':')
-            chrom = chrom_part or None
-            if range_part:
-                start_str, _, end_str = range_part.partition('-')
-                if start_str:
-                    chrom_start = int(start_str.replace(',', ''))
-                if end_str:
-                    chrom_end = int(end_str.replace(',', ''))
+            if start is not None:
+                chrom_start = start
+            if stop is not None:
+                chrom_end = stop - 1
         elif 'variants/CHROM' in vcf:
             chrom = vcf['variants/CHROM'][0]
 
@@ -571,7 +592,9 @@ class HaplotypeMatrix:
         path : str
             Path to Zarr store directory.
         region : str, optional
-            Genomic region 'chrom:start-end' to load a subset.
+            Genomic region to load: 'chrom' for a whole chromosome,
+            'chrom:start' from a position to the chromosome end, or
+            'chrom:start-end'. Both ends are inclusive, as in samtools.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
         pop_assignment : str, numpy.ndarray, list, dict, or False, optional
@@ -722,7 +745,7 @@ class HaplotypeMatrix:
                 region=region,
             )
 
-        chrom = region.split(':')[0] if region else None
+        chrom = parse_region(region)[0]
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
 

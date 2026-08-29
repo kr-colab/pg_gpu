@@ -20,7 +20,8 @@ import cupy as cp
 import numpy as np
 import zarr
 
-from .zarr_io import _parse_region, detect_zarr_layout
+from .zarr_io import (_region_mask, _vcz_contig_index, detect_zarr_layout,
+                      parse_region)
 
 
 #: Maximum contiguous-run count before ``slice_subsample_gpu`` falls
@@ -38,9 +39,10 @@ class ZarrGenotypeSource:
     path : str
         Filesystem path to a VCZ zarr store.
     region : str, optional
-        ``'chrom:start-end'`` to restrict the source to a single
-        sub-region. The source is single-contig regardless: a
-        multi-contig store without ``region`` raises.
+        Genomic region string; see ``pg_gpu.zarr_io.parse_region`` for
+        the accepted forms (``'chrom'`` alone picks a contig). The
+        source is single-contig regardless: a multi-contig store
+        without ``region`` raises.
     pop_assignment : str, optional
         Tab-delimited file mapping ``sample`` -> ``pop`` (same format as
         ``HaplotypeMatrix.load_pop_file``). Default ``None`` looks for
@@ -48,8 +50,8 @@ class ZarrGenotypeSource:
         emits a one-line stderr note so the auto-load isn't invisible.
         Pass ``pop_assignment=False`` to disable the auto-load entirely.
     contig_id : str, optional
-        Pick a contig by name when ``region`` is not given and the store
-        has multiple contigs. Ignored otherwise.
+        Pick a contig by name when ``region`` does not name one; an
+        alias for ``region='chrom'``.
 
     Attributes
     ----------
@@ -84,43 +86,16 @@ class ZarrGenotypeSource:
                 f"or HaplotypeMatrix.to_zarr(format='vcz')."
             )
 
-        contig_ids = list(np.array(self._store["contig_id"]))
         all_contigs = np.array(self._store["variant_contig"])
         all_pos = np.array(self._store["variant_position"])
 
-        if region is not None:
-            chrom, start, end = _parse_region(region)
-            if chrom not in contig_ids:
-                raise ValueError(
-                    f"Contig {chrom!r} not found in store. "
-                    f"Available: {contig_ids}"
-                )
-            contig_idx = contig_ids.index(chrom)
-            mask = (all_contigs == contig_idx) & (all_pos >= start) & (all_pos < end)
-        else:
-            unique_contigs = np.unique(all_contigs)
-            if len(unique_contigs) > 1 and contig_id is None:
-                names = [contig_ids[i] for i in unique_contigs]
-                raise ValueError(
-                    f"Store contains {len(unique_contigs)} contigs: "
-                    f"{names}. Pass region='chrom:start-end' or "
-                    f"contig_id=... to pick one."
-                )
-            if contig_id is not None:
-                if contig_id not in contig_ids:
-                    raise ValueError(
-                        f"Contig {contig_id!r} not found in store. "
-                        f"Available: {contig_ids}"
-                    )
-                contig_idx = contig_ids.index(contig_id)
-            else:
-                contig_idx = int(unique_contigs[0])
-            chrom = contig_ids[contig_idx]
-            mask = all_contigs == contig_idx
+        chrom, start, stop = parse_region(region)
+        contig_idx, self.chrom = _vcz_contig_index(
+            self._store, all_contigs, contig_id if chrom is None else chrom)
+        mask = (all_contigs == contig_idx) & _region_mask(all_pos, start, stop)
 
         self._zarr_var_indices = np.where(mask)[0]
         self.site_pos = all_pos[mask]
-        self.chrom = chrom
 
         cg = self._store["call_genotype"]
         # The streaming gather and the (n_dip, 2) -> 2 * n_dip haplotype layout

@@ -711,3 +711,38 @@ class TestDirectListValidation:
             windowed_statistics_fused(hm, bp_bins=np.array([0.0, 700.0]),
                                       statistics=('fst_wc',),
                                       pop1=[[0, 1], [2, 3]], pop2='p2')
+
+
+@pytest.fixture
+def indexed_vcf(tmp_path):
+    """A bgzipped, tabix-indexed VCF with the loaded positions as truth."""
+    from .conftest import bgzip_index
+    ts = msprime.sim_ancestry(samples=10, sequence_length=20_000,
+                              recombination_rate=1e-4, random_seed=7, ploidy=2)
+    ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=7)
+    vcf = str(tmp_path / "r.vcf")
+    with open(vcf, "w") as f:
+        ts.write_vcf(f, contig_id="1")
+    path = bgzip_index(vcf)
+    pos = cp.asnumpy(HaplotypeMatrix.from_vcf(path).positions)
+    return path, pos
+
+
+def test_from_vcf_region_forms(indexed_vcf):
+    """Region strings follow samtools on the VCF path: inclusive ends, a
+    single position, a bare chromosome, an open end, and separators."""
+    path, pos = indexed_vcf
+    first, mid, one = int(pos[0]), int(pos[len(pos) // 2]), int(pos[3])
+
+    def positions(region):
+        return cp.asnumpy(HaplotypeMatrix.from_vcf(path, region=region).positions)
+
+    hm = HaplotypeMatrix.from_vcf(path, region=f"1:{first}-{mid}")
+    got = cp.asnumpy(hm.positions)
+    assert int(got[-1]) == mid
+    assert len(got) == int(np.sum(pos <= mid))
+    assert (hm.chrom_start, hm.chrom_end) == (first, mid)
+    assert positions(f"1:{one}-{one}").tolist() == [one]
+    np.testing.assert_array_equal(positions("1"), pos)
+    np.testing.assert_array_equal(positions(f"1:{mid}"), pos[pos >= mid])
+    np.testing.assert_array_equal(positions(f"1:{first:,}-{mid:,}"), got)

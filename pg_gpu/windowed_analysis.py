@@ -622,9 +622,9 @@ class WindowedAnalyzer:
         chrom : str or int
             Chromosome identifier
         start : int
-            Region start position
+            Region start position (inclusive).
         end : int
-            Region end position
+            Region end position (exclusive), as in ``get_subset_from_range``.
 
         Returns
         -------

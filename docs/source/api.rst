@@ -57,6 +57,8 @@ diploid genotypes; haploid and polyploid stores are rejected.
    :members: iter_chunks
    :show-inheritance:
 
+.. autofunction:: pg_gpu.zarr_io.parse_region
+
 .. autofunction:: pg_gpu.zarr_io.allel_zarr_to_vcz
 
 Warnings
