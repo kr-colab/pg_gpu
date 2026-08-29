@@ -5539,8 +5539,8 @@ packages:
   timestamp: 1733302019362
 - pypi: ./
   name: pg-gpu
-  version: 0.1.1.dev201+gbea31e2a5
-  sha256: bb0943662db5a089d006743bfd00b078ea5a36a73567306d9ade9ddffb8313e6
+  version: 0.1.1.dev205+g1c9d4855e
+  sha256: c34db1eddb3c315084a6024c3e6fa26316e56a296632d27837fedd0126feebec
   requires_dist:
   - bio2zarr[vcf]>=0.1
   - cupy-cuda12x[ctk]>=13.0
