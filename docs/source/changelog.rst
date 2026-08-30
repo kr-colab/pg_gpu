@@ -175,6 +175,15 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``HaplotypeMatrix.from_ts`` laid out rows in ``ts.samples()`` order and
+  assumed each individual's two nodes were adjacent there. tskit does not
+  promise that (``simplify`` renumbers samples freely), so on a reordered
+  tree sequence every statistic that rebuilds individuals from adjacent
+  rows (``fst_weir_cockerham``, ``heterozygosity_observed``,
+  ``GenotypeMatrix.from_haplotype_matrix``) was silently wrong. Rows now
+  follow the individuals, so individual ``i`` owns rows ``2i`` and
+  ``2i + 1`` whatever the sample order; ordinary msprime output is
+  unchanged.
 * ``divergence.zx`` computed each of its three ZnS values on a different
   site set, because ``zns`` drops the sites that are multiallelic within
   the matrix it is handed. The whole matrix is now restricted to
