@@ -125,9 +125,12 @@ def simulate_hm(n_samples=20, seq_length=100_000, seed=42,
     Centralizes what would otherwise be repeated per-test simulation
     boilerplate. ``mutation_model=None`` lets msprime pick its default
     (Jukes-Cantor, which can produce triallelic sites);
-    ``mutation_model='binary'`` forces biallelic, which is what the
-    pg_gpu-vs-allel parity tests want because pg_gpu's pi formula has
-    a known multi-allelic gap (kr-colab/pg_gpu#100).
+    ``mutation_model='binary'`` forces biallelic sites. The scikit-allel
+    parity tests want that because allel counts a multiallelic site once
+    where pg_gpu counts each allele, so the two only agree on biallelic
+    data; the streaming-versus-eager suite wants it so a biallelic-only
+    drop (an error under the test configuration) cannot fail a comparison
+    that is not about it.
     """
     import msprime
     from pg_gpu import HaplotypeMatrix

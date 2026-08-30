@@ -1249,6 +1249,10 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     stronger LD within populations than across the combined sample,
     consistent with population structure or recent admixture.
 
+    All three ZnS values are computed on one site set: sites with more
+    than two alleles across the whole sample are dropped first, and a
+    ``BiallelicOnlyWarning`` reports how many.
+
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
@@ -1270,11 +1274,14 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     from . import ld_statistics
     from ._utils import get_population_matrix
 
-    m1 = get_population_matrix(haplotype_matrix, pop1)
-    m2 = get_population_matrix(haplotype_matrix, pop2)
-    z1 = ld_statistics.zns(m1, missing_data=missing_data)
-    z2 = ld_statistics.zns(m2, missing_data=missing_data)
-    z_total = ld_statistics.zns(haplotype_matrix, missing_data=missing_data)
+    # zns restricts to the biallelic sites of whatever matrix it is handed;
+    # restricting once up front keeps all three terms on the same sites.
+    biallelic = haplotype_matrix.restrict_to_biallelic(warn_context="zx")
+    z1 = ld_statistics._zns_biallelic(get_population_matrix(biallelic, pop1),
+                                      missing_data)
+    z2 = ld_statistics._zns_biallelic(get_population_matrix(biallelic, pop2),
+                                      missing_data)
+    z_total = ld_statistics._zns_biallelic(biallelic, missing_data)
 
     if z_total == 0:
         return float('nan')

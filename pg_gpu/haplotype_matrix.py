@@ -1194,12 +1194,17 @@ class HaplotypeMatrix:
             accessible_mask=self.accessible_mask,
         )
 
-    def restrict_to_biallelic(self) -> "HaplotypeMatrix":
+    def restrict_to_biallelic(self, *, warn_context=None) -> "HaplotypeMatrix":
         """Restrict to biallelic sites (drop >=3-allele), preserving allele codes.
 
         Keeps sites with at most two distinct present alleles, allele codes
         unchanged, so {0,1}, {0,2}, and reference-absent {1,2} are all retained;
         sites with three or more distinct present alleles are dropped.
+
+        ``warn_context`` names a biallelic-only operation; when given, a
+        ``BiallelicOnlyWarning`` reports how many sites that operation dropped.
+        Left as ``None`` the filter is silent, which is what a direct call and
+        the chunk loops that tally their own drops want.
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
@@ -1208,7 +1213,14 @@ class HaplotypeMatrix:
 
         ac, _ = allele_counts(self.haplotypes)
         biallelic, _ = _biallelic_and_alt(ac)
-        return self._keep_sites(cp.where(biallelic)[0])
+        out = self._keep_sites(cp.where(biallelic)[0])
+        if warn_context is not None:
+            from ._warnings import _warn_biallelic_only
+            # One frame deeper than a direct caller, so the warning points at
+            # whoever called the biallelic-only operation.
+            _warn_biallelic_only(self.num_variants - out.num_variants,
+                                 context=warn_context, stacklevel=4)
+        return out
 
     def restrict_to_segregating(self) -> "HaplotypeMatrix":
         """Drop non-segregating (monomorphic) sites.
@@ -1891,12 +1903,8 @@ class HaplotypeMatrix:
             # Biallelic-restrict (drop >=3-allele, warn once) and tally on the
             # 0/1 indicator so {0,2}/{1,2} codings are handled; per-bin output
             # makes the site drop invisible.
-            from ._warnings import _warn_biallelic_only
             from pg_gpu import ld_statistics
-            biallelic = self.restrict_to_biallelic()
-            _warn_biallelic_only(
-                self.num_variants - biallelic.num_variants,
-                context="windowed_r_squared")
+            biallelic = self.restrict_to_biallelic(warn_context="windowed_r_squared")
             m = biallelic.num_variants
             pos = biallelic.positions
             ind = biallelic._biallelic_indicator()
@@ -2221,11 +2229,8 @@ class HaplotypeMatrix:
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
-        from ._warnings import _warn_biallelic_only
-        biallelic = self.restrict_to_biallelic()
-        _warn_biallelic_only(
-            self.num_variants - biallelic.num_variants,
-            context="compute_ld_statistics_gpu_single_pop")
+        biallelic = self.restrict_to_biallelic(
+            warn_context="compute_ld_statistics_gpu_single_pop")
         seg = biallelic.restrict_to_segregating()
 
         bp_bins_arr = np.array(bp_bins)
@@ -2297,11 +2302,8 @@ class HaplotypeMatrix:
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
-        from ._warnings import _warn_biallelic_only
-        biallelic = self.restrict_to_biallelic()
-        _warn_biallelic_only(
-            self.num_variants - biallelic.num_variants,
-            context="compute_ld_statistics_gpu_two_pops")
+        biallelic = self.restrict_to_biallelic(
+            warn_context="compute_ld_statistics_gpu_two_pops")
         seg = biallelic.restrict_to_segregating()
 
         bp_bins_arr = np.array(bp_bins)

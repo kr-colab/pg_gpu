@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 import msprime
-from pg_gpu import HaplotypeMatrix, divergence
+from pg_gpu import BiallelicOnlyWarning, HaplotypeMatrix, divergence
 
 
 @pytest.fixture
@@ -168,6 +168,7 @@ class TestPrecomputedDistanceMatrices:
             divergence.snn(two_pop_hm, 'pop1', 'pop2', distance_matrices=bad_dm)
 
 
+@pytest.mark.filterwarnings("ignore::pg_gpu._warnings.BiallelicOnlyWarning")
 class TestZx:
     def test_finite(self, two_pop_hm):
         val = divergence.zx(two_pop_hm, 'pop1', 'pop2')
@@ -176,3 +177,13 @@ class TestZx:
     def test_positive(self, two_pop_hm):
         val = divergence.zx(two_pop_hm, 'pop1', 'pop2')
         assert val > 0
+
+    def test_one_site_set_for_all_three_zns(self, two_pop_hm):
+        """A site that is triallelic across the sample but biallelic inside
+        one population leaves every ZnS term, so restricting the matrix
+        yourself first must not move the value."""
+        shared = two_pop_hm.restrict_to_biallelic()
+        assert shared.num_variants < two_pop_hm.num_variants
+        with pytest.warns(BiallelicOnlyWarning):
+            val = divergence.zx(two_pop_hm, 'pop1', 'pop2')
+        assert divergence.zx(shared, 'pop1', 'pop2') == pytest.approx(val)

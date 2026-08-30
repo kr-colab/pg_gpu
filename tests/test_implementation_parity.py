@@ -81,8 +81,9 @@ def _two_pop_split(hm):
 def clean_hm():
     """Clean biallelic matrix (no missing) split into two populations.
 
-    ``mutation_model='binary'`` forces biallelic sites, sidestepping the
-    multiallelic folding gap so the paths are expected to agree exactly here.
+    ``mutation_model='binary'`` forces biallelic sites, so this is the
+    baseline every path must reproduce exactly; ``multiallelic_hm`` below
+    covers the per-allele conventions.
     """
     hm = simulate_hm(n_samples=24, seq_length=200_000, seed=7,
                      mutation_model="binary")

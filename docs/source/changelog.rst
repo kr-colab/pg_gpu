@@ -175,6 +175,11 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``divergence.zx`` computed each of its three ZnS values on a different
+  site set, because ``zns`` drops the sites that are multiallelic within
+  the matrix it is handed. The whole matrix is now restricted to
+  biallelic sites before any ZnS is computed, and one
+  ``BiallelicOnlyWarning`` reports the count.
 * Pairwise distances treated a missing genotype as if it were a
   reference homozygote, so a missing call could count as a difference.
   Missing data is now skipped on both sides of the calculation.

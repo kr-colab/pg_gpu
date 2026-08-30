@@ -16,7 +16,8 @@ from .conftest import simulate_hm
 
 
 def _simulate_hm(n_samples=20, seq_length=100_000, seed=42):
-    return simulate_hm(n_samples=n_samples, seq_length=seq_length, seed=seed)
+    return simulate_hm(n_samples=n_samples, seq_length=seq_length, seed=seed,
+                       mutation_model='binary')
 
 
 @pytest.fixture

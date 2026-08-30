@@ -233,6 +233,8 @@ def _warn_biallelic_only(n_dropped, *, context, stacklevel=3, action="dropped"):
     if n_dropped <= 0:
         return
     warnings.warn(
+        # "is defined on biallelic sites" is the phrase the test suite's
+        # warning filter keys on (pyproject.toml); a test pins it.
         f"{context} is defined on biallelic sites; {n_dropped} "
         f"multiallelic site(s) {action}. To silence:\n"
         "    import warnings\n"
