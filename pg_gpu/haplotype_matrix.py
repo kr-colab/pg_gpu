@@ -105,6 +105,51 @@ def _tabix_region(chrom, start, stop):
     return f"{chrom}:{1 if start is None else start}-{end}"
 
 
+_TS_LAYOUT_HINT = ("Simplify to the sample nodes you want, or build the "
+                   "matrix by hand.")
+
+
+def _ts_row_order(ts):
+    """``(order, paired)``: the sample-node row order ``from_ts`` uses, and
+    whether adjacent rows pair into individuals.
+
+    tskit does not promise that an individual's nodes sit together in
+    ``ts.samples()`` (``simplify`` renumbers freely), and the statistics
+    that rebuild individuals from adjacent rows have no other way to know.
+    ``order`` is ``None`` whenever the default decode order already serves:
+    nothing in the input defines a pairing (no individuals, or one sample
+    node each; ``paired`` is False), or the grouped order equals
+    ``ts.samples()`` anyway. Individuals with no sample nodes own no rows;
+    non-sample nodes inside an individual are ignored.
+    """
+    samples = ts.samples()
+    owner = ts.nodes_individual[samples]
+    per_individual = np.bincount(owner[owner != tskit.NULL],
+                                 minlength=ts.num_individuals)
+    if (per_individual <= 1).all():
+        return None, False
+    if (owner == tskit.NULL).any():
+        raise ValueError(
+            "from_ts cannot lay out rows by individual: sample node "
+            f"{samples[owner == tskit.NULL][0]} belongs to no individual while "
+            f"others do. {_TS_LAYOUT_HINT}")
+    bad = np.flatnonzero((per_individual > 0) & (per_individual != 2))
+    if bad.size:
+        from ._warnings import ISSUE_URL
+        raise ValueError(
+            "from_ts needs two sample nodes per individual to lay out rows 2i "
+            f"and 2i + 1; individual {bad[0]} has {per_individual[bad[0]]}. "
+            f"{_TS_LAYOUT_HINT} pg_gpu's loaders support diploid data only; "
+            f"haploid and polyploid input is not yet supported (see {ISSUE_URL}).")
+    # Node id order within an individual is the order individual.nodes reports
+    # and the order write_vcf emits alleles in, so from_ts and from_vcf of the
+    # VCF written from the same tree sequence produce identical rows.
+    order = samples[np.lexsort((samples, owner))]
+    if np.array_equal(order, samples):
+        return None, True
+    return order, True
+
+
 def _decide_streaming_mode(zarr_path, region, streaming, pop_assignment,
                            free_gpu_bytes=None,
                            fraction=STREAMING_AUTO_EAGER_FRACTION):
@@ -179,6 +224,11 @@ class HaplotypeMatrix:
     ``diversity.inbreeding_coefficient``, genotype-mode LD, and the
     ``to_zarr`` writer -- assumes it. ``sample_sets`` therefore lists both
     gametes of each member, e.g. sample 3 contributes ``[6, 7]``.
+
+    The one exception is ``from_ts`` on a tree sequence with no individuals,
+    or with one sample node per individual: those rows keep ``ts.samples()``
+    order and do not pair, so the consumers above have no defined meaning on
+    them.
 
     Statistics that treat rows as independent gametes are unaffected by the
     order; only the ones above pair rows.
@@ -965,16 +1015,33 @@ class HaplotypeMatrix:
             HaplotypeMatrix: A new HaplotypeMatrix instance
 
         Notes:
+            Rows are grouped by individual: when every sample node belongs
+            to an individual with two sample nodes, individual ``i`` owns
+            rows ``2i`` and ``2i + 1`` regardless of the order of
+            ``ts.samples()``, which ``simplify`` is free to change. A tree
+            sequence with no individuals, or with one sample node per
+            individual (``ploidy=1``), keeps ``ts.samples()`` order; the
+            statistics that pair adjacent rows into individuals have no
+            defined meaning on such input. Any other layout raises.
+
             Populations declared in the tree sequence (with a name in
             metadata) are automatically registered in ``sample_sets``:
             each pop name maps to the haplotype row indices of its
             samples. The no-demography case (``sim_ancestry(samples=N)``
             with a single unnamed population) leaves ``sample_sets``
-            unset. Users who need custom groupings can overwrite
+            unset. An individual whose two sample nodes belong to
+            different populations raises, because a population subset
+            cannot pair it; assign ``sample_sets`` by hand for such data.
+            Users who need custom groupings can overwrite
             ``hm.sample_sets`` after construction.
         """
-        # Convert ts to haplotype matrix
-        haplotypes = ts.genotype_matrix().T
+        row_nodes, paired = _ts_row_order(ts)
+        # Passing samples= makes tskit decode node by node, 1.3-1.8x slower
+        # than the default order, so only pay it when the rows really move.
+        haplotypes = (ts.genotype_matrix() if row_nodes is None
+                      else ts.genotype_matrix(samples=row_nodes)).T
+        if row_nodes is None:
+            row_nodes = ts.samples()
         positions = ts.tables.sites.position
         # tskit uses 0-based exclusive ends (positions in [0, sequence_length))
         # while pg_gpu treats chrom_end as 1-based inclusive. Subtract 1 so
@@ -993,14 +1060,33 @@ class HaplotypeMatrix:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
 
         sample_sets = {}
-        sample_idx = {s: i for i, s in enumerate(ts.samples())}
+        row_of = {s: i for i, s in enumerate(row_nodes.tolist())}
         for pop in ts.populations():
             name = pop.metadata.get("name") if pop.metadata else None
             if name is None:
                 continue
             nodes = ts.samples(population=pop.id)
             if len(nodes):
-                sample_sets[name] = [sample_idx[s] for s in nodes]
+                # Ascending, so each list reads as whole individuals: the
+                # pairing consumers take consecutive entries as one sample,
+                # while ts.samples(population=) returns node order.
+                rows = sorted(row_of[s] for s in nodes.tolist())
+                if paired:
+                    # A row whose partner row (2i <-> 2i + 1) is missing means
+                    # this individual's gametes sit in different populations,
+                    # which a paired row list cannot represent.
+                    rowset = set(rows)
+                    lone = [r for r in rows if (r ^ 1) not in rowset]
+                    if lone:
+                        ind = int(ts.nodes_individual[row_nodes[lone[0]]])
+                        raise ValueError(
+                            f"population {name!r} holds one gamete of "
+                            f"individual {ind} but not the other: its sample "
+                            f"nodes belong to different populations. "
+                            f"sample_sets pair consecutive rows into "
+                            f"individuals, so this layout cannot be "
+                            f"auto-registered. Assign sample_sets by hand.")
+                sample_sets[name] = rows
         if sample_sets:
             hm.sample_sets = sample_sets
 

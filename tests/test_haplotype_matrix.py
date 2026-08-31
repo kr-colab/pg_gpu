@@ -1,5 +1,6 @@
 import pytest
 import msprime
+import tskit
 import allel
 import cupy as cp
 import numpy as np
@@ -84,21 +85,31 @@ def test_from_ts_default_population(sample_ts):
     assert len(hm.sample_sets["pop_0"]) == hm.num_haplotypes
 
 
-def test_from_ts_populates_sample_sets_from_demography():
-    """Named populations in the tree sequence auto-register as sample_sets."""
+def _two_pop_ts(samples, seq_length, seed, mutation_rate=1e-8, model=None):
+    """Two named populations A and B that split from AB 5,000 generations ago."""
     demography = msprime.Demography()
-    demography.add_population(name="A", initial_size=10_000)
-    demography.add_population(name="B", initial_size=10_000)
-    demography.add_population(name="AB", initial_size=10_000)
+    for name in ("A", "B", "AB"):
+        demography.add_population(name=name, initial_size=10_000)
     demography.add_population_split(time=5_000, derived=["A", "B"],
                                     ancestral="AB")
-    ts = msprime.sim_ancestry(
-        samples={"A": 12, "B": 8},
-        sequence_length=100_000,
-        recombination_rate=1e-8,
-        demography=demography,
-        random_seed=42, ploidy=2)
-    ts = msprime.sim_mutations(ts, rate=1e-8, random_seed=42)
+    ts = msprime.sim_ancestry(samples=samples, sequence_length=seq_length,
+                              recombination_rate=1e-8, demography=demography,
+                              random_seed=seed, ploidy=2)
+    return msprime.sim_mutations(ts, rate=mutation_rate, random_seed=seed,
+                                 model=model)
+
+
+def _scrambled(ts):
+    """The same tree sequence with one gamete of every individual listed
+    first, then the others: a legal sample order in which no individual's
+    nodes sit together."""
+    n = ts.num_individuals
+    return ts.simplify(samples=[2 * i for i in range(n)] + [2 * i + 1 for i in range(n)])
+
+
+def test_from_ts_populates_sample_sets_from_demography():
+    """Named populations in the tree sequence auto-register as sample_sets."""
+    ts = _two_pop_ts({"A": 12, "B": 8}, seq_length=100_000, seed=42)
 
     hm = HaplotypeMatrix.from_ts(ts)
 
@@ -746,3 +757,102 @@ def test_from_vcf_region_forms(indexed_vcf):
     np.testing.assert_array_equal(positions("1"), pos)
     np.testing.assert_array_equal(positions(f"1:{mid}"), pos[pos >= mid])
     np.testing.assert_array_equal(positions(f"1:{first:,}-{mid:,}"), got)
+
+
+
+class TestFromTsRowOrder:
+    """from_ts lays out rows by individual, not by ts.samples() order."""
+
+    @staticmethod
+    def _ts():
+        return _two_pop_ts({"A": 4, "B": 4}, seq_length=5e4, seed=7,
+                           mutation_rate=1e-7, model="binary")
+
+    def test_ordinary_msprime_output_is_unchanged(self):
+        ts = self._ts()
+        np.testing.assert_array_equal(HaplotypeMatrix.from_ts(ts).haplotypes,
+                                      ts.genotype_matrix().T)
+
+    def test_rows_follow_individuals_after_simplify(self):
+        ts = self._ts()
+        ts2 = _scrambled(ts)
+        assert list(ts2.individual(0).nodes) != [0, 1]  # the order really moved
+        hm, hm2 = HaplotypeMatrix.from_ts(ts), HaplotypeMatrix.from_ts(ts2)
+        for t, m in ((ts, hm), (ts2, hm2)):
+            nodes = [n for i in range(t.num_individuals)
+                     for n in sorted(t.individual(i).nodes)]
+            np.testing.assert_array_equal(m.haplotypes, t.genotype_matrix()[:, nodes].T)
+        # Same individuals in the same rows, so every downstream statistic
+        # that pairs rows agrees between the two loads.
+        np.testing.assert_array_equal(hm.haplotypes, hm2.haplotypes)
+
+    def test_population_sets_follow_individuals(self):
+        ts2 = _scrambled(self._ts())
+        hm = HaplotypeMatrix.from_ts(ts2)
+        pop_id = {p.metadata["name"]: p.id for p in ts2.populations() if p.metadata}
+        for name in ("A", "B"):
+            expect = [r for i in range(ts2.num_individuals)
+                      if ts2.node(ts2.individual(i).nodes[0]).population == pop_id[name]
+                      for r in (2 * i, 2 * i + 1)]
+            assert hm.sample_sets[name] == expect
+
+    def test_no_individuals_keeps_sample_order(self):
+        # sim_ancestry always records individuals, so strip them through the
+        # tables: this is what hand-built or pre-individual tree sequences
+        # look like.
+        ts = msprime.sim_ancestry(3, sequence_length=1e3, random_seed=3, ploidy=2)
+        ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=3)
+        tables = ts.dump_tables()
+        tables.individuals.clear()
+        tables.nodes.individual = np.full(tables.nodes.num_rows, tskit.NULL,
+                                          dtype=np.int32)
+        ts = tables.tree_sequence()
+        assert ts.num_individuals == 0
+        np.testing.assert_array_equal(HaplotypeMatrix.from_ts(ts).haplotypes,
+                                      ts.genotype_matrix().T)
+
+    @pytest.mark.filterwarnings("error")
+    def test_haploid_keeps_sample_order_silently(self):
+        ts = msprime.sim_ancestry(5, sequence_length=1e4, random_seed=3, ploidy=1)
+        ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=3)
+        np.testing.assert_array_equal(HaplotypeMatrix.from_ts(ts).haplotypes,
+                                      ts.genotype_matrix().T)
+
+    def test_mixed_layouts_raise(self):
+        ts = self._ts()
+
+        def with_individual(node, value):
+            tables = ts.dump_tables()
+            individual = tables.nodes.individual.copy()
+            individual[node] = value
+            tables.nodes.individual = individual
+            return tables.tree_sequence()
+
+        # A sample node with no individual, next to samples that have one.
+        with pytest.raises(ValueError, match="belongs to no individual"):
+            HaplotypeMatrix.from_ts(with_individual(0, tskit.NULL))
+        # An individual with three sample nodes.
+        with pytest.raises(ValueError, match="individual 0 has 3"):
+            HaplotypeMatrix.from_ts(with_individual(2, 0))
+
+    def test_split_individual_across_populations_raises(self):
+        # Legal in the tables (Nate's admixture-at-the-present example): one
+        # individual with a gamete in each population. The auto-registered
+        # sample_sets cannot pair it, so from_ts must say so instead of
+        # building lists that mis-pair downstream.
+        ts = self._ts()
+        tables = ts.dump_tables()
+        population = tables.nodes.population.copy()
+        other = int(population[ts.samples()[-1]])
+        population[int(ts.individual(0).nodes[1])] = other
+        tables.nodes.population = population
+        with pytest.raises(ValueError, match="one gamete of individual 0"):
+            HaplotypeMatrix.from_ts(tables.tree_sequence())
+
+    def test_non_sample_node_in_individual_is_ignored(self):
+        ts = self._ts()
+        tables = ts.dump_tables()
+        tables.nodes.add_row(flags=0, time=1.0, individual=0)  # not a sample
+        np.testing.assert_array_equal(
+            HaplotypeMatrix.from_ts(tables.tree_sequence()).haplotypes,
+            ts.genotype_matrix().T)
