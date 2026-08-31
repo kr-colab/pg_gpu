@@ -835,6 +835,20 @@ class TestFromTsRowOrder:
         with pytest.raises(ValueError, match="individual 0 has 3"):
             HaplotypeMatrix.from_ts(with_individual(2, 0))
 
+    def test_split_individual_across_populations_raises(self):
+        # Legal in the tables (Nate's admixture-at-the-present example): one
+        # individual with a gamete in each population. The auto-registered
+        # sample_sets cannot pair it, so from_ts must say so instead of
+        # building lists that mis-pair downstream.
+        ts = self._ts()
+        tables = ts.dump_tables()
+        population = tables.nodes.population.copy()
+        other = int(population[ts.samples()[-1]])
+        population[int(ts.individual(0).nodes[1])] = other
+        tables.nodes.population = population
+        with pytest.raises(ValueError, match="one gamete of individual 0"):
+            HaplotypeMatrix.from_ts(tables.tree_sequence())
+
     def test_non_sample_node_in_individual_is_ignored(self):
         ts = self._ts()
         tables = ts.dump_tables()
