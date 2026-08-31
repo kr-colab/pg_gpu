@@ -797,8 +797,16 @@ class TestFromTsRowOrder:
             assert hm.sample_sets[name] == expect
 
     def test_no_individuals_keeps_sample_order(self):
-        ts = msprime.simulate(sample_size=6, length=1e3, mutation_rate=1e-3,
-                              random_seed=3)
+        # sim_ancestry always records individuals, so strip them through the
+        # tables: this is what hand-built or pre-individual tree sequences
+        # look like.
+        ts = msprime.sim_ancestry(3, sequence_length=1e3, random_seed=3, ploidy=2)
+        ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=3)
+        tables = ts.dump_tables()
+        tables.individuals.clear()
+        tables.nodes.individual = np.full(tables.nodes.num_rows, tskit.NULL,
+                                          dtype=np.int32)
+        ts = tables.tree_sequence()
         assert ts.num_individuals == 0
         np.testing.assert_array_equal(HaplotypeMatrix.from_ts(ts).haplotypes,
                                       ts.genotype_matrix().T)
