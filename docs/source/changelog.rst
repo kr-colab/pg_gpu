@@ -192,6 +192,16 @@ Bug fixes
   different matrices. They now share one definition. Sites showing only
   alleles ``0`` and ``2``, or only ``1`` and ``2``, are kept rather
   than dropped, and sites where nothing varies are kept too.
+* ``moments_ld.compute_ld_statistics`` ran out of GPU memory for three
+  and four populations: the automatic pair-chunk size assumed the work
+  per pair grew in proportion to the number of populations, but the
+  number of LD statistics grows faster (3, 15, 45, 105 for one to four
+  populations), so it chose a chunk several times too large. The
+  estimate now scales with the statistic count, and a lower bound that
+  could force a chunk larger than fits in memory was removed.
+  ``compute_ld_statistics`` also gained ``chunk_size`` and
+  ``available_memory_bytes`` arguments to override the estimate; they do
+  not change results, only memory use.
 
 New warnings
 ~~~~~~~~~~~~

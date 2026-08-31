@@ -18,14 +18,17 @@ def estimate_ld_chunk_size(n_haplotypes_per_pop, available_memory_bytes=None,
     """
     Estimate optimal chunk size for LD computation based on GPU memory.
 
-    Per-pair memory has two parts: the gathered genotype/haplotype slabs, which
-    scale with haplotypes * populations, and the per-pair working set (counts,
-    statistics, kernel intermediates), which scales with the *number* of LD
-    statistics ``n_ld = len(ld_names(num_pops))`` -- 3 / 15 / 45 / 105 for 1-4
-    pops -- not with ``num_pops``. The ``50 * n_ld`` term is anchored so it
-    matches the historical ``150 * num_pops`` at one population (n_ld == 3) and
-    keeps scaling with the true statistic count above it. The ``* 3`` overhead
-    and the 50%-of-free budget below are the safety margin.
+    Memory per pair (N pairs, H haplotypes per pop, P populations,
+    S = len(ld_names(P)) statistics: 3 / 15 / 45 / 105 for P = 1-4):
+    - gathered genotype/haplotype slabs (P pops): 4 * H * P * N bytes
+    - working set (counts, statistics, intermediates): 50 * S * N bytes
+    - Overhead (~3x): accounts for intermediates, fragmentation
+
+    Formula: bytes_per_pair = (4*H*P + 50*S) * 3
+
+    The working set scales with the number of statistics S, not with P; the
+    constant sets a one-population run (S == 3) to 150 bytes per pair. The * 3
+    overhead and the 50%-of-free budget below are the safety margin.
 
     Parameters
     ----------
@@ -47,9 +50,6 @@ def estimate_ld_chunk_size(n_haplotypes_per_pop, available_memory_bytes=None,
     n_ld = len(ld_names(num_pops))
     bytes_per_pair = (4 * n_haplotypes_per_pop * num_pops + 50 * n_ld) * 3
     fit = available_memory_bytes // bytes_per_pair
-
-    # Cap per-chunk work at the ceiling. There is no lower floor: a minimum
-    # above what fits would defeat the estimate on a tight or contended GPU.
     return max(1, min(fit, 10_000_000))
 
 
