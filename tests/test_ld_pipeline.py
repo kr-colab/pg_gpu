@@ -10,36 +10,40 @@ from pg_gpu.ld_pipeline import estimate_ld_chunk_size, ld_names
 
 
 class TestEstimateLdChunkSize:
-    def test_single_pop_matches_historical_anchor(self):
-        # The workspace term is anchored so that at one population (n_ld == 3)
-        # it equals the historical 150 * num_pops, leaving P=1 unchanged.
-        assert len(ld_names(1)) == 3
-        H, budget = 50, 1050 * 1_000_000  # bytes_per_pair = (4*50 + 150)*3 = 1050
-        assert estimate_ld_chunk_size(H, budget, num_pops=1) == 1_000_000
-
-    def test_chunk_shrinks_as_populations_grow(self):
-        # More populations -> more LD statistics (3/15/45/105) -> heavier
-        # per-pair working set -> a smaller chunk for the same budget.
+    def test_chunk_shrinks_as_statistics_grow(self):
+        # More statistics -> heavier per-pair working set -> a smaller chunk for
+        # the same budget. The LD basis grows 3/15/45/105 with the populations,
+        # and gathered rows grow with them (H per pop times pops).
         H, budget = 100, 5_000_000_000
-        sizes = [estimate_ld_chunk_size(H, budget, num_pops=p) for p in (1, 2, 3, 4)]
+        sizes = [estimate_ld_chunk_size(H * p, len(ld_names(p)), budget)
+                 for p in (1, 2, 3, 4)]
         assert sizes == sorted(sizes, reverse=True)
         assert len(set(sizes)) == 4  # strictly decreasing, none clamped here
 
     def test_scales_with_statistic_count(self):
-        # Lock the 50 * n_ld workspace term for four populations (n_ld == 105).
-        H, budget = 100, 5_000_000_000
-        bytes_per_pair = (4 * H * 4 + 50 * len(ld_names(4))) * 3
-        assert estimate_ld_chunk_size(H, budget, num_pops=4) == budget // bytes_per_pair
+        # Lock the 50 * n_stats workspace term for a 105-statistic basis.
+        rows, budget, n_stats = 400, 5_000_000_000, len(ld_names(4))
+        bytes_per_pair = (4 * rows + 50 * n_stats) * 3
+        assert (estimate_ld_chunk_size(rows, n_stats, budget)
+                == budget // bytes_per_pair)
 
-    def test_estimate_never_exceeds_capacity(self):
-        # On a tight budget where fewer than 100k pairs fit, the estimate
-        # returns what fits rather than being lifted to a fixed minimum (the
-        # removed 100k floor), which would have overshot memory.
-        H, budget = 100, 1_000_000_000
-        bytes_per_pair = (4 * H * 4 + 50 * len(ld_names(4))) * 3
+    def test_rejects_nonpositive_statistic_count(self):
+        with pytest.raises(ValueError):
+            estimate_ld_chunk_size(400, 0, 1_000_000_000)
+
+    def test_returns_what_fits_between_floor_and_ceiling(self):
+        # A budget admitting more than the floor and less than the ceiling is
+        # passed through unclamped.
+        rows, budget, n_stats = 400, 1_000_000_000, len(ld_names(4))
+        bytes_per_pair = (4 * rows + 50 * n_stats) * 3
         fit = budget // bytes_per_pair
-        assert fit < 100_000
-        assert estimate_ld_chunk_size(H, budget, num_pops=4) == fit
+        assert 1_000 < fit < 10_000_000
+        assert estimate_ld_chunk_size(rows, n_stats, budget) == fit
+
+    def test_floor_applied_on_tight_budget(self):
+        # A budget too small for the floor still returns 1k pairs rather than a
+        # handful, which would launch far too many kernels.
+        assert estimate_ld_chunk_size(400, len(ld_names(4)), 1_000_000) == 1_000
 
     def test_ceiling_caps_large_budgets(self):
-        assert estimate_ld_chunk_size(50, 10**12, num_pops=1) == 10_000_000
+        assert estimate_ld_chunk_size(50, 3, 10**12) == 10_000_000

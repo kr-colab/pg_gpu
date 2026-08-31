@@ -197,8 +197,7 @@ Bug fixes
   per pair grew in proportion to the number of populations, but the
   number of LD statistics grows faster (3, 15, 45, 105 for one to four
   populations), so it chose a chunk several times too large. The
-  estimate now scales with the statistic count, and a lower bound that
-  could force a chunk larger than fits in memory was removed.
+  estimate now scales with the statistic count.
   ``compute_ld_statistics`` also gained ``chunk_size`` and
   ``available_memory_bytes`` arguments to override the estimate; they do
   not change results, only memory use.

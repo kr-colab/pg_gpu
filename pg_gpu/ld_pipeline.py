@@ -13,44 +13,47 @@ import cupy as cp
 # ---------------------------------------------------------------------------
 
 
-def estimate_ld_chunk_size(n_haplotypes_per_pop, available_memory_bytes=None,
-                           num_pops=2):
+def estimate_ld_chunk_size(n_gathered_rows, n_stats,
+                           available_memory_bytes=None):
     """
     Estimate optimal chunk size for LD computation based on GPU memory.
 
-    Memory per pair (N pairs, H haplotypes per pop, P populations,
-    S = len(ld_names(P)) statistics: 3 / 15 / 45 / 105 for P = 1-4):
-    - gathered genotype/haplotype slabs (P pops): 4 * H * P * N bytes
-    - working set (counts, statistics, intermediates): 50 * S * N bytes
-    - Overhead (~3x): accounts for intermediates, fragmentation
+    The per-pair cost is modelled as two terms (R rows gathered per pair
+    across populations, S statistics per pair):
+    - a data term growing with R, the per-pair genotype/haplotype gather. The
+      genotype path reads the matrix in place rather than gathering per pair,
+      so this term overestimates it.
+    - a working-set term (counts, statistics, intermediates) growing with the
+      statistic count S.
 
-    Formula: bytes_per_pair = (4*H*P + 50*S) * 3
-
-    The working set scales with the number of statistics S, not with P; the
-    constant sets a one-population run (S == 3) to 150 bytes per pair. The * 3
-    overhead and the 50%-of-free budget below are the safety margin.
+    Concretely bytes_per_pair = (4*R + 50*S) * 3, evaluated against half the
+    free memory. The constant sets a run of three statistics to 150 bytes per
+    pair; the * 3 overhead and the 50%-of-free budget are the safety margin.
 
     Parameters
     ----------
-    n_haplotypes_per_pop : int
-        Number of haplotypes in the larger population
+    n_gathered_rows : int
+        Total haplotype/genotype rows gathered per pair, summed over the
+        populations (e.g. haplotypes per pop times the number of pops).
+    n_stats : int
+        Number of statistic values accumulated per pair (for the LD moments,
+        the length of the statistic basis for the requested populations).
     available_memory_bytes : int, optional
         Available GPU memory in bytes. If None, queries the GPU.
-    num_pops : int
-        Number of populations (default 2)
 
     Returns
     -------
     int
         Recommended chunk size (number of pairs per iteration)
     """
+    if n_stats < 1:
+        raise ValueError("n_stats must be positive")
     if available_memory_bytes is None:
         available_memory_bytes = int(cp.cuda.Device().mem_info[0] * 0.5)
 
-    n_ld = len(ld_names(num_pops))
-    bytes_per_pair = (4 * n_haplotypes_per_pop * num_pops + 50 * n_ld) * 3
+    bytes_per_pair = (4 * n_gathered_rows + 50 * n_stats) * 3
     fit = available_memory_bytes // bytes_per_pair
-    return max(1, min(fit, 10_000_000))
+    return max(1_000, min(fit, 10_000_000))
 
 
 # ---------------------------------------------------------------------------

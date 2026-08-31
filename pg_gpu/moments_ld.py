@@ -341,13 +341,14 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
     bins_gpu = cp.asarray(bins)
     pop_indices = [mat.sample_sets[p] for p in pops]
     max_samp = max(len(pi) for pi in pop_indices)
-    if chunk_size is None:
-        chunk_size = _estimate_ld_chunk_size(
-            max_samp, available_memory_bytes=available_memory_bytes,
-            num_pops=num_pops)
 
     ld_stat_names = _ld_names(num_pops)
     n_ld = len(ld_stat_names)
+
+    if chunk_size is None:
+        chunk_size = _estimate_ld_chunk_size(
+            max_samp * num_pops, n_ld,
+            available_memory_bytes=available_memory_bytes)
 
     # Genetic-distance lookup: filter once outside the loop so fancy-indexing
     # on the keep-mask doesn't repeat per chunk.
