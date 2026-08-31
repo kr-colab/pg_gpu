@@ -18,13 +18,14 @@ def estimate_ld_chunk_size(n_haplotypes_per_pop, available_memory_bytes=None,
     """
     Estimate optimal chunk size for LD computation based on GPU memory.
 
-    Memory per pair (N pairs, H haplotypes per pop, P populations):
-    - hap_i, hap_j arrays (P pops): 4 * H * P * N bytes
-    - counts arrays: 32 * P * N bytes
-    - statistics: 120 * P * N bytes
-    - Overhead (~3x): accounts for intermediates, fragmentation
-
-    Formula: bytes_per_pair = (4*H*P + 150*P) * 3
+    Per-pair memory has two parts: the gathered genotype/haplotype slabs, which
+    scale with haplotypes * populations, and the per-pair working set (counts,
+    statistics, kernel intermediates), which scales with the *number* of LD
+    statistics ``n_ld = len(ld_names(num_pops))`` -- 3 / 15 / 45 / 105 for 1-4
+    pops -- not with ``num_pops``. The ``50 * n_ld`` term is anchored so it
+    matches the historical ``150 * num_pops`` at one population (n_ld == 3) and
+    keeps scaling with the true statistic count above it. The ``* 3`` overhead
+    and the 50%-of-free budget below are the safety margin.
 
     Parameters
     ----------
@@ -43,10 +44,13 @@ def estimate_ld_chunk_size(n_haplotypes_per_pop, available_memory_bytes=None,
     if available_memory_bytes is None:
         available_memory_bytes = int(cp.cuda.Device().mem_info[0] * 0.5)
 
-    bytes_per_pair = (4 * n_haplotypes_per_pop * num_pops + 150 * num_pops) * 3
-    chunk_size = available_memory_bytes // bytes_per_pair
+    n_ld = len(ld_names(num_pops))
+    bytes_per_pair = (4 * n_haplotypes_per_pop * num_pops + 50 * n_ld) * 3
+    fit = available_memory_bytes // bytes_per_pair
 
-    return max(100_000, min(chunk_size, 10_000_000))
+    # Cap per-chunk work at the ceiling. There is no lower floor: a minimum
+    # above what fits would defeat the estimate on a tight or contended GPU.
+    return max(1, min(fit, 10_000_000))
 
 
 # ---------------------------------------------------------------------------
