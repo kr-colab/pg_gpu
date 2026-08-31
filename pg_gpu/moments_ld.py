@@ -44,7 +44,7 @@ def compute_ld_statistics(
     r_bins=None, bp_bins=None, use_genotypes=True,
     report=True, haplotype_matrix=None,
     genotype_matrix=None, accessible_bed=None,
-    pop_assignment=None,
+    pop_assignment=None, chunk_size=None, available_memory_bytes=None,
 ):
     """GPU LD statistics in the moments.LD.Parsing.compute_ld_statistics output format.
 
@@ -127,6 +127,14 @@ def compute_ld_statistics(
     accessible_bed : str, optional
         Path to a BED file defining accessible/callable regions. Variants
         at inaccessible positions are removed before computing statistics.
+    chunk_size : int, optional
+        Pairs processed per GPU batch. Overrides the automatic estimate; use
+        it to bound peak memory when the estimate is too large (e.g. many
+        populations on a contended GPU). Chunking only partitions an additive
+        sum, so the result is identical for any value.
+    available_memory_bytes : int, optional
+        Memory budget for the automatic chunk-size estimate, in bytes.
+        Defaults to half the free GPU memory. Ignored if ``chunk_size`` is set.
 
     Returns
     -------
@@ -218,10 +226,13 @@ def compute_ld_statistics(
 
     if use_genotypes:
         ld_sums = _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
-                                    use_genotypes=True)
+                                    use_genotypes=True, chunk_size=chunk_size,
+                                    available_memory_bytes=available_memory_bytes)
         het = _compute_heterozygosity(mat, pops, use_genotypes=True)
     else:
-        ld_sums = _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist)
+        ld_sums = _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
+                                   chunk_size=chunk_size,
+                                   available_memory_bytes=available_memory_bytes)
         het = _compute_heterozygosity(mat, pops)
 
     if report:
@@ -278,7 +289,8 @@ def _max_bp_for_r_dist(positions, gen_dists, max_r):
 
 
 def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
-                     use_genotypes=False):
+                     use_genotypes=False, chunk_size=None,
+                     available_memory_bytes=None):
     """Compute LD statistic sums per bin on GPU for N populations.
 
     Handles both haplotype (4-way) and genotype (9-way) count modes.
@@ -329,7 +341,10 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
     bins_gpu = cp.asarray(bins)
     pop_indices = [mat.sample_sets[p] for p in pops]
     max_samp = max(len(pi) for pi in pop_indices)
-    chunk_size = _estimate_ld_chunk_size(max_samp, num_pops=num_pops)
+    if chunk_size is None:
+        chunk_size = _estimate_ld_chunk_size(
+            max_samp, available_memory_bytes=available_memory_bytes,
+            num_pops=num_pops)
 
     ld_stat_names = _ld_names(num_pops)
     n_ld = len(ld_stat_names)
