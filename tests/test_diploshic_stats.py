@@ -24,6 +24,15 @@ def geno_data(hap_data):
     return GenotypeMatrix.from_haplotype_matrix(hap_data)
 
 
+def _with_zero_variance_sites(gm):
+    """``gm`` plus sites with no dosage variance: all-reference,
+    all-alt-homozygote, and all-heterozygous."""
+    g = cp.asnumpy(gm.genotypes)
+    extra = np.tile(np.array([0, 0, 2, 2, 1, 1], np.int8), (g.shape[0], 1))
+    g2 = np.concatenate([g, extra], axis=1)
+    return GenotypeMatrix(g2, np.arange(g2.shape[1]) * 1000)
+
+
 # ---------------------------------------------------------------------------
 # GenotypeMatrix
 # ---------------------------------------------------------------------------
@@ -148,6 +157,19 @@ class TestZnSOmega:
     def test_omega_diploid(self, geno_data):
         o = ld_statistics.omega_diploid(geno_data)
         assert o >= 0
+
+    @pytest.mark.parametrize("stat", [ld_statistics.zns, ld_statistics.omega])
+    def test_diploid_ignores_zero_variance_sites(self, geno_data, stat):
+        """Sites with no defined r^2 must leave ZnS and omega unchanged."""
+        expected = stat(geno_data)
+        np.testing.assert_allclose(stat(_with_zero_variance_sites(geno_data)),
+                                   expected, rtol=1e-12)
+
+    def test_zns_diploid_all_zero_variance_is_zero(self):
+        # Every dosage 1: segregating by allele counts, no dosage variance
+        # anywhere, so everything drops and the too-few-sites value returns.
+        gm = GenotypeMatrix(np.ones((10, 6), np.int8), np.arange(6) * 1000)
+        assert ld_statistics.zns(gm) == 0.0
 
     def test_zns_default_is_sigma_d2_for_haplotype_matrix(self, hap_data):
         # Default 'auto' should resolve to sigma_d2 for HaplotypeMatrix

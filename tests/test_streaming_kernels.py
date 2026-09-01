@@ -142,6 +142,20 @@ class TestWindowedAnalysisDispatch:
                                  missing_data="include")
         _assert_frames_equivalent(df_e, df_s)
 
+    @pytest.mark.parametrize("stat", ["zns", "omega"])
+    @pytest.mark.parametrize("chunk_bp,window_size", [(25_000, 5_000),
+                                                      (50_000, 10_000)])
+    def test_windowed_ld_stat_matches_eager(self, vcz_store, stat, chunk_bp,
+                                            window_size):
+        # zns and omega run through the per-window fallback, not the fused
+        # engine, so the streaming dispatch needs its own equivalence pin.
+        eager, stream = _aligned_pair(vcz_store, chunk_bp=chunk_bp)
+        df_e = windowed_analysis(eager, window_size=window_size,
+                                 statistics=[stat])
+        df_s = windowed_analysis(stream, window_size=window_size,
+                                 statistics=[stat])
+        _assert_frames_equivalent(df_e, df_s)
+
     def test_two_pop_divergence_equivalent(self, vcz_store, tmp_path):
         # Build a two-population pop file so divergence stats have something
         # to compute. Split samples 50/50.
