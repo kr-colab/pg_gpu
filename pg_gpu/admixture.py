@@ -241,6 +241,12 @@ def patterson_d(haplotype_matrix: HaplotypeMatrix,
     four populations are excluded (num = den = 0) and a ``BiallelicOnlyWarning``
     is emitted with the dropped-site count. A multiallelic generalization is a
     possible future extension.
+
+    Under ``missing_data='include'``, a site where any of the four
+    populations has no called gametes is also excluded (num = den = 0),
+    without a warning: a zero-call population has no allele frequency,
+    and treating it as frequency 0 can flip D's sign. scikit-allel drops
+    the same sites (its per-site values are nan there).
     """
     return tuple(v.get() for v in
                  _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
@@ -252,7 +258,8 @@ def _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
     """Like patterson_d but returns CuPy arrays (no D2H transfer).
 
     BIALLELIC-RESTRICTED: D (ABBA-BABA) is defined on biallelic SNPs; sites with
-    >2 alleles across the four pops are excluded (num=den=0). On the retained
+    >2 alleles across the four pops are excluded (num=den=0). Sites where any
+    pop has zero called gametes are also excluded (num=den=0). On the retained
     sites the allele frequency is a proper per-allele frequency (count of the
     single alt allele / n), NOT cp.sum(hap)/n -- so a biallelic {0,2}-type site
     is handled correctly, not index-inflated. The multiallelic generalization is
@@ -283,12 +290,19 @@ def _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
     alt = cp.where(present, cp.arange(k)[None, :], -1).argmax(axis=1)[:, None]
 
     def freq(x, n):
+        # n == 0 implies a zero alt count, so the clamp returns 0.0 there;
+        # those sites leave the result through `defined` below anyway.
         alt_count = cp.take_along_axis(x, alt, axis=1)[:, 0]
-        return cp.where(n > 0, alt_count / n, 0.0)
+        return alt_count / cp.maximum(n, 1.0)
+
+    # A population with zero called gametes has no frequency at the site; a
+    # frequency-0 stand-in would keep the site in both terms and can flip
+    # D's sign.
+    defined = biallelic & (na > 0) & (nb > 0) & (nc > 0) & (nd > 0)
 
     a, b, c, d = freq(xa, na), freq(xb, nb), freq(xc, nc), freq(xd, nd)
-    num = cp.where(biallelic, (a - b) * (c - d), 0.0)
-    den = cp.where(biallelic,
+    num = cp.where(defined, (a - b) * (c - d), 0.0)
+    den = cp.where(defined,
                    (a + b - 2 * a * b) * (c + d - 2 * c * d), 0.0)
     return num, den
 

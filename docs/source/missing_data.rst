@@ -56,6 +56,10 @@ Consider a site with 100 haplotypes where 10 are missing (``-1``):
 For statistics that require a single sample size (e.g., Tajima's D
 variance formula), the harmonic mean of per-site sample sizes is used.
 
+A population with no called gametes at a site has no allele frequency
+there, so ``patterson_d`` excludes such sites entirely (both terms zero)
+rather than treating the frequency as 0.
+
 Supported Statistics
 --------------------
 
@@ -81,7 +85,8 @@ Every public function accepts the ``missing_data`` parameter:
      - per-site n
      - filter sites
    * - Admixture (patterson_d, f2, f3, f4)
-     - per-site n
+     - per-site n; patterson_d also drops sites where a population has
+       zero calls
      - filter sites
    * - Selection scans (ihs, nsl, xpehh)
      - wildcard in shared-site length (SSL)

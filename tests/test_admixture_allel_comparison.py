@@ -29,10 +29,8 @@ def _make_matrix(hap_dict, n_var=100):
 
 
 def _allele_counts(hap):
-    """Compute allele counts (n_variants, 2) from haplotype array."""
-    n = hap.shape[0]
-    dac = np.sum(hap, axis=0)
-    return np.column_stack([n - dac, dac])
+    """Allele counts (n_variants, 2); ``-1`` counts as a missing call."""
+    return np.column_stack([np.sum(hap == 0, axis=0), np.sum(hap == 1, axis=0)])
 
 
 @pytest.fixture
@@ -230,3 +228,81 @@ class TestKnownValues:
         num, den = admixture.patterson_d(matrix, 'A', 'B', 'C', 'D')
         # numerator should be exactly 0 since a == b
         np.testing.assert_array_almost_equal(num, 0.0)
+
+
+class TestPattersonDZeroCallSites:
+    """Sites where one population has no called gametes leave D entirely."""
+
+    @pytest.fixture
+    def zero_call_data(self, four_pop_data):
+        """four_pop_data with all calls missing in one pop at some sites."""
+        _, base = four_pop_data
+        pops = {name: hap.copy() for name, hap in base.items()}
+        missing = np.zeros(pops['A'].shape[1], dtype=bool)
+        pops['A'][:, 10:20] = -1
+        pops['C'][:, 50:55] = -1
+        missing[10:20] = True
+        missing[50:55] = True
+        return _make_matrix(pops), pops, missing
+
+    def test_zero_call_sites_match_allel(self, zero_call_data):
+        matrix, pops, missing = zero_call_data
+        num_pg, den_pg = admixture.patterson_d(matrix, 'A', 'B', 'C', 'D')
+        acs = [_allele_counts(pops[p]) for p in 'ABCD']
+        num_a, den_a = allel.patterson_d(*acs)
+
+        # allel's nan sites are exactly our zeroed sites.
+        undefined = np.isnan(num_a) | np.isnan(den_a)
+        np.testing.assert_array_equal(undefined, missing)
+        np.testing.assert_array_equal(num_pg[undefined], 0.0)
+        np.testing.assert_array_equal(den_pg[undefined], 0.0)
+        # The defined sites agree.
+        np.testing.assert_allclose(num_pg[~undefined], num_a[~undefined],
+                                   rtol=1e-10)
+        np.testing.assert_allclose(den_pg[~undefined], den_a[~undefined],
+                                   rtol=1e-10)
+
+    def test_zero_call_site_contributes_nothing(self):
+        """The aggregate D over [zero-call site, informative site] is the
+        informative site's own ratio; a frequency-0 stand-in would have let
+        the zero-call site move it."""
+        pops = {
+            'A': np.array([[-1, 1], [-1, 1]], dtype=np.int8),
+            'B': np.array([[1, 1], [1, 0]], dtype=np.int8),
+            'C': np.array([[1, 1], [1, 0]], dtype=np.int8),
+            'D': np.array([[0, 0], [0, 0]], dtype=np.int8),
+        }
+        num, den = admixture.patterson_d(_make_matrix(pops), 'A', 'B', 'C', 'D')
+        assert num[0] == 0.0 and den[0] == 0.0
+        np.testing.assert_allclose(np.nansum(num) / np.nansum(den),
+                                   num[1] / den[1], rtol=1e-12)
+
+    def test_moving_d_matches_allel_with_zero_call_sites(self, zero_call_data):
+        """size=5 puts three windows entirely inside the missing blocks, so
+        this also pins the all-undefined-window -> NaN convention."""
+        matrix, pops, _ = zero_call_data
+        d_pg = admixture.moving_patterson_d(matrix, 'A', 'B', 'C', 'D', size=5)
+        acs = [_allele_counts(pops[p]) for p in 'ABCD']
+        with np.errstate(invalid='ignore'):  # allel reaches NaN through 0/0
+            d_a = allel.moving_patterson_d(*acs, size=5)
+        np.testing.assert_array_equal(np.isnan(d_pg), np.isnan(d_a))
+        valid = ~np.isnan(d_a)
+        np.testing.assert_allclose(d_pg[valid], d_a[valid], rtol=1e-10)
+
+    def test_average_d_matches_allel_with_zero_call_sites(self, zero_call_data):
+        matrix, pops, _ = zero_call_data
+        d_pg, se_pg, z_pg, _, _ = admixture.average_patterson_d(
+            matrix, 'A', 'B', 'C', 'D', blen=20)
+        acs = [_allele_counts(pops[p]) for p in 'ABCD']
+        d_a, se_a, z_a, _, _ = allel.average_patterson_d(*acs, blen=20)
+        np.testing.assert_allclose(d_pg, d_a, rtol=1e-10)
+        np.testing.assert_allclose(se_pg, se_a, rtol=1e-5)
+
+    def test_exclude_mode_drops_only_the_missing_sites(self, zero_call_data):
+        matrix, _, missing = zero_call_data
+        num, den = admixture.patterson_d(matrix, 'A', 'B', 'C', 'D',
+                                         missing_data='exclude')
+        # The base data has no other missing calls, so exclude keeps
+        # exactly the fully-called sites.
+        assert num.shape == den.shape == ((~missing).sum(),)
+        assert np.isfinite(np.nansum(num) / np.nansum(den))
