@@ -175,6 +175,13 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``patterson_d`` kept sites where one of the four populations had no
+  called gametes, treating the missing population as frequency 0, which
+  can flip D's sign. Such sites are now excluded from both the
+  numerator and denominator (num = den = 0), matching scikit-allel,
+  which returns nan there. ``moving_patterson_d`` and
+  ``average_patterson_d`` share the fix. ``missing_data='exclude'`` was
+  already correct.
 * ``HaplotypeMatrix.from_ts`` laid out rows in ``ts.samples()`` order and
   assumed each individual's two nodes were adjacent there. tskit does not
   promise that (``simplify`` renumbers samples freely), so on a reordered
