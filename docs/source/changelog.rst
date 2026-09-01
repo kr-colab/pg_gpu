@@ -159,10 +159,12 @@ Read this section if you are comparing against older pg_gpu results.
   ``sqeuclidean``, and ``cityblock``. Other metrics now raise
   ``NotImplementedError``, and passing a ``GenotypeMatrix`` raises a
   ``TypeError``.
-* ``pairwise_r2`` returns ``NaN`` instead of ``0`` for a pair whose
-  r-squared is undefined (a site where nothing varies), with either
-  estimator. Reductions over the matrix need ``nanmean`` /
-  ``nanargmax`` now.
+* ``pairwise_r2`` and ``ld_statistics.r2_matrix_diploid`` return
+  ``NaN`` instead of ``0`` for a pair whose r-squared is undefined -- a
+  site where nothing varies; for diploid dosages that includes an
+  all-heterozygous site -- with either estimator. Reductions over a
+  stored matrix need
+  ``nanmean`` or friends now.
 * ``windowed_analysis`` with exactly two populations names the
   two-population columns the same way on every path (``fst_hudson``);
   the non-fused fallback used to suffix them
@@ -175,6 +177,11 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``zns`` and ``omega`` on a ``GenotypeMatrix`` scored sites with no
+  dosage variance -- monomorphic sites, and all-heterozygous sites --
+  as r^2 = 0 instead of undefined, which diluted ZnS and inflated
+  omega. Both statistics now drop those sites, as the haplotype path
+  already did.
 * ``patterson_d`` kept sites where one of the four populations had no
   called gametes, treating the missing population as frequency 0, which
   can flip D's sign. Such sites are now excluded from both the

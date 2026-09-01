@@ -661,9 +661,10 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
 def _drop_undefined_sites(r2_matrix):
     """Drop sites whose r2 is undefined for every pair.
 
-    ``pairwise_r2`` marks a monomorphic or multiallelic site by NaN-ing its
-    whole row and column, so excluding undefined pairs is the same as dropping
-    those sites -- what the object-input path already does before reducing.
+    Both r^2 matrix builders NaN a site's whole row and column when its
+    r^2 is undefined: ``pairwise_r2`` for monomorphic and multiallelic
+    sites, ``_r2_matrix_diploid`` for sites with no dosage variance. So
+    excluding undefined pairs is the same as dropping those sites.
     No-op on a finite matrix. Assumes undefined entries arrive as whole
     rows/cols (all this package produces); a scattered NaN would propagate.
     """
@@ -708,7 +709,10 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     -----
     A ``HaplotypeMatrix`` is first restricted to its own biallelic sites and
     a ``BiallelicOnlyWarning`` reports how many were dropped; an input that
-    is already biallelic drops nothing and stays silent.
+    is already biallelic drops nothing and stays silent. A
+    ``GenotypeMatrix`` instead drops sites with no dosage variance --
+    monomorphic sites, and sites where every called individual is
+    heterozygous -- because r^2 is undefined there.
     """
     from .haplotype_matrix import HaplotypeMatrix
 
@@ -724,8 +728,8 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
             "not a pre-computed r² array")
 
     r2_matrix = _resolve_r2_matrix(r2_matrix_or_matrix, missing_data)
-    # Undefined (monomorphic/multiallelic) sites carry NaN rows/cols; drop them
-    # so the mean is over defined pairs, matching the object-input path.
+    # Sites with no defined r^2 carry NaN rows/cols; drop them so the mean
+    # is over defined pairs.
     r2_matrix = _drop_undefined_sites(r2_matrix)
 
     m = r2_matrix.shape[0]
@@ -810,7 +814,10 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     -----
     A ``HaplotypeMatrix`` is first restricted to its own biallelic sites and
     a ``BiallelicOnlyWarning`` reports how many were dropped; an input that
-    is already biallelic drops nothing and stays silent.
+    is already biallelic drops nothing and stays silent. A
+    ``GenotypeMatrix`` instead drops sites with no dosage variance --
+    monomorphic sites, and sites where every called individual is
+    heterozygous -- because r^2 is undefined there.
     """
     from .haplotype_matrix import HaplotypeMatrix
 
@@ -830,8 +837,8 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     else:
         r2_matrix = _resolve_r2_matrix(r2_matrix_or_matrix, missing_data)
 
-    # Undefined (monomorphic/multiallelic) sites carry NaN rows/cols; drop them
-    # so the block means are over defined pairs, matching the object-input path.
+    # Sites with no defined r^2 carry NaN rows/cols; drop them so the block
+    # means are over defined pairs.
     r2_matrix = _drop_undefined_sites(r2_matrix)
 
     m = r2_matrix.shape[0]
@@ -940,8 +947,8 @@ def mu_ld(haplotype_matrix, missing_data='include'):
 def _resolve_r2_matrix(r2_matrix_or_matrix, missing_data='include'):
     """Convert a matrix object to an r2 matrix, or pass through raw arrays.
 
-    Filters to segregating sites only (excludes monomorphic variants)
-    to match diploSHIC/allel convention for ZnS/Omega.
+    Sites with no defined r^2 never reach the reducers; see the branch
+    comment below. Matches the diploSHIC/allel convention for ZnS/Omega.
     """
     from .haplotype_matrix import HaplotypeMatrix
     from .genotype_matrix import GenotypeMatrix
@@ -964,18 +971,12 @@ def _resolve_r2_matrix(r2_matrix_or_matrix, missing_data='include'):
                 from .genotype_matrix import GenotypeMatrix as GM
                 mat = GM(geno, pos)
 
-        # Haploid: filter monomorphic sites before r^2 computation.
-        # diploSHIC marks monomorphic pairs as -1 and skips them in ZnS/Omega.
-        # We match this by excluding monomorphic sites entirely.
+        # Haplotypes: drop non-segregating sites here. Diploids cannot use
+        # the same test -- an all-heterozygous site segregates but has
+        # constant dosage -- so _r2_matrix_diploid NaN-marks zero-variance
+        # rows and the reducers drop them via _drop_undefined_sites.
         if isinstance(mat, HaplotypeMatrix):
-            ind = mat._biallelic_indicator()
-            dac = cp.sum(ind == 1, axis=0)
-            n_valid = cp.sum(ind >= 0, axis=0)
-            seg = (dac > 0) & (dac < n_valid)
-            seg_idx = cp.where(seg)[0]
-            if len(seg_idx) < mat.num_variants:
-                mat = mat.get_subset(seg_idx)
-            return mat.pairwise_r2().astype(cp.float64)
+            return mat.restrict_to_segregating().pairwise_r2().astype(cp.float64)
         else:
             return _r2_matrix_diploid(mat)
     else:
@@ -998,6 +999,7 @@ def _r2_matrix_diploid(genotype_matrix):
     Returns
     -------
     r2 : cupy.ndarray, float64, shape (n_variants, n_variants)
+        NaN row and column at a site with no dosage variance; diagonal 0.
     """
     from .genotype_matrix import GenotypeMatrix
 
@@ -1024,12 +1026,14 @@ def _r2_matrix_diploid(genotype_matrix):
     # variance per variant (using valid counts)
     var = cp.sum(gn ** 2, axis=0)
 
-    # correlation via matrix multiply
-    cov = gn.T @ gn  # (n_var, n_var)
-
-    # normalize: r_ij = cov_ij / sqrt(var_i * var_j)
-    denom = cp.sqrt(cp.outer(var, var))
-    r2 = cp.where(denom > 0, (cov / denom) ** 2, 0.0)
+    # r_ij = cov_ij / sqrt(var_i * var_j), applied as a rank-1 in-place
+    # scale so peak memory stays near the one output matrix; the NaN scale
+    # at a zero-variance site spreads over its whole row and column.
+    r2 = gn.T @ gn  # (n_var, n_var)
+    inv = cp.where(var > 0, 1.0 / cp.sqrt(var), cp.nan)
+    r2 *= inv[:, None]
+    r2 *= inv[None, :]
+    r2 *= r2
     cp.fill_diagonal(r2, 0.0)
 
     return r2
