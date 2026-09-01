@@ -277,6 +277,18 @@ class TestPattersonDZeroCallSites:
         np.testing.assert_allclose(np.nansum(num) / np.nansum(den),
                                    num[1] / den[1], rtol=1e-12)
 
+    def test_moving_d_matches_allel_with_zero_call_sites(self, zero_call_data):
+        """size=5 puts three windows entirely inside the missing blocks, so
+        this also pins the all-undefined-window -> NaN convention."""
+        matrix, pops, _ = zero_call_data
+        d_pg = admixture.moving_patterson_d(matrix, 'A', 'B', 'C', 'D', size=5)
+        acs = [_allele_counts(pops[p]) for p in 'ABCD']
+        with np.errstate(invalid='ignore'):  # allel reaches NaN through 0/0
+            d_a = allel.moving_patterson_d(*acs, size=5)
+        np.testing.assert_array_equal(np.isnan(d_pg), np.isnan(d_a))
+        valid = ~np.isnan(d_a)
+        np.testing.assert_allclose(d_pg[valid], d_a[valid], rtol=1e-10)
+
     def test_average_d_matches_allel_with_zero_call_sites(self, zero_call_data):
         matrix, pops, _ = zero_call_data
         d_pg, se_pg, z_pg, _, _ = admixture.average_patterson_d(
