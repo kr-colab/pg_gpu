@@ -164,6 +164,20 @@ class TestLDStatistics:
         np.testing.assert_allclose(g, m, rtol=1e-6,
             err_msg="Heterozygosity sums mismatch")
 
+    def test_chunk_size_override_is_result_invariant(self, gpu_stats,
+                                                      biallelic01_vcf):
+        # A pair chunk is just a partition of an additive sum, so a small
+        # chunk_size (~7 chunks here) must give the same sums as the auto
+        # estimate, which fits this data in one chunk.
+        forced = compute_ld_statistics(
+            biallelic01_vcf, pop_file=POP_FILE, pops=POPS,
+            bp_bins=BP_BINS, use_genotypes=False, report=False,
+            chunk_size=500_000,
+        )
+        for i in range(len(gpu_stats['bins'])):
+            np.testing.assert_allclose(forced['sums'][i], gpu_stats['sums'][i],
+                rtol=1e-6, err_msg=f"chunk_size changed sums in bin {i}")
+
 
 class TestHeterozygosity:
     """Verify heterozygosity computation independently."""

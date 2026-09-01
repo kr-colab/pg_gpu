@@ -2324,7 +2324,8 @@ class HaplotypeMatrix:
         n_bins = len(bp_bins_arr) - 1
         bp_bins_cp = cp.array(bp_bins_arr)
         if chunk_size == 'auto':
-            chunk_size = _estimate_ld_chunk_size(seg.num_haplotypes)
+            num_stats = 3  # single-pop DD/Dz/pi2
+            chunk_size = _estimate_ld_chunk_size(seg.num_haplotypes, num_stats)
 
         pos = seg.positions
         if not isinstance(pos, cp.ndarray):
@@ -2399,9 +2400,9 @@ class HaplotypeMatrix:
         pop1_indices = seg._sample_sets[pop1]
         pop2_indices = seg._sample_sets[pop2]
         if chunk_size == 'auto':
-            chunk_size = _estimate_ld_chunk_size(
-                max(len(pop1_indices), len(pop2_indices))
-            )
+            num_stats = 15  # two-pop DD/Dz/pi2
+            num_haplos = max(len(pop1_indices), len(pop2_indices))
+            chunk_size = _estimate_ld_chunk_size(num_haplos * 2, num_stats)
 
         pos = seg.positions
         if not isinstance(pos, cp.ndarray):
@@ -2526,7 +2527,9 @@ def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, chunk_size):
     n_bins = len(bp_bins_arr) - 1
     bp_bins_cp = cp.array(bp_bins_arr)
     if chunk_size == 'auto':
-        chunk_size_int = _estimate_ld_chunk_size(streaming_hm.num_haplotypes)
+        num_stats = 3  # single-pop DD/Dz/pi2
+        chunk_size_int = _estimate_ld_chunk_size(
+            streaming_hm.num_haplotypes, num_stats)
     else:
         chunk_size_int = int(chunk_size)
     bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
@@ -2572,9 +2575,9 @@ def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
     pop1_indices = streaming_hm.sample_sets[pop1]
     pop2_indices = streaming_hm.sample_sets[pop2]
     if chunk_size == 'auto':
-        chunk_size_int = _estimate_ld_chunk_size(
-            max(len(pop1_indices), len(pop2_indices))
-        )
+        num_stats = 15  # two-pop DD/Dz/pi2
+        num_haplos = max(len(pop1_indices), len(pop2_indices))
+        chunk_size_int = _estimate_ld_chunk_size(num_haplos * 2, num_stats)
     else:
         chunk_size_int = int(chunk_size)
     bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
