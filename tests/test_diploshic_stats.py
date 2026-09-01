@@ -205,6 +205,31 @@ class TestZnSOmega:
         with pytest.raises(ValueError, match="Unknown estimator"):
             ld_statistics.zns(hap_data, estimator='nonsense')
 
+    @pytest.mark.parametrize("stat", [ld_statistics.zns, ld_statistics.omega])
+    def test_rogers_huff_on_haplotypes_pairs_rows(self, hap_data, geno_data,
+                                                  stat):
+        rh = stat(hap_data, estimator='rogers_huff')
+        assert rh == stat(geno_data, estimator='rogers_huff')
+        # And it is a different estimator from naive haplotype r2.
+        assert rh != stat(hap_data, estimator='r2')
+
+    @pytest.mark.parametrize("stat", [ld_statistics.zns, ld_statistics.omega])
+    def test_rogers_huff_raises_on_precomputed_array(self, hap_data, stat):
+        with pytest.raises(ValueError, match="pre-computed"):
+            stat(hap_data.pairwise_r2(), estimator='rogers_huff')
+
+    def test_rogers_huff_reads_no_sample_sets(self, hap_data):
+        # zns takes no population argument; a gappy sample_sets must
+        # neither warn nor change the result.
+        import warnings
+        from pg_gpu import UnpairedRowsWarning
+        baseline = ld_statistics.zns(hap_data, estimator='rogers_huff')
+        hap_data.sample_sets = {'p': [0, 2]}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UnpairedRowsWarning)
+            assert ld_statistics.zns(hap_data,
+                                     estimator='rogers_huff') == baseline
+
 
 # ---------------------------------------------------------------------------
 # mu_ld
@@ -381,3 +406,4 @@ class TestDiplotypeFreqSpec:
         freqs, n_d = diversity.diplotype_frequency_spectrum(gm)
         assert n_d == 1
         assert freqs[0] == 1.0
+

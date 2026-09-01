@@ -513,3 +513,17 @@ class TestStreamingGenotypeMatrix:
         # individual axis into row blocks. Result must match eager.
         np.testing.assert_allclose(ibs(gm_stream), ibs(gm_eager),
                                     rtol=1e-9, atol=1e-12)
+
+
+class TestPairwiseLdRejectsStreams:
+    """zns and omega need the full pair set at once."""
+
+    @pytest.mark.parametrize("cls_name", ["HaplotypeMatrix", "GenotypeMatrix"])
+    @pytest.mark.parametrize("stat_name", ["zns", "omega"])
+    def test_rejects_streams(self, vcz_store, cls_name, stat_name):
+        import pg_gpu
+        from pg_gpu import ld_statistics
+        path, _ = vcz_store
+        stream = getattr(pg_gpu, cls_name).from_zarr(path, streaming="always")
+        with pytest.raises(NotImplementedError, match="materialize"):
+            getattr(ld_statistics, stat_name)(stream)
