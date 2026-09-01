@@ -47,3 +47,7 @@ class TestEstimateLdChunkSize:
 
     def test_ceiling_caps_large_budgets(self):
         assert estimate_ld_chunk_size(50, 3, 10**12) == 10_000_000
+
+    def test_float_budget_gives_int_chunk(self):
+        # A float budget must not leak a float chunk size.
+        assert isinstance(estimate_ld_chunk_size(400, 105, 5.0e9), int)

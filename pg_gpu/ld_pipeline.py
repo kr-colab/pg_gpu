@@ -49,7 +49,8 @@ def estimate_ld_chunk_size(n_gathered_rows, n_stats,
     if n_stats < 1:
         raise ValueError("n_stats must be positive")
     if available_memory_bytes is None:
-        available_memory_bytes = int(cp.cuda.Device().mem_info[0] * 0.5)
+        available_memory_bytes = cp.cuda.Device().mem_info[0] * 0.5
+    available_memory_bytes = int(available_memory_bytes)
 
     bytes_per_pair = (4 * n_gathered_rows + 50 * n_stats) * 3
     fit = available_memory_bytes // bytes_per_pair
