@@ -143,23 +143,32 @@ class TestEdgeCases:
 
 
 class TestEstimatorResolver:
+    """_resolve_ld_estimator maps 'auto' per input kind and raises for
+    estimators a kind cannot compute."""
 
-    def test_auto_haplotype_resolves_to_sigma_d2(self):
-        assert _resolve_ld_estimator('auto', is_hap_matrix=True) == 'sigma_d2'
+    def test_auto_policy_per_kind(self):
+        assert _resolve_ld_estimator('auto', 'haplotype') == 'sigma_d2'
+        assert _resolve_ld_estimator('auto', 'genotype') == 'rogers_huff'
+        assert _resolve_ld_estimator('auto', 'array') == 'r2'
 
-    def test_auto_genotype_resolves_to_rogers_huff(self):
-        assert _resolve_ld_estimator(
-            'auto', is_hap_matrix=False) == 'rogers_huff'
+    def test_computable_names_pass_through(self):
+        assert _resolve_ld_estimator('rogers_huff', 'haplotype') == 'rogers_huff'
+        assert _resolve_ld_estimator('rogers_huff', 'genotype') == 'rogers_huff'
+        assert _resolve_ld_estimator('sigma_d2', 'haplotype') == 'sigma_d2'
+        for kind in ('haplotype', 'genotype', 'array'):
+            assert _resolve_ld_estimator('r2', kind) == 'r2'
 
-    def test_explicit_rogers_huff_passes_through(self):
-        assert _resolve_ld_estimator(
-            'rogers_huff', is_hap_matrix=True) == 'rogers_huff'
-        assert _resolve_ld_estimator(
-            'rogers_huff', is_hap_matrix=False) == 'rogers_huff'
+    def test_incomputable_combinations_raise(self):
+        with pytest.raises(ValueError, match="requires a HaplotypeMatrix"):
+            _resolve_ld_estimator('sigma_d2', 'genotype')
+        with pytest.raises(ValueError, match="pre-computed"):
+            _resolve_ld_estimator('sigma_d2', 'array')
+        with pytest.raises(ValueError, match="pre-computed"):
+            _resolve_ld_estimator('rogers_huff', 'array')
 
     def test_unknown_estimator_raises(self):
         with pytest.raises(ValueError, match="Unknown estimator"):
-            _resolve_ld_estimator('bogus', is_hap_matrix=True)
+            _resolve_ld_estimator('bogus', 'haplotype')
 
 
 # ---------------------------------------------------------------------------

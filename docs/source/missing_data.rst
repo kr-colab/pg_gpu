@@ -110,17 +110,23 @@ LD Estimator Choice
 For LD statistics, ``zns()`` and ``omega()`` accept an ``estimator``
 parameter independent of missing data handling:
 
-* ``estimator='auto'`` (default): use the unbiased ``sigma_d2``
-  estimator when the input is a ``HaplotypeMatrix``, and fall back to
-  naive ``r2`` for pre-computed r² arrays or ``GenotypeMatrix`` inputs
-  (where ``sigma_d2`` is not available).
-* ``estimator='r2'``: always use naive r-squared. Convenient when you
-  want the "classical" estimator regardless of input type.
-* ``estimator='sigma_d2'``: always use the unbiased multinomial
-  projection estimators (Ragsdale & Gravel 2019), computing
+* ``estimator='auto'`` (default): ``sigma_d2`` for a
+  ``HaplotypeMatrix``, ``rogers_huff`` for a ``GenotypeMatrix``, and
+  ``r2`` for a pre-computed r² array.
+* ``estimator='r2'``: naive r-squared on any input.
+* ``estimator='sigma_d2'``: the unbiased multinomial projection
+  estimators (Ragsdale & Gravel 2019), computing
   :math:`\sigma_D^2 = D^2 / \pi_2` with falling-factorial corrections.
   More robust with small or variable sample sizes; requires a
   ``HaplotypeMatrix``.
+* ``estimator='rogers_huff'``: the diploid dosage-correlation r²
+  (Rogers & Huff 2008). A ``HaplotypeMatrix`` is first paired into
+  0/1/2 dosages by adjacent rows; on a ``GenotypeMatrix`` this is the
+  same computation as ``'r2'``.
+
+An estimator the input cannot compute raises: ``sigma_d2`` needs
+haplotypes, ``rogers_huff`` needs genotype data, and a pre-computed
+array accepts only ``'r2'``.
 
 .. code-block:: python
 
@@ -368,13 +374,12 @@ Best Practices
    when you want proper handling of variable sample sizes via group-by-n
    or SFS projection.
 
-4. **The default ``estimator='auto'`` for ``zns()`` and ``omega()``
-   uses the unbiased ``sigma_d2`` estimator on ``HaplotypeMatrix``
-   inputs**, which corrects the upward bias inherent in naive
-   :math:`r^2` -- particularly important with small or variable
-   sample sizes. Pass ``estimator='r2'`` explicitly if you want the
-   classical naive estimator instead (e.g. for backward comparison
-   with a previous analysis).
+4. **The default ``estimator='auto'`` picks per input**: the unbiased
+   ``sigma_d2`` estimator on a ``HaplotypeMatrix``, the dosage
+   correlation (``rogers_huff``) on a ``GenotypeMatrix``, and plain
+   ``r2`` on a pre-computed array. Pass ``estimator='r2'`` explicitly
+   if you want the classical naive estimator everywhere (e.g. for
+   backward comparison with older results).
 
 5. **Check missingness patterns** before analysis with
    ``summarize_missing_data()`` and consider filtering sites with

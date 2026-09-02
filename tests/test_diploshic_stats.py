@@ -205,6 +205,61 @@ class TestZnSOmega:
         with pytest.raises(ValueError, match="Unknown estimator"):
             ld_statistics.zns(hap_data, estimator='nonsense')
 
+    @pytest.mark.parametrize("stat", [ld_statistics.zns, ld_statistics.omega])
+    def test_rogers_huff_on_haplotypes_pairs_rows(self, hap_data, geno_data,
+                                                  stat):
+        rh = stat(hap_data, estimator='rogers_huff')
+        assert rh == stat(geno_data, estimator='rogers_huff')
+        # And it is a different estimator from naive haplotype r2.
+        assert rh != stat(hap_data, estimator='r2')
+
+    @pytest.mark.parametrize("stat", [ld_statistics.zns, ld_statistics.omega])
+    def test_rogers_huff_raises_on_precomputed_array(self, hap_data, stat):
+        with pytest.raises(ValueError, match="pre-computed"):
+            stat(hap_data.pairwise_r2(), estimator='rogers_huff')
+
+    def test_rogers_huff_reads_no_sample_sets(self, hap_data):
+        # zns takes no population argument; a gappy sample_sets must
+        # neither warn nor change the result.
+        import warnings
+        from pg_gpu import UnpairedRowsWarning
+        baseline = ld_statistics.zns(hap_data, estimator='rogers_huff')
+        hap_data.sample_sets = {'p': [0, 2]}
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UnpairedRowsWarning)
+            assert ld_statistics.zns(hap_data,
+                                     estimator='rogers_huff') == baseline
+
+    @staticmethod
+    def _with_missing(hap_data, frac=0.03, seed=0):
+        g = cp.asnumpy(hap_data.haplotypes).copy()
+        g[np.random.default_rng(seed).random(g.shape) < frac] = -1
+        pos = cp.asnumpy(hap_data.positions)
+        return HaplotypeMatrix(g, pos, hap_data.chrom_start, hap_data.chrom_end)
+
+    def test_zns_sigma_d2_honours_exclude(self, hap_data):
+        # The default estimator (sigma_d2) used to discard missing_data,
+        # returning the include result; exclude must now restrict to
+        # complete sites first.
+        hm = self._with_missing(hap_data)
+        inc = ld_statistics.zns(hm, missing_data='include')
+        exc = ld_statistics.zns(hm, missing_data='exclude')
+        assert inc != exc
+        # And on complete data exclude drops nothing, so it equals include.
+        assert (ld_statistics.zns(hap_data, missing_data='exclude')
+                == ld_statistics.zns(hap_data, missing_data='include'))
+
+    def test_zns_exclude_matches_manual_complete_site_subset(self, hap_data):
+        # exclude equals the same statistic on a matrix hand-filtered to
+        # the sites with no missing calls, under the default estimator.
+        hm = self._with_missing(hap_data)
+        g = cp.asnumpy(hm.haplotypes)
+        complete = np.where((g >= 0).all(axis=0))[0]
+        sub = hm.get_subset(complete)
+        np.testing.assert_allclose(ld_statistics.zns(hm, missing_data='exclude'),
+                                   ld_statistics.zns(sub, missing_data='include'),
+                                   rtol=1e-12)
+
 
 # ---------------------------------------------------------------------------
 # mu_ld
@@ -381,3 +436,4 @@ class TestDiplotypeFreqSpec:
         freqs, n_d = diversity.diplotype_frequency_spectrum(gm)
         assert n_d == 1
         assert freqs[0] == 1.0
+

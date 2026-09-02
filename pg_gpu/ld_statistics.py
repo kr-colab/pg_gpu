@@ -341,26 +341,52 @@ def _tile_sigma_d2(hi, vi, hj, vj):
     return sigma_d2, valid
 
 
-def _resolve_ld_estimator(estimator: str, is_hap_matrix: bool) -> str:
-    """Resolve an LD estimator string, including the ``'auto'`` policy.
+def _resolve_ld_estimator(estimator: str, kind: str) -> str:
+    """Resolve an LD estimator string against the input ``kind``.
 
-    ``'auto'`` resolves to:
-      - ``'sigma_d2'`` for a ``HaplotypeMatrix`` (unbiased Ragsdale &
-        Gravel 2019 estimator -- the recommended path on phased data).
-      - ``'rogers_huff'`` for a ``GenotypeMatrix`` (the natural
-        diploid-dosage estimator).
-      - ``'r2'`` otherwise (pre-computed r² arrays, etc.).
-
-    Explicit ``'r2'``, ``'sigma_d2'``, and ``'rogers_huff'`` pass
-    through unchanged.
+    ``kind`` is ``'haplotype'``, ``'genotype'``, or ``'array'``
+    (a pre-computed r² matrix). ``'auto'`` resolves to ``'sigma_d2'``,
+    ``'rogers_huff'``, and ``'r2'`` respectively. Explicit names pass
+    through, except that an estimator the kind cannot compute raises:
+    ``sigma_d2`` needs haplotypes, ``rogers_huff`` needs genotype data,
+    and an array is already an r² matrix.
     """
     if estimator == 'auto':
-        return 'sigma_d2' if is_hap_matrix else 'rogers_huff'
+        return {'haplotype': 'sigma_d2', 'genotype': 'rogers_huff',
+                'array': 'r2'}[kind]
     if estimator not in ('r2', 'sigma_d2', 'rogers_huff'):
         raise ValueError(
             f"Unknown estimator: {estimator!r} "
             f"(expected one of 'auto', 'r2', 'sigma_d2', 'rogers_huff')")
+    if estimator == 'sigma_d2' and kind != 'haplotype':
+        raise ValueError("estimator='sigma_d2' requires a HaplotypeMatrix, "
+                         f"not {_KIND_NOUN[kind]}")
+    if estimator == 'rogers_huff' and kind == 'array':
+        raise ValueError("estimator='rogers_huff' needs genotype data, "
+                         f"not {_KIND_NOUN[kind]}")
     return estimator
+
+
+_KIND_NOUN = {'haplotype': 'a HaplotypeMatrix', 'genotype': 'a GenotypeMatrix',
+              'array': 'a pre-computed r² array'}
+
+
+def _ld_input_kind(obj, context):
+    """Classify an LD input as ``'haplotype'``, ``'genotype'``, or
+    ``'array'``, rejecting streaming matrices up front."""
+    from .haplotype_matrix import HaplotypeMatrix
+    from .genotype_matrix import GenotypeMatrix
+    from .streaming_matrix import _StreamingMatrixBase
+    if isinstance(obj, _StreamingMatrixBase):
+        raise NotImplementedError(
+            f"{context} needs every variant pair in scope at once, which a "
+            "streaming matrix cannot hold; call .materialize(region=(lo, hi)) "
+            "to get an eager matrix over a sub-region and compute on that.")
+    if isinstance(obj, HaplotypeMatrix):
+        return 'haplotype'
+    if isinstance(obj, GenotypeMatrix):
+        return 'genotype'
+    return 'array'
 
 
 def _dosage_from_matrix(matrix) -> "cp.ndarray":
@@ -513,21 +539,21 @@ def rogers_huff_r_squared(matrix, tile_size: Optional[int] = None
     return rogers_huff_r(matrix, tile_size=tile_size) ** 2
 
 
-def _zns_tiled(mat, missing_data='include', tile_size=512):
+def _zns_tiled(mat, missing_data='include', tile_size=512, use_projection=False):
     """Compute ZnS without materializing the full r² matrix.
 
     Uses tile-based accumulation: computes r² for B×B blocks and
     sums per tile, keeping memory at O(B²) instead of O(m²).
 
-    When missing_data='project' (set internally via estimator='sigma_d2'),
-    uses unbiased multinomial projection estimators (Ragsdale & Gravel
-    2019) computing σ_D² = D²/π² per pair instead of naive r².
+    ``use_projection`` selects the unbiased multinomial projection
+    estimator (Ragsdale & Gravel 2019, σ_D² = D²/π² per pair) over
+    naive r². ``missing_data`` is applied first either way, so
+    ``'exclude'`` restricts to complete sites before the estimator runs,
+    matching ``_build_sigma_d2_matrix`` (omega's projection path).
     """
     hap_clean, valid_mask, m = _prepare_segregating(mat, missing_data)
     if m < 2:
         return 0.0
-
-    use_projection = (missing_data == 'project')  # internal: mapped from estimator='sigma_d2'
 
     B = tile_size
     total = 0.0
@@ -684,21 +710,30 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     r2_matrix_or_matrix : ndarray, HaplotypeMatrix, or GenotypeMatrix
         Square r-squared matrix, or a matrix object (dispatches to
         haploid or diploid r-squared computation automatically).
-        When a HaplotypeMatrix is passed, uses tiled computation to
-        avoid materializing the full m×m r² matrix.
+        With estimator 'r2' or 'sigma_d2', a HaplotypeMatrix goes
+        through tiled computation that avoids materializing the full
+        m×m r² matrix; 'rogers_huff' builds the full matrix, so peak
+        memory is O(m²).
     missing_data : str
         ``'include'`` (default) uses per-site valid data for frequency
-        computation. ``'exclude'`` filters to sites with no missing data.
+        computation. ``'exclude'`` filters to sites with no missing data
+        before the estimator runs, under every estimator.
     estimator : str
-        ``'auto'`` (default) uses the unbiased ``sigma_d2`` estimator
-        when the input is a ``HaplotypeMatrix``, and falls back to
-        naive ``r2`` for pre-computed r² arrays or ``GenotypeMatrix``
-        inputs (where ``sigma_d2`` is not available).
-        ``'r2'`` always computes naive r-squared.
-        ``'sigma_d2'`` always uses the unbiased multinomial projection
+        ``'auto'`` (default): ``sigma_d2`` for a ``HaplotypeMatrix``,
+        ``rogers_huff`` for a ``GenotypeMatrix``, ``r2`` for a
+        pre-computed r² array.
+        ``'r2'`` computes naive r-squared.
+        ``'sigma_d2'`` uses the unbiased multinomial projection
         estimators (Ragsdale & Gravel 2019), computing mean
         :math:`\\sigma_D^2 = D^2/\\pi_2` per pair with falling-factorial
         corrections. Requires ``HaplotypeMatrix`` input.
+        ``'rogers_huff'`` computes the diploid dosage-correlation r²
+        (Rogers & Huff 2008); a ``HaplotypeMatrix`` is first paired
+        into 0/1/2 dosages by adjacent rows, as ``pairwise_r2`` does.
+        On a ``GenotypeMatrix`` this is the same computation as
+        ``'r2'``. Raises on a pre-computed array. The pairing assumes
+        rows ``2i`` and ``2i + 1`` are one individual, and unlike
+        ``pairwise_r2`` this route tolerates missing calls.
 
     Returns
     -------
@@ -714,28 +749,30 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     monomorphic sites, and sites where every called individual is
     heterozygous -- because r^2 is undefined there.
     """
-    from .haplotype_matrix import HaplotypeMatrix
-
-    if isinstance(r2_matrix_or_matrix, HaplotypeMatrix):
-        # Tiled path: O(B²) memory instead of O(m²).
+    kind = _ld_input_kind(r2_matrix_or_matrix, "zns")
+    estimator = _resolve_ld_estimator(estimator, kind)
+    if kind == 'haplotype':
         biallelic = r2_matrix_or_matrix.restrict_to_biallelic(warn_context="zns")
-        return _zns_biallelic(biallelic, missing_data, estimator)
-    estimator = _resolve_ld_estimator(estimator, False)
-
-    if estimator == 'sigma_d2':
-        raise ValueError(
-            "estimator='sigma_d2' requires a HaplotypeMatrix, "
-            "not a pre-computed r² array")
+        if estimator != 'rogers_huff':
+            # Tiled path: O(B²) memory instead of O(m²).
+            return _zns_biallelic(biallelic, missing_data, estimator)
+        # Rogers-Huff r is a diploid dosage correlation, so take the genotype
+        # path. These statistics read no populations, so drop the sample sets
+        # rather than convert-and-warn about them.
+        from .genotype_matrix import GenotypeMatrix
+        biallelic._sample_sets = None
+        r2_matrix_or_matrix = GenotypeMatrix.from_haplotype_matrix(biallelic)
 
     r2_matrix = _resolve_r2_matrix(r2_matrix_or_matrix, missing_data)
-    # Sites with no defined r^2 carry NaN rows/cols; drop them so the mean
-    # is over defined pairs.
-    r2_matrix = _drop_undefined_sites(r2_matrix)
-
-    m = r2_matrix.shape[0]
+    # Undefined sites carry NaN rows; nansum skips them without the
+    # compacting copy _drop_undefined_sites would make (omega needs that
+    # copy for its prefix sums; a scalar mean does not).
+    finite = ~cp.isnan(r2_matrix)
+    cp.fill_diagonal(finite, False)
+    m = int(cp.any(finite, axis=1).sum())
     if m < 2:
         return 0.0
-    total = cp.sum(r2_matrix) - cp.trace(r2_matrix)
+    total = cp.nansum(r2_matrix) - cp.nansum(cp.diag(r2_matrix))
     return float((total / (m * (m - 1))).get())
 
 
@@ -743,9 +780,9 @@ def _zns_biallelic(hm, missing_data='include', estimator='auto'):
     """``zns`` for a HaplotypeMatrix already restricted to biallelic sites:
     no second restriction and no warning. ``divergence.zx`` restricts once
     and calls this for each of its three terms."""
-    estimator = _resolve_ld_estimator(estimator, True)
-    # 'project' selects the sigma_d2 estimator inside _zns_tiled.
-    return _zns_tiled(hm, 'project' if estimator == 'sigma_d2' else missing_data)
+    estimator = _resolve_ld_estimator(estimator, 'haplotype')
+    return _zns_tiled(hm, missing_data,
+                      use_projection=(estimator == 'sigma_d2'))
 
 
 def _build_sigma_d2_matrix(mat, missing_data='include'):
@@ -796,14 +833,20 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
         ``'include'`` (default) uses per-site valid data for frequency
         computation. ``'exclude'`` filters to sites with no missing data.
     estimator : str
-        ``'auto'`` (default) uses the unbiased ``sigma_d2`` estimator
-        when the input is a ``HaplotypeMatrix``, and falls back to
-        naive ``r2`` for pre-computed r² arrays or ``GenotypeMatrix``
-        inputs (where ``sigma_d2`` is not available).
-        ``'r2'`` always computes naive r-squared.
-        ``'sigma_d2'`` always uses unbiased
+        ``'auto'`` (default): ``sigma_d2`` for a ``HaplotypeMatrix``,
+        ``rogers_huff`` for a ``GenotypeMatrix``, ``r2`` for a
+        pre-computed r² array.
+        ``'r2'`` computes naive r-squared.
+        ``'sigma_d2'`` uses unbiased
         :math:`\\sigma_D^2 = D^2/\\pi_2` (Ragsdale & Gravel 2019).
         Requires ``HaplotypeMatrix`` input.
+        ``'rogers_huff'`` computes the diploid dosage-correlation r²
+        (Rogers & Huff 2008); a ``HaplotypeMatrix`` is first paired
+        into 0/1/2 dosages by adjacent rows, as ``pairwise_r2`` does.
+        On a ``GenotypeMatrix`` this is the same computation as
+        ``'r2'``. Raises on a pre-computed array. The pairing assumes
+        rows ``2i`` and ``2i + 1`` are one individual, and unlike
+        ``pairwise_r2`` this route tolerates missing calls.
 
     Returns
     -------
@@ -819,19 +862,22 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     monomorphic sites, and sites where every called individual is
     heterozygous -- because r^2 is undefined there.
     """
-    from .haplotype_matrix import HaplotypeMatrix
+    kind = _ld_input_kind(r2_matrix_or_matrix, "omega")
+    estimator = _resolve_ld_estimator(estimator, kind)
 
-    is_hm = isinstance(r2_matrix_or_matrix, HaplotypeMatrix)
-    estimator = _resolve_ld_estimator(estimator, is_hm)
-
-    if is_hm:
+    if kind == 'haplotype':
         r2_matrix_or_matrix = r2_matrix_or_matrix.restrict_to_biallelic(
             warn_context="omega")
+        if estimator == 'rogers_huff':
+            # Rogers-Huff r is a diploid dosage correlation, so take the
+            # genotype path; populations are unused, so drop the sample sets
+            # rather than convert-and-warn about them.
+            from .genotype_matrix import GenotypeMatrix
+            r2_matrix_or_matrix._sample_sets = None
+            r2_matrix_or_matrix = GenotypeMatrix.from_haplotype_matrix(
+                r2_matrix_or_matrix)
 
     if estimator == 'sigma_d2':
-        if not is_hm:
-            raise ValueError(
-                "estimator='sigma_d2' requires a HaplotypeMatrix")
         r2_matrix = _build_sigma_d2_matrix(r2_matrix_or_matrix,
                                            missing_data=missing_data)
     else:
