@@ -157,6 +157,10 @@ class TestProjection:
         projected = project_sfs(sfs, n_from=6, n_to=4)
         assert projected.shape == (5,)
 
+    def test_projection_rejects_upsampling(self):
+        with pytest.raises(ValueError, match="Cannot project up"):
+            project_sfs(np.zeros(6), n_from=5, n_to=6)
+
     def test_frequency_spectrum_project(self, hm):
         fs = FrequencySpectrum(hm)
         n = fs.n_max
@@ -344,3 +348,79 @@ class TestMissingData:
         assert len(fs.sfs_by_n) >= 2
         # Theta should still be computable
         assert np.isfinite(fs.theta('pi'))
+
+
+def _multi_size_fs():
+    """A FrequencySpectrum whose sites have several per-site sample sizes
+    (scattered missing data) and some segregating alleles."""
+    rng = np.random.default_rng(0)
+    hap = (rng.random((20, 80)) < 0.3).astype(np.int8)
+    hap[rng.random((20, 80)) < 0.1] = -1
+    hm = HaplotypeMatrix(hap, np.arange(80) * 100, 0, 8000)
+    return FrequencySpectrum(hm)
+
+
+class TestFrequencySpectrumEdges:
+    """Multi-sample-size, projection, and degenerate-input paths."""
+
+    def test_suggest_projection_n_single_size(self, hm):
+        fs = FrequencySpectrum(hm)
+        assert len(fs.sfs_by_n) == 1
+        assert fs.suggest_projection_n() == fs.n_max
+
+    def test_suggest_projection_n_multi_size(self):
+        fs = _multi_size_fs()
+        assert len(fs.sfs_by_n) > 1
+        ns = sorted(fs.sfs_by_n)
+        # Retaining everything needs the smallest size; a valid key otherwise;
+        # an unreachable fraction falls back to the smallest.
+        assert fs.suggest_projection_n(retain_fraction=1.0) == ns[0]
+        assert fs.suggest_projection_n(retain_fraction=0.5) in fs.sfs_by_n
+        assert fs.suggest_projection_n(retain_fraction=2.0) == ns[0]
+
+    def test_suggest_projection_n_no_segregating(self):
+        # Several sample sizes but nothing segregates -> falls back to n_max.
+        hap = np.zeros((10, 8), dtype=np.int8)
+        hap[0, :4] = -1  # sites 0-3 have n_valid 9, sites 4-7 have 10
+        fs = FrequencySpectrum(HaplotypeMatrix(hap, np.arange(8) * 100, 0, 800))
+        assert fs.n_segregating == 0 and len(fs.sfs_by_n) > 1
+        assert fs.suggest_projection_n() == fs.n_max
+
+    def test_sfs_method_paths(self, hm):
+        single = FrequencySpectrum(hm)
+        np.testing.assert_array_equal(single.sfs(),
+                                      list(single.sfs_by_n.values())[0])
+        multi = _multi_size_fs()
+        np.testing.assert_array_equal(multi.sfs(), multi.sfs_by_n[multi.n_max])
+        target = min(multi.sfs_by_n)
+        assert multi.sfs(n=target).shape == (target + 1,)
+
+    def test_project_combines_sample_sizes(self):
+        multi = _multi_size_fs()
+        ns = sorted(multi.sfs_by_n)
+        target = ns[len(ns) // 2]  # larger sizes project down, smaller skip
+        proj = multi.project(target)
+        assert proj.n_max == target
+        assert list(proj.sfs_by_n) == [target]
+
+    def test_empty_spectrum(self):
+        # Under 'exclude', a missing call at every site leaves no complete
+        # site, so the spectrum is empty.
+        hap = np.zeros((6, 4), dtype=np.int8)
+        hap[0, :] = -1  # haplotype 0 missing at every site
+        fs = FrequencySpectrum(HaplotypeMatrix(hap, np.arange(4) * 100, 0, 400),
+                               missing_data='exclude')
+        assert fs.n_max == 0 and fs.n_segregating == 0
+        np.testing.assert_array_equal(fs.sfs(), np.array([]))
+
+    def test_skips_sites_with_one_called_haplotype(self):
+        # Site 1 has a single non-missing haplotype (n_valid == 1) -> skipped.
+        hap = np.array([[0, 0], [1, -1], [1, -1], [0, -1]], dtype=np.int8)
+        fs = FrequencySpectrum(HaplotypeMatrix(hap, np.array([0, 100]), 0, 200))
+        assert 1 not in fs.sfs_by_n and 4 in fs.sfs_by_n
+
+    def test_invariant_site_correction(self, hm):
+        n_seg = FrequencySpectrum(hm).n_segregating
+        fs = FrequencySpectrum(hm, n_total_sites=n_seg + 50)
+        # The 50 monomorphic sites land in bin 0 at the top sample size.
+        assert fs.sfs_by_n[fs.n_max][0] == 50
