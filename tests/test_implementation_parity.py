@@ -291,6 +291,18 @@ _STATS = {
         None, None, "fst_wc", "fst_wc"),
 }
 
+# The Achaz eta-family: scalar (per-allele _ac_contribution, reached through
+# diversity_stats) vs the SFS dot-product (FrequencySpectrum.theta). Both are
+# per-allele-correct, so they agree on every condition -- including multiallelic,
+# unlike pi/theta_w. Not windowed, so only the fs path is checked.
+for _eta in ("eta1", "eta1_star", "minus_eta1", "minus_eta1_star"):
+    _STATS[_eta] = _Stat(
+        False, "value",
+        lambda hm, md, name=_eta: diversity.diversity_stats(
+            hm, statistics=[name], span_normalize=False, missing_data=md)[name],
+        lambda fs, name=_eta: fs.theta(name, span_normalize=False),
+        None, None, None)
+
 
 # ---------------------------------------------------------------------------
 # Per-path adapters -- each returns the canonical quantity for its stat

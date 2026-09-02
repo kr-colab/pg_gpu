@@ -424,3 +424,59 @@ class TestFrequencySpectrumEdges:
         fs = FrequencySpectrum(hm, n_total_sites=n_seg + 50)
         # The 50 monomorphic sites land in bin 0 at the top sample size.
         assert fs.sfs_by_n[fs.n_max][0] == 50
+
+
+class TestEtaScalarPath:
+    """The eta-family through diversity_stats (the per-allele scalar path):
+    absolute values from the Achaz definition and multiallelic per-allele
+    decomposition."""
+
+    ETA = ['eta1', 'eta1_star', 'minus_eta1', 'minus_eta1_star']
+
+    def test_absolute_values_match_achaz_definition(self):
+        # n=8 haplotypes; one column per known derived-allele count.
+        n = 8
+        counts = [1, 1, 1, 7, 3, 3, 2, 6]
+        hap = np.zeros((n, len(counts)), dtype=np.int8)
+        for j, c in enumerate(counts):
+            hap[:c, j] = 1
+        hm = HaplotypeMatrix(hap, np.arange(len(counts)) * 100)
+
+        a1 = np.sum(1.0 / np.arange(1, n))
+        cnt = np.array(counts)
+        expected = {
+            'eta1': np.sum(cnt == 1) / a1,
+            'eta1_star': np.sum((cnt == 1) | (cnt == n - 1)) / a1,
+            'minus_eta1': np.sum((cnt >= 2) & (cnt < n)) / (a1 - 1),
+            'minus_eta1_star': (np.sum((cnt >= 2) & (cnt <= n - 2))
+                                / (a1 - 1 - 1.0 / (n - 1))),
+        }
+        got = diversity.diversity_stats(hm, statistics=self.ETA,
+                                        span_normalize=False)
+        for name in self.ETA:
+            np.testing.assert_allclose(got[name], expected[name], rtol=1e-12,
+                                       err_msg=name)
+
+    @pytest.mark.parametrize("name", ETA)
+    def test_multiallelic_equals_per_allele_split(self, name):
+        # A multiallelic site contributes per derived allele, so eta on data
+        # with >2-allele sites equals eta on the same data split into one
+        # biallelic indicator column per derived allele.
+        rng = np.random.default_rng(3)
+        n = 12
+        hap = rng.integers(0, 3, size=(n, 40)).astype(np.int8)
+        assert any(len(np.unique(hap[:, j])) > 2 for j in range(hap.shape[1]))
+
+        split = np.stack(
+            [(hap[:, j] == a).astype(np.int8)
+             for j in range(hap.shape[1])
+             for a in np.unique(hap[:, j]) if a > 0],
+            axis=1)
+
+        hm = HaplotypeMatrix(hap, np.arange(hap.shape[1]) * 100)
+        hm_split = HaplotypeMatrix(split, np.arange(split.shape[1]) * 100)
+        multi = diversity.diversity_stats(hm, statistics=[name],
+                                          span_normalize=False)[name]
+        decomp = diversity.diversity_stats(hm_split, statistics=[name],
+                                           span_normalize=False)[name]
+        np.testing.assert_allclose(multi, decomp, rtol=1e-12)
