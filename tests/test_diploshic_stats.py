@@ -230,6 +230,36 @@ class TestZnSOmega:
             assert ld_statistics.zns(hap_data,
                                      estimator='rogers_huff') == baseline
 
+    @staticmethod
+    def _with_missing(hap_data, frac=0.03, seed=0):
+        g = cp.asnumpy(hap_data.haplotypes).copy()
+        g[np.random.default_rng(seed).random(g.shape) < frac] = -1
+        pos = cp.asnumpy(hap_data.positions)
+        return HaplotypeMatrix(g, pos, hap_data.chrom_start, hap_data.chrom_end)
+
+    def test_zns_sigma_d2_honours_exclude(self, hap_data):
+        # The default estimator (sigma_d2) used to discard missing_data,
+        # returning the include result; exclude must now restrict to
+        # complete sites first.
+        hm = self._with_missing(hap_data)
+        inc = ld_statistics.zns(hm, missing_data='include')
+        exc = ld_statistics.zns(hm, missing_data='exclude')
+        assert inc != exc
+        # And on complete data exclude drops nothing, so it equals include.
+        assert (ld_statistics.zns(hap_data, missing_data='exclude')
+                == ld_statistics.zns(hap_data, missing_data='include'))
+
+    def test_zns_exclude_matches_manual_complete_site_subset(self, hap_data):
+        # exclude equals the same statistic on a matrix hand-filtered to
+        # the sites with no missing calls, under the default estimator.
+        hm = self._with_missing(hap_data)
+        g = cp.asnumpy(hm.haplotypes)
+        complete = np.where((g >= 0).all(axis=0))[0]
+        sub = hm.get_subset(complete)
+        np.testing.assert_allclose(ld_statistics.zns(hm, missing_data='exclude'),
+                                   ld_statistics.zns(sub, missing_data='include'),
+                                   rtol=1e-12)
+
 
 # ---------------------------------------------------------------------------
 # mu_ld

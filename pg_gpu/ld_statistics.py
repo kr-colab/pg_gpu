@@ -539,21 +539,21 @@ def rogers_huff_r_squared(matrix, tile_size: Optional[int] = None
     return rogers_huff_r(matrix, tile_size=tile_size) ** 2
 
 
-def _zns_tiled(mat, missing_data='include', tile_size=512):
+def _zns_tiled(mat, missing_data='include', tile_size=512, use_projection=False):
     """Compute ZnS without materializing the full r² matrix.
 
     Uses tile-based accumulation: computes r² for B×B blocks and
     sums per tile, keeping memory at O(B²) instead of O(m²).
 
-    When missing_data='project' (set internally via estimator='sigma_d2'),
-    uses unbiased multinomial projection estimators (Ragsdale & Gravel
-    2019) computing σ_D² = D²/π² per pair instead of naive r².
+    ``use_projection`` selects the unbiased multinomial projection
+    estimator (Ragsdale & Gravel 2019, σ_D² = D²/π² per pair) over
+    naive r². ``missing_data`` is applied first either way, so
+    ``'exclude'`` restricts to complete sites before the estimator runs,
+    matching ``_build_sigma_d2_matrix`` (omega's projection path).
     """
     hap_clean, valid_mask, m = _prepare_segregating(mat, missing_data)
     if m < 2:
         return 0.0
-
-    use_projection = (missing_data == 'project')  # internal: mapped from estimator='sigma_d2'
 
     B = tile_size
     total = 0.0
@@ -716,9 +716,8 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
         memory is O(m²) -- about 55,000 variants on an 80 GB GPU.
     missing_data : str
         ``'include'`` (default) uses per-site valid data for frequency
-        computation. ``'exclude'`` filters to sites with no missing data. Under the
-        default ``sigma_d2`` estimator the projection handles missing
-        data per pair and ``'exclude'`` is not applied.
+        computation. ``'exclude'`` filters to sites with no missing data
+        before the estimator runs, under every estimator.
     estimator : str
         ``'auto'`` (default): ``sigma_d2`` for a ``HaplotypeMatrix``,
         ``rogers_huff`` for a ``GenotypeMatrix``, ``r2`` for a
@@ -782,8 +781,8 @@ def _zns_biallelic(hm, missing_data='include', estimator='auto'):
     no second restriction and no warning. ``divergence.zx`` restricts once
     and calls this for each of its three terms."""
     estimator = _resolve_ld_estimator(estimator, 'haplotype')
-    # 'project' selects the sigma_d2 estimator inside _zns_tiled.
-    return _zns_tiled(hm, 'project' if estimator == 'sigma_d2' else missing_data)
+    return _zns_tiled(hm, missing_data,
+                      use_projection=(estimator == 'sigma_d2'))
 
 
 def _build_sigma_d2_matrix(mat, missing_data='include'):

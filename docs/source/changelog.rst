@@ -185,6 +185,11 @@ Bug fixes
   the estimator names raise on a pre-computed r² array
   (``estimator='auto'`` there means ``r2``, as documented), and a
   streaming matrix gets a clear error pointing at ``materialize``.
+* ``zns`` under the default ``sigma_d2`` estimator silently ignored
+  ``missing_data='exclude'`` and returned the ``include`` result,
+  because the estimator was smuggled through the ``missing_data``
+  argument. ``exclude`` is now applied before the estimator on every
+  path, matching ``omega``.
 * ``zns`` and ``omega`` on a ``GenotypeMatrix`` scored sites with no
   dosage variance -- monomorphic sites, and all-heterozygous sites --
   as r^2 = 0 instead of undefined, which diluted ZnS and inflated
