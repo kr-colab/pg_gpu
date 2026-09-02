@@ -713,7 +713,7 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
         With estimator 'r2' or 'sigma_d2', a HaplotypeMatrix goes
         through tiled computation that avoids materializing the full
         m×m r² matrix; 'rogers_huff' builds the full matrix, so peak
-        memory is O(m²) -- about 55,000 variants on an 80 GB GPU.
+        memory is O(m²).
     missing_data : str
         ``'include'`` (default) uses per-site valid data for frequency
         computation. ``'exclude'`` filters to sites with no missing data
