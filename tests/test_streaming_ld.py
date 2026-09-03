@@ -160,6 +160,18 @@ class TestSinglePopParity:
         s = stream.compute_ld_statistics_gpu_single_pop(bp_bins)
         _assert_single_pop_equivalent(e, s)
 
+    def test_explicit_chunk_size_and_empty_bin(self, vcz_store):
+        # An explicit chunk_size (not 'auto') exercises the fixed-size
+        # branch, and a top bin wider than the sequence has no pairs, so
+        # the empty-bin formatter path runs. Streaming must still match
+        # eager, including the empty bin's zero tuple.
+        eager, stream = _aligned_single_pop_pair(vcz_store, chunk_bp=10_000)
+        bp_bins = [0, 10_000, 250_000, 500_000]  # last bin empty (seq 200kb)
+        e = eager.compute_ld_statistics_gpu_single_pop(bp_bins)
+        s = stream.compute_ld_statistics_gpu_single_pop(bp_bins, chunk_size=64)
+        _assert_single_pop_equivalent(e, s)
+        assert s[(250_000.0, 500_000.0)] == (0.0, 0.0, 0.0)
+
 
 class TestTwoPopParity:
 
@@ -211,4 +223,16 @@ class TestTwoPopParity:
         bp_bins = [0, 5_000, 15_000]
         e = eager.compute_ld_statistics_gpu_two_pops(bp_bins, "pop1", "pop2")
         s = stream.compute_ld_statistics_gpu_two_pops(bp_bins, "pop1", "pop2")
+        _assert_two_pop_equivalent(e, s)
+
+    def test_explicit_chunk_size_and_empty_bin(self, two_pop_vcz_store):
+        # Two-pop twin of the single-pop explicit-size + empty-bin test:
+        # the fixed-size branch and the empty-bin formatter under the
+        # 15-stat path.
+        path, popfile = two_pop_vcz_store
+        eager, stream = _aligned_two_pop_pair(path, popfile, chunk_bp=10_000)
+        bp_bins = [0, 10_000, 250_000, 500_000]  # last bin empty (seq 200kb)
+        e = eager.compute_ld_statistics_gpu_two_pops(bp_bins, "pop1", "pop2")
+        s = stream.compute_ld_statistics_gpu_two_pops(
+            bp_bins, "pop1", "pop2", chunk_size=64)
         _assert_two_pop_equivalent(e, s)
