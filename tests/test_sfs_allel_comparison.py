@@ -106,6 +106,18 @@ class TestJointSFSComparison:
         expected = allel.joint_sfs_scaled(dac1, dac2, n1=n1, n2=n2)
         np.testing.assert_array_almost_equal(result, expected)
 
+    def test_joint_sfs_no_segregating_alleles(self):
+        # No allele segregates in the A+B cohort, so the joint SFS is all zeros.
+        n1, n2 = 4, 3
+        hap = np.zeros((n1 + n2, 5), dtype=np.int8)
+        hm = HaplotypeMatrix(
+            hap, np.arange(5) * 1000, 0, 5000,
+            sample_sets={'p1': list(range(n1)),
+                         'p2': list(range(n1, n1 + n2))})
+        result = sfs.joint_sfs(hm, 'p1', 'p2')
+        assert result.shape == (n1 + 1, n2 + 1)
+        np.testing.assert_array_equal(result, 0)
+
 
 class TestProjectionSandwich:
     """Validate project_joint_sfs against the explicit P1 @ S @ P2.T."""
@@ -139,6 +151,25 @@ class TestProjectionSandwich:
         np.testing.assert_allclose(result, full.astype(np.float64),
                                     rtol=1e-9, atol=1e-9)
 
+    def test_over_projection_raises(self, two_pop_data):
+        matrix, hap, n1, n2 = two_pop_data
+        with pytest.raises(ValueError, match="Cannot project up"):
+            sfs.project_joint_sfs(matrix, "pop1", "pop2",
+                                  target_n1=n1 + 1, target_n2=n2)
+
+    def test_no_alleles_returns_zeros(self):
+        # Monomorphic input: no allele survives the cohort filter.
+        n1, n2 = 5, 4
+        hap = np.zeros((n1 + n2, 8), dtype=np.int8)
+        hm = HaplotypeMatrix(
+            hap, np.arange(8) * 1000, 0, 8000,
+            sample_sets={'p1': list(range(n1)),
+                         'p2': list(range(n1, n1 + n2))})
+        result = sfs.project_joint_sfs(hm, "p1", "p2",
+                                       target_n1=3, target_n2=2)
+        assert result.shape == (4, 3)
+        np.testing.assert_array_equal(result, 0.0)
+
 
 class TestScalingComparison:
     """Validate scaling and folding utilities."""
@@ -164,3 +195,42 @@ class TestScalingComparison:
             s = np.random.randint(0, 20, size=n + 1)
             np.testing.assert_array_equal(
                 sfs.fold_sfs(s, n), allel.fold_sfs(s, n))
+
+    def test_fold_sfs_pads_short_input(self):
+        # A short unfolded SFS is zero-padded to n+1 before folding.
+        n = 8
+        short = np.array([0, 3, 5, 2])
+        padded = np.zeros(n + 1, dtype=short.dtype)
+        padded[:len(short)] = short
+        np.testing.assert_array_equal(sfs.fold_sfs(short, n),
+                                      sfs.fold_sfs(padded, n))
+
+    def test_fold_joint_sfs(self):
+        rng = np.random.default_rng(0)
+        for n1, n2 in [(6, 5), (7, 4), (8, 8)]:
+            s = rng.integers(0, 20, size=(n1 + 1, n2 + 1))
+            np.testing.assert_array_equal(sfs.fold_joint_sfs(s, n1, n2),
+                                          allel.fold_joint_sfs(s, n1, n2))
+
+    def test_fold_joint_sfs_pads_short_input(self):
+        # A short joint SFS is zero-padded on both axes before folding.
+        n1, n2 = 6, 5
+        short = np.arange(1, 3 * 4 + 1).reshape(3, 4)
+        padded = np.zeros((n1 + 1, n2 + 1), dtype=short.dtype)
+        padded[:3, :4] = short
+        np.testing.assert_array_equal(sfs.fold_joint_sfs(short, n1, n2),
+                                      sfs.fold_joint_sfs(padded, n1, n2))
+
+
+class TestProjectionMatrixVec:
+    """Edge cases of the hypergeometric projection-matrix builder."""
+
+    def test_rejects_upsampling(self):
+        with pytest.raises(ValueError, match=r"n_to <= n_from"):
+            sfs._projection_matrix_vec(5, 6)
+
+    def test_projects_to_zero_sample(self):
+        # A size-0 target puts all mass in the empty-sample bin.
+        P = sfs._projection_matrix_vec(5, 0)
+        assert P.shape == (1, 6)
+        np.testing.assert_array_equal(P, 1.0)
