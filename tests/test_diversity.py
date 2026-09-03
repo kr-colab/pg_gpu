@@ -399,6 +399,12 @@ class TestDiversityStats:
         assert 0 <= stats['segregating_sites'] <= n_variants
         assert 0 <= stats['singletons'] <= stats['segregating_sites']
 
+    def test_diversity_stats_unknown_statistic(self):
+        hap = np.random.randint(0, 2, size=(10, 20))
+        hm = HaplotypeMatrix(hap, np.arange(20) * 1000)
+        with pytest.raises(ValueError, match="Unknown statistic"):
+            diversity.diversity_stats(hm, statistics=['bogus'])
+
 
 class TestNeutralityTests:
     """Test neutrality test suite."""
@@ -426,6 +432,59 @@ class TestNeutralityTests:
         assert results['pi'] >= 0
         assert results['theta_w'] >= 0
         assert results['segregating_sites'] >= 0
+
+    def test_zeng_dh_sweep_signal(self):
+        # Post-sweep-like SFS: excess singletons (Tajima's D < 0) and excess
+        # high-frequency derived alleles (Fay-Wu H < 0) -> DH = D * H > 0.
+        n = 10
+        hap = np.zeros((n, 40), dtype=np.int8)
+        hap[0, :20] = 1     # 20 singletons (derived count 1)
+        hap[:9, 20:] = 1    # 20 near-fixed derived (count 9)
+        hm = HaplotypeMatrix(hap, np.arange(40) * 100, 0, 4000)
+        d = diversity.tajimas_d(hm)
+        h = diversity.fay_wus_h(hm)
+        assert d < 0 and h < 0
+        dh = diversity.zeng_dh(hm)
+        assert dh == pytest.approx(d * h)
+        assert dh > 0
+
+    def test_zeng_dh_zero_when_not_swept(self):
+        # Excess intermediate-frequency variants give Tajima's D >= 0, so the
+        # sweep condition fails and DH is 0.
+        hap = np.zeros((10, 20), dtype=np.int8)
+        hap[:5, :] = 1  # every site at derived count 5
+        hm = HaplotypeMatrix(hap, np.arange(20) * 100, 0, 2000)
+        assert diversity.tajimas_d(hm) >= 0
+        assert diversity.zeng_dh(hm) == 0.0
+
+    def test_neutrality_tests_insufficient_sites(self):
+        # Fewer than 3 segregating sites -> neutrality tests are undefined (NaN).
+        hap = np.array([[0, 0], [1, 0], [0, 1], [0, 0], [0, 0], [0, 0]],
+                       dtype=np.int8)  # 2 segregating sites (S < 3)
+        hm = HaplotypeMatrix(hap, np.array([0, 1000]), 0, 2000)
+        assert np.isnan(diversity.tajimas_d(hm))
+        assert np.isnan(diversity.zeng_e(hm))
+
+
+class TestPiComponents:
+    """Power-user pairwise-difference components."""
+
+    def test_basic_counts(self):
+        hap = np.array([[0, 0], [0, 1], [1, 0], [1, 1]], dtype=np.int8)
+        hm = HaplotypeMatrix(hap, np.array([0, 100]), 0, 200)
+        hm.transfer_to_gpu()
+        # Each site has two 0s and two 1s: 4 differing pairs of 6 comparisons.
+        assert diversity.pi_components(hm.haplotypes) == (8.0, 12.0, 0.0, 2)
+
+    def test_invariant_and_missing(self):
+        # site 0 fully called; site 1 has one missing call (n_valid 3).
+        hap = np.array([[0, 0], [0, 1], [1, -1], [1, 1]], dtype=np.int8)
+        hm = HaplotypeMatrix(hap, np.array([0, 100]), 0, 200)
+        hm.transfer_to_gpu()
+        # site0: 4 diffs / 6 comps; site1: 2 diffs / 3 comps; 3 invariant sites
+        # add 3 * C(4,2) = 18 comps; missing = 4*3/2 * 5 - 27 = 3.
+        d, c, m, n = diversity.pi_components(hm.haplotypes, n_total_sites=5)
+        assert (d, c, m, n) == (6.0, 27.0, 3.0, 5)
 
 
 class TestGPUCalculations:
