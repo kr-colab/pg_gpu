@@ -1817,11 +1817,11 @@ class HaplotypeMatrix:
         Parameters
         ----------
         estimator : str
-            ``'r2'`` (default) -- naive haplotype r² from
-            frequency-based formula. ``'rogers_huff'`` -- Rogers-Huff
-            r² computed on diploid 0/1/2 dosages obtained by pairing
-            adjacent haplotypes (sample 0 = haplotypes 0,1; sample 1
-            = haplotypes 2,3; ...). Matches
+            ``'auto'`` and ``'r2'`` (the default) both give naive
+            haplotype r² from the frequency-based formula.
+            ``'rogers_huff'`` gives Rogers-Huff r² on diploid 0/1/2
+            dosages obtained by pairing adjacent haplotypes (sample 0 =
+            haplotypes 0,1; sample 1 = haplotypes 2,3; ...), matching
             :func:`scikit-allel.rogers_huff_r` ** 2.
 
         Returns
@@ -1831,6 +1831,10 @@ class HaplotypeMatrix:
             (>2 distinct present alleles) site; r-squared is computed on
             biallelic sites only.
         """
+        from .ld_statistics import _resolve_ld_estimator
+        estimator = _resolve_ld_estimator(estimator, 'haplotype',
+                                          allowed=('r2', 'rogers_huff'),
+                                          auto='r2')
         if estimator == 'rogers_huff':
             from .genotype_matrix import GenotypeMatrix
             from .ld_statistics import _rogers_huff_pairwise_r
@@ -1851,10 +1855,6 @@ class HaplotypeMatrix:
                 r2[cp.ix_(idx, idx)] = r2_kept
             cp.fill_diagonal(r2, 0)
             return r2
-        if estimator != 'r2':
-            raise ValueError(
-                f"Unknown estimator: {estimator!r} "
-                f"(expected 'r2' or 'rogers_huff')")
         from ._warnings import _warn_biallelic_only
         bmask = self._biallelic_mask()
         _warn_biallelic_only(int((~bmask).sum()), context="pairwise_r2")
@@ -1950,11 +1950,11 @@ class HaplotypeMatrix:
         pop : str, optional
             Population key to use.
         estimator : str
-            ``'r2'`` (default) -- naive haplotype r² from frequency
-            counts. ``'rogers_huff'`` -- Rogers-Huff r² on diploid
-            0/1/2 dosages obtained by pairing adjacent haplotypes;
-            sites with three or more present alleles are dropped
-            before binning. Matches
+            ``'auto'`` and ``'r2'`` (the default) both give naive
+            haplotype r² from frequency counts. ``'rogers_huff'`` gives
+            Rogers-Huff r² on diploid 0/1/2 dosages obtained by pairing
+            adjacent haplotypes; sites with three or more present
+            alleles are dropped before binning. Matches
             :func:`scikit-allel.rogers_huff_r` ** 2.
 
         Returns
@@ -1967,6 +1967,10 @@ class HaplotypeMatrix:
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
+        from .ld_statistics import _resolve_ld_estimator
+        estimator = _resolve_ld_estimator(estimator, 'haplotype',
+                                          allowed=('r2', 'rogers_huff'),
+                                          auto='r2')
         if estimator == 'rogers_huff':
             if pop is not None:
                 raise NotImplementedError(
@@ -1998,10 +2002,6 @@ class HaplotypeMatrix:
                 ind = ind[biallelic.sample_sets[pop], :]
             counts_arr, n_valid = biallelic._tally_pairs_impl(ind)
             r2_vals = ld_statistics.r_squared(counts_arr, n_valid=n_valid)
-        else:
-            raise ValueError(
-                f"Unknown estimator: {estimator!r} "
-                f"(expected 'r2' or 'rogers_huff')")
 
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)

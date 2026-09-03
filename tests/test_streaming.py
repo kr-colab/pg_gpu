@@ -516,14 +516,30 @@ class TestStreamingGenotypeMatrix:
 
 
 class TestPairwiseLdRejectsStreams:
-    """zns and omega need the full pair set at once."""
+    """The pairwise LD statistics need every variant pair at once, so a
+    streaming matrix gets a materialize pointer, not a bare error."""
 
     @pytest.mark.parametrize("cls_name", ["HaplotypeMatrix", "GenotypeMatrix"])
     @pytest.mark.parametrize("stat_name", ["zns", "omega"])
-    def test_rejects_streams(self, vcz_store, cls_name, stat_name):
+    def test_zns_omega_reject_streams(self, vcz_store, cls_name, stat_name):
         import pg_gpu
         from pg_gpu import ld_statistics
         path, _ = vcz_store
         stream = getattr(pg_gpu, cls_name).from_zarr(path, streaming="always")
         with pytest.raises(NotImplementedError, match="materialize"):
             getattr(ld_statistics, stat_name)(stream)
+
+    def test_mu_ld_rejects_haplotype_stream(self, vcz_store):
+        from pg_gpu import ld_statistics
+        path, _ = vcz_store
+        stream = HaplotypeMatrix.from_zarr(path, streaming="always")
+        with pytest.raises(NotImplementedError, match="materialize"):
+            ld_statistics.mu_ld(stream)
+
+    @pytest.mark.parametrize("fn", ["rogers_huff_r", "rogers_huff_r_squared"])
+    def test_rogers_huff_rejects_genotype_stream(self, vcz_store, fn):
+        from pg_gpu import GenotypeMatrix, ld_statistics
+        path, _ = vcz_store
+        stream = GenotypeMatrix.from_zarr(path, streaming="always")
+        with pytest.raises(NotImplementedError, match="materialize"):
+            getattr(ld_statistics, fn)(stream)

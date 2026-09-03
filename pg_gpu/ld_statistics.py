@@ -341,34 +341,48 @@ def _tile_sigma_d2(hi, vi, hj, vj):
     return sigma_d2, valid
 
 
-def _resolve_ld_estimator(estimator: str, kind: str) -> str:
-    """Resolve an LD estimator string against the input ``kind``.
-
-    ``kind`` is ``'haplotype'``, ``'genotype'``, or ``'array'``
-    (a pre-computed r² matrix). ``'auto'`` resolves to ``'sigma_d2'``,
-    ``'rogers_huff'``, and ``'r2'`` respectively. Explicit names pass
-    through, except that an estimator the kind cannot compute raises:
-    ``sigma_d2`` needs haplotypes, ``rogers_huff`` needs genotype data,
-    and an array is already an r² matrix.
-    """
-    if estimator == 'auto':
-        return {'haplotype': 'sigma_d2', 'genotype': 'rogers_huff',
-                'array': 'r2'}[kind]
-    if estimator not in ('r2', 'sigma_d2', 'rogers_huff'):
-        raise ValueError(
-            f"Unknown estimator: {estimator!r} "
-            f"(expected one of 'auto', 'r2', 'sigma_d2', 'rogers_huff')")
-    if estimator == 'sigma_d2' and kind != 'haplotype':
-        raise ValueError("estimator='sigma_d2' requires a HaplotypeMatrix, "
-                         f"not {_KIND_NOUN[kind]}")
-    if estimator == 'rogers_huff' and kind == 'array':
-        raise ValueError("estimator='rogers_huff' needs genotype data, "
-                         f"not {_KIND_NOUN[kind]}")
-    return estimator
-
-
 _KIND_NOUN = {'haplotype': 'a HaplotypeMatrix', 'genotype': 'a GenotypeMatrix',
               'array': 'a pre-computed r² array'}
+_AUTO_BY_KIND = {'haplotype': 'sigma_d2', 'genotype': 'rogers_huff',
+                 'array': 'r2'}
+
+
+def _resolve_ld_estimator(estimator, kind, *,
+                          allowed=('r2', 'sigma_d2', 'rogers_huff'), auto=None):
+    """Resolve an LD estimator string against the input ``kind``.
+
+    ``kind`` is ``'haplotype'``, ``'genotype'``, or ``'array'`` (a
+    pre-computed r² matrix). ``'auto'`` resolves to ``auto`` if the
+    caller sets it, else the natural default for the kind (``sigma_d2``
+    / ``rogers_huff`` / ``r2``). ``allowed`` lists the estimators the
+    call site implements; a name outside it raises, as does an estimator
+    the kind cannot compute (``sigma_d2`` needs haplotypes,
+    ``rogers_huff`` needs genotype data).
+    """
+    resolved = ((auto if auto is not None else _AUTO_BY_KIND[kind])
+                if estimator == 'auto' else estimator)
+    if resolved not in allowed:
+        names = ', '.join(repr(e) for e in ('auto', *allowed))
+        raise ValueError(f"Unknown estimator: {estimator!r} "
+                         f"(expected one of {names})")
+    if resolved == 'sigma_d2' and kind != 'haplotype':
+        raise ValueError("estimator='sigma_d2' requires a HaplotypeMatrix, "
+                         f"not {_KIND_NOUN[kind]}")
+    if resolved == 'rogers_huff' and kind == 'array':
+        raise ValueError("estimator='rogers_huff' needs genotype data, "
+                         f"not {_KIND_NOUN[kind]}")
+    return resolved
+
+
+def _reject_streaming(obj, context):
+    """Raise a pointed error when ``obj`` is a streaming matrix: the
+    pairwise LD statistics need every variant pair in scope at once."""
+    from .streaming_matrix import _StreamingMatrixBase
+    if isinstance(obj, _StreamingMatrixBase):
+        raise NotImplementedError(
+            f"{context} needs every variant pair in scope at once, which a "
+            "streaming matrix cannot hold; call .materialize(region=(lo, hi)) "
+            "to get an eager matrix over a sub-region and compute on that.")
 
 
 def _ld_input_kind(obj, context):
@@ -376,12 +390,7 @@ def _ld_input_kind(obj, context):
     ``'array'``, rejecting streaming matrices up front."""
     from .haplotype_matrix import HaplotypeMatrix
     from .genotype_matrix import GenotypeMatrix
-    from .streaming_matrix import _StreamingMatrixBase
-    if isinstance(obj, _StreamingMatrixBase):
-        raise NotImplementedError(
-            f"{context} needs every variant pair in scope at once, which a "
-            "streaming matrix cannot hold; call .materialize(region=(lo, hi)) "
-            "to get an eager matrix over a sub-region and compute on that.")
+    _reject_streaming(obj, context)
     if isinstance(obj, HaplotypeMatrix):
         return 'haplotype'
     if isinstance(obj, GenotypeMatrix):
@@ -399,6 +408,7 @@ def _dosage_from_matrix(matrix) -> "cp.ndarray":
     """
     from .genotype_matrix import GenotypeMatrix
 
+    _reject_streaming(matrix, "rogers_huff_r")
     if not isinstance(matrix, GenotypeMatrix):
         raise TypeError(
             "rogers_huff_r is the diploid dosage correlation and requires a "
@@ -947,6 +957,7 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     -------
     float
     """
+    _reject_streaming(haplotype_matrix, "mu_ld")
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 

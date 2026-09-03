@@ -178,6 +178,28 @@ class TestEstimatorResolver:
 
 class TestHaplotypeMatrixEstimator:
 
+    def test_auto_estimator_accepted_and_equals_r2(self):
+        # 'auto' is the default estimator name elsewhere; the matrix methods
+        # must accept it (meaning naive r2 here), not reject it.
+        hm = _random_hm(n_diploids=25, n_var=40, seed=3)
+        np.testing.assert_array_equal(
+            np.nan_to_num(hm.pairwise_r2(estimator='auto').get()),
+            np.nan_to_num(hm.pairwise_r2(estimator='r2').get()))
+        va, ca = hm.windowed_r_squared([0, 20_000, 40_000], estimator='auto')
+        vr, cr = hm.windowed_r_squared([0, 20_000, 40_000], estimator='r2')
+        np.testing.assert_array_equal(np.nan_to_num(va), np.nan_to_num(vr))
+        np.testing.assert_array_equal(ca, cr)
+
+    @pytest.mark.parametrize("bad", ["sigma_d2", "bogus"])
+    def test_unavailable_estimator_raises_unknown(self, bad):
+        # sigma_d2 is a real estimator but not available on these methods;
+        # both it and a nonsense name raise the shared "Unknown estimator".
+        hm = _random_hm(n_diploids=25, n_var=40, seed=3)
+        with pytest.raises(ValueError, match="Unknown estimator"):
+            hm.pairwise_r2(estimator=bad)
+        with pytest.raises(ValueError, match="Unknown estimator"):
+            hm.windowed_r_squared([0, 40_000], estimator=bad)
+
     def test_pairwise_r2_matches_module_function(self):
         hm = _random_hm(n_diploids=30, n_var=40, seed=11)
         r2_hm = hm.pairwise_r2(estimator='rogers_huff').get()

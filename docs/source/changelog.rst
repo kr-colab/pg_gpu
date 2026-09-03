@@ -177,6 +177,13 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``HaplotypeMatrix.pairwise_r2`` and ``windowed_r_squared`` rejected
+  ``estimator='auto'`` -- the default name for the LD estimator
+  everywhere else -- with an "unknown estimator" error. They accept it
+  now (it means ``'r2'`` there), sharing the one estimator resolver.
+* ``mu_ld`` and the ``rogers_huff_r`` family raised a bare
+  ``AttributeError``/``TypeError`` on a streaming matrix; they now give
+  the same "call ``materialize``" message ``zns``/``omega`` do.
 * ``zns`` and ``omega`` accepted ``estimator='rogers_huff'`` on a
   ``HaplotypeMatrix`` and silently computed naive ``r2`` instead. They
   now pair adjacent haplotypes into 0/1/2 dosages and compute the
