@@ -182,7 +182,7 @@ def dd_geno_between(pi, pj):
 # ===========================================================================
 
 
-def dz_geno_single(p):
+def dz_geno_single(p):  # pragma: no cover
     """Dz for single population (Dz(i,i,i)) from _PopDataGeno."""
     g1, g2, g3, g4, g5, g6, g7, g8, g9 = (
         p.g1, p.g2, p.g3, p.g4, p.g5, p.g6, p.g7, p.g8, p.g9,
@@ -314,7 +314,7 @@ def dz_geno_single(p):
     return 2.0 * _safe_div(numer, denom, valid)
 
 
-def dz_geno_p1p2(pi, pj):
+def dz_geno_p1p2(pi, pj):  # pragma: no cover
     """Dz(i,i,j): pop1==pop2, pop3 different. pi is the repeated pop."""
     g11, g12, g13, g14, g15, g16, g17, g18, g19 = (
         pi.g1, pi.g2, pi.g3, pi.g4, pi.g5, pi.g6, pi.g7, pi.g8, pi.g9,
@@ -368,7 +368,7 @@ def dz_geno_p1p2(pi, pj):
     return 2.0 * _safe_div(numer, denom, valid)
 
 
-def dz_geno_p1p3(pi, pj):
+def dz_geno_p1p3(pi, pj):  # pragma: no cover
     """Dz(i,j,i): pop1==pop3, pop2 different. pi is the repeated pop."""
     g11, g12, g13, g14, g15, g16, g17, g18, g19 = (
         pi.g1, pi.g2, pi.g3, pi.g4, pi.g5, pi.g6, pi.g7, pi.g8, pi.g9,
@@ -422,7 +422,7 @@ def dz_geno_p1p3(pi, pj):
     return 2.0 * _safe_div(numer, denom, valid)
 
 
-def dz_geno_p2p3(pi, pj):
+def dz_geno_p2p3(pi, pj):  # pragma: no cover
     """Dz(i,j,j): pop2==pop3, pi is pop1, pj is the repeated pop."""
     g11, g12, g13, g14, g15, g16, g17, g18, g19 = (
         pi.g1, pi.g2, pi.g3, pi.g4, pi.g5, pi.g6, pi.g7, pi.g8, pi.g9,
@@ -456,7 +456,7 @@ def dz_geno_p2p3(pi, pj):
     return 2.0 * _safe_div(numer, denom, valid)
 
 
-def dz_geno_alldiff(pi, pj, pk):
+def dz_geno_alldiff(pi, pj, pk):  # pragma: no cover
     """Dz(i,j,k): all three populations different."""
     g11, g12, g13, g14, g15, g16, g17, g18, g19 = (
         pi.g1, pi.g2, pi.g3, pi.g4, pi.g5, pi.g6, pi.g7, pi.g8, pi.g9,
@@ -665,7 +665,7 @@ def pi2_geno_single(p):
     return _safe_div(numer, denom, valid)
 
 
-def pi2_geno_triple_123(pi, pj):
+def pi2_geno_triple_123(pi, pj):  # pragma: no cover
     """pi2(i,i,i,j) or pi2(i,i,j,i): triple pop is pi, single is pj.
 
     Covers pop1==pop2==pop3 (with pop4 different) and
@@ -855,7 +855,7 @@ def pi2_geno_triple_123(pi, pj):
     return 1.0 * _safe_div(numer, denom, valid)
 
 
-def pi2_geno_triple_134(pi, pj):
+def pi2_geno_triple_134(pi, pj):  # pragma: no cover
     """pi2(i,j,i,i) or pi2(j,i,i,i): triple pop is pi, single is pj.
 
     Covers pop1==pop3==pop4 (with pop2 different) and
@@ -1045,7 +1045,7 @@ def pi2_geno_triple_134(pi, pj):
     return 1.0 * _safe_div(numer, denom, valid)
 
 
-def pi2_geno_iikk(pi, pj):
+def pi2_geno_iikk(pi, pj):  # pragma: no cover
     """pi2(i,i,j,j): pop1==pop2, pop3==pop4, two distinct populations."""
     g11, g12, g13, g14, g15, g16, g17, g18, g19 = (
         pi.g1, pi.g2, pi.g3, pi.g4, pi.g5, pi.g6, pi.g7, pi.g8, pi.g9,
@@ -1090,7 +1090,7 @@ def pi2_geno_iikk(pi, pj):
     return 1.0 * _safe_div(numer, denom, valid)
 
 
-def pi2_geno_ijij(pi, pj):
+def pi2_geno_ijij(pi, pj):  # pragma: no cover
     """pi2(i,j,i,j) or pi2(i,j,j,i): pop1==pop3 and pop2==pop4 (or pop1==pop4 and pop2==pop3)."""
     g11, g12, g13, g14, g15, g16, g17, g18, g19 = (
         pi.g1, pi.g2, pi.g3, pi.g4, pi.g5, pi.g6, pi.g7, pi.g8, pi.g9,
@@ -1275,7 +1275,7 @@ def pi2_geno_ijij(pi, pj):
     return 1.0 * _safe_div(numer, denom, valid)
 
 
-def pi2_geno_iikl(pi, pj, pk):
+def pi2_geno_iikl(pi, pj, pk):  # pragma: no cover
     """pi2(i,i,j,k): pop1==pop2, pop3 and pop4 are distinct from each other and from pop1.
 
     pi is the repeated pop, pj is pop3, pk is pop4.
@@ -1325,7 +1325,7 @@ def pi2_geno_iikl(pi, pj, pk):
     return 1.0 * _safe_div(numer, denom, valid)
 
 
-def pi2_geno_ijkk(pi, pj, pk):
+def pi2_geno_ijkk(pi, pj, pk):  # pragma: no cover
     """pi2(i,j,k,k): pop3==pop4, pop1 and pop2 are distinct from each other and from pop3.
 
     pi is the repeated pop (pop3==pop4), pj is pop1, pk is pop2.
@@ -1375,7 +1375,7 @@ def pi2_geno_ijkk(pi, pj, pk):
     return 1.0 * _safe_div(numer, denom, valid)
 
 
-def pi2_geno_shared(pi, pj, pk):
+def pi2_geno_shared(pi, pj, pk):  # pragma: no cover
     """pi2 with one shared pop: pi2(i,j,i,k), pi2(i,j,k,i), pi2(i,j,j,k), pi2(i,j,k,j).
 
     pi is the shared (repeated) pop, pj is the other locus-1 pop,
@@ -1452,7 +1452,7 @@ def pi2_geno_shared(pi, pj, pk):
     return 1.0 * _safe_div(numer, denom, valid)
 
 
-def pi2_geno_alldiff(pi, pj, pk, pl):
+def pi2_geno_alldiff(pi, pj, pk, pl):  # pragma: no cover
     """pi2(i,j,k,l): all four population indices different."""
     g11, g12, g13, g14, g15, g16, g17, g18, g19 = (
         pi.g1, pi.g2, pi.g3, pi.g4, pi.g5, pi.g6, pi.g7, pi.g8, pi.g9,

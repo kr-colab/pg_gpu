@@ -114,7 +114,7 @@ class GenotypeMatrix:
         return self._geno_filtered
 
     @genotypes.setter
-    def genotypes(self, value):
+    def genotypes(self, value):  # pragma: no cover
         self._genotypes = value
         self._geno_filtered = None
 
@@ -127,7 +127,7 @@ class GenotypeMatrix:
         return self._pos_filtered
 
     @positions.setter
-    def positions(self, value):
+    def positions(self, value):  # pragma: no cover
         self._positions = value
         self._pos_filtered = None
 

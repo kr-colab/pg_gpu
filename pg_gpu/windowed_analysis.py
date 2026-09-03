@@ -111,71 +111,6 @@ class WindowData:
     window_id: int
 
 
-class MemoryManager:
-    """Manages GPU memory allocation and chunking strategy."""
-
-    def __init__(self, gpu_memory_limit: Union[str, int] = 'auto'):
-        self.gpu_memory_limit = self._parse_memory_limit(gpu_memory_limit)
-        self._gpu_memory_info = {}
-
-    def _parse_memory_limit(self, limit: Union[str, int]) -> int:
-        """Parse memory limit string (e.g., '8GB') to bytes."""
-        if limit == 'auto':
-            # Use 80% of available GPU memory
-            mempool = cp.get_default_memory_pool()
-            return int(cp.cuda.Device().mem_info[1] * 0.8)
-        elif isinstance(limit, str):
-            # Parse strings like '8GB', '512MB'
-            units = {'KB': 1024, 'MB': 1024**2, 'GB': 1024**3}
-            for unit, multiplier in units.items():
-                if limit.upper().endswith(unit):
-                    return int(float(limit[:-len(unit)]) * multiplier)
-            raise ValueError(f"Invalid memory limit format: {limit}")
-        else:
-            return int(limit)
-
-    def estimate_window_memory(self, n_variants: int, n_samples: int,
-                             statistics: List[str]) -> int:
-        """Estimate memory required for processing a window."""
-        # Base matrix memory
-        matrix_memory = n_variants * n_samples * 4  # float32
-
-        # Add overhead for statistics computation
-        overhead_multiplier = 1.5 + 0.2 * len(statistics)
-
-        # LD statistics need pairwise computations
-        if any('ld' in stat.lower() for stat in statistics):
-            overhead_multiplier += n_variants / 1000  # Scale with variant count
-
-        return int(matrix_memory * overhead_multiplier)
-
-    def determine_chunk_size(self, total_variants: int, n_samples: int,
-                           window_params: WindowParams,
-                           statistics: List[str]) -> int:
-        """Determine optimal chunk size for processing."""
-        # Estimate memory per variant
-        window_memory = self.estimate_window_memory(
-            window_params.window_size, n_samples, statistics
-        )
-
-        # Calculate how many windows fit in memory
-        windows_per_chunk = max(1, self.gpu_memory_limit // window_memory)
-
-        # Account for overlapping windows
-        if window_params.step_size < window_params.window_size:
-            overlap_factor = window_params.window_size / window_params.step_size
-            chunk_variants = int(windows_per_chunk * window_params.step_size +
-                               window_params.window_size)
-        else:
-            chunk_variants = windows_per_chunk * window_params.window_size
-
-        # Ensure reasonable chunk size
-        chunk_variants = min(chunk_variants, total_variants)
-        chunk_variants = max(chunk_variants, window_params.window_size * 2)
-
-        return chunk_variants
-
-
 class StatisticsComputer:
     """Computes population genetics statistics for windows."""
 
@@ -569,7 +504,6 @@ class WindowedAnalyzer:
         self.span_normalize = span_normalize
 
         # Initialize components
-        self.memory_manager = MemoryManager(gpu_memory_limit)
         self.stats_computer = StatisticsComputer(
             statistics, populations, custom_stat_kwargs, ld_bins=self.ld_bins,
             missing_data=missing_data, span_normalize=span_normalize
