@@ -1088,7 +1088,7 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
             results['n_variants'] = m.num_variants
         elif stat == 'haplotype_diversity':
             results['haplotype_diversity'] = haplotype_diversity(haplotype_matrix, population, missing_data)
-        elif stat not in ('pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'):
+        else:
             raise ValueError(f"Unknown statistic: {stat}")
 
     # Give back keys in the caller's order; the theta batch above fills
