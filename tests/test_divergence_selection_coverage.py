@@ -72,9 +72,21 @@ def test_distance_based_stats_matches_constituents(hm):
 
 
 # ── selection: garud_h GenotypeMatrix dispatch ─────────────────────────
-def test_garud_h_genotype_matrix_dispatch(hm):
-    gm = GenotypeMatrix.from_haplotype_matrix(hm)
-    assert selection.garud_h(gm) == pytest.approx(selection.garud_h_diploid(gm))
+def test_garud_h_genotype_matrix_dispatch():
+    # garud_h on a GenotypeMatrix groups distinct diplotypes. Four patterns at
+    # counts 4/3/2/1 give frequencies 0.4/0.3/0.2/0.1, so H1/H12/H123/H2H1 are
+    # known independently of the implementation.
+    patterns = [[0, 0, 0, 0], [1, 1, 1, 1], [2, 2, 2, 2], [0, 1, 2, 0]]
+    rows = (patterns[0:1] * 4 + patterns[1:2] * 3
+            + patterns[2:3] * 2 + patterns[3:4] * 1)
+    geno = np.array(rows, dtype=np.int8)
+    pos = np.arange(geno.shape[1], dtype=np.int64) * 100
+    gm = GenotypeMatrix(geno, pos)
+    h1, h12, h123, h2_h1 = selection.garud_h(gm)
+    assert h1 == pytest.approx(0.4**2 + 0.3**2 + 0.2**2 + 0.1**2)          # 0.30
+    assert h12 == pytest.approx((0.4 + 0.3) ** 2 + 0.2**2 + 0.1**2)        # 0.54
+    assert h123 == pytest.approx((0.4 + 0.3 + 0.2) ** 2 + 0.1**2)          # 0.82
+    assert h2_h1 == pytest.approx((0.30 - 0.4**2) / 0.30)                  # 0.4667
 
 
 # ── selection: standardize_by_allele_count default bin count ───────────
