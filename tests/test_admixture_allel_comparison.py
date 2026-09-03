@@ -306,3 +306,30 @@ class TestPattersonDZeroCallSites:
         # exactly the fully-called sites.
         assert num.shape == den.shape == ((~missing).sum(),)
         assert np.isfinite(np.nansum(num) / np.nansum(den))
+
+
+class TestUnnormedF3Comparison:
+    """The normed=False F3 paths (per-window/aggregate mean of the numerator)
+    against scikit-allel."""
+
+    def test_moving_f3_unnormed(self, three_pop_data):
+        matrix, pops = three_pop_data
+        f3_pg = admixture.moving_patterson_f3(
+            matrix, 'C', 'A', 'B', size=20, normed=False)
+        acc = _allele_counts(pops['C'])
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        f3_a = allel.moving_patterson_f3(acc, aca, acb, size=20, normed=False)
+        np.testing.assert_allclose(f3_pg, f3_a, rtol=1e-10)
+
+    def test_average_f3_unnormed(self, three_pop_data):
+        matrix, pops = three_pop_data
+        f3_pg, se_pg, z_pg, _, _ = admixture.average_patterson_f3(
+            matrix, 'C', 'A', 'B', blen=20, normed=False)
+        acc = _allele_counts(pops['C'])
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        f3_a, se_a, z_a, _, _ = allel.average_patterson_f3(
+            acc, aca, acb, blen=20, normed=False)
+        np.testing.assert_allclose(f3_pg, f3_a, rtol=1e-10)
+        np.testing.assert_allclose(se_pg, se_a, rtol=1e-5)
