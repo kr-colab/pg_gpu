@@ -110,6 +110,47 @@ class TestHeterozygosityObserved:
 
         np.testing.assert_allclose(ho_pg, ho_allel, rtol=1e-10)
 
+    @pytest.mark.parametrize("ploidy", [3, 4])
+    def test_polyploid_matches_allel(self, ploidy):
+        """Polyploid Ho (an individual is het when its ploidy haplotypes are
+        not all identical) matches scikit-allel for ploidy 3 and 4."""
+        rng = np.random.default_rng(7)
+        n_ind, n_var = 6, 30
+        hap = rng.integers(0, 3, (n_ind * ploidy, n_var)).astype(np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(n_var) * 1000, 0, n_var * 1000)
+        ho_pg = diversity.heterozygosity_observed(hm, ploidy=ploidy)
+
+        g = np.empty((n_var, n_ind, ploidy), dtype=np.int8)
+        for i in range(n_ind):
+            for k in range(ploidy):
+                g[:, i, k] = hap[i * ploidy + k]
+        ho_allel = allel.heterozygosity_observed(allel.GenotypeArray(g))
+        np.testing.assert_allclose(ho_pg, ho_allel, rtol=1e-10)
+
+    def test_polyploid_skips_missing_individuals(self):
+        """Under the default 'include', an individual with any missing
+        haplotype is skipped; a site with no fully-called individual is NaN."""
+        # ploidy 3, 2 individuals, 2 sites.
+        hap = np.array([[0, 0],    # ind0 hap0
+                        [-1, -1],  # ind0 hap1 (missing at both sites)
+                        [1, 0],    # ind0 hap2
+                        [0, 1],    # ind1 hap0
+                        [0, -1],   # ind1 hap1
+                        [1, 1]],   # ind1 hap2
+                       dtype=np.int8)
+        hm = HaplotypeMatrix(hap, np.array([0, 1000]), 0, 2000)
+        ho = diversity.heterozygosity_observed(hm, ploidy=3)
+        # site 0: ind0 missing (skipped); ind1 = [0, 0, 1] is het -> 1/1
+        np.testing.assert_allclose(ho[0], 1.0)
+        # site 1: both individuals missing -> no valid individual -> NaN
+        assert np.isnan(ho[1])
+
+    def test_ploidy_not_dividing_n_haplotypes_raises(self):
+        hap = np.zeros((6, 2), dtype=np.int8)  # 6 not divisible by 4
+        hm = HaplotypeMatrix(hap, np.array([0, 1000]), 0, 2000)
+        with pytest.raises(ValueError, match="not divisible by ploidy"):
+            diversity.heterozygosity_observed(hm, ploidy=4)
+
 
 class TestInbreedingCoefficient:
     """Test Wright's inbreeding coefficient."""
