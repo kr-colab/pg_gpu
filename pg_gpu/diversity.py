@@ -1599,12 +1599,8 @@ def diplotype_frequency_spectrum(genotype_matrix,
         Number of distinct diplotypes.
     """
     if population is not None:
-        pop_idx = genotype_matrix.sample_sets.get(population)
-        if pop_idx is None:
-            raise ValueError(f"Population {population} not found")
-        geno = genotype_matrix.genotypes[pop_idx, :]
-    else:
-        geno = genotype_matrix.genotypes
+        genotype_matrix = _get_population_matrix(genotype_matrix, population)
+    geno = genotype_matrix.genotypes
 
     if isinstance(geno, cp.ndarray):
         geno = geno.get()
@@ -1650,12 +1646,8 @@ def _histogram_from_dafs(dafs, n_bins):
 def _daf_histogram_diploid(genotype_matrix, n_bins=20, population=None):
     """DAF histogram from diploid genotypes (internal)."""
     if population is not None:
-        pop_idx = genotype_matrix.sample_sets.get(population)
-        if pop_idx is None:
-            raise ValueError(f"Population {population} not found")
-        geno = genotype_matrix.genotypes[pop_idx, :]
-    else:
-        geno = genotype_matrix.genotypes
+        genotype_matrix = _get_population_matrix(genotype_matrix, population)
+    geno = genotype_matrix.genotypes
 
     if not isinstance(geno, cp.ndarray):
         geno = cp.asarray(geno)

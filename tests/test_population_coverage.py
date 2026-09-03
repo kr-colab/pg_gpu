@@ -148,6 +148,48 @@ def test_diploid_population_not_found_raises(gm, fn):
         fn(gm)
 
 
+# ── list-argument form of population= on the diploid / dosage paths ──
+# These route through the shared get_population_matrix, so a row list must
+# give the same result as the population name that selects those rows, and
+# an unusable list (out of range, empty) must raise rather than read garbage.
+def test_diplotype_frequency_spectrum_population_list(gm):
+    a = diversity.diplotype_frequency_spectrum(gm, population=gm.sample_sets["p1"])
+    b = diversity.diplotype_frequency_spectrum(gm, population="p1")
+    _agree(a[0], b[0])
+    assert a[1] == b[1]
+
+
+def test_daf_histogram_diploid_population_list(gm):
+    a = diversity.daf_histogram(gm, population=gm.sample_sets["p1"])
+    b = diversity.daf_histogram(gm, population="p1")
+    for x, y in zip(a, b):
+        _agree(x, y)
+
+
+def test_garud_h_diploid_population_list(gm):
+    _agree(selection.garud_h(gm, population=gm.sample_sets["p1"]),
+           selection.garud_h(gm, population="p1"))
+
+
+def test_pca_dosage_population_list(gm):
+    a = decomposition._prepare_dosage(gm, population=gm.sample_sets["p1"])
+    b = decomposition._prepare_dosage(gm, population="p1")
+    _agree(a, b)
+
+
+@pytest.mark.parametrize("fn", [
+    lambda m, pop: diversity.diplotype_frequency_spectrum(m, population=pop),
+    lambda m, pop: diversity.daf_histogram(m, population=pop),
+    lambda m, pop: selection.garud_h(m, population=pop),
+    lambda m, pop: decomposition._prepare_dosage(m, population=pop),
+], ids=["diplotype_frequency_spectrum", "daf_histogram", "garud_h",
+        "pca_dosage"])
+@pytest.mark.parametrize("bad", [[0, 999], []], ids=["out_of_range", "empty"])
+def test_diploid_population_bad_row_list_raises(gm, fn, bad):
+    with pytest.raises(ValueError):
+        fn(gm, bad)
+
+
 # ── divergence._get_population_indices edge lookups ─────────────────────
 def test_population_indices_unknown_name_raises(hm):
     with pytest.raises(ValueError, match="not found"):
