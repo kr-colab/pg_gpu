@@ -296,18 +296,9 @@ def _prepare_dosage(genotype_matrix, population=None, missing_data='include'):
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
-    geno = matrix.genotypes
-    # Subset individuals inline: the shared get_population_matrix speaks
-    # haplotype rows, not individual rows.
     if population is not None:
-        if isinstance(population, str):
-            if matrix.sample_sets is None or population not in matrix.sample_sets:
-                raise ValueError(
-                    f"Population {population} not found in sample_sets")
-            idx = matrix.sample_sets[population]
-        else:
-            idx = list(population)
-        geno = geno[idx, :]
+        matrix = _get_population_matrix(matrix, population)
+    geno = matrix.genotypes
 
     n_ind, n_var = geno.shape
     if n_var and int(geno.max()) > 2:
