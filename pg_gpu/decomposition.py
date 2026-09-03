@@ -1035,7 +1035,7 @@ def _sign_align_windows(eigvecs):
     the sign of the coordinates changes; eigenvalues and lostruct distances (which
     are sign-invariant) are unaffected.
     """
-    if eigvecs.size == 0:
+    if eigvecs.size == 0:  # pragma: no cover
         return eigvecs
     n_windows, k, _ = eigvecs.shape
     for p in range(k):

@@ -269,6 +269,11 @@ New warnings
 Removed
 ~~~~~~~
 
+* The deprecated LD wrappers ``ld_statistics.DD``, ``DD_two_pops``,
+  ``Dz_two_pops``, and ``pi2_two_pops``. Use ``dd`` / ``dz`` / ``pi2``
+  with the ``populations=`` argument.
+* ``pg_gpu/utils.py`` and its ``read_vcf`` helper (unused, superseded by
+  ``HaplotypeMatrix.from_vcf``).
 * ``diversity.allele_frequency_spectrum`` and
   ``HaplotypeMatrix.allele_frequency_spectrum``. Use the ``sfs`` module
   instead.
