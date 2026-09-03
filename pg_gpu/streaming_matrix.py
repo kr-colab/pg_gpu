@@ -141,32 +141,41 @@ def _pick_chunk_fetcher(source, *, backend):
 
 
 def _store_call_genotype_codec(store_path):
-    """Return the name of the bytes-encoder codec on the store's
+    """Return the name of the compression codec on the store's
     call_genotype array (e.g. ``'zstd'``), or None when the codec
-    spec cannot be read.
+    cannot be read or is not one nvCOMP decodes on the GPU.
 
-    The codec name is what matters for picking a fetcher: nvCOMP has
-    GPU decoders for a fixed list, and the rest go through the host
-    path. Reading the spec is cheap (one JSON parse off the
-    ``call_genotype/zarr.json`` blob).
+    The codec name is what picks a fetcher: nvCOMP has GPU decoders
+    for a fixed list, and the rest go through the host path. The
+    metadata layout differs by zarr format, so read whichever is
+    present: a zarr v3 store keeps a codec pipeline in ``zarr.json``,
+    while a zarr v2 store (the bio2zarr default) keeps a single
+    ``compressor`` in ``.zarray``.
     """
     import json
     import os
-    spec_path = os.path.join(str(store_path), "call_genotype", "zarr.json")
-    if not os.path.exists(spec_path):
-        return None
+    array_dir = os.path.join(str(store_path), "call_genotype")
+    v3_spec = os.path.join(array_dir, "zarr.json")
+    v2_spec = os.path.join(array_dir, ".zarray")
     try:
-        with open(spec_path) as f:
-            spec = json.load(f)
-        for entry in spec.get("codecs", []):
-            name = entry.get("name") if isinstance(entry, dict) else None
-            if name in _NVCOMP_SUPPORTED_CODECS:
-                return name
-            if name == "bytes":
-                continue  # transparent reinterpretation; not a real codec
+        if os.path.exists(v3_spec):
+            with open(v3_spec) as f:
+                spec = json.load(f)
+            names = [entry.get("name") for entry in spec.get("codecs", [])
+                     if isinstance(entry, dict)]
+        elif os.path.exists(v2_spec):
+            with open(v2_spec) as f:
+                spec = json.load(f)
+            compressor = spec.get("compressor") or {}
+            names = [compressor.get("id")]
+        else:
+            return None
+    except (OSError, json.JSONDecodeError):
         return None
-    except (OSError, json.JSONDecodeError, KeyError):
-        return None
+    for name in names:
+        if name in _NVCOMP_SUPPORTED_CODECS:
+            return name
+    return None
 
 
 def _store_call_genotype_chunks(store_path):

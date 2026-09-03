@@ -15,18 +15,20 @@ import zarr
 from pg_gpu import HaplotypeMatrix
 from pg_gpu.streaming_matrix import (
     BadlyChunkedWarning, HostChunkFetcher, KvikioChunkFetcher,
-    _pick_chunk_fetcher, _store_call_genotype_chunks,
-    _store_call_genotype_codec,
+    _NVCOMP_SUPPORTED_CODECS, _pick_chunk_fetcher,
+    _store_call_genotype_chunks, _store_call_genotype_codec,
 )
 from pg_gpu.zarr_source import ZarrGenotypeSource
 
 from .conftest import simulate_hm
 
 
-def _write_vcz_with_sample_chunk(path, hm, *, sample_chunk):
+def _write_vcz_with_sample_chunk(path, hm, *, sample_chunk, zarr_format=3):
     """Wrap ``zarr_io.write_vcz`` with explicit sample-axis chunking so
     tests can opt into bio2zarr-shaped or whole-sample-axis chunking
-    without hand-rolling a VCZ writer."""
+    without hand-rolling a VCZ writer. ``zarr_format=2`` writes v2
+    metadata (``.zarray`` with a single ``compressor``), the bio2zarr
+    default, so the codec probe must read that layout."""
     from pg_gpu.zarr_io import write_vcz
     if os.path.exists(path):
         shutil.rmtree(path)
@@ -35,8 +37,9 @@ def _write_vcz_with_sample_chunk(path, hm, *, sample_chunk):
     gt = HaplotypeMatrix._haplotypes_to_gt(haps)
     n_var, n_dip = gt.shape[0], gt.shape[1]
     samples = [f"s{i}" for i in range(n_dip)]
-    write_vcz(path, gt, pos, samples=samples, contig_name="1",
-              chunks=(min(n_var, 10_000), sample_chunk, 2))
+    with zarr.config.set({"default_zarr_format": zarr_format}):
+        write_vcz(path, gt, pos, samples=samples, contig_name="1",
+                  chunks=(min(n_var, 10_000), sample_chunk, 2))
     return path
 
 
@@ -66,6 +69,21 @@ def whole_axis_store(tmp_path):
     )
 
 
+@pytest.fixture
+def bio2zarr_v2_store(tmp_path):
+    """A zarr v2 VCZ store (``.zarray`` metadata, the bio2zarr default)
+    with bio2zarr-style sample chunking. The codec lives in the v2
+    ``compressor`` field, so the probe must read that to route the
+    store to kvikio."""
+    hm = simulate_hm()
+    return _write_vcz_with_sample_chunk(
+        str(tmp_path / "bio2zarr_v2.vcz"),
+        hm,
+        sample_chunk=max(1, hm.num_haplotypes // 4),
+        zarr_format=2,
+    )
+
+
 class TestStoreProbes:
 
     def test_codec_probe_picks_zstd(self, bio2zarr_store):
@@ -78,6 +96,13 @@ class TestStoreProbes:
         assert chunks is not None
         assert len(chunks) == 3
         assert chunks[2] == 2
+
+    def test_codec_probe_reads_v2_store(self, bio2zarr_v2_store):
+        # bio2zarr writes zarr v2: a .zarray with a single compressor,
+        # not the v3 zarr.json codec pipeline. Reading only zarr.json
+        # made every bio2zarr store look codec-less.
+        codec = _store_call_genotype_codec(bio2zarr_v2_store)
+        assert codec in _NVCOMP_SUPPORTED_CODECS
 
     def test_missing_store_probes_return_none(self, tmp_path):
         nowhere = str(tmp_path / "does-not-exist.vcz")
@@ -104,6 +129,24 @@ class TestPickFetcher:
         source = ZarrGenotypeSource(bio2zarr_store)
         fetcher = _pick_chunk_fetcher(source, backend="host")
         assert isinstance(fetcher, HostChunkFetcher)
+
+    def test_auto_picks_kvikio_on_v2_store(self, bio2zarr_v2_store):
+        # Regression: a v2 store with a supported compressor and
+        # bio2zarr-shaped chunks must route to kvikio. Before the v2
+        # metadata read the codec probe returned None and auto fell
+        # back to the host fetcher with no hint why.
+        source = ZarrGenotypeSource(bio2zarr_v2_store)
+        fetcher = _pick_chunk_fetcher(source, backend="auto")
+        assert isinstance(fetcher, KvikioChunkFetcher)
+        fetcher.close()
+
+    def test_explicit_kvikio_on_v2_store_does_not_raise(self, bio2zarr_v2_store):
+        # The compressor is nvCOMP-decodable, so backend='kvikio' must
+        # build the fetcher rather than raise "could not identify one".
+        source = ZarrGenotypeSource(bio2zarr_v2_store)
+        fetcher = _pick_chunk_fetcher(source, backend="kvikio")
+        assert isinstance(fetcher, KvikioChunkFetcher)
+        fetcher.close()
 
     def test_explicit_kvikio_on_unsupported_codec_raises(self, tmp_path):
         # A store whose call_genotype is uncompressed (no codec in
