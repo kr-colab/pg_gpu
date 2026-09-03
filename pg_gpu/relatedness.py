@@ -544,8 +544,7 @@ def _get_genotype_data(matrix, population=None):
 
     if isinstance(matrix, GenotypeMatrix):
         return matrix.genotypes, matrix.genotypes.shape[0]
-    raise TypeError(  # pragma: no cover
-        f"Expected GenotypeMatrix, got {type(matrix)}")
+    raise TypeError(f"Expected GenotypeMatrix, got {type(matrix)}")  # pragma: no cover
 
 
 def _stream_ibs(streaming_matrix, *, population, missing_data,
