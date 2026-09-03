@@ -184,6 +184,11 @@ Bug fixes
 * ``mu_ld`` and the ``rogers_huff_r`` family raised a bare
   ``AttributeError``/``TypeError`` on a streaming matrix; they now give
   the same "call ``materialize``" message ``zns``/``omega`` do.
+* ``diversity_stats`` listed the Achaz eta-family estimators (``eta1``,
+  ``eta1_star``, ``minus_eta1``, ``minus_eta1_star``) as available but
+  raised ``Unknown statistic`` when asked for them. It now computes them
+  through the per-allele scalar path, giving the same values as
+  ``FrequencySpectrum.theta`` on both biallelic and multiallelic data.
 * ``zns`` and ``omega`` accepted ``estimator='rogers_huff'`` on a
   ``HaplotypeMatrix`` and silently computed naive ``r2`` instead. They
   now pair adjacent haplotypes into 0/1/2 dosages and compute the

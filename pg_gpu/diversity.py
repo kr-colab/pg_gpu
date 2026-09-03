@@ -465,9 +465,9 @@ def project_sfs(sfs, n_from, n_to):
 # FrequencySpectrum: power-user class for SFS analysis
 # ---------------------------------------------------------------------------
 
-# Weight functions for the SFS dot-product path, used by
-# FrequencySpectrum.theta for custom callables; the built-in estimator
-# names go through the per-allele _ac_contribution path.
+# Weight vectors for the SFS dot-product path, used by FrequencySpectrum.theta
+# for built-in names and custom callables alike; the scalar functions and
+# diversity_stats use the per-allele _ac_contribution path instead.
 def _weights_watterson(n):
     w = np.zeros(n + 1)
     a1 = np.sum(1.0 / np.arange(1, n))
@@ -1009,7 +1009,12 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     statistics : list
-        List of statistics to compute
+        List of statistics to compute. Theta estimators: ``pi``,
+        ``theta_w``, ``theta_h``, ``theta_l``, and the Achaz eta-family
+        ``eta1``, ``eta1_star``, ``minus_eta1``, ``minus_eta1_star``.
+        Neutrality tests: ``tajimas_d``, ``fay_wus_h``,
+        ``normalized_fay_wus_h``, ``zeng_e``. Also ``segregating_sites``,
+        ``singletons``, ``n_variants``, ``haplotype_diversity``.
     span_normalize : bool
         ``True`` (default): auto-detect best denominator.
         ``False``: return raw sums.
@@ -1024,7 +1029,9 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     """
     # Map stat names to estimator names for batched computation
     theta_stats = {'pi': 'pi', 'theta_w': 'watterson', 'theta_h': 'theta_h',
-                   'theta_l': 'theta_l'}
+                   'theta_l': 'theta_l', 'eta1': 'eta1',
+                   'eta1_star': 'eta1_star', 'minus_eta1': 'minus_eta1',
+                   'minus_eta1_star': 'minus_eta1_star'}
     # Neutrality tests: (w1, w2) weight pairs
     test_specs = {
         'tajimas_d': ('pi', 'watterson'),
@@ -1081,7 +1088,7 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
             results['n_variants'] = m.num_variants
         elif stat == 'haplotype_diversity':
             results['haplotype_diversity'] = haplotype_diversity(haplotype_matrix, population, missing_data)
-        elif stat not in ('pi', 'theta_w', 'theta_h', 'theta_l', 'tajimas_d'):
+        else:
             raise ValueError(f"Unknown statistic: {stat}")
 
     # Give back keys in the caller's order; the theta batch above fills
