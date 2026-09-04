@@ -635,6 +635,11 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
     float
         ZnS value, or 0.0 if fewer than 2 segregating sites.
     """
+    # A bool valid_mask silently corrupts the tiled r2/sigma_d2 math: bool
+    # matmul reduces logically instead of counting jointly-valid samples. Any
+    # numeric dtype (the caller supplies float64) counts correctly.
+    assert valid_mask.dtype.kind != 'b', \
+        "valid_mask must be a numeric (non-bool) array"
     hc = hap_clean[:, col_start:col_end]
     vm = valid_mask[:, col_start:col_end]
 
