@@ -38,14 +38,22 @@ def _codec_name_from_metadata(meta):
 
     Reads either the zarr v3 codec pipeline or the single zarr v2
     compressor, so the caller never parses the on-disk metadata layout
-    itself. The v3 ``bytes`` codec is a transparent reinterpretation,
-    not a compressor, so it is skipped.
+    itself. Descends into a v3 sharding codec, whose compressor sits one
+    level down in the shard's own pipeline. The v3 ``bytes`` codec is a
+    transparent reinterpretation, not a compressor, so it is skipped.
     """
     codecs = meta.get("codecs")
     if codecs is not None:  # zarr v3 codec pipeline
         for entry in codecs:
             name = entry.get("name") if isinstance(entry, dict) else None
-            if name and name != "bytes":
+            if name == "sharding_indexed":
+                # The shard frames an inner pipeline that holds the real
+                # compressor; recurse on its configuration (also a dict
+                # with a "codecs" list).
+                nested = _codec_name_from_metadata(entry.get("configuration", {}))
+                if nested is not None:
+                    return nested
+            elif name and name != "bytes":
                 return name
         return None
     compressor = meta.get("compressor")  # zarr v2 single compressor

@@ -12,12 +12,14 @@ import numpy as np
 import pytest
 import zarr
 
-from pg_gpu import HaplotypeMatrix
+from pg_gpu import (
+    BadlyChunkedWarning, HaplotypeMatrix, KvikioUnavailableWarning,
+)
 from pg_gpu.streaming_matrix import (
     HostChunkFetcher, KvikioChunkFetcher, _NVCOMP_SUPPORTED_CODECS,
     _pick_chunk_fetcher,
 )
-from pg_gpu.zarr_source import ZarrGenotypeSource
+from pg_gpu.zarr_source import ZarrGenotypeSource, _codec_name_from_metadata
 
 from .conftest import simulate_hm
 
@@ -83,6 +85,31 @@ def bio2zarr_v2_store(tmp_path):
     )
 
 
+def _write_v3_blosc_store(path, *, n_var, n_dip, sample_chunk):
+    """A minimal v3 VCZ store whose call_genotype uses bio2zarr's genotype
+    codec (blosc/zstd + bitshuffle), so the kvikio nvCOMP path is exercised
+    on blosc, not only the write_vcz zstd default."""
+    from zarr.codecs.blosc import BloscCodec, BloscShuffle
+    if os.path.exists(path):
+        shutil.rmtree(path)
+    rng = np.random.default_rng(0)
+    gt = rng.integers(0, 2, size=(n_var, n_dip, 2)).astype(np.int8)
+    g = zarr.create_group(store=path, overwrite=True, zarr_format=3)
+    cg = g.create_array(
+        "call_genotype", shape=(n_var, n_dip, 2),
+        chunks=(min(n_var, 10_000), sample_chunk, 2), dtype="int8",
+        compressors=[BloscCodec(cname="zstd", shuffle=BloscShuffle.bitshuffle)])
+    cg[:] = gt
+    g.create_array("variant_position", shape=(n_var,),
+                   dtype="int32")[:] = np.arange(1, n_var + 1, dtype=np.int32)
+    g.create_array("variant_contig", shape=(n_var,),
+                   dtype="int32")[:] = np.zeros(n_var, dtype=np.int32)
+    g.create_array("contig_id", shape=(1,), dtype="<U16")[:] = ["1"]
+    g.create_array("sample_id", shape=(n_dip,), dtype="<U16")[:] = [
+        f"s{i}" for i in range(n_dip)]
+    return path
+
+
 class TestSourceMetadata:
     """ZarrGenotypeSource reads the codec, zarr format, and chunk shape
     off the call_genotype handle it already opens, so the fetcher layer
@@ -106,6 +133,17 @@ class TestSourceMetadata:
         chunks = ZarrGenotypeSource(bio2zarr_store).chunks
         assert len(chunks) == 3
         assert chunks[2] == 2
+
+    def test_sharded_v3_codec_detected(self):
+        # A sharded v3 store nests the compressor inside the sharding
+        # codec's own pipeline; the probe must descend to find it, or a
+        # GPU-decodable store is misread as codec-less.
+        from zarr.codecs import ZstdCodec
+        g = zarr.create_group(store=zarr.storage.MemoryStore(), zarr_format=3)
+        a = g.create_array("call_genotype", shape=(100, 4, 2),
+                           chunks=(100, 4, 2), shards=(100, 4, 2),
+                           dtype="int8", compressors=[ZstdCodec()])
+        assert _codec_name_from_metadata(a.metadata.to_dict()) == "zstd"
 
     def test_missing_store_raises(self, tmp_path):
         nowhere = str(tmp_path / "does-not-exist.vcz")
@@ -184,6 +222,32 @@ class TestPickFetcher:
             _pick_chunk_fetcher(source, backend="kvikio")
 
 
+class TestFallbackWarnings:
+    """backend='auto' hints (once, size-gated) when it falls back to the
+    host fetcher on a fixable store. The fixtures are tiny, so force the
+    size gate to exercise the warning."""
+
+    def test_v2_store_warns_kvikio_unavailable(self, bio2zarr_v2_store,
+                                               monkeypatch):
+        import pg_gpu.streaming_matrix as sm
+        monkeypatch.setattr(sm, "_store_large_enough_to_warn",
+                            lambda source: True)
+        source = ZarrGenotypeSource(bio2zarr_v2_store)
+        with pytest.warns(KvikioUnavailableWarning, match="zarr v3"):
+            fetcher = _pick_chunk_fetcher(source, backend="auto")
+        assert isinstance(fetcher, HostChunkFetcher)
+
+    def test_whole_axis_warns_badly_chunked(self, whole_axis_store,
+                                            monkeypatch):
+        import pg_gpu.streaming_matrix as sm
+        monkeypatch.setattr(sm, "_store_large_enough_to_warn",
+                            lambda source: True)
+        source = ZarrGenotypeSource(whole_axis_store)
+        with pytest.warns(BadlyChunkedWarning, match="full sample axis"):
+            fetcher = _pick_chunk_fetcher(source, backend="auto")
+        assert isinstance(fetcher, HostChunkFetcher)
+
+
 class TestKvikioFetcherReads:
     """KvikioChunkFetcher should produce the same per-chunk genotype
     bytes the host fetcher does on the same store. Same source, same
@@ -214,6 +278,30 @@ class TestKvikioFetcherReads:
             assert (lh, rh) == (lk, rk)
             np.testing.assert_array_equal(gth, gtk)
             np.testing.assert_array_equal(ph, pk)
+
+    def test_v3_blosc_matches_host(self, tmp_path):
+        # bio2zarr writes v3 with a blosc(zstd, bitshuffle) codec, not the
+        # zstd of write_vcz; kvikio's nvCOMP path must decode blosc and
+        # match the host bytes -- the guarantee behind recommending
+        # vcf_to_zarr(zarr_format=3).
+        path = _write_v3_blosc_store(str(tmp_path / "v3blosc.vcz"),
+                                     n_var=30_000, n_dip=100, sample_chunk=25)
+        source = ZarrGenotypeSource(path)
+        assert source.codec == "blosc"
+        auto = _pick_chunk_fetcher(source, backend="auto")
+        assert isinstance(auto, KvikioChunkFetcher)
+        regions = [(0, 10_000), (10_000, 20_000)]
+        try:
+            kvi = [np.asarray(cp.asnumpy(gt) if isinstance(gt, cp.ndarray)
+                              else gt)
+                   for _, _, _, gt, _, _ in auto.iter_chunks(regions, prefetch=0)]
+        finally:
+            auto.close()
+        host = [np.asarray(gt) for _, _, _, gt, _, _
+                in HostChunkFetcher(source).iter_chunks(regions, prefetch=0)]
+        assert kvi and len(kvi) == len(host)
+        for a, b in zip(kvi, host):
+            np.testing.assert_array_equal(a, b)
 
 
 class TestSliceSubsampleGpu:

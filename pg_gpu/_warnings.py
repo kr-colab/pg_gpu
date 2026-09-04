@@ -63,8 +63,10 @@ class HaploidDataWarning(UserWarning):
 class BadlyChunkedWarning(UserWarning):
     """Emitted when ``backend='auto'`` picks ``host`` on a store whose
     call_genotype chunking would have defeated the kvikio fetcher's
-    win. The store is functional but a bio2zarr-style re-encode would
-    unlock the GPU-decode fast path."""
+    win. The store is functional but re-encoding as zarr v3 with
+    bio2zarr-style sample chunking
+    (``HaplotypeMatrix.vcf_to_zarr(..., zarr_format=3)``) would unlock
+    the GPU-decode fast path."""
 
 
 class KvikioUnavailableWarning(UserWarning):

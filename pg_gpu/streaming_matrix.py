@@ -122,8 +122,8 @@ def _pick_chunk_fetcher(source, *, backend):
                 f"{source.path}: zarr v{source.zarr_format} store; the "
                 f"kvikio GPU decoder needs zarr v3 (a v2 compressor decodes "
                 f"on the CPU). Falling back to the host fetcher. Re-encode "
-                f"as zarr v3 via HaplotypeMatrix.vcf_to_zarr to enable "
-                f"kvikio.",
+                f"as zarr v3 with HaplotypeMatrix.vcf_to_zarr(..., "
+                f"zarr_format=3) to enable kvikio.",
                 KvikioUnavailableWarning, stacklevel=4,
             )
         return HostChunkFetcher(source)
@@ -143,8 +143,9 @@ def _pick_chunk_fetcher(source, *, backend):
                 f"full sample axis ({source.num_diploids} diploids); the "
                 f"kvikio fetcher gives no speedup at this chunking. "
                 f"Falling back to the host fetcher. Re-encode with "
-                f"bio2zarr-style chunking (sample_chunk ~= 1000) via "
-                f"HaplotypeMatrix.vcf_to_zarr to enable kvikio.",
+                f"HaplotypeMatrix.vcf_to_zarr(..., zarr_format=3), whose "
+                f"bio2zarr sample chunking splits the sample axis, to "
+                f"enable kvikio.",
                 BadlyChunkedWarning, stacklevel=4,
             )
         return HostChunkFetcher(source)
@@ -309,8 +310,8 @@ class KvikioChunkFetcher(ChunkFetcher):
                 f"kvikio GPU decode requires a zarr v3 store; "
                 f"{source.path} is zarr v{source.zarr_format}, whose "
                 f"numcodecs compressor decodes on the CPU. Re-encode as "
-                f"zarr v3 via HaplotypeMatrix.vcf_to_zarr to use the "
-                f"kvikio backend."
+                f"zarr v3 with HaplotypeMatrix.vcf_to_zarr(..., "
+                f"zarr_format=3) to use the kvikio backend."
             )
         if source.codec not in _NVCOMP_SUPPORTED_CODECS:
             raise ValueError(
