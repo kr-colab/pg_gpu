@@ -67,6 +67,18 @@ class BadlyChunkedWarning(UserWarning):
     unlock the GPU-decode fast path."""
 
 
+class KvikioUnavailableWarning(UserWarning):
+    """Emitted when ``backend='auto'`` picks ``host`` because the store
+    cannot be GPU-decoded -- most often a zarr v2 store, whose numcodecs
+    compressor decodes on the CPU. The store is functional; re-encoding
+    it as zarr v3 unlocks the kvikio GPU-decode fast path. Silence with::
+
+        import warnings
+        from pg_gpu import KvikioUnavailableWarning
+        warnings.filterwarnings("ignore", category=KvikioUnavailableWarning)
+    """
+
+
 class MultiallelicCapWarning(UserWarning):
     """Emitted when a fused windowed kernel drops sites with more alleles
     than the kernel's fixed per-allele capacity.

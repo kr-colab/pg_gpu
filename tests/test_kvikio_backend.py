@@ -14,19 +14,20 @@ import zarr
 
 from pg_gpu import HaplotypeMatrix
 from pg_gpu.streaming_matrix import (
-    BadlyChunkedWarning, HostChunkFetcher, KvikioChunkFetcher,
-    _pick_chunk_fetcher, _store_call_genotype_chunks,
-    _store_call_genotype_codec,
+    HostChunkFetcher, KvikioChunkFetcher, _NVCOMP_SUPPORTED_CODECS,
+    _pick_chunk_fetcher,
 )
 from pg_gpu.zarr_source import ZarrGenotypeSource
 
 from .conftest import simulate_hm
 
 
-def _write_vcz_with_sample_chunk(path, hm, *, sample_chunk):
+def _write_vcz_with_sample_chunk(path, hm, *, sample_chunk, zarr_format=3):
     """Wrap ``zarr_io.write_vcz`` with explicit sample-axis chunking so
     tests can opt into bio2zarr-shaped or whole-sample-axis chunking
-    without hand-rolling a VCZ writer."""
+    without hand-rolling a VCZ writer. ``zarr_format=2`` writes v2
+    metadata (``.zarray`` with a single ``compressor``), the bio2zarr
+    default, which the kvikio GPU decoder cannot read."""
     from pg_gpu.zarr_io import write_vcz
     if os.path.exists(path):
         shutil.rmtree(path)
@@ -35,8 +36,9 @@ def _write_vcz_with_sample_chunk(path, hm, *, sample_chunk):
     gt = HaplotypeMatrix._haplotypes_to_gt(haps)
     n_var, n_dip = gt.shape[0], gt.shape[1]
     samples = [f"s{i}" for i in range(n_dip)]
-    write_vcz(path, gt, pos, samples=samples, contig_name="1",
-              chunks=(min(n_var, 10_000), sample_chunk, 2))
+    with zarr.config.set({"default_zarr_format": zarr_format}):
+        write_vcz(path, gt, pos, samples=samples, contig_name="1",
+                  chunks=(min(n_var, 10_000), sample_chunk, 2))
     return path
 
 
@@ -66,23 +68,49 @@ def whole_axis_store(tmp_path):
     )
 
 
-class TestStoreProbes:
+@pytest.fixture
+def bio2zarr_v2_store(tmp_path):
+    """A zarr v2 VCZ store (``.zarray`` metadata, the bio2zarr default)
+    with bio2zarr-style sample chunking. Its numcodecs compressor
+    decodes on the CPU, so kvikio must route it to the host fetcher
+    instead of handing a GPU buffer to numcodecs and crashing."""
+    hm = simulate_hm()
+    return _write_vcz_with_sample_chunk(
+        str(tmp_path / "bio2zarr_v2.vcz"),
+        hm,
+        sample_chunk=max(1, hm.num_haplotypes // 4),
+        zarr_format=2,
+    )
 
-    def test_codec_probe_picks_zstd(self, bio2zarr_store):
-        # zarr 3's create_array defaults to zstd for int dtypes; the
-        # probe reads call_genotype/zarr.json and returns the name.
-        assert _store_call_genotype_codec(bio2zarr_store) == "zstd"
 
-    def test_chunk_probe_returns_shape(self, bio2zarr_store):
-        chunks = _store_call_genotype_chunks(bio2zarr_store)
-        assert chunks is not None
+class TestSourceMetadata:
+    """ZarrGenotypeSource reads the codec, zarr format, and chunk shape
+    off the call_genotype handle it already opens, so the fetcher layer
+    never reopens or hand-parses the store's on-disk metadata."""
+
+    def test_v3_store_reports_zstd(self, bio2zarr_store):
+        # zarr v3's create_array defaults to zstd for int dtypes.
+        source = ZarrGenotypeSource(bio2zarr_store)
+        assert source.zarr_format == 3
+        assert source.codec == "zstd"
+
+    def test_v2_store_reports_compressor(self, bio2zarr_v2_store):
+        # bio2zarr writes zarr v2: a .zarray with a single compressor.
+        # Reading it through the zarr API is what tells the fetcher the
+        # store exists but cannot be GPU-decoded.
+        source = ZarrGenotypeSource(bio2zarr_v2_store)
+        assert source.zarr_format == 2
+        assert source.codec in _NVCOMP_SUPPORTED_CODECS
+
+    def test_chunks_shape(self, bio2zarr_store):
+        chunks = ZarrGenotypeSource(bio2zarr_store).chunks
         assert len(chunks) == 3
         assert chunks[2] == 2
 
-    def test_missing_store_probes_return_none(self, tmp_path):
+    def test_missing_store_raises(self, tmp_path):
         nowhere = str(tmp_path / "does-not-exist.vcz")
-        assert _store_call_genotype_codec(nowhere) is None
-        assert _store_call_genotype_chunks(nowhere) is None
+        with pytest.raises((FileNotFoundError, ValueError)):
+            ZarrGenotypeSource(nowhere)
 
 
 class TestPickFetcher:
@@ -105,13 +133,31 @@ class TestPickFetcher:
         fetcher = _pick_chunk_fetcher(source, backend="host")
         assert isinstance(fetcher, HostChunkFetcher)
 
+    def test_explicit_kvikio_on_v2_store_raises(self, bio2zarr_v2_store):
+        # backend='kvikio' on a v2 store must raise a clear "needs v3"
+        # error rather than route to kvikio and crash on decode.
+        source = ZarrGenotypeSource(bio2zarr_v2_store)
+        with pytest.raises(ValueError, match="zarr v3"):
+            _pick_chunk_fetcher(source, backend="kvikio")
+
+    def test_v2_store_host_iterates_without_crash(self, bio2zarr_v2_store):
+        # Regression: routing a v2 store to kvikio handed a cupy buffer
+        # to CPU numcodecs and crashed on the first chunk read. The v2
+        # store must go to the host fetcher and iterate cleanly.
+        source = ZarrGenotypeSource(bio2zarr_v2_store)
+        fetcher = _pick_chunk_fetcher(source, backend="auto")
+        assert isinstance(fetcher, HostChunkFetcher)
+        chunks = list(fetcher.iter_chunks([(0, 10_000), (10_000, 20_000)],
+                                          prefetch=0))
+        assert chunks
+        first_gt = np.asarray(chunks[0][3])
+        assert first_gt.size > 0
+
     def test_explicit_kvikio_on_unsupported_codec_raises(self, tmp_path):
-        # A store whose call_genotype is uncompressed (no codec in
-        # the nvCOMP-supported list). Force compressors=None so the
-        # spec ends up with just a bytes codec; the probe then
-        # cannot identify a GPU-decodable codec and the explicit
-        # backend='kvikio' should raise rather than silently produce
-        # wrong output.
+        # A v3 store whose call_genotype is uncompressed: compressors=
+        # None leaves only the bytes codec, so source.codec is None and
+        # explicit backend='kvikio' must raise rather than route to a
+        # decoder with nothing to decode.
         path = str(tmp_path / "uncompressed.vcz")
         if os.path.exists(path):
             shutil.rmtree(path)
