@@ -606,3 +606,26 @@ class TestFusedJackknife:
         # Jackknife should be NaN (4 < 10)
         assert result.jackknife_se is not None
         assert np.all(np.isnan(result.jackknife_se))
+
+
+class TestPcDistCornersEdges:
+    """Malformed-input guards on pc_dist and corners."""
+
+    def test_pc_dist_flat_requires_npc(self):
+        # A flat lostruct matrix carries no k, so npc must be given.
+        with pytest.raises(ValueError, match="npc must be provided"):
+            pc_dist(np.zeros((3, 10)), npc=None)
+
+    def test_pc_dist_rejects_unknown_normalize(self, small_hm):
+        res = local_pca(small_hm, window_size=200, window_type='snp', k=2)
+        with pytest.raises(ValueError, match="Unknown normalize"):
+            pc_dist(res, npc=2, normalize='bogus')
+
+    def test_corners_rejects_non_2d(self):
+        with pytest.raises(ValueError, match=r"shape \(n, 2\)"):
+            corners(np.zeros((5, 3)), prop=0.2)
+
+    def test_corners_needs_enough_points(self):
+        # Fewer non-NaN points than corners requested cannot be placed.
+        with pytest.raises(ValueError, match="at least"):
+            corners(np.array([[0.0, 0.0], [1.0, 1.0]]), prop=0.5)

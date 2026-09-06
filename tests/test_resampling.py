@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from pg_gpu.resampling import block_jackknife, block_bootstrap
+import cupy as cp
+
+from pg_gpu.resampling import (
+    _moving_nanmean, _moving_nansum, block_bootstrap, block_jackknife,
+)
 
 
 # -----------------------------------------------------------------------------
@@ -167,3 +171,34 @@ class TestBlockBootstrap:
                                       n_replicates=2000, rng=0)
         # Not equal — but should agree to within a factor of ~1.5-2.
         assert 0.5 * se_jk < se_bs < 2.0 * se_jk
+
+
+class TestMovingWindowHelpers:
+    """Windowed cumsum helpers behind the moving-window statistics."""
+
+    def test_nansum_nonoverlapping(self):
+        out = _moving_nansum(cp.asarray([1., 2., 3., 4.]), size=2)
+        np.testing.assert_array_equal(cp.asnumpy(out), [3., 7.])
+
+    def test_nanmean_nonoverlapping(self):
+        out = _moving_nanmean(cp.asarray([1., 2., 3., 4.]), size=2)
+        np.testing.assert_array_equal(cp.asnumpy(out), [1.5, 3.5])
+
+    def test_nanmean_ignores_nan_in_window(self):
+        # A finite-only window averages over its non-NaN entries.
+        out = _moving_nanmean(cp.asarray([1., cp.nan, 3., 4.]), size=2)
+        np.testing.assert_array_equal(cp.asnumpy(out), [1.0, 3.5])
+
+    def test_nanmean_all_nan_window_is_nan(self):
+        # Zero finite entries -> NaN rather than a divide-by-zero.
+        out = _moving_nanmean(cp.asarray([cp.nan, cp.nan]), size=2)
+        assert bool(cp.isnan(out).all())
+
+    def test_strided_overlapping_windows(self):
+        out = _moving_nansum(cp.asarray([1., 2., 3.]), size=2, step=1)
+        np.testing.assert_array_equal(cp.asnumpy(out), [3., 5.])
+
+    def test_window_larger_than_data_is_empty(self):
+        # No window fits, so the result is empty rather than an error.
+        assert _moving_nanmean(cp.asarray([1., 2.]), size=5).shape == (0,)
+        assert _moving_nansum(cp.asarray([1., 2.]), size=5).shape == (0,)
