@@ -492,6 +492,30 @@ class TestVcfToZarr:
         hm = HaplotypeMatrix.from_zarr(zarr_path)
         assert hm.num_variants > 0
 
+    def test_zarr_format_v3(self, tmp_path):
+        """zarr_format=3 writes a v3 store (zarr.json, not .zarray), the
+        layout the kvikio GPU-decode backend needs."""
+        import os
+        ts = msprime.sim_ancestry(
+            samples=4, sequence_length=5_000,
+            recombination_rate=1e-4, random_seed=45, ploidy=2,
+        )
+        ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=45)
+        vcf_path = str(tmp_path / "v3.vcf")
+        with open(vcf_path, 'w') as f:
+            ts.write_vcf(f)
+        bgzip_index(vcf_path)
+
+        zarr_path = str(tmp_path / "v3.zarr")
+        vcf_to_zarr(vcf_path + '.gz', zarr_path,
+                    worker_processes=1, show_progress=False, zarr_format=3)
+
+        cg = os.path.join(zarr_path, "call_genotype")
+        assert os.path.exists(os.path.join(cg, "zarr.json"))
+        assert not os.path.exists(os.path.join(cg, ".zarray"))
+        hm = HaplotypeMatrix.from_zarr(zarr_path)
+        assert hm.num_variants > 0
+
 
 # ── Edge Cases ──────────────────────────────────────────────────────────
 

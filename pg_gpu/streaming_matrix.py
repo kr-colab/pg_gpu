@@ -32,7 +32,7 @@ import zarr
 from kvikio.zarr import GDSStore
 
 from ._gpu_genotype_prep import build_genotype_matrix, build_haplotype_matrix
-from ._warnings import BadlyChunkedWarning
+from ._warnings import BadlyChunkedWarning, KvikioUnavailableWarning
 
 
 def _pad_to(arr, shape):
@@ -110,9 +110,22 @@ def _pick_chunk_fetcher(source, *, backend):
     if backend == "kvikio":
         return KvikioChunkFetcher(source)
 
-    codec = _store_call_genotype_codec(source.path)
-    if codec is None:
-        # codec unreadable or unsupported -> host
+    if not _kvikio_can_decode(source):
+        # A zarr v2 store decodes through CPU numcodecs, and an
+        # uncompressed or unsupported codec has no nvCOMP GPU decoder --
+        # either way kvikio cannot engage, so use the host fetcher. Hint
+        # on the v2 case (the common, fixable one) when the store is big
+        # enough that the GPU path would have mattered; small fixtures
+        # would just get noise.
+        if source.zarr_format != 3 and _store_large_enough_to_warn(source):
+            warnings.warn(
+                f"{source.path}: zarr v{source.zarr_format} store; the "
+                f"kvikio GPU decoder needs zarr v3 (a v2 compressor decodes "
+                f"on the CPU). Falling back to the host fetcher. Re-encode "
+                f"as zarr v3 with HaplotypeMatrix.vcf_to_zarr(..., "
+                f"zarr_format=3) to enable kvikio.",
+                KvikioUnavailableWarning, stacklevel=4,
+            )
         return HostChunkFetcher(source)
     chunks = source.chunks  # already cached on the source from __init__
     whole_sample_axis = (chunks is not None and len(chunks) >= 2
@@ -124,64 +137,36 @@ def _pick_chunk_fetcher(source, *, backend):
         # buys nothing. Only warn when the store is large enough that
         # the user would actually see the speedup of a rechunk -- on
         # small test fixtures the warning is noise.
-        warn_threshold_bytes = 1 << 30  # 1 GiB of int8 footprint
-        eager_bytes = int(source.num_variants) * int(source.num_haplotypes)
-        if eager_bytes >= warn_threshold_bytes:
+        if _store_large_enough_to_warn(source):
             warnings.warn(
                 f"{source.path}: call_genotype.chunks={chunks} spans the "
                 f"full sample axis ({source.num_diploids} diploids); the "
                 f"kvikio fetcher gives no speedup at this chunking. "
                 f"Falling back to the host fetcher. Re-encode with "
-                f"bio2zarr-style chunking (sample_chunk ~= 1000) via "
-                f"HaplotypeMatrix.vcf_to_zarr to enable kvikio.",
+                f"HaplotypeMatrix.vcf_to_zarr(..., zarr_format=3), whose "
+                f"bio2zarr sample chunking splits the sample axis, to "
+                f"enable kvikio.",
                 BadlyChunkedWarning, stacklevel=4,
             )
         return HostChunkFetcher(source)
     return KvikioChunkFetcher(source)
 
 
-def _store_call_genotype_codec(store_path):
-    """Return the name of the bytes-encoder codec on the store's
-    call_genotype array (e.g. ``'zstd'``), or None when the codec
-    spec cannot be read.
-
-    The codec name is what matters for picking a fetcher: nvCOMP has
-    GPU decoders for a fixed list, and the rest go through the host
-    path. Reading the spec is cheap (one JSON parse off the
-    ``call_genotype/zarr.json`` blob).
-    """
-    import json
-    import os
-    spec_path = os.path.join(str(store_path), "call_genotype", "zarr.json")
-    if not os.path.exists(spec_path):
-        return None
-    try:
-        with open(spec_path) as f:
-            spec = json.load(f)
-        for entry in spec.get("codecs", []):
-            name = entry.get("name") if isinstance(entry, dict) else None
-            if name in _NVCOMP_SUPPORTED_CODECS:
-                return name
-            if name == "bytes":
-                continue  # transparent reinterpretation; not a real codec
-        return None
-    except (OSError, json.JSONDecodeError, KeyError):
-        return None
+def _kvikio_can_decode(source):
+    """True when kvikio's nvCOMP GPU decoder can read this store: a zarr
+    v3 store (a v2 store decodes through CPU numcodecs) whose
+    call_genotype codec nvCOMP supports."""
+    return (source.zarr_format == 3
+            and source.codec in _NVCOMP_SUPPORTED_CODECS)
 
 
-def _store_call_genotype_chunks(store_path):
-    """Return ``call_genotype.chunks`` as a tuple, or None if unreadable.
-
-    Used to decide whether the store's sample-axis chunking is
-    bio2zarr-shaped (small enough chunks that kvikio's GPU codec
-    decode actually wins on sample-subset reads) or whole-axis
-    chunked (in which case the kvikio path gives no real speedup).
-    """
-    try:
-        store = zarr.open_group(store_path, mode="r")
-        return tuple(store["call_genotype"].chunks)
-    except (FileNotFoundError, KeyError, ValueError):
-        return None
+def _store_large_enough_to_warn(source):
+    """A kvikio fallback is only worth a warning on a store big enough
+    that the GPU decode path would have mattered; on small fixtures the
+    warning is just noise."""
+    warn_threshold_bytes = 1 << 30  # 1 GiB of int8 footprint
+    eager_bytes = int(source.num_variants) * int(source.num_haplotypes)
+    return eager_bytes >= warn_threshold_bytes
 
 
 def _iter_chunks_with_prefetch(chunks, prefetch, slice_fn, *,
@@ -320,16 +305,22 @@ class KvikioChunkFetcher(ChunkFetcher):
                 f"compat_mode must be 'ON', 'AUTO', or 'OFF'; "
                 f"got {compat_mode!r}"
             )
-        codec = _store_call_genotype_codec(source.path)
-        if codec is None:
+        if source.zarr_format != 3:
             raise ValueError(
-                f"KvikioChunkFetcher requires a call_genotype codec "
-                f"the nvCOMP GPU decoder supports "
-                f"({sorted(_NVCOMP_SUPPORTED_CODECS)}); could not "
-                f"identify one on {source.path}"
+                f"kvikio GPU decode requires a zarr v3 store; "
+                f"{source.path} is zarr v{source.zarr_format}, whose "
+                f"numcodecs compressor decodes on the CPU. Re-encode as "
+                f"zarr v3 with HaplotypeMatrix.vcf_to_zarr(..., "
+                f"zarr_format=3) to use the kvikio backend."
+            )
+        if source.codec not in _NVCOMP_SUPPORTED_CODECS:
+            raise ValueError(
+                f"KvikioChunkFetcher requires a call_genotype codec the "
+                f"nvCOMP GPU decoder supports "
+                f"({sorted(_NVCOMP_SUPPORTED_CODECS)}); {source.path} has "
+                f"codec {source.codec!r}"
             )
         self._source = source
-        self._codec = codec
         # GDSStore is a separate handle from source._store: the codec
         # pipeline is cached on the zarr group, and we need a group
         # opened with the GPU buffer prototype active so nvCOMP runs

@@ -686,7 +686,8 @@ def read_genotypes(path, region=None):
 
 
 def vcf_to_zarr(vcf_paths, zarr_path, worker_processes=None,
-                icf_path=None, max_memory='4GB', show_progress=True):
+                icf_path=None, max_memory='4GB', show_progress=True,
+                zarr_format=None):
     """Convert VCF file(s) to VCZ-format zarr store using bio2zarr.
 
     Uses the two-step explode + encode pipeline for control over
@@ -708,6 +709,11 @@ def vcf_to_zarr(vcf_paths, zarr_path, worker_processes=None,
         Maximum memory for encoding step. Default '4GB'.
     show_progress : bool
         Show progress bars. Default True.
+    zarr_format : int, optional
+        Zarr metadata version to write (2 or 3). ``None`` (default)
+        uses bio2zarr's own default (v2). Pass ``3`` to write a v3
+        store, which the kvikio GPU-decode backend can read; a v2
+        store decodes on the CPU.
     """
     from bio2zarr.vcf import explode, encode
 
@@ -726,7 +732,8 @@ def vcf_to_zarr(vcf_paths, zarr_path, worker_processes=None,
         encode(icf_path, zarr_path,
                worker_processes=worker_processes,
                max_memory=max_memory,
-               show_progress=show_progress)
+               show_progress=show_progress,
+               zarr_format=zarr_format)
     finally:
         try:
             if os.path.exists(icf_path):

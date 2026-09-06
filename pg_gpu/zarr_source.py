@@ -31,6 +31,37 @@ from .zarr_io import (_region_mask, _vcz_contig_index, detect_zarr_layout,
 _SLICE_SUBSAMPLE_GPU_MAX_RUNS = 64
 
 
+def _codec_name_from_metadata(meta):
+    """Return the compression codec name from ``call_genotype`` array
+    metadata (zarr's ``metadata.to_dict()``), or None when the array is
+    uncompressed.
+
+    Reads either the zarr v3 codec pipeline or the single zarr v2
+    compressor, so the caller never parses the on-disk metadata layout
+    itself. Descends into a v3 sharding codec, whose compressor sits one
+    level down in the shard's own pipeline. The v3 ``bytes`` codec is a
+    transparent reinterpretation, not a compressor, so it is skipped.
+    """
+    codecs = meta.get("codecs")
+    if codecs is not None:  # zarr v3 codec pipeline
+        for entry in codecs:
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if name == "sharding_indexed":
+                # The shard frames an inner pipeline that holds the real
+                # compressor; recurse on its configuration (also a dict
+                # with a "codecs" list).
+                nested = _codec_name_from_metadata(entry.get("configuration", {}))
+                if nested is not None:
+                    return nested
+            elif name and name != "bytes":
+                return name
+        return None
+    compressor = meta.get("compressor")  # zarr v2 single compressor
+    if isinstance(compressor, dict):
+        return compressor.get("id")
+    return None
+
+
 class ZarrGenotypeSource:
     """Open a VCZ store and expose chunked + subset read primitives.
 
@@ -68,6 +99,13 @@ class ZarrGenotypeSource:
         Selected contig name.
     chunks : tuple
         ``call_genotype`` chunk shape.
+    zarr_format : int
+        Zarr metadata version of the store (2 or 3). kvikio's nvCOMP GPU
+        decoder needs a v3 store; a v2 store decodes through the CPU
+        numcodecs path.
+    codec : str or None
+        ``call_genotype`` compression codec name (e.g. ``'zstd'``,
+        ``'blosc'``), or None when the array is uncompressed.
     pop_cols : dict or None
         ``{pop_name: ndarray[hap_axis_indices]}`` when a pop file was
         resolved, else None.
@@ -105,6 +143,13 @@ class ZarrGenotypeSource:
         from ._warnings import _require_diploid_ploidy
         _require_diploid_ploidy(cg.shape[2], f"streaming zarr store '{self.path}'")
         self.chunks = tuple(cg.chunks)
+        # Read the codec and zarr format off the handle already in hand,
+        # so the fetcher-selection layer can tell a GPU-decodable v3
+        # store from a v2 store (which decodes on the CPU) without
+        # reopening or parsing the on-disk metadata itself.
+        meta = cg.metadata.to_dict()
+        self.zarr_format = int(meta.get("zarr_format", 3))
+        self.codec = _codec_name_from_metadata(meta)
         self.num_diploids = int(cg.shape[1])
         self.num_haplotypes = 2 * self.num_diploids
         self.num_variants = int(self.site_pos.size)
