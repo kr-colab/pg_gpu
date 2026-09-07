@@ -101,14 +101,14 @@ def pi2(counts: cp.ndarray,
         populations: Optional[Tuple[int, int, int, int]] = None,
         n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """
-    Compute π₂ statistic for any population configuration.
+    Compute pi2 statistic for any population configuration.
 
     Parameters
     ----------
     counts : cp.ndarray
         Haplotype counts array
     populations : tuple of int, optional
-        Four population indices (i, j, k, l) for π₂(i,j,k,l).
+        Four population indices (i, j, k, l) for pi2(i,j,k,l).
         None defaults to single population (0, 0, 0, 0)
     n_valid : cp.ndarray, optional
         Valid sample counts per population
@@ -116,7 +116,10 @@ def pi2(counts: cp.ndarray,
     Returns
     -------
     cp.ndarray
-        π₂ values for each locus
+        pi2 values for each locus. The statistic is symmetrized over the two
+        loci and the two populations within each locus, so equivalent index
+        patterns (e.g. ``(i, j, k, l)`` and ``(k, l, i, j)``) return the same
+        value.
     """
     if populations is None:
         # Single population case
@@ -1379,7 +1382,32 @@ def _pi2_single(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.
 def _pi2_multi(counts: cp.ndarray,
                populations: Tuple[int, int, int, int],
                n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
-    """Compute π₂ for multiple populations."""
+    """Compute the symmetrized pi2 for a population index pattern.
+
+    pi2 is invariant under swapping its two loci and under swapping the two
+    populations within a locus, so the named statistic is the raw
+    per-arrangement term averaged over that symmetry orbit. Averaging makes
+    ``pi2`` return the same kind of quantity for every index pattern, and
+    matches the fused pipeline, which sums the same orbit one layer up in
+    ``generate_stat_specs``. When the orbit collapses to a single
+    arrangement (e.g. one population), the average is that one term.
+    """
+    i, j, k, l = populations
+    orbit = {(i, j, k, l), (i, j, l, k), (j, i, k, l), (j, i, l, k),
+             (k, l, i, j), (l, k, i, j), (k, l, j, i), (l, k, j, i)}
+    return sum(_pi2_single_term(counts, cfg, n_valid)
+               for cfg in orbit) / len(orbit)
+
+
+def _pi2_single_term(counts: cp.ndarray,
+                     populations: Tuple[int, int, int, int],
+                     n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
+    """Raw (un-symmetrized) pi2 term for one population arrangement.
+
+    Returns the single index term for ``(i, j, k, l)`` -- locus A between
+    pops i, j and locus B between pops k, l. ``_pi2_multi`` averages this
+    over the arrangement's symmetry orbit to form the named statistic.
+    """
     i, j, k, l = populations
 
     def get_pop_data(pop_idx):
@@ -1405,18 +1433,18 @@ def _pi2_multi(counts: cp.ndarray,
         result = _pi2_iiij(counts, (single_pop, triple_pop, triple_pop, triple_pop), n_valid)
 
     elif i == j and k == l:
-        # pi2(i,i,k,k) -- two pairs
+        # pi2(i,i,k,k): the raw term, locus A drawn from pop i and locus B
+        # from pop k. _pi2_multi averages it with the locus-swapped term.
         c11, c12, c13, c14, n1 = get_pop_data(i)
         c21, c22, c23, c24, n2 = get_pop_data(k)
 
-        numer1 = (c11 + c12) * (c13 + c14) * (c21 + c23) * (c22 + c24)
-        numer2 = (c21 + c22) * (c23 + c24) * (c11 + c13) * (c12 + c14)
+        numer = (c11 + c12) * (c13 + c14) * (c21 + c23) * (c22 + c24)
 
         denom = n1 * (n1 - 1) * n2 * (n2 - 1)
 
         valid_mask = (n1 >= 2) & (n2 >= 2)
         result = cp.zeros_like(n1, dtype=cp.float64)
-        result[valid_mask] = 0.5 * (numer1[valid_mask] + numer2[valid_mask]) / denom[valid_mask]
+        result[valid_mask] = numer[valid_mask] / denom[valid_mask]
 
     elif i == j and k != l:
         # pi2(i,i,k,l) type -- handles both 2 and 3 distinct populations
