@@ -94,6 +94,14 @@ class TestGRM:
         with pytest.raises(TypeError, match="genetic_relatedness"):
             relatedness.grm(small_haplotype_matrix)
 
+    def test_all_monomorphic_returns_zeros(self):
+        # No polymorphic sites -> nothing to standardize and accumulate, so
+        # the GRM is all zeros rather than a divide-by-zero.
+        gm = GenotypeMatrix(np.zeros((3, 5), dtype=np.int8), np.arange(5) * 100)
+        grm = relatedness.grm(gm)
+        assert grm.shape == (3, 3)
+        np.testing.assert_array_equal(grm, np.zeros((3, 3)))
+
 
 class TestIBS:
     def test_shape(self, small_genotype_matrix):
