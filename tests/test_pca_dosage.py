@@ -13,6 +13,7 @@ import allel
 
 from pg_gpu import (GenotypeMatrix, HaplotypeMatrix, pca_dosage,
                     randomized_pca_dosage)
+from pg_gpu.decomposition import _prepare_dosage
 
 
 def _polymorphic_gm(seed=0, n_ind=30, n_var=200):
@@ -95,3 +96,23 @@ class TestPCADosageTypeGuards:
         gm = GenotypeMatrix(geno, np.arange(50) * 100)
         with pytest.raises(ValueError, match="biallelic"):
             pca_dosage(gm)
+
+
+class TestPrepareDosageEdges:
+    """Guards in the dosage standardization step."""
+
+    def test_rejects_non_biallelic_dosage(self):
+        # A dosage above 2 is not biallelic-diploid, so standardization refuses
+        # it rather than producing a meaningless frequency.
+        gm = GenotypeMatrix(np.array([[3, 1], [2, 0]], dtype=np.int8),
+                            np.array([100, 200]))
+        with pytest.raises(ValueError, match="biallelic diploid dosages"):
+            _prepare_dosage(gm)
+
+    def test_empty_after_exclude_returns_no_variants(self):
+        # Every site carries a missing call, so 'exclude' drops them all and the
+        # standardized matrix has zero variants instead of dividing by zero.
+        gm = GenotypeMatrix(np.array([[-1, 0], [0, -1]], dtype=np.int8),
+                            np.array([100, 200]))
+        X = _prepare_dosage(gm, missing_data='exclude')
+        assert X.shape == (2, 0)
