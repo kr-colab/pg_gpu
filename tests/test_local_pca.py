@@ -634,11 +634,26 @@ class TestPcDistCornersEdges:
 class TestLocalPCAEdges:
     """Degenerate-window and argument-validation guards on local PCA."""
 
-    def test_tiny_window_yields_nan_rows(self, small_hm):
+    @pytest.mark.parametrize('engine', ['dense-eigh', 'streaming-dense'])
+    def test_tiny_window_yields_nan_rows(self, small_hm, engine):
         # A window with fewer variants than max(k, 2) cannot form k PCs, so its
         # eigenvalue row is NaN rather than an error.
-        res = local_pca(small_hm, window_size=1, window_type='snp', k=2)
+        res = local_pca(small_hm, window_size=1, window_type='snp', k=2,
+                        engine=engine)
         assert np.isnan(np.asarray(res.eigvals)).any()
+
+    @pytest.mark.parametrize('entry, kwargs', [
+        (local_pca, {}),
+        (local_pca, {'engine': 'streaming-dense'}),
+        (local_pca_jackknife, {'n_blocks': 4}),
+        (lostruct, {'jackknife': True, 'n_blocks': 4}),
+    ], ids=['dense', 'streaming', 'jackknife', 'lostruct-jackknife'])
+    def test_window_wider_than_data_raises(self, small_hm, entry, kwargs):
+        # A SNP window wider than the matrix never completes, so the iterator
+        # yields nothing and every entry point refuses to build an empty result.
+        with pytest.raises(ValueError, match="produced no windows"):
+            entry(small_hm, window_size=small_hm.num_variants + 1,
+                  window_type='snp', k=2, **kwargs)
 
     def test_jackknife_rejects_unknown_aggregate(self, small_hm):
         with pytest.raises(ValueError, match="Unknown aggregate"):
