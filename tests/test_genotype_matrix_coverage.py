@@ -136,3 +136,83 @@ class TestAccessibleMaskLifecycle:
         idx = gm._accessible_idx
         assert idx is not None
         assert 1 not in (idx.get() if hasattr(idx, "get") else idx)
+
+
+@pytest.fixture
+def vcz_with_fields(tmp_path):
+    """A small VCZ store with sample names and a per-call GQ field."""
+    from pg_gpu.zarr_io import write_vcz
+    rng = np.random.default_rng(0)
+    n_var, n_ind = 30, 4
+    gt = rng.integers(0, 2, size=(n_var, n_ind, 2)).astype(np.int8)
+    gq = rng.integers(0, 60, size=(n_var, n_ind)).astype(np.int32)
+    path = str(tmp_path / "fields.vcz")
+    write_vcz(path, gt, np.arange(1, n_var + 1) * 100,
+              samples=[f"s{i}" for i in range(n_ind)], contig_name="1",
+              fields={"GQ": gq})
+    return path
+
+
+class TestFromZarrEager:
+    """The from_zarr argument guards and the eager build path: fields,
+    population assignment, and the tolerated store-reopen failure."""
+
+    def test_invalid_streaming_raises(self, vcz_with_fields):
+        with pytest.raises(ValueError, match="streaming must be"):
+            GenotypeMatrix.from_zarr(vcz_with_fields, streaming="bogus")
+
+    def test_invalid_backend_raises(self, vcz_with_fields):
+        with pytest.raises(ValueError, match="backend must be"):
+            GenotypeMatrix.from_zarr(vcz_with_fields, backend="bogus")
+
+    def test_streaming_always_rejects_fields(self, vcz_with_fields):
+        with pytest.raises(NotImplementedError, match="not supported on the streaming"):
+            GenotypeMatrix.from_zarr(vcz_with_fields, streaming="always",
+                                     fields=["GQ"])
+
+    def test_auto_streaming_rejects_fields(self, vcz_with_fields, monkeypatch):
+        # Force the size probe to choose streaming so the fields= guard on
+        # the auto path is reached without a matrix too large for the GPU.
+        monkeypatch.setattr("pg_gpu.haplotype_matrix._decide_streaming_mode",
+                            lambda *a, **k: ("streaming", None))
+        with pytest.raises(NotImplementedError, match="would not fit"):
+            GenotypeMatrix.from_zarr(vcz_with_fields, streaming="auto",
+                                     fields=["GQ"])
+
+    def test_eager_reads_requested_fields(self, vcz_with_fields):
+        gm = GenotypeMatrix.from_zarr(vcz_with_fields, streaming="never",
+                                      fields=["GQ"])
+        assert "GQ" in gm.fields
+        assert gm.fields["GQ"].shape[0] == 30
+
+    def test_pop_assignment_dict_loads_populations(self, vcz_with_fields):
+        gm = GenotypeMatrix.from_zarr(
+            vcz_with_fields, streaming="never",
+            pop_assignment={"s0": "A", "s1": "A", "s2": "B", "s3": "B"})
+        assert set(gm.sample_sets) == {"A", "B"}
+        assert gm.sample_sets["A"] == [0, 1]
+
+    def test_eager_attaches_accessible_bed(self, vcz_with_fields, tmp_path):
+        bed = tmp_path / "acc.bed"
+        bed.write_text("1\t0\t5000\n")
+        gm = GenotypeMatrix.from_zarr(vcz_with_fields, streaming="never",
+                                      accessible_bed=str(bed))
+        assert gm.accessible_mask is not None
+
+    def test_store_reopen_failure_is_tolerated(self, vcz_with_fields, monkeypatch):
+        # The genotypes are already read; a failure re-opening the group for
+        # the population lookup must not sink the load. Fail only the reopen
+        # made inside _build_eager, so the size probe's own open still works.
+        import sys
+        import zarr
+        real_open_group = zarr.open_group
+
+        def _fail_reopen(*args, **kwargs):
+            if sys._getframe(1).f_code.co_name == "_build_eager":
+                raise RuntimeError("simulated open failure")
+            return real_open_group(*args, **kwargs)
+
+        monkeypatch.setattr("zarr.open_group", _fail_reopen)
+        gm = GenotypeMatrix.from_zarr(vcz_with_fields, streaming="never")
+        assert isinstance(gm, GenotypeMatrix)
+        assert gm.num_variants == 30
