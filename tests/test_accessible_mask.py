@@ -5,7 +5,11 @@ import os
 import tempfile
 import pytest
 
-from pg_gpu.accessible import AccessibleMask, parse_bed, bed_to_mask
+from types import SimpleNamespace
+
+from pg_gpu.accessible import (AccessibleMask, parse_bed, bed_to_mask,
+                               resolve_accessible_mask,
+                               resolve_streaming_accessible_mask)
 from pg_gpu.haplotype_matrix import HaplotypeMatrix
 from pg_gpu.genotype_matrix import GenotypeMatrix
 
@@ -872,3 +876,37 @@ class TestSiteCountProperties:
         assert gm.n_segregating_sites == 2
         assert gm.n_callable_sites == 10
         assert gm.n_invariant_sites == 8
+
+
+class TestBedParseAndResolveEdges:
+    """Malformed or degenerate BED input, and the streaming-mask passthrough."""
+
+    def test_parse_bed_skips_lines_with_too_few_fields(self, tmp_path):
+        bed = tmp_path / "short.bed"
+        bed.write_text("1 100\n1\t200\t300\n")  # first line has two fields
+        assert parse_bed(str(bed)) == [("1", 200, 300)]
+
+    def test_resolve_raises_when_chrom_has_no_intervals(self, tmp_path):
+        bed = tmp_path / "other.bed"
+        bed.write_text("2\t0\t100\n")
+        with pytest.raises(ValueError, match="No BED intervals found"):
+            resolve_accessible_mask(str(bed), None, None, chrom="1")
+
+    def test_resolve_raises_on_inverted_interval(self, tmp_path):
+        # An end before its start leaves no positive span to build a mask on.
+        bed = tmp_path / "inverted.bed"
+        bed.write_text("1\t500\t100\n")
+        with pytest.raises(ValueError, match="Could not determine mask range"):
+            resolve_accessible_mask(str(bed), None, None, chrom="1")
+
+    def test_streaming_mask_none_passes_through(self):
+        assert resolve_streaming_accessible_mask(None, source=None) is None
+
+    def test_streaming_mask_uses_source_chrom_and_bounds(self, tmp_path):
+        # No region given: the chromosome comes from the source and the mask
+        # spans the source's mappable range.
+        bed = tmp_path / "acc.bed"
+        bed.write_text("1\t0\t1000\n")
+        source = SimpleNamespace(mappable_lo=100, mappable_hi=1000, chrom="1")
+        assert isinstance(resolve_streaming_accessible_mask(str(bed), source),
+                          AccessibleMask)
