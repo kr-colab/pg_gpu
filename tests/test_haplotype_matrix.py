@@ -4,32 +4,8 @@ import tskit
 import allel
 import cupy as cp
 import numpy as np
-import tempfile
-import os
 
 from pg_gpu.haplotype_matrix import HaplotypeMatrix
-
-@pytest.fixture
-def sample_vcf():
-    """Create a temporary VCF file with simulated data for testing."""
-    # Simulate some data
-    ts = msprime.sim_ancestry(
-        samples=10,
-        sequence_length=1000,
-        recombination_rate=0.01,
-        random_seed=42,
-        ploidy=2
-    )
-    ts = msprime.sim_mutations(ts, rate=0.01, random_seed=42)
-    # Create a temporary file
-    with tempfile.NamedTemporaryFile(suffix='.vcf', delete=False) as tmp:
-        # Write VCF to temporary file
-        with open(tmp.name, 'w') as f:
-            ts.write_vcf(f, allow_position_zero=True)
-        yield tmp.name
-
-    # Clean up the temporary file
-    os.unlink(tmp.name)
 
 @pytest.fixture
 def sample_ts():

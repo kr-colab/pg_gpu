@@ -118,6 +118,24 @@ def bgzip_index(vcf_path):
     return vcf_path + ".gz"
 
 
+@pytest.fixture
+def sample_vcf(tmp_path):
+    """A small simulated VCF on disk: 10 diploid samples, 1 kb, seed 42.
+
+    Plain text, so ``from_vcf`` reads it directly; run it through
+    ``bgzip_index`` for loaders that need a tabix index.
+    """
+    import msprime
+    ts = msprime.sim_ancestry(
+        samples=10, sequence_length=1000, recombination_rate=0.01,
+        random_seed=42, ploidy=2)
+    ts = msprime.sim_mutations(ts, rate=0.01, random_seed=42)
+    path = tmp_path / "sample.vcf"
+    with open(path, "w") as f:
+        ts.write_vcf(f, allow_position_zero=True)
+    return str(path)
+
+
 def simulate_hm(n_samples=20, seq_length=100_000, seed=42,
                 mutation_model=None):
     """Build a small msprime-derived HaplotypeMatrix for tests.
