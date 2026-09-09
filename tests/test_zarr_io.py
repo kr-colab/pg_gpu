@@ -13,6 +13,10 @@ from pg_gpu.zarr_io import (
     vcf_to_zarr, write_allel, write_vcz,
 )
 
+from pg_gpu.zarr_io import (_pop_array_to_map, _region_mask,
+                            allel_zarr_to_vcz, normalize_pop_input,
+                            read_genotypes_allel,
+                            read_genotypes_allel_grouped)
 from .conftest import bgzip_index
 
 
@@ -729,3 +733,83 @@ class TestAllelZarrToVcz:
         # accept on the read side either.
         hm_ref = HaplotypeMatrix.from_zarr(ref_path, streaming="never")
         assert hm_ref.num_variants == ts.num_sites
+
+
+class TestRegionMaskAndPopInput:
+    """Region masking with an open start, and every pop_assignment input form."""
+
+    def test_region_mask_open_start(self):
+        np.testing.assert_array_equal(
+            _region_mask(np.array([10, 20, 30]), None, 25), [True, True, False])
+
+    def test_pop_input_dict_drops_empty_labels(self):
+        out = normalize_pop_input({"s0": "A", "s1": ""}, zarr_path="x",
+                                  sample_names=["s0", "s1"])
+        assert out == {"s0": "A"}
+
+    def test_pop_input_array(self):
+        out = normalize_pop_input(np.array(["A", "B"]), zarr_path="x",
+                                  sample_names=["s0", "s1"])
+        assert out == {"s0": "A", "s1": "B"}
+
+    def test_pop_input_array_must_be_1d(self):
+        with pytest.raises(ValueError, match="must be 1-D"):
+            normalize_pop_input(np.array([["A"], ["B"]]), zarr_path="x",
+                                sample_names=["s0", "s1"])
+
+    def test_pop_input_array_length_must_match_samples(self):
+        with pytest.raises(ValueError, match="does not match"):
+            normalize_pop_input(np.array(["A"]), zarr_path="x",
+                                sample_names=["s0", "s1"])
+
+    def test_pop_input_zarr_key(self):
+        store = zarr.create_group(store=zarr.storage.MemoryStore())
+        store.create_array("pops", data=np.array(["A", "B"], dtype="U"))
+        out = normalize_pop_input("pops", zarr_path="x",
+                                  sample_names=["s0", "s1"], zarr_store=store)
+        assert out == {"s0": "A", "s1": "B"}
+
+    def test_pop_input_zarr_key_length_must_match_samples(self):
+        store = zarr.create_group(store=zarr.storage.MemoryStore())
+        store.create_array("pops", data=np.array(["A"], dtype="U"))
+        with pytest.raises(ValueError, match="expected 1-D of length"):
+            normalize_pop_input("pops", zarr_path="x",
+                                sample_names=["s0", "s1"], zarr_store=store)
+
+    def test_pop_input_rejects_unknown_type(self):
+        with pytest.raises(TypeError, match="pop_assignment must be"):
+            normalize_pop_input(42, zarr_path="x", sample_names=["s0"])
+
+    def test_pop_array_to_map_skips_missing_labels(self):
+        out = _pop_array_to_map([None, "", "nan", "A"], ["s0", "s1", "s2", "s3"])
+        assert out == {"s3": "A"}
+
+
+class TestAllelReaderAndConverterEdges:
+    """Empty regions on the scikit-allel readers, and the converter's
+    contig default, empty-region guard, and progress output."""
+
+    def test_flat_allel_empty_region_raises(self, allel_store):
+        store = zarr.open(allel_store, mode="r")
+        with pytest.raises(ValueError, match="No variants in region"):
+            read_genotypes_allel(store, region="1:900000-1000000")
+
+    def test_grouped_allel_empty_region_raises(self, grouped_store):
+        store = zarr.open(grouped_store, mode="r")
+        with pytest.raises(ValueError, match="No variants in region"):
+            read_genotypes_allel_grouped(store, region="chr1:900000-1000000")
+
+    def test_convert_without_contig_labels_it_unknown(self, allel_store, tmp_path):
+        out = str(tmp_path / "out.vcz")
+        allel_zarr_to_vcz(allel_store, out)
+        assert list(zarr.open(out, mode="r")["contig_id"][:]) == ["unknown"]
+
+    def test_convert_empty_region_raises(self, allel_store, tmp_path):
+        with pytest.raises(ValueError, match="No variants in region"):
+            allel_zarr_to_vcz(allel_store, str(tmp_path / "out.vcz"),
+                              region="1:900000-1000000")
+
+    def test_convert_progress_reports_to_stderr(self, allel_store, tmp_path, capsys):
+        allel_zarr_to_vcz(allel_store, str(tmp_path / "out.vcz"),
+                          contig="1", progress=True)
+        assert "[allel_zarr_to_vcz]" in capsys.readouterr().err

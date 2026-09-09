@@ -132,3 +132,44 @@ class TestHaplotypePlots:
         _, _, pos = sim_data
         ax = plotting.plot_variant_locator(pos)
         assert ax is not None
+
+
+class TestPlotEdgeInputs:
+    """Input shapes and ranges that select the less-common drawing branches."""
+
+    def test_sfs_without_endpoint_clipping(self):
+        s = np.arange(1, 22, dtype=float)
+        assert plotting.plot_sfs(s, clip_endpoints=False) is not None
+
+    def test_pca_without_explained_variance(self):
+        coords = np.random.RandomState(0).randn(20, 3)
+        assert plotting.plot_pca(coords) is not None
+
+    def test_pairwise_distance_square_matrix_with_labels(self):
+        a = np.random.RandomState(0).rand(6, 6)
+        dist = (a + a.T) / 2
+        np.fill_diagonal(dist, 0.0)
+        ax = plotting.plot_pairwise_distance(
+            dist, labels=[f"s{i}" for i in range(6)])
+        assert ax is not None
+
+    def test_windowed_axis_in_mb(self):
+        starts = np.arange(0, 5_000_000, 500_000)  # largest start 4.5 Mb
+        ax = plotting.plot_windowed(starts, np.random.rand(len(starts)))
+        assert ax.get_xlabel() == "Position (Mb)"
+
+    def test_windowed_axis_in_bp(self):
+        starts = np.arange(0, 1000, 100)  # largest start 900 bp
+        ax = plotting.plot_windowed(starts, np.random.rand(len(starts)))
+        assert ax.get_xlabel() == "Position (bp)"
+
+    def test_windowed_panel_single_statistic(self, sim_data):
+        matrix, _, _ = sim_data
+        bp_bins = np.arange(0, 100001, 20000)
+        result = windowed_statistics(matrix, bp_bins, statistics=('pi',))
+        _, axes = plotting.plot_windowed_panel(result)
+        assert len(axes) == 1
+
+    def test_variant_locator_with_step(self, sim_data):
+        _, _, pos = sim_data
+        assert plotting.plot_variant_locator(pos, step=2) is not None
