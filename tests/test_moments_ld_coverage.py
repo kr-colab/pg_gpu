@@ -7,10 +7,12 @@ physical-distance cap. These drive the guard, parse, and report branches the
 parity tests skip. The module needs no moments install, so these run in the
 default environment.
 """
+from contextlib import nullcontext
+
 import numpy as np
 import pytest
 
-from pg_gpu import GenotypeMatrix, HaplotypeMatrix
+from pg_gpu import BiallelicOnlyWarning, GenotypeMatrix, HaplotypeMatrix
 from pg_gpu.moments_ld import (compute_ld_statistics,
                                _interpolate_genetic_distances,
                                _max_bp_for_r_dist)
@@ -138,5 +140,36 @@ class TestReportRun:
         res = compute_ld_statistics(haplotype_matrix=hm, use_genotypes=False,
                                     pops=["pop0"], bp_bins=[0, 500, 4000],
                                     report=True)
+        assert set(res) == {"bins", "sums", "stats", "pops"}
+        assert res["pops"] == ["pop0"]
+
+
+class TestVcfLoadingPath:
+    """The VCF-loading branches -- from_vcf, load_pop_file, and the
+    accessible_bed mask attached at load -- on both compute paths."""
+
+    @pytest.fixture
+    def pop_and_bed(self, tmp_path):
+        pop = tmp_path / "pops.tsv"
+        pop.write_text("sample\tpop\n"
+                       + "".join(f"tsk_{i}\tpop0\n" for i in range(10)))
+        bed = tmp_path / "acc.bed"
+        bed.write_text("1\t0\t1000\n")
+        return str(pop), str(bed)
+
+    @pytest.mark.parametrize("use_genotypes", [True, False],
+                             ids=["genotype", "haplotype"])
+    def test_vcf_with_accessible_bed(self, sample_vcf, pop_and_bed,
+                                     use_genotypes):
+        pop, bed = pop_and_bed
+        # The genotype loader is biallelic-only and drops the fixture's
+        # multiallelic sites with a warning; the haplotype loader keeps them.
+        expect = (pytest.warns(BiallelicOnlyWarning) if use_genotypes
+                  else nullcontext())
+        with expect:
+            res = compute_ld_statistics(vcf_file=sample_vcf, pop_file=pop,
+                                        pops=["pop0"], bp_bins=[0, 100, 1000],
+                                        use_genotypes=use_genotypes,
+                                        accessible_bed=bed, report=False)
         assert set(res) == {"bins", "sums", "stats", "pops"}
         assert res["pops"] == ["pop0"]
