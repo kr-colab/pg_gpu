@@ -629,3 +629,18 @@ class TestPcDistCornersEdges:
         # Fewer non-NaN points than corners requested cannot be placed.
         with pytest.raises(ValueError, match="at least"):
             corners(np.array([[0.0, 0.0], [1.0, 1.0]]), prop=0.5)
+
+
+class TestLocalPCAEdges:
+    """Degenerate-window and argument-validation guards on local PCA."""
+
+    def test_tiny_window_yields_nan_rows(self, small_hm):
+        # A window with fewer variants than max(k, 2) cannot form k PCs, so its
+        # eigenvalue row is NaN rather than an error.
+        res = local_pca(small_hm, window_size=1, window_type='snp', k=2)
+        assert np.isnan(np.asarray(res.eigvals)).any()
+
+    def test_jackknife_rejects_unknown_aggregate(self, small_hm):
+        with pytest.raises(ValueError, match="Unknown aggregate"):
+            local_pca_jackknife(small_hm, window_size=200, window_type='snp',
+                                k=2, n_blocks=4, aggregate='bogus')
