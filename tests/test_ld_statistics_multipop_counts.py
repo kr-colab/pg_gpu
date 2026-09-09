@@ -1,26 +1,23 @@
-"""Coverage for the counts-based multi-population LD moment API, and a guard on
-its symmetrization consistency.
+"""Coverage for the counts-based multi-population LD moment API.
 
 `ld_statistics.dz` / `ld_statistics.pi2` accept a concatenated per-population
-counts array and a population-index tuple, and dispatch through `_dz_multi` /
-`_pi2_multi` to per-index-pattern formulas -- including the three- and
-four-distinct-population branches that have no in-package caller (the pipeline
-computes multi-population moments through the fused CUDA kernels) and were
-untested, though the module is public.
+counts array and a population-index tuple, and dispatch to a per-index-pattern
+formula for each population configuration.
 
-Each pattern is cross-checked against the fused kernels (`compute_all_dz_hap` /
-`compute_all_pi2_hap`) on the same counts. Those kernels return the raw
-single-index term for every pattern and are validated against moments.LD (see
-test_moments_ld_multipop), so agreement pins the counts-API formula for that
-term.
+The two statistics follow different, self-consistent conventions:
 
-`dz` returns the raw single-index term for every pattern, so it agrees
-throughout. `pi2` does not: the `_pi2_multi` iikk branch self-symmetrizes
-(returns `0.5*(numer1+numer2)`, the two-locus average) while every other pi2
-branch returns a single term. So `ld_statistics.pi2` returns a different kind
-of quantity depending on the index pattern -- an inconsistent public contract.
-That case is marked xfail(strict) below so the mismatch is pinned and a fix
-(unifying the convention) trips the marker.
+* `dz` returns the raw single-index term for every pattern, so it is
+  cross-checked directly against the fused kernel (`compute_all_dz_hap`) on the
+  same counts.
+* `pi2` returns the *symmetrized* statistic for every pattern. pi2 is invariant
+  under swapping its two loci and under swapping the two populations within a
+  locus, so the named statistic averages the raw term over that symmetry orbit.
+  It is cross-checked against the same average of the fused kernel
+  (`compute_all_pi2_hap`) over the orbit -- the average the fused pipeline
+  applies one layer up in `generate_stat_specs`.
+
+Because the fused kernels are validated against moments.LD (see
+test_moments_ld_multipop), agreement pins each counts-API formula.
 """
 import numpy as np
 import cupy as cp
@@ -58,28 +55,37 @@ def _agree(a, b):
                                rtol=1e-9, atol=1e-12, equal_nan=True)
 
 
+def _pi2_orbit(cfg):
+    """The (i,j,k,l) arrangements pi2 is symmetric over: swap the two loci,
+    and swap the two populations within each locus."""
+    i, j, k, l = cfg
+    return {(i, j, k, l), (i, j, l, k), (j, i, k, l), (j, i, l, k),
+            (k, l, i, j), (l, k, i, j), (k, l, j, i), (l, k, j, i)}
+
+
+def _pi2_symmetrized_fused(pops, cfg):
+    """The fused pi2 kernel averaged over cfg's symmetry orbit -- the
+    symmetrized statistic ld_statistics.pi2 returns for every pattern."""
+    orbit = _pi2_orbit(cfg)
+    return sum(compute_all_pi2_hap(pops, [c])[0] for c in orbit) / len(orbit)
+
+
 # Dz(i,j,k): the i,i,j / i,j,i / i,j,j (two-pop) and all-different (three
-# distinct) branches. Dz returns a single term for every pattern -> all agree.
+# distinct) branches. Dz returns a single term for every pattern -> all agree
+# with the raw fused call.
 DZ_CONFIGS = [(0, 0, 1), (0, 1, 0), (0, 1, 1), (0, 1, 2)]
 
-# pi2 patterns across every branch. All return a single term matching the
-# fused raw call, EXCEPT iikk, whose _pi2_multi branch self-symmetrizes --
-# an inconsistent contract, pinned as an expected failure.
+# pi2 patterns across every branch: iiij (degenerate), ijij, iikk, the three-
+# and four-distinct branches, and the shared-population orderings. Each returns
+# the symmetrized statistic, cross-checked against the orbit-averaged kernel.
 PI2_CONFIGS = [
-    (0, 0, 0, 1),                                          # iiij
+    (0, 0, 0, 1),                                          # iiij (degenerate)
     (0, 1, 0, 1),                                          # ijij
+    (0, 0, 1, 1),                                          # iikk
     (0, 0, 1, 2),                                          # iikl (3 distinct)
     (0, 1, 2, 2),                                          # ijkk (3 distinct)
     (0, 1, 2, 0), (0, 1, 0, 2), (0, 1, 1, 2), (0, 1, 2, 1),  # shared, orderings
     (0, 1, 2, 3),                                          # all-different
-    pytest.param(
-        (0, 0, 1, 1),                                     # iikk -- self-symmetrizes
-        marks=pytest.mark.xfail(
-            strict=True,
-            reason="_pi2_multi iikk branch returns the two-locus average "
-                   "0.5*(numer1+numer2) while every other pi2 branch returns "
-                   "a single index term; ld_statistics.pi2 is inconsistent "
-                   "across index patterns")),
 ]
 
 
@@ -90,13 +96,21 @@ def test_dz_counts_api_matches_fused(counts_and_pops, cfg):
            compute_all_dz_hap(pops, [cfg])[0])
 
 
-@pytest.mark.parametrize("cfg", PI2_CONFIGS,
-                         ids=[str(c.values[0]) if hasattr(c, "values") else str(c)
-                              for c in PI2_CONFIGS])
-def test_pi2_counts_api_matches_fused(counts_and_pops, cfg):
+@pytest.mark.parametrize("cfg", PI2_CONFIGS, ids=[str(c) for c in PI2_CONFIGS])
+def test_pi2_counts_api_matches_symmetrized_fused(counts_and_pops, cfg):
     counts, n_valid, pops = counts_and_pops
     _agree(ld_statistics.pi2(counts, cfg, n_valid),
-           compute_all_pi2_hap(pops, [cfg])[0])
+           _pi2_symmetrized_fused(pops, cfg))
+
+
+def test_pi2_is_symmetric_across_orbit(counts_and_pops):
+    # pi2 returns one quantity for every arrangement in an index pattern's
+    # symmetry orbit, so a locus swap or a within-locus population swap leaves
+    # the result unchanged.
+    counts, n_valid, _ = counts_and_pops
+    base = ld_statistics.pi2(counts, (0, 0, 1, 2), n_valid)
+    for cfg in [(0, 0, 2, 1), (1, 2, 0, 0), (2, 1, 0, 0)]:
+        _agree(ld_statistics.pi2(counts, cfg, n_valid), base)
 
 
 def test_multi_pop_configs_are_non_degenerate(counts_and_pops):
