@@ -17,7 +17,9 @@ import cupy as cp
 import numpy as np
 import pytest
 
-from pg_gpu import HaplotypeMatrix, divergence, ld_statistics, selection
+from pg_gpu import (
+    HaplotypeMatrix, distance_stats, divergence, ld_statistics, selection,
+)
 from pg_gpu.windowed_analysis import (
     WindowedAnalyzer, _compute_mean_r2, windowed_analysis,
 )
@@ -91,19 +93,26 @@ def test_windowed_mean_r2_matches_scalar(hm):
                                rtol=1e-9, atol=1e-12)
 
 
-def test_windowed_ld_decay_is_finite(hm):
+def test_windowed_ld_decay_matches_mean_r2(hm):
+    # ld_decay dispatches to _compute_mean_r2 with the given max_distance, so
+    # the whole-matrix window equals that scalar at the same distance.
     analyzer = WindowedAnalyzer(
         window_type="bp", window_size=_WHOLE, step_size=_WHOLE,
         statistics=["ld_decay"],
         custom_stat_kwargs={"ld_decay": {"max_distance": 20000}})
     df = analyzer.compute(hm)
-    assert np.isfinite(float(df.iloc[0]["ld_decay"]))
+    np.testing.assert_allclose(df.iloc[0]["ld_decay"],
+                               float(_compute_mean_r2(hm, 20000)),
+                               rtol=1e-9, atol=1e-12)
 
 
-def test_windowed_distribution_moments_finite(hm):
+def test_windowed_distribution_moments_match_scalar(hm):
     r = _single(hm, ["dist_var", "dist_skew", "dist_kurt"])
-    assert all(np.isfinite(float(r[c]))
-               for c in ["dist_var", "dist_skew", "dist_kurt"])
+    np.testing.assert_allclose(
+        [r["dist_var"], r["dist_skew"], r["dist_kurt"]],
+        [float(distance_stats.dist_var(hm)),
+         float(distance_stats.dist_skew(hm)),
+         float(distance_stats.dist_kurt(hm))], rtol=1e-9, atol=1e-12)
 
 
 # ── whole-matrix window == scalar Garud H ──────────────────────────────
@@ -145,3 +154,17 @@ def test_garud_multiwindow_matches_per_window_scalar(hm, window, step):
                                    rtol=1e-9, atol=1e-9)
         compared += 1
     assert compared > 1
+
+
+@pytest.mark.xfail(strict=True, reason="a variant-free tile (non-overlapping) "
+                   "window borrows the next window's first-variant hash via "
+                   "cp.add.reduceat instead of yielding the no-variant value")
+def test_garud_tile_empty_window_value():
+    # A non-overlapping grid with a variant-free middle window. An empty window
+    # has no differentiating sites -> one distinct haplotype -> H1/H12/H123 = 1,
+    # H2/H1 = 0 (the value the overlapping/prefix-sum path already produces).
+    hap = np.array([[0, 1], [1, 0], [1, 1], [0, 0]], dtype=np.int8)
+    m = HaplotypeMatrix(hap, np.array([10, 210], dtype=np.int64), 0, 300)
+    df = windowed_analysis(m, window_size=100, step_size=100, statistics=_GARUD)
+    empty = df[df["n_variants"] == 0].iloc[0]
+    np.testing.assert_allclose([empty[s] for s in _GARUD], [1.0, 1.0, 1.0, 0.0])

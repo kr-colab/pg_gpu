@@ -517,6 +517,14 @@ class TestStreamingGuardrails:
             chunk_bp=10_000)
         df = windowed_analysis(stream, window_size=10_000, statistics=["pi"])
         assert df.empty
+        # The empty frame is the no-variants outcome, not a broken pipeline:
+        # the same streaming call over the populated span yields finite rows.
+        populated = HaplotypeMatrix.from_zarr(
+            vcz_store, region="1:1-100000", streaming="always",
+            chunk_bp=10_000)
+        df2 = windowed_analysis(populated, window_size=10_000, statistics=["pi"])
+        assert not df2.empty
+        assert np.isfinite(df2["pi"].to_numpy()).any()
 
 
 
