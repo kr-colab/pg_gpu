@@ -17,6 +17,7 @@ Parity tests against frozen R lostruct outputs live in
 reference files are missing.
 """
 
+import cupy as cp
 import numpy as np
 import pandas as pd
 import pytest
@@ -25,6 +26,8 @@ from pg_gpu import HaplotypeMatrix, windowed_analysis
 from pg_gpu.decomposition import (
     LocalPCAResult,
     LostructResult,
+    _local_pca_with_jackknife,
+    _sign_align_replicates,
     corners,
     local_pca,
     local_pca_jackknife,
@@ -32,6 +35,7 @@ from pg_gpu.decomposition import (
     pc_dist,
     pcoa,
 )
+from pg_gpu.windowed_analysis import WindowParams
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +80,15 @@ def structured_hm():
             'pop2': list(range(n_hap_per, n_hap)),
         },
     )
+
+
+@pytest.fixture
+def sparse_regions():
+    """Three regions of ``small_hm``: one holding a single variant, then
+    two holding 15 and 20 variants."""
+    return pd.DataFrame({'chrom': [1, 1, 1],
+                         'start': [0, 5000, 20_000],
+                         'end': [100, 20_000, 40_000]})
 
 
 # ---------------------------------------------------------------------------
@@ -206,20 +219,24 @@ class TestBatchedVsLoop:
 
 class TestNanHandling:
 
-    def test_sparse_window_returns_nan(self, small_hm):
-        # Window too small for k — force NaN.
-        # Use a region-based window that lands on a tiny slice.
-        regions = pd.DataFrame({'chrom': [1, 1],
-                                'start': [0, 5000],
-                                'end': [100, 1_000_000]})
+    def test_sparse_window_returns_nan(self, small_hm, sparse_regions):
+        # A one-variant region cannot form k PCs, so its rows are NaN.
         res = local_pca(small_hm, window_type='regions',
-                        regions=regions, window_size=0, step_size=0, k=3)
-        # First window is tiny (1 variant at pos 0) -> NaN
+                        regions=sparse_regions, window_size=0, step_size=0, k=3)
         assert np.all(np.isnan(res.eigvals[0]))
         assert np.all(np.isnan(res.eigvecs[0]))
         assert np.isnan(res.sumsq[0])
-        # Second window has many variants -> finite
+        # Second window has enough variants -> finite
         assert np.all(np.isfinite(res.eigvals[1]))
+
+    def test_pc_dist_masks_nan_window(self, small_hm, sparse_regions):
+        # An invalid window has no PCs to compare, so its distance to every
+        # other window is NaN; the valid windows keep finite distances.
+        res = local_pca(small_hm, window_type='regions', regions=sparse_regions,
+                        window_size=0, step_size=0, k=2)
+        dist = pc_dist(res, npc=2)
+        assert np.isnan(dist[0]).all()
+        assert np.isfinite(dist[1:, 1:]).all()
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +560,6 @@ class TestJackknife:
 
     def test_sign_alignment_via_flip(self):
         """Sign-aligned variance is invariant to arbitrary pre-flips."""
-        from pg_gpu.decomposition import _sign_align_replicates
-        import cupy as cp
         rng = np.random.default_rng(11)
         n_reps, k, n_samples = 10, 2, 30
         V = cp.asarray(rng.standard_normal((n_reps, k, n_samples)))
@@ -557,6 +572,10 @@ class TestJackknife:
         var2 = cp.var(V_flipped_aligned, axis=0).get()
         np.testing.assert_allclose(var1, var2, rtol=1e-10, atol=1e-12)
 
+    def test_sign_align_rejects_bad_ndim(self):
+        with pytest.raises(ValueError, match="3 or 4 dims"):
+            _sign_align_replicates(cp.zeros((2, 3)))
+
 
 # ---------------------------------------------------------------------------
 # Fused local_pca + jackknife
@@ -566,8 +585,6 @@ class TestJackknife:
 class TestFusedJackknife:
 
     def test_fused_matches_separate(self, small_hm):
-        from pg_gpu.decomposition import _local_pca_with_jackknife
-
         k, n_blocks = 2, 5
         wkw = dict(window_size=200, window_type='snp', k=k)
 
@@ -597,7 +614,6 @@ class TestFusedJackknife:
         pos = np.arange(n_var, dtype=np.int64) * 1000
         hm = HaplotypeMatrix(hap, pos, 0, n_var * 1000)
 
-        from pg_gpu.decomposition import _local_pca_with_jackknife
         result = _local_pca_with_jackknife(hm, window_size=4, window_type='snp',
                                            k=2, n_blocks=5, aggregate='mean')
 
@@ -606,6 +622,24 @@ class TestFusedJackknife:
         # Jackknife should be NaN (4 < 10)
         assert result.jackknife_se is not None
         assert np.all(np.isnan(result.jackknife_se))
+
+    def test_fused_tiny_window_yields_nan(self, small_hm, sparse_regions):
+        # A one-variant region can form neither PCs nor jackknife blocks, so
+        # its eigenvalue row and SE block are NaN while the others stay finite.
+        res = _local_pca_with_jackknife(small_hm, window_type='regions',
+                                        regions=sparse_regions, window_size=0,
+                                        step_size=0, k=2, n_blocks=4,
+                                        aggregate=None)
+        assert np.isnan(res.eigvals[0]).all()
+        assert np.isnan(res.jackknife_se[0]).all()
+        assert np.isfinite(res.eigvals[1:]).all()
+        assert np.isfinite(res.jackknife_se[1:]).all()
+
+    def test_fused_rejects_unknown_aggregate(self, small_hm):
+        with pytest.raises(ValueError, match="Unknown aggregate"):
+            _local_pca_with_jackknife(small_hm, window_size=2000,
+                                      window_type='snp', k=2, n_blocks=4,
+                                      aggregate='bogus')
 
 
 class TestPcDistCornersEdges:
@@ -616,10 +650,15 @@ class TestPcDistCornersEdges:
         with pytest.raises(ValueError, match="npc must be provided"):
             pc_dist(np.zeros((3, 10)), npc=None)
 
-    def test_pc_dist_rejects_unknown_normalize(self, small_hm):
+    @pytest.mark.parametrize('kwargs, msg', [
+        ({'npc': 2, 'normalize': 'bogus'}, "Unknown normalize"),
+        ({'npc': 3}, "npc mismatch"),
+    ], ids=['normalize', 'npc-above-k'])
+    def test_pc_dist_rejects_bad_arguments(self, small_hm, kwargs, msg):
+        # An npc above the result's k has no eigenvectors to draw on.
         res = local_pca(small_hm, window_size=200, window_type='snp', k=2)
-        with pytest.raises(ValueError, match="Unknown normalize"):
-            pc_dist(res, npc=2, normalize='bogus')
+        with pytest.raises(ValueError, match=msg):
+            pc_dist(res, **kwargs)
 
     def test_corners_rejects_non_2d(self):
         with pytest.raises(ValueError, match=r"shape \(n, 2\)"):
@@ -629,6 +668,14 @@ class TestPcDistCornersEdges:
         # Fewer non-NaN points than corners requested cannot be placed.
         with pytest.raises(ValueError, match="at least"):
             corners(np.array([[0.0, 0.0], [1.0, 1.0]]), prop=0.5)
+
+    def test_corners_coincident_points(self):
+        # Identical points give a zero-radius enclosing circle with a single
+        # defining point; the remaining corners fill in from the center, and
+        # every column then holds the same nearest points.
+        out = corners(np.zeros((5, 2)), prop=0.4, k=3)
+        assert out.shape == (2, 3)
+        assert (out == out[:, :1]).all()
 
 
 class TestLocalPCAEdges:
@@ -659,3 +706,35 @@ class TestLocalPCAEdges:
         with pytest.raises(ValueError, match="Unknown aggregate"):
             local_pca_jackknife(small_hm, window_size=200, window_type='snp',
                                 k=2, n_blocks=4, aggregate='bogus')
+
+    def test_requires_window_size_or_params(self, small_hm):
+        with pytest.raises(ValueError, match="requires window_params or window_size"):
+            local_pca(small_hm, k=2)
+
+    def test_explicit_window_params_pass_through(self, small_hm):
+        params = WindowParams(window_type='snp', window_size=500, step_size=500)
+        res = local_pca(small_hm, window_params=params, k=2)
+        assert res.n_windows == 4
+
+    def test_rejects_unknown_window_type(self, small_hm):
+        params = WindowParams(window_type='bogus', window_size=1, step_size=1)
+        with pytest.raises(ValueError, match="Unknown window type"):
+            local_pca(small_hm, window_params=params, k=2)
+
+    @pytest.mark.parametrize('window_size, missing_data', [
+        (1, 'include'),
+        (10, 'exclude'),
+    ], ids=['too-few-variants', 'no-usable-columns'])
+    def test_jackknife_degenerate_window_yields_nan(self, window_size, missing_data):
+        # A window needs max(k, 2) * n_blocks variants to split into blocks,
+        # and under missing_data='exclude' a window whose sites are all
+        # incomplete keeps no columns at all. Both give NaN standard errors.
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (10, 40), dtype=np.int8)
+        hap[0] = -1
+        hm = HaplotypeMatrix(hap, np.arange(40, dtype=np.int64) * 100, 0, 4000)
+        se = local_pca_jackknife(hm, window_size=window_size, window_type='snp',
+                                 k=2, n_blocks=4, missing_data=missing_data,
+                                 aggregate=None)
+        assert se.shape == (40 // window_size, 2, 10)
+        assert np.isnan(se).all()

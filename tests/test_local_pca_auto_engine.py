@@ -6,6 +6,7 @@ per window) based on the estimated Gram-stack peak vs free GPU memory.
 """
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from pg_gpu import HaplotypeMatrix
@@ -54,6 +55,25 @@ class TestEstimateNWindows:
         n = _estimate_n_windows(small_hm, params)
         # The bound is span // step + 1 = 599_000 // 100_000 + 1 = 6.
         assert n == 6
+        # The span is read from whichever device holds the positions.
+        small_hm.transfer_to_gpu()
+        assert _estimate_n_windows(small_hm, params) == 6
+
+    @pytest.mark.parametrize('regions, expected', [
+        (pd.DataFrame({'chrom': [1, 1], 'start': [0, 300_000],
+                       'end': [100_000, 600_000]}), 2),
+        (None, 0),
+    ], ids=['two-regions', 'no-regions'])
+    def test_regions_count_is_number_of_regions(self, small_hm, regions, expected):
+        params = WindowParams(window_type='regions', window_size=0, step_size=0,
+                              regions=regions)
+        assert _estimate_n_windows(small_hm, params) == expected
+
+    def test_unknown_window_type_estimates_zero(self, small_hm):
+        # An unrecognized type adds nothing to the memory estimate; the
+        # WindowIterator rejects it when iteration starts.
+        params = WindowParams(window_type='bogus', window_size=1, step_size=1)
+        assert _estimate_n_windows(small_hm, params) == 0
 
 
 # ---------------------------------------------------------------------------
