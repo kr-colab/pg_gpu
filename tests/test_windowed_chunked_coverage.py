@@ -13,9 +13,10 @@ import numpy as np
 import pytest
 
 import pg_gpu._memutil as _memutil
+from pg_gpu import ld_statistics
 from pg_gpu.windowed_analysis import (
-    _bp_grid_bounds, _bp_window_grid, windowed_statistics_fused,
-    windowed_statistics_fused_chunked,
+    _bp_grid_bounds, _bp_window_grid, windowed_analysis,
+    windowed_statistics_fused, windowed_statistics_fused_chunked,
 )
 
 from .conftest import simulate_hm
@@ -83,8 +84,19 @@ def test_single_pop_perbase_false(twopop_hm, monkeypatch):
 # ── scatter/LD stats delegate to the single-shot engine ────────────────
 def test_remaining_stats_delegated(twopop_hm, monkeypatch):
     # zns is not a chunked kernel output; the chunked engine forwards it to
-    # windowed_statistics_fused, so both results must carry an equal column.
+    # windowed_statistics_fused. _compare shows the forwarded column matches
+    # the single-shot engine (and pi still accumulates across chunks); the
+    # whole-matrix window below independently pins the forwarded zns value to
+    # the ld_statistics.zns scalar, so the delegation cannot forward a wrong
+    # number undetected.
     _compare(twopop_hm, ["pi", "zns"], monkeypatch)
+    pos = twopop_hm.positions
+    pos = pos.get() if hasattr(pos, "get") else np.asarray(pos)
+    whole = int(pos.max()) * 10
+    r = windowed_analysis(twopop_hm, window_size=whole, step_size=whole,
+                          statistics=["zns"]).iloc[0]
+    np.testing.assert_allclose(r["zns"], float(ld_statistics.zns(twopop_hm)),
+                               rtol=1e-9, atol=1e-12)
 
 
 # ── sparse windows: chunks in a between-window gap overlap nothing ──────

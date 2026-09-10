@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 import pytest
 
-from pg_gpu import HaplotypeMatrix
+from pg_gpu import HaplotypeMatrix, diversity
 from pg_gpu.windowed_analysis import (
     StatisticsComputer, WindowData, WindowedAnalyzer, WindowIterator,
     WindowParams, windowed_analysis,
@@ -76,10 +76,13 @@ def test_statistics_computer_empty_window_callable_name_fallback():
 
 # ── multiallelic max_daf ───────────────────────────────────────────────
 def test_max_daf_multiallelic():
+    # A single window over the whole matrix must reproduce the scalar max_daf,
+    # which is the frequency of the most common derived allele per site --
+    # a per-allele (not total non-ancestral) quantity on multiallelic sites.
     m = _matrix(multiallelic=True)
-    df = windowed_analysis(m, window_size=600, statistics=["max_daf"])
-    assert "max_daf" in df.columns
-    assert np.all(df["max_daf"].to_numpy() >= 0)
+    df = windowed_analysis(m, window_size=100_000, statistics=["max_daf"])
+    assert len(df) == 1
+    assert df["max_daf"].iloc[0] == pytest.approx(float(diversity.max_daf(m)))
 
 
 def test_max_daf_no_derived_alleles():
@@ -97,26 +100,35 @@ def test_populations_without_sample_sets_warns():
     m.sample_sets = {}  # empty sample_sets sticks; the default is {'all': ...}
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(ValueError, match="not found in sample_sets"):
             WindowedAnalyzer(window_size=600, statistics=["pi"],
                              populations=["p1"], progress_bar=False).compute(m)
     assert any("sample_sets" in str(w.message) for w in caught)
 
 
 # ── two-population exclude-missing + n_total_sites normalization ────────
-def test_two_pop_exclude_missing_with_n_total_sites():
-    m = _matrix(n_var=12, sample_sets=_TWO_POP, n_total_sites=5000)
-    hap = m.haplotypes
-    import cupy as cp
-    hap = cp.asnumpy(hap) if isinstance(hap, cp.ndarray) else np.asarray(hap)
-    hap[0, 0] = -1  # a missing call -> exclude drops that site
-    m2 = HaplotypeMatrix(hap, np.asarray(m.positions.get() if hasattr(m.positions, "get")
-                                         else m.positions),
-                         sample_sets=_TWO_POP, n_total_sites=5000)
-    df = windowed_analysis(m2, window_size=600, statistics=["dxy"],
-                           populations=["p1", "p2"], missing_data="exclude")
-    assert "dxy_p1_p2" in df.columns or "dxy" in df.columns
-    assert len(df) >= 1
+def test_two_pop_exclude_missing_drops_missing_sites():
+    # missing_data='exclude' drops every site with a missing call: the windowed
+    # dxy then differs from 'include' and equals dxy on the matrix with that
+    # site already removed. The n_total_sites call drives the span-norm branch.
+    rng = np.random.default_rng(0)
+    hap = rng.integers(0, 2, size=(8, 12)).astype(np.int8)
+    pos = (np.arange(1, 13) * 100).astype(np.int64)
+    hap[0, 0] = -1                                    # missing in p1 at site 0
+    m = HaplotypeMatrix(hap.copy(), pos, sample_sets=_TWO_POP,
+                        n_total_sites=5000)
+    complete = HaplotypeMatrix(hap[:, 1:].copy(), pos[1:], sample_sets=_TWO_POP)
+
+    def dxy(mat, missing_data, **kw):
+        return float(windowed_analysis(
+            mat, window_size=100_000, statistics=["dxy"],
+            populations=["p1", "p2"], missing_data=missing_data, **kw
+        ).iloc[0]["dxy"])
+
+    excl = dxy(m, "exclude", span_normalize=False)
+    assert excl != dxy(m, "include", span_normalize=False)
+    assert excl == pytest.approx(dxy(complete, "include", span_normalize=False))
+    assert np.isfinite(dxy(m, "exclude"))             # n_total_sites normalized
 
 
 def test_exclude_missing_all_sites_returns_empty():
@@ -139,17 +151,29 @@ def test_two_pop_exclude_missing_all_sites_returns_empty():
 
 # ── scatter path: the less-common single-pop stat outputs ──────────────
 def test_scatter_all_single_pop_stat_outputs():
-    # Requesting the full scatter-single set exercises the per-stat output
-    # branches (singletons, fay_wu_h, normalized_fay_wu_h, zeng_e, zeng_dh,
-    # max_daf) that the common pi/theta_w tests skip.
-    # n_total_sites drives the proportional span-normalization branch.
+    # Requesting the full scatter-single set exercises every per-stat output
+    # branch (singletons, fay_wu_h, normalized_fay_wu_h, zeng_e, zeng_dh,
+    # max_daf) that the common pi/theta_w tests skip. span_normalize=False
+    # pins the core stats to their independent scalar estimators; the
+    # normalized call then exercises the n_total_sites span branch.
     m = _matrix(n_var=30, seed=3, n_total_sites=8000)
     stats = ["pi", "theta_w", "theta_h", "theta_l", "segregating_sites",
              "singletons", "fay_wu_h", "normalized_fay_wu_h", "zeng_e",
              "zeng_dh", "max_daf", "tajimas_d"]
-    df = windowed_analysis(m, window_size=1500, statistics=stats)
+    r = windowed_analysis(m, window_size=100_000, statistics=stats,
+                          span_normalize=False).iloc[0]
     for col in stats:
-        assert col in df.columns
+        assert col in r.index
+    assert r["pi"] == pytest.approx(float(diversity.pi(m, span_normalize=False)))
+    assert r["theta_w"] == pytest.approx(
+        float(diversity.theta_w(m, span_normalize=False)))
+    assert r["tajimas_d"] == pytest.approx(float(diversity.tajimas_d(m)))
+    assert r["fay_wu_h"] == pytest.approx(float(diversity.fay_wus_h(m)))
+    assert r["max_daf"] == pytest.approx(float(diversity.max_daf(m)))
+    # span-normalization by n_total_sites shrinks the raw per-window value.
+    norm = windowed_analysis(
+        m, window_size=100_000, statistics=["pi"]).iloc[0]["pi"]
+    assert 0 < norm < r["pi"]
 
 
 # ── fused-path edges: non-overlapping windows + fst_wc ─────────────────
