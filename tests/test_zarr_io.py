@@ -16,7 +16,7 @@ from pg_gpu.zarr_io import (
 from pg_gpu.zarr_io import (_pop_array_to_map, _region_mask,
                             allel_zarr_to_vcz, normalize_pop_input,
                             read_genotypes_allel,
-                            read_genotypes_allel_grouped)
+                            read_genotypes_allel_grouped, read_qc_fields)
 from .conftest import bgzip_index
 
 
@@ -547,6 +547,18 @@ class TestEdgeCases:
         assert hm.num_variants == 5
         assert np.all(hm.haplotypes == -1)
 
+    def test_explicit_chunks_are_honored(self, tmp_path):
+        """Chunks passed to write_vcz shape the genotype arrays on disk."""
+        rng = np.random.default_rng(0)
+        gt = rng.integers(0, 2, size=(30, 4, 2)).astype(np.int8)
+        pos = np.arange(1, 31, dtype=np.int32) * 100
+        path = str(tmp_path / "chunked.zarr")
+        write_vcz(path, gt, pos, chunks=(10, 4, 2))
+        store = zarr.open(path, mode='r')
+        assert store['call_genotype'].chunks == (10, 4, 2)
+        assert store['call_genotype_mask'].chunks == (10, 4, 2)
+        np.testing.assert_array_equal(store['call_genotype'][:], gt)
+
 
 # ── scikit-allel -> vcz conversion ──────────────────────────────────────
 
@@ -786,8 +798,9 @@ class TestRegionMaskAndPopInput:
 
 
 class TestAllelReaderAndConverterEdges:
-    """Empty regions on the scikit-allel readers, and the converter's
-    contig default, empty-region guard, and progress output."""
+    """Empty regions on the scikit-allel readers, the field reader's
+    grouped-store default, and the converter's contig default,
+    empty-region guard, and progress output."""
 
     def test_flat_allel_empty_region_raises(self, allel_store):
         store = zarr.open(allel_store, mode="r")
@@ -798,6 +811,11 @@ class TestAllelReaderAndConverterEdges:
         store = zarr.open(grouped_store, mode="r")
         with pytest.raises(ValueError, match="No variants in region"):
             read_genotypes_allel_grouped(store, region="chr1:900000-1000000")
+
+    def test_grouped_fields_without_region_return_nothing(self, grouped_store):
+        # The grouped genotype reader already raises without region=, so the
+        # field reader returns empty rather than raising a second time.
+        assert read_qc_fields(grouped_store, ["GQ"], region=None) == {}
 
     def test_convert_without_contig_labels_it_unknown(self, allel_store, tmp_path):
         out = str(tmp_path / "out.vcz")

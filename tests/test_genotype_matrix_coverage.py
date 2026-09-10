@@ -8,7 +8,7 @@ import numpy as np
 import cupy as cp
 import pytest
 
-from pg_gpu import GenotypeMatrix
+from pg_gpu import BiallelicOnlyWarning, GenotypeMatrix
 from pg_gpu.accessible import AccessibleMask
 
 
@@ -29,6 +29,51 @@ class TestInitValidation:
     def test_empty_positions_raises(self):
         with pytest.raises(ValueError, match="positions cannot be empty"):
             GenotypeMatrix(np.zeros((2, 3), dtype=np.int8), np.array([]))
+
+    def test_sample_sets_must_be_a_dict(self):
+        gm = _gm([[0, 1], [2, 0]])
+        with pytest.raises(ValueError, match="must be a dictionary"):
+            gm.sample_sets = [[0, 1]]
+
+
+class TestInitNormalization:
+    """Inputs the constructor reshapes rather than rejects."""
+
+    def test_gpu_positions_follow_cpu_genotypes(self):
+        # The genotype array decides the device; positions are moved to match.
+        gm = GenotypeMatrix(np.zeros((2, 3), dtype=np.int8),
+                            cp.arange(1, 4) * 100)
+        assert isinstance(gm.positions, np.ndarray)
+
+    def test_array_mask_without_bounds_counts_the_whole_mask(self):
+        # A boolean array becomes a mask at offset 0, and with no chrom
+        # bounds every accessible base in it counts as callable.
+        arr = np.ones(300, dtype=bool)
+        arr[:50] = False
+        gm = GenotypeMatrix(np.zeros((2, 3), dtype=np.int8),
+                            np.array([101, 201, 251]), accessible_mask=arr)
+        assert isinstance(gm.accessible_mask, AccessibleMask)
+        assert gm.n_total_sites == 250
+
+
+class TestAccessors:
+    """Defaults on a bare matrix: sample sets, invariant-site info, repr."""
+
+    def test_sample_sets_default_to_every_individual(self):
+        gm = _gm([[0, 1], [2, 0], [1, 1]])
+        assert gm.sample_sets == {"all": [0, 1, 2]}
+
+    def test_invariant_info_absent_without_total_sites(self):
+        gm = _gm([[0, 1], [2, 0]])
+        assert not gm.has_invariant_info
+        assert gm.n_invariant_sites is None
+
+    def test_repr_reports_shape_and_position_range(self):
+        gm = _gm([[0, 1], [2, 0]])  # positions 1, 101
+        text = repr(gm)
+        assert "shape=(2, 2)" in text
+        assert "first_position=1" in text
+        assert "last_position=101" in text
 
 
 class TestDeviceTransfer:
@@ -77,9 +122,17 @@ class TestFilter:
         with pytest.raises(ValueError, match="genotypes mask shape mismatch"):
             gm.filter(genotypes=np.ones((2, 3), dtype=bool))
 
-    def test_filtering_all_variants_out_returns_empty(self):
+    @pytest.mark.parametrize("device", ["CPU", "GPU"])
+    def test_filtering_all_variants_out_returns_empty(self, device):
+        # The empty result is built on the same device as its source.
         gm = _gm([[0, 1, 2], [2, 1, 0]])
+        if device == "GPU":
+            gm.transfer_to_gpu()
         out = gm.filter(variants=np.zeros(3, dtype=bool))
+        assert out.device == device
+        xp = cp if device == "GPU" else np
+        assert isinstance(out.genotypes, xp.ndarray)
+        assert isinstance(out.positions, xp.ndarray)
         assert out.genotypes.shape == (2, 0)
         assert out.positions.shape == (0,)
         assert out.n_total_sites is None
@@ -153,6 +206,14 @@ def vcz_with_fields(tmp_path):
     return path
 
 
+@pytest.fixture
+def contig1_bed(tmp_path):
+    """A BED file marking bases 1-500 of contig ``1`` accessible."""
+    bed = tmp_path / "acc.bed"
+    bed.write_text("1\t0\t500\n")
+    return str(bed)
+
+
 class TestFromZarrEager:
     """The from_zarr argument guards and the eager build path: fields,
     population assignment, and the tolerated store-reopen failure."""
@@ -192,11 +253,9 @@ class TestFromZarrEager:
         assert set(gm.sample_sets) == {"A", "B"}
         assert gm.sample_sets["A"] == [0, 1]
 
-    def test_eager_attaches_accessible_bed(self, vcz_with_fields, tmp_path):
-        bed = tmp_path / "acc.bed"
-        bed.write_text("1\t0\t5000\n")
+    def test_eager_attaches_accessible_bed(self, vcz_with_fields, contig1_bed):
         gm = GenotypeMatrix.from_zarr(vcz_with_fields, streaming="never",
-                                      accessible_bed=str(bed))
+                                      accessible_bed=contig1_bed)
         assert gm.accessible_mask is not None
 
     def test_store_reopen_failure_is_tolerated(self, vcz_with_fields, monkeypatch):
@@ -216,3 +275,28 @@ class TestFromZarrEager:
         gm = GenotypeMatrix.from_zarr(vcz_with_fields, streaming="never")
         assert isinstance(gm, GenotypeMatrix)
         assert gm.num_variants == 30
+
+
+class TestFromVcf:
+
+    def test_accessible_bed_attaches_mask(self, sample_vcf, contig1_bed):
+        # The BED is resolved on the VCF's own contig name, and the callable
+        # span is the BED interval clipped to start at the first variant.
+        with pytest.warns(BiallelicOnlyWarning):
+            gm = GenotypeMatrix.from_vcf(sample_vcf, accessible_bed=contig1_bed)
+        assert gm.accessible_mask is not None
+        assert gm.n_total_sites == 500 - gm.chrom_start + 1
+
+
+class TestToZarr:
+
+    def test_allel_format_rejects_fields(self, tmp_path):
+        gm = _gm([[0, 1, 2], [2, 1, 0]])
+        gm.fields = {"GQ": np.zeros((3, 2), dtype=np.int32)}
+        with pytest.raises(NotImplementedError, match="only supported for format='vcz'"):
+            gm.to_zarr(str(tmp_path / "out.zarr"), format="scikit-allel")
+
+    def test_unknown_format_raises(self, tmp_path):
+        gm = _gm([[0, 1, 2], [2, 1, 0]])
+        with pytest.raises(ValueError, match="Unknown format"):
+            gm.to_zarr(str(tmp_path / "out.zarr"), format="bogus")
