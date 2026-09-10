@@ -110,8 +110,9 @@ class TestRecMapHelpers:
 
 
 class TestReportRun:
-    """A full report=True run over each compute path prints progress and
-    returns the moments-format result dict."""
+    """Full runs over each compute path: progress reporting on and off,
+    recombination-distance binning, and the union filter across
+    populations, each returning the moments-format result dict."""
 
     def test_genotype_report_run(self):
         gm = _gm()
@@ -122,17 +123,39 @@ class TestReportRun:
         assert set(res) == {"bins", "sums", "stats", "pops"}
         assert res["pops"] == ["pop0"]
 
-    def test_recombination_binned_run(self, tmp_path):
+    def test_recombination_binned_run(self, tmp_path, capsys):
         # r_bins routes through the genetic-map interpolation and the physical
-        # distance cap, then bins pairs by recombination distance.
+        # distance cap, then bins pairs by recombination distance. The map is
+        # 1e-5 M/bp, so bins up to 1e-2 M admit pairs up to about 1 kb apart;
+        # the inner edge sits between the 100 bp multiples of the variant
+        # spacing so no pair lands on a bin boundary.
         rec = tmp_path / "rmap.map"
         rec.write_text("0 0.0\n5000 5.0\n")
         hm = _hm()
         hm.sample_sets = {"pop0": list(range(8))}
         res = compute_ld_statistics(haplotype_matrix=hm, use_genotypes=False,
-                                    pops=["pop0"], r_bins=[0, 1e-5, 5e-5],
+                                    pops=["pop0"], r_bins=[0, 1.5e-3, 1e-2],
                                     rec_map_file=str(rec), report=False)
         assert set(res) == {"bins", "sums", "stats", "pops"}
+        # Both recombination bins receive pairs; the last entry holds H.
+        assert all(np.any(np.asarray(s) != 0) for s in res["sums"][:-1])
+        # report=False keeps the run silent.
+        assert capsys.readouterr().out == ""
+
+    def test_shared_individual_counted_once_in_union_filter(self):
+        # The biallelic filter runs over the union of the populations and
+        # counts an individual listed in both once. A site whose only call is
+        # that individual's stays below the two-call minimum, so no pair forms
+        # and every LD bin stays at zero.
+        geno = np.ones((12, 2), dtype=np.int8)  # site 0: heterozygous in all
+        geno[:, 1] = -1
+        geno[4, 1] = 1                           # site 1: one call, individual 4
+        gm = GenotypeMatrix(geno, np.array([100, 200]))
+        gm.sample_sets = {"pop0": list(range(0, 8)), "pop1": list(range(4, 12))}
+        res = compute_ld_statistics(genotype_matrix=gm, use_genotypes=True,
+                                    pops=["pop0", "pop1"], bp_bins=[0, 500],
+                                    report=False)
+        assert all(np.all(np.asarray(s) == 0) for s in res["sums"][:-1])
 
     def test_haplotype_report_run(self):
         hm = _hm()
@@ -145,8 +168,9 @@ class TestReportRun:
 
 
 class TestVcfLoadingPath:
-    """The VCF-loading branches -- from_vcf, load_pop_file, and the
-    accessible_bed mask attached at load -- on both compute paths."""
+    """The VCF-loading branches -- from_vcf, load_pop_file, the
+    accessible_bed mask attached at load, and the progress line -- on both
+    compute paths."""
 
     @pytest.fixture
     def pop_and_bed(self, tmp_path):
@@ -160,7 +184,7 @@ class TestVcfLoadingPath:
     @pytest.mark.parametrize("use_genotypes", [True, False],
                              ids=["genotype", "haplotype"])
     def test_vcf_with_accessible_bed(self, sample_vcf, pop_and_bed,
-                                     use_genotypes):
+                                     use_genotypes, capsys):
         pop, bed = pop_and_bed
         # The genotype loader is biallelic-only and drops the fixture's
         # multiallelic sites with a warning; the haplotype loader keeps them.
@@ -170,6 +194,7 @@ class TestVcfLoadingPath:
             res = compute_ld_statistics(vcf_file=sample_vcf, pop_file=pop,
                                         pops=["pop0"], bp_bins=[0, 100, 1000],
                                         use_genotypes=use_genotypes,
-                                        accessible_bed=bed, report=False)
+                                        accessible_bed=bed, report=True)
         assert set(res) == {"bins", "sums", "stats", "pops"}
         assert res["pops"] == ["pop0"]
+        assert f"Loading {sample_vcf}" in capsys.readouterr().out
