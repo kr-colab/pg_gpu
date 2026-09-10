@@ -507,6 +507,17 @@ class TestStreamingGuardrails:
             windowed_analysis(stream, window_size=5_000,
                               statistics=["local_pca"])
 
+    def test_empty_region_returns_empty_frame(self, vcz_store):
+        # A mappable region with no variants (the fixture spans ~100 kb) yields
+        # no per-chunk results, so streaming windowed analysis returns an empty
+        # frame -- a legitimate "no data" outcome, where the eager path would
+        # raise on an empty matrix.
+        stream = HaplotypeMatrix.from_zarr(
+            vcz_store, region="1:5000000-5100000", streaming="always",
+            chunk_bp=10_000)
+        df = windowed_analysis(stream, window_size=10_000, statistics=["pi"])
+        assert df.empty
+
 
 
 class TestGeneticRelatednessDispatch:
