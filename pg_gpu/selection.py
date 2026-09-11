@@ -13,6 +13,7 @@ from typing import Union, Optional, Tuple
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
 from ._memutil import allele_counts
+from ._haplotype_hash import garud_from_moments, garud_h_windows
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +184,12 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
     h12 : ndarray, float
     h123 : ndarray, float
     h2_h1 : ndarray, float
+
+    Raises
+    ------
+    ValueError
+        If ``start`` is negative, ``stop`` exceeds the variant count, or
+        ``size`` or ``step`` is below 1.
     """
     if population is not None:
         matrix = _get_population_matrix(haplotype_matrix, population)
@@ -205,75 +212,30 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
     if step is None:
         step = size
 
-    has_missing = bool(cp.any(hap < 0).get())
+    if start < 0 or stop > n_variants or size < 1 or step < 1:
+        raise ValueError(
+            f"moving_garud_h needs 0 <= start, stop <= n_variants "
+            f"({n_variants}), size >= 1 and step >= 1; got start={start}, "
+            f"stop={stop}, size={size}, step={step}")
+    starts = np.arange(start, stop - size + 1, step, dtype=np.int64)
 
-    if has_missing:
+    if bool(cp.any(hap < 0).get()):
         # Fallback: per-window wildcard matching
-        results = []
-        for w_start in range(start, stop - size + 1, step):
-            w_end = w_start + size
-            hap_window = hap[:, w_start:w_end]
-            f = _distinct_haplotype_frequencies_missing(hap_window)
-            results.append(_garud_from_freqs(f))
-        results = np.array(results, dtype='f8')
-        return results[:, 0], results[:, 1], results[:, 2], results[:, 3]
+        results = np.empty((starts.size, 4), dtype=np.float64)
+        for i, w_start in enumerate(starts):
+            f = _distinct_haplotype_frequencies_missing(hap[:, w_start:w_start + size])
+            results[i] = _garud_from_freqs(f)
+        return tuple(results.T)
 
-    # GPU fast path: precompute cumulative weighted sums on GPU,
-    # compute per-window hashes on GPU, transfer only the small hash
-    # arrays to CPU for sorting/counting.
-    # float64 for prefix-sum hashing to avoid accumulation error over long ranges
-    n_hap = hap.shape[0]
-    h_f64 = hap.astype(cp.float64)
-
-    rng = cp.random.RandomState(seed=42)
-    w1 = rng.standard_normal(n_variants, dtype=cp.float64)
-    w2 = rng.standard_normal(n_variants, dtype=cp.float64)
-
-    hw1 = h_f64 * w1[cp.newaxis, :]
-    hw2 = h_f64 * w2[cp.newaxis, :]
-
-    cs1 = cp.zeros((n_hap, n_variants + 1), dtype=cp.float64)
-    cs2 = cp.zeros((n_hap, n_variants + 1), dtype=cp.float64)
-    cp.cumsum(hw1, axis=1, out=cs1[:, 1:])
-    cp.cumsum(hw2, axis=1, out=cs2[:, 1:])
-
-    windows = list(range(start, stop - size + 1, step))
-    n_windows = len(windows)
-
-    # Compute all window hashes on GPU at once: (n_windows, n_hap)
-    w_starts = cp.array(windows, dtype=cp.int64)
-    w_ends = w_starts + size
-    # Gather prefix sums at window boundaries: (n_hap, n_windows)
-    all_hash1 = cs1[:, w_ends] - cs1[:, w_starts]  # (n_hap, n_windows)
-    all_hash2 = cs2[:, w_ends] - cs2[:, w_starts]
-
-    # Transfer to CPU: (n_hap, n_windows) * 2 * 8 bytes -- small
-    ah1 = all_hash1.get().T  # (n_windows, n_hap)
-    ah2 = all_hash2.get().T
-
-    results = np.empty((n_windows, 4), dtype='f8')
-    for wi in range(n_windows):
-        order = np.lexsort((ah2[wi], ah1[wi]))
-        s1 = ah1[wi, order]
-        s2 = ah2[wi, order]
-        diff = (np.abs(s1[1:] - s1[:-1]) > 1e-6) | (np.abs(s2[1:] - s2[:-1]) > 1e-6)
-        boundaries = np.concatenate([[True], diff])
-        boundary_idx = np.where(boundaries)[0]
-        counts = np.diff(np.concatenate([boundary_idx, [n_hap]]))
-        freqs = np.sort(counts)[::-1].astype(np.float64) / n_hap
-        results[wi] = _garud_from_freqs(freqs)
-
-    return results[:, 0], results[:, 1], results[:, 2], results[:, 3]
+    return garud_h_windows(hap, starts, starts + size)[:4]
 
 
 def _garud_from_freqs(f):
-    """Compute H1/H12/H123/H2H1 from sorted frequency array."""
-    h1 = float(np.sum(f ** 2))
-    h12 = float(np.sum(f[:2]) ** 2 + np.sum(f[2:] ** 2))
-    h123 = float(np.sum(f[:3]) ** 2 + np.sum(f[3:] ** 2))
-    h2 = h1 - float(f[0] ** 2)
-    h2_h1 = h2 / h1 if h1 > 0 else 0.0
-    return h1, h12, h123, h2_h1
+    """Compute H1/H12/H123/H2H1 from a descending-sorted frequency array."""
+    f = np.asarray(f, dtype=np.float64)
+    top = np.zeros(3)
+    top[:min(3, f.size)] = f[:3]
+    return tuple(float(x) for x in garud_from_moments(float(np.sum(f ** 2)), *top))
 
 
 def _garud_h_diploid(genotype_matrix, population=None):
@@ -747,7 +709,7 @@ def _distinct_haplotype_frequencies(hap):
 def _distinct_haplotype_frequencies_missing(hap):
     """Compute distinct haplotype frequencies treating -1 as wildcard.
 
-    Uses GPU dot-product hashing when no missing data is present,
+    Uses the exact GPU row hash when no missing data is present,
     otherwise falls back to CPU wildcard matching.
 
     Parameters

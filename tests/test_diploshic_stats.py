@@ -9,6 +9,8 @@ import cupy as cp
 from pg_gpu import HaplotypeMatrix, GenotypeMatrix
 from pg_gpu import ld_statistics, diversity, selection, distance_stats
 
+from .conftest import founder_haplotypes
+
 
 @pytest.fixture
 def hap_data():
@@ -311,7 +313,7 @@ class TestDiversityNewStats:
         assert diversity.haplotype_count(matrix) == 1
 
     def test_haplotype_count_gpu_matches_naive(self):
-        """GPU dot-product hashing must match exact unique-row count on clean data."""
+        """GPU row hashing must match the exact unique-row count on clean data."""
         rng = np.random.default_rng(0)
         n_hap, n_var = 60, 2000
         # 8 distinct founders, replicated with low mutation -> many ties
@@ -323,6 +325,16 @@ class TestDiversityNewStats:
         gpu_count = diversity.haplotype_count(matrix)
         naive = len({h.tobytes() for h in hap})
         assert gpu_count == naive
+
+    def test_haplotype_count_gpu_matches_naive_many_haplotypes(self):
+        """Exact counts with thousands of haplotypes and rows hashed in segments."""
+        rng = np.random.default_rng(1)
+        n_hap, n_var = 3000, 70_000
+        hap = founder_haplotypes(rng, n_hap, n_var, 40)
+        # a few thousand scattered private mutations
+        hap.flat[rng.integers(0, hap.size, size=2000)] ^= 1
+        matrix = HaplotypeMatrix(hap, np.arange(n_var) * 100, 0, n_var * 100)
+        assert diversity.haplotype_count(matrix) == len({h.tobytes() for h in hap})
 
     def test_haplotype_count_with_missing_data(self):
         n_var = 50

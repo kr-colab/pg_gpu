@@ -177,6 +177,27 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* Windowed Garud's H made three float64 copies of the haplotype matrix
+  (109 GB each for 2,940 haplotypes across 4.7 million sites) and, for
+  a Garud-only request, a transposed int8 copy on top. Each window is
+  now hashed straight from the int8 matrix, in batches sized to free
+  GPU memory, and Garud-only scans skip the transposed copy.
+* A window with no variants borrowed the next window's first variant
+  and reported its Garud H; a grid whose windows all lay past the last
+  variant raised ``IndexError``. Such a window now reports one
+  haplotype (``garud_h1``, ``garud_h12`` and ``garud_h123`` of 1,
+  ``garud_h2h1`` of 0, ``haplotype_count`` of 1) on tile and sliding
+  grids alike.
+* Windowed Garud's H sorted each window's haplotypes in shared memory
+  and left every haplotype past the 2,048th unsorted, so haplotype
+  counts and H statistics were wrong for larger cohorts, and the kernel
+  failed outright past 3,072 haplotypes. The sort now runs in global
+  memory with no limit on the haplotype count.
+* ``haplotype_diversity``, ``haplotype_count``, ``garud_h`` and
+  ``moving_garud_h`` no longer make a float copy of the matrix; they
+  share the exact haplotype hash of the windowed scan.
+  ``moving_garud_h`` rejects windows outside the matrix instead of
+  reading past it.
 * ``HaplotypeMatrix.pairwise_r2`` and ``windowed_r_squared`` rejected
   ``estimator='auto'`` -- the default name for the LD estimator
   everywhere else -- with an "unknown estimator" error. They accept it

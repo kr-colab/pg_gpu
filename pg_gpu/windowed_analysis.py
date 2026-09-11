@@ -17,6 +17,11 @@ from .haplotype_matrix import HaplotypeMatrix
 from . import ld_statistics
 from . import divergence
 from . import diversity
+from ._haplotype_hash import garud_h_windows
+
+# Column order of the Garud H family, as garud_h_windows returns it.
+_FUSED_GARUD_STATS = ('garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
+                      'haplotype_count')
 
 # Kwargs that the 'local_pca' / 'local_pca_jackknife' dispatch consumes but
 # scalar-stat paths don't accept. Filtered out before the recursive call.
@@ -1284,8 +1289,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     fused_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
                     'singletons', 'theta_h', 'fay_wu_h', 'max_daf'}
     fused_two = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
-    fused_garud = {'garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
-                   'haplotype_count'}
+    fused_garud = set(_FUSED_GARUD_STATS)
     fused_selection = {'mean_nsl'}
     fused_diploshic = {'snp_dist_mean', 'snp_dist_var', 'snp_dist_min',
                        'snp_dist_max', 'mu_var', 'mu_sfs', 'mu_ld',
@@ -1328,12 +1332,15 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         pop2 = populations[1] if populations and len(populations) >= 2 else None
         population = pop1  # single-pop stats use the first population
 
-        # Choose chunked or single-shot fused based on memory
+        # Chunk the fused engine when its transposed int8 copy would not fit.
+        # A Garud-only request never builds that copy (it batches its own
+        # windows), so it runs single-shot whatever the matrix size.
         n_hap = haplotype_matrix.num_haplotypes
         n_var = haplotype_matrix.num_variants
         transpose_bytes = n_var * n_hap  # int8
         free_mem = cp.cuda.Device().mem_info[0]
-        use_chunked = transpose_bytes * 2 > free_mem * 0.7
+        use_chunked = (bool(requested - fused_garud)
+                       and transpose_bytes * 2 > free_mem * 0.7)
 
         fused_fn = (windowed_statistics_fused_chunked if use_chunked
                      else windowed_statistics_fused)
@@ -1432,14 +1439,13 @@ def _warn_fused_allele_cap(n_over):
 
 
 def _filter_fused_allele_cap_raw(hap_raw, positions, cap_source=None):
-    """Cap filter for the chunked path's un-transposed (n_hap, n_var) matrix.
+    """Cap filter for an un-transposed (n_hap, n_var) matrix.
 
     Reduces over the haplotype axis (axis 0) to get per-variant max allele
     indices without a full transpose, then slices variants (axis 1) and
     positions consistently. Drops variants whose max allele index
     >= _FUSED_MAX_ALLELES and emits a ``MultiallelicCapWarning``; missing (-1)
-    never triggers the cap. (The non-chunked single-pass path filters inline,
-    capturing the keep mask so the two-pop kernel's hap1/hap2 align.)
+    never triggers the cap.
 
     ``cap_source`` is the matrix the reduction runs over; it defaults to
     ``hap_raw`` but must be the original matrix whenever the kernels will
@@ -1800,111 +1806,6 @@ void fused_windowed_twopop(const signed char* hap1_t,
 ''', 'fused_windowed_twopop')
 
 
-# Garud's H fused kernel: one block per window, sorts haplotype hashes
-# in shared memory to count unique patterns and compute H statistics.
-_fused_garud_h_kernel = cp.RawKernel(r'''
-extern "C" __global__
-void fused_garud_h(const double* hash1,   // (n_windows, n_hap)
-                   const double* hash2,   // (n_windows, n_hap)
-                   int n_hap, int n_windows, double tol,
-                   double* out_h1, double* out_h12,
-                   double* out_h123, double* out_h2h1,
-                   double* out_n_distinct) {
-    int wid = blockIdx.x;
-    if (wid >= n_windows) return;
-    int tid = threadIdx.x;
-
-    // Load hashes into shared memory for sorting. The launcher picks
-    // blockDim.x = ceil(n_hap / 2) rounded up to a power of two so the
-    // odd-even sort has enough threads for every compare-and-swap, but
-    // that leaves blockDim.x < n_hap for many n_hap values -- a strided
-    // load is needed to cover all elements.
-    extern __shared__ double shm[];
-    double* s_h1 = shm;            // n_hap doubles
-    double* s_h2 = shm + n_hap;    // n_hap doubles
-
-    for (int i = tid; i < n_hap; i += blockDim.x) {
-        s_h1[i] = hash1[wid * n_hap + i];
-        s_h2[i] = hash2[wid * n_hap + i];
-    }
-    __syncthreads();
-
-    // Simple odd-even sort on hash1 (secondary on hash2 for ties)
-    // For n_hap <= 256 this is fast in shared memory
-    for (int phase = 0; phase < n_hap; phase++) {
-        int i = 2 * tid + (phase & 1);
-        if (i + 1 < n_hap) {
-            bool do_swap = false;
-            if (s_h1[i] > s_h1[i + 1]) {
-                do_swap = true;
-            } else if (s_h1[i] == s_h1[i + 1] && s_h2[i] > s_h2[i + 1]) {
-                do_swap = true;
-            }
-            if (do_swap) {
-                double tmp;
-                tmp = s_h1[i]; s_h1[i] = s_h1[i+1]; s_h1[i+1] = tmp;
-                tmp = s_h2[i]; s_h2[i] = s_h2[i+1]; s_h2[i+1] = tmp;
-            }
-        }
-        __syncthreads();
-    }
-
-    // Thread 0: count unique haplotypes, compute frequencies, derive H stats
-    if (tid == 0) {
-        // Count distinct haplotypes and collect top-3 frequencies
-        double inv_n = 1.0 / (double)n_hap;
-
-        // Walk sorted array, count runs
-        // We need: sum(f_i^2), and the top 3 frequencies
-        double sum_f2 = 0.0;
-        double top3[3] = {0.0, 0.0, 0.0};
-        int run_len = 1;
-        int n_distinct = 0;
-
-        for (int i = 1; i <= n_hap; i++) {
-            bool boundary = (i == n_hap);
-            if (!boundary) {
-                double d1 = s_h1[i] - s_h1[i-1];
-                double d2 = s_h2[i] - s_h2[i-1];
-                if (d1 < 0) d1 = -d1;
-                if (d2 < 0) d2 = -d2;
-                boundary = (d1 > tol) || (d2 > tol);
-            }
-            if (boundary) {
-                n_distinct++;
-                double f = (double)run_len * inv_n;
-                sum_f2 += f * f;
-                if (f > top3[0]) {
-                    top3[2] = top3[1]; top3[1] = top3[0]; top3[0] = f;
-                } else if (f > top3[1]) {
-                    top3[2] = top3[1]; top3[1] = f;
-                } else if (f > top3[2]) {
-                    top3[2] = f;
-                }
-                run_len = 1;
-            } else {
-                run_len++;
-            }
-        }
-
-        double h1_val = sum_f2;
-        double h12_val = (top3[0] + top3[1]) * (top3[0] + top3[1])
-                       + (sum_f2 - top3[0]*top3[0] - top3[1]*top3[1]);
-        double h123_val = (top3[0] + top3[1] + top3[2]) * (top3[0] + top3[1] + top3[2])
-                        + (sum_f2 - top3[0]*top3[0] - top3[1]*top3[1] - top3[2]*top3[2]);
-        double h2_val = h1_val - top3[0] * top3[0];
-        double h2h1_val = (h1_val > 0.0) ? h2_val / h1_val : 0.0;
-
-        out_h1[wid]   = h1_val;
-        out_h12[wid]  = h12_val;
-        out_h123[wid] = h123_val;
-        out_h2h1[wid] = h2h1_val;
-        out_n_distinct[wid] = (double)n_distinct;
-    }
-}
-''', 'fused_garud_h')
-
-
 def _compute_window_ranges(positions, bp_bins):
     """Map window edges to variant index ranges using searchsorted.
 
@@ -1978,8 +1879,6 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     hap_raw = matrix.haplotypes
     n_hap = hap_raw.shape[0]
-    # transpose for coalesced kernel access: (n_total_var, n_hap)
-    hap = cp.ascontiguousarray(hap_raw.T.astype(cp.int8))
 
     positions = matrix.positions
     if not isinstance(positions, cp.ndarray):
@@ -1987,30 +1886,22 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     # Drop sites the fused kernel's per-allele capacity can't represent (rare;
     # nucleotide data has <= 4 alleles). Must precede window indexing so the
-    # variant-index ranges are computed against the retained sites. Capture the
-    # keep mask so the two-pop path can slice hap1/hap2 to the same variants
-    # (positions/window indices are computed against the filtered set below).
-    # When two-population statistics are requested the kernel reads pop1 and
-    # pop2 rows of the original matrix, which the single-population subset
-    # need not cover, so the reduction runs over the original.
-    if any(s in ('fst', 'fst_hudson', 'fst_wc', 'dxy', 'da')
-           for s in statistics):
-        cap_src = haplotype_matrix.haplotypes
-        cap_keep = (cap_src.max(axis=0) < _FUSED_MAX_ALLELES
-                    if cap_src.shape[1] else None)
-    else:
-        cap_keep = hap.max(axis=1) < _FUSED_MAX_ALLELES if hap.shape[0] else None
-    if cap_keep is not None and not bool(cap_keep.all()):
-        _warn_fused_allele_cap(int((~cap_keep).sum()))
-        hap = hap[cap_keep]
-        positions = positions[cap_keep]
+    # variant-index ranges are computed against the retained sites. The kept
+    # indices let the two-pop path slice hap1/hap2 to the same variants. When
+    # two-population statistics are requested the kernel reads pop1 and pop2
+    # rows of the original matrix, which the single-population subset need
+    # not cover, so the reduction runs over the original.
+    two_pop_requested = any(s in ('fst', 'fst_hudson', 'fst_wc', 'dxy', 'da')
+                            for s in statistics)
+    hap_raw, positions, cap_keep = _filter_fused_allele_cap_raw(
+        hap_raw, positions,
+        cap_source=haplotype_matrix.haplotypes if two_pop_requested else None)
+    if cap_keep is not None:
         # Everything below that slices by variant-index ranges or counts
         # per site (Garud, per-window LD, the per-site scatter stats) must
         # see the same variant set the kernel arrays hold.
-        matrix = matrix.get_subset(cp.where(cap_keep)[0])
-    else:
-        cap_keep = None
-    n_total_var = hap.shape[0]
+        matrix = matrix.get_subset(cap_keep)
+    n_total_var = hap_raw.shape[1]
 
     # Support overlapping windows via explicit start/stop arrays
     if _win_starts is not None and _win_stops is not None:
@@ -2044,6 +1935,10 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                         'singletons', 'theta_h', 'fay_wu_h', 'max_daf'}
     single_pop_requested = any(s in statistics for s in single_pop_stats)
     if single_pop_requested:
+        # Only this kernel needs the transposed (n_total_var, n_hap) int8
+        # copy for coalesced access; Garud-only and scatter-only requests
+        # skip the extra matrix-sized allocation.
+        hap = cp.ascontiguousarray(hap_raw.T, dtype=cp.int8)
         out_mpd = cp.zeros(n_windows, dtype=cp.float64)
         out_seg = cp.zeros(n_windows, dtype=cp.float64)
         out_sing = cp.zeros(n_windows, dtype=cp.float64)
@@ -2066,6 +1961,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         var_count = out_count.get()
         theta_h_sum = out_theta_h.get()
         max_daf = out_max_daf.get()
+        # The later stages read the un-transposed matrix; release the copy
+        # so their batches can use the memory.
+        del hap
 
         results['n_variants'] = var_count.astype(int)
 
@@ -2214,18 +2112,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             else:
                 results['da'] = da_sum.get()
 
-    # Garud's H via fused kernel (SNP windows using prefix-sum hashing)
-    garud_stats = {'garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
-                   'haplotype_count'}
-    garud_requested = any(s in statistics for s in garud_stats)
-    if garud_requested:
-        # `matrix` is already population-subsetted above (line 1722); pass
-        # population=None to avoid a double lookup that would fail because
-        # the subsetted matrix has sample_sets={'all': ...}, not the original
-        # population names.
-        _compute_fused_garud_h(matrix, None,
-                               win_start, win_stop, n_windows, statistics,
-                               results)
+    # Garud's H: exact per-window haplotype hashing, batched to GPU memory
+    if any(s in statistics for s in _FUSED_GARUD_STATS):
+        _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results)
 
     # Per-site stats binned into windows via scatter_add. A variant belongs
     # to window w iff ws[w] <= pos < we[w] -- the same right-open rule
@@ -2801,8 +2690,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     # Delegate Garud H / scatter-add stats / per-window LD to the
     # non-chunked function (they already handle large data or operate
     # per-window).
-    garud_stats = {'garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
-                   'haplotype_count'}
+    garud_stats = set(_FUSED_GARUD_STATS)
     scatter_stats = {*_PER_SITE_SCATTER_STATS, 'snp_dist_mean',
                      'snp_dist_var', 'snp_dist_min', 'snp_dist_max',
                      'mu_var', 'zns', 'omega', 'mu_ld', 'dist_var',
@@ -2825,41 +2713,6 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     return results
 
 
-def _position_weights(positions, salt):
-    """Position-deterministic float64 weights for the Garud H hash basis.
-
-    Splitmix64-scrambles each absolute variant position to a weight in
-    ``[-1, 1)``. The weight is a pure function of the position and the
-    salt, which is what lets the Garud H kernel produce the same per-
-    window hash whether the surrounding window was computed in one
-    eager pass or split across two streaming chunks; an n_variants-
-    seeded RNG would assign a different weight to the same variant
-    every time the matrix shape changed.
-
-    Two salts produce two independent weight columns w1, w2; together
-    they make collisions between distinct haplotype patterns vanishingly
-    rare without changing the Garud H computation downstream.
-
-    The output is uniform in [-1, 1) rather than standard-normal -- the
-    kernel only uses the weights to discriminate haplotype patterns by
-    sorted hash, not to inherit any specific distribution.
-    """
-    s = cp.uint64(salt & 0xFFFFFFFFFFFFFFFF)
-    x = positions.astype(cp.uint64) + s
-    x = (x ^ (x >> cp.uint64(30))) * cp.uint64(0xBF58476D1CE4E5B9)
-    x = (x ^ (x >> cp.uint64(27))) * cp.uint64(0x94D049BB133111EB)
-    x = x ^ (x >> cp.uint64(31))
-    # Mantissa-pack the low 52 bits as a float64 in [1, 2); subtract 1 to
-    # get [0, 1); rescale to [-1, 1).
-    mant = (x & cp.uint64(0x000FFFFFFFFFFFFF)) | cp.uint64(0x3FF0000000000000)
-    u = mant.view(cp.float64) - 1.0
-    return 2.0 * u - 1.0
-
-
-_GARUD_SALT1 = 0x9E3779B97F4A7C15   # golden-ratio constant
-_GARUD_SALT2 = 0xC6BC279692B5C323   # phi^-2-based companion
-
-
 def _windowed_mean(values, bin_idx, valid_mask, n_bins):
     """Compute mean of values per window bin, returning NaN for empty bins."""
     val_sum = _scatter_sum(values[valid_mask], bin_idx[valid_mask], n_bins)
@@ -2869,266 +2722,15 @@ def _windowed_mean(values, bin_idx, valid_mask, n_bins):
     return np.where(count_cpu > 0, sum_cpu / count_cpu, np.nan)
 
 
-def _compute_fused_garud_h(haplotype_matrix, population,
-                            win_start, win_stop, n_windows, statistics,
-                            results):
-    """Compute windowed Garud's H + fused GPU kernel.
+def _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results):
+    """Windowed Garud's H and distinct-haplotype count into ``results``.
 
-    Two assembly paths build the per-window haplotype hashes:
-
-    * Tile windows (``win_stop[k] == win_start[k+1]`` for all k) use
-      a per-window scatter-reduce via ``cp.add.reduceat``. Each
-      window's hash is summed from its own variants in index order,
-      so eager and streaming produce bit-identical results and the
-      kernel can use an exact-equality tolerance to bucket haplotypes.
-    * Sliding windows (overlap > 0) still use the prefix-sum trick,
-      which carries the well-known ULP-scale drift the kernel's
-      legacy ``tol=1e-3`` absorbs.
+    A window with no variants reports one haplotype.
     """
-    from ._utils import get_population_matrix
-
-    if population is not None:
-        matrix = get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    hap = matrix.haplotypes  # (n_hap, n_var)
-    n_hap, n_var = hap.shape
-    pos = matrix.positions
-    if not isinstance(pos, cp.ndarray):
-        pos = cp.asarray(pos)
-
-    # Tile detection. Both win_start and win_stop arrive as either
-    # numpy or cupy arrays; check on the host so the comparison is
-    # cheap and synchronous.
-    ws = win_start.get() if isinstance(win_start, cp.ndarray) else np.asarray(win_start)
-    we = win_stop.get() if isinstance(win_stop, cp.ndarray) else np.asarray(win_stop)
-    is_tile = (n_windows == 0) or bool(np.all(we[:-1] == ws[1:]))
-
-    if is_tile:
-        _garud_h_per_window_reduceat(hap, pos, win_start, win_stop,
-                                      n_hap, n_windows, statistics,
-                                      results)
-        return
-
-    # Sliding path: keep the existing prefix-sum implementation. Memory
-    # check sized for 4 (n_hap, span+1) float64 arrays (hw1, hw2,
-    # cs1, cs2); fall back to per-group chunking if a full single-pass
-    # buffer would not fit.
-    free_mem = cp.cuda.Device().mem_info[0]
-    prefix_budget = int(free_mem * 0.3)
-    cost_per_var = n_hap * 8 * 4
-    max_span = max(1, prefix_budget // cost_per_var)
-
-    if n_var <= max_span:
-        _garud_h_single_pass(hap, pos, n_hap, n_var, win_start, win_stop,
-                             n_windows, statistics, results)
-    else:
-        _garud_h_chunked(hap, pos, n_hap, n_var, win_start, win_stop,
-                         n_windows, max_span, statistics, results)
-
-
-def _garud_h_per_window_reduceat(hap, pos, win_start, win_stop, n_hap,
-                                   n_windows, statistics, results):
-    """Garud H assembling each window's hash by per-window scatter-reduce.
-
-    Cost is O(n_hap * n_var) -- the same as the prefix-sum approach --
-    but each window's hash is summed from its own variants in index
-    order, so two chunkings covering the same window produce
-    bit-identical results. With deterministic hashes the kernel can
-    bucket haplotypes by a much tighter tolerance (1e-12) than the
-    prefix-sum path's 1e-3, which means the count of distinct
-    haplotypes matches the hand-rolled reference exactly.
-
-    Requires non-overlapping tile windows so each variant is in at
-    most one window; the caller dispatches sliding windows to the
-    prefix-sum path.
-    """
-    if n_windows == 0:
-        return
-    w1 = _position_weights(pos, _GARUD_SALT1)
-    w2 = _position_weights(pos, _GARUD_SALT2)
-
-    # Slice to the variant range covered by any window. Anything left
-    # of win_start[0] and right of win_stop[-1] is not in any window
-    # and should not contribute.
-    if isinstance(win_start, cp.ndarray):
-        ws = win_start.get()
-        we = win_stop.get()
-    else:
-        ws = np.asarray(win_start)
-        we = np.asarray(win_stop)
-    v_lo = int(ws[0])
-    v_hi = int(we[-1])
-
-    hap_slice = hap[:, v_lo:v_hi].astype(cp.float64)
-    hw1 = hap_slice * w1[v_lo:v_hi][cp.newaxis, :]
-    hw2 = hap_slice * w2[v_lo:v_hi][cp.newaxis, :]
-
-    # cp.add.reduceat: bin k sums positions ws[k]-v_lo .. ws[k+1]-v_lo
-    # (exclusive), and the final bin runs to the end of the sliced
-    # array, which equals we[-1]-v_lo for tile windows.
-    rel = (ws - v_lo).astype(np.int64)
-    h1 = cp.add.reduceat(hw1, rel, axis=1)   # (n_hap, n_windows)
-    h2 = cp.add.reduceat(hw2, rel, axis=1)
-
-    all_h1 = cp.ascontiguousarray(h1.T)      # kernel wants (n_windows, n_hap)
-    all_h2 = cp.ascontiguousarray(h2.T)
-
-    _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics,
-                          results, tol=1e-12)
-
-
-def _garud_h_single_pass(hap, pos, n_hap, n_var, win_start, win_stop,
-                          n_windows, statistics, results):
-    """Garud H via full prefix-sum hashing (fits in memory)."""
-    h_f64 = hap.astype(cp.float64)
-    w1 = _position_weights(pos, _GARUD_SALT1)
-    w2 = _position_weights(pos, _GARUD_SALT2)
-
-    hw1 = h_f64 * w1[cp.newaxis, :]
-    hw2 = h_f64 * w2[cp.newaxis, :]
-    cs1 = cp.zeros((n_hap, n_var + 1), dtype=cp.float64)
-    cs2 = cp.zeros((n_hap, n_var + 1), dtype=cp.float64)
-    cp.cumsum(hw1, axis=1, out=cs1[:, 1:])
-    cp.cumsum(hw2, axis=1, out=cs2[:, 1:])
-
-    all_h1 = (cs1[:, win_stop] - cs1[:, win_start]).T
-    all_h2 = (cs2[:, win_stop] - cs2[:, win_start]).T
-    all_h1 = cp.ascontiguousarray(all_h1)
-    all_h2 = cp.ascontiguousarray(all_h2)
-
-    _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics,
-                          results, tol=1e-3)
-
-
-def _garud_h_chunked(hap, pos, n_hap, n_var, win_start, win_stop,
-                      n_windows, max_span, statistics, results):
-    """Garud H processing windows in groups to limit memory."""
-    from ._memutil import free_gpu_pool
-
-    out_h1 = np.empty(n_windows, dtype=np.float64)
-    out_h12 = np.empty(n_windows, dtype=np.float64)
-    out_h123 = np.empty(n_windows, dtype=np.float64)
-    out_h2h1 = np.empty(n_windows, dtype=np.float64)
-    out_n_distinct = np.empty(n_windows, dtype=np.float64)
-
-    ws_cpu = win_start.get()
-    we_cpu = win_stop.get()
-
-    # Group windows by overlapping variant spans
-    processed = np.zeros(n_windows, dtype=bool)
-    wi = 0
-    while wi < n_windows:
-        # Find a group of consecutive windows that fit in max_span
-        group_var_start = int(ws_cpu[wi])
-        group_var_end = int(we_cpu[wi])
-        group_end = wi + 1
-        while group_end < n_windows:
-            candidate_end = int(we_cpu[group_end])
-            if candidate_end - group_var_start > max_span:
-                break
-            group_var_end = candidate_end
-            group_end += 1
-
-        span = group_var_end - group_var_start
-        n_group = group_end - wi
-
-        # Compute prefix sums over just this variant span. Weights are
-        # derived from absolute variant positions so the per-span basis
-        # matches the equivalent full-matrix span -- different chunkings
-        # produce identical Garud H values on the same window.
-        hap_span = hap[:, group_var_start:group_var_end].astype(cp.float64)
-        pos_span = pos[group_var_start:group_var_end]
-        w1 = _position_weights(pos_span, _GARUD_SALT1)
-        w2 = _position_weights(pos_span, _GARUD_SALT2)
-
-        hw1 = hap_span * w1[cp.newaxis, :]
-        hw2 = hap_span * w2[cp.newaxis, :]
-        cs1 = cp.zeros((n_hap, span + 1), dtype=cp.float64)
-        cs2 = cp.zeros((n_hap, span + 1), dtype=cp.float64)
-        cp.cumsum(hw1, axis=1, out=cs1[:, 1:])
-        cp.cumsum(hw2, axis=1, out=cs2[:, 1:])
-
-        # Local window indices relative to span start
-        local_ws = cp.asarray(ws_cpu[wi:group_end] - group_var_start)
-        local_we = cp.asarray(we_cpu[wi:group_end] - group_var_start)
-
-        all_h1 = (cs1[:, local_we] - cs1[:, local_ws]).T
-        all_h2 = (cs2[:, local_we] - cs2[:, local_ws]).T
-        all_h1 = cp.ascontiguousarray(all_h1)
-        all_h2 = cp.ascontiguousarray(all_h2)
-
-        # Launch kernel for this group
-        grp_results = {}
-        _launch_garud_kernel(all_h1, all_h2, n_hap, n_group,
-                             statistics, grp_results, tol=1e-3)
-
-        # Store group results
-        for stat_name, out_arr in [('garud_h1', out_h1), ('garud_h12', out_h12),
-                                    ('garud_h123', out_h123), ('garud_h2h1', out_h2h1),
-                                    ('haplotype_count', out_n_distinct)]:
-            if stat_name in grp_results:
-                out_arr[wi:group_end] = grp_results[stat_name]
-
-        del hap_span, hw1, hw2, cs1, cs2, all_h1, all_h2
-        free_gpu_pool()
-        wi = group_end
-
-    if 'garud_h1' in statistics:
-        results['garud_h1'] = out_h1
-    if 'garud_h12' in statistics:
-        results['garud_h12'] = out_h12
-    if 'garud_h123' in statistics:
-        results['garud_h123'] = out_h123
-    if 'garud_h2h1' in statistics:
-        results['garud_h2h1'] = out_h2h1
-    if 'haplotype_count' in statistics:
-        results['haplotype_count'] = out_n_distinct.astype(int)
-
-
-def _launch_garud_kernel(all_h1, all_h2, n_hap, n_windows, statistics,
-                          results, *, tol):
-    """Launch the Garud H GPU kernel and store results.
-
-    ``tol`` is the float64 distance below which two sorted hashes are
-    treated as the same haplotype. The per-window scatter-reduce
-    hashing path passes a much tighter tolerance (1e-12) than the
-    prefix-sum path (1e-3) because its hashes are bit-identical for
-    equal haplotypes and far apart for distinct ones; the looser
-    legacy value still absorbs the ULP-scale drift the cumsum-then-
-    subtract trick introduces.
-    """
-    out_h1 = cp.empty(n_windows, dtype=cp.float64)
-    out_h12 = cp.empty(n_windows, dtype=cp.float64)
-    out_h123 = cp.empty(n_windows, dtype=cp.float64)
-    out_h2h1 = cp.empty(n_windows, dtype=cp.float64)
-    out_n_distinct = cp.empty(n_windows, dtype=cp.float64)
-
-    block = max(1, (n_hap + 1) // 2)
-    block = 1 << (block - 1).bit_length()
-    block = min(block, 1024)
-    shm_size = 2 * n_hap * 8
-
-    _fused_garud_h_kernel(
-        (n_windows,), (block,),
-        (all_h1, all_h2, np.int32(n_hap), np.int32(n_windows),
-         np.float64(tol),
-         out_h1, out_h12, out_h123, out_h2h1, out_n_distinct),
-        shared_mem=shm_size)
-
-    if 'garud_h1' in statistics:
-        results['garud_h1'] = out_h1.get()
-    if 'garud_h12' in statistics:
-        results['garud_h12'] = out_h12.get()
-    if 'garud_h123' in statistics:
-        results['garud_h123'] = out_h123.get()
-    if 'garud_h2h1' in statistics:
-        results['garud_h2h1'] = out_h2h1.get()
-    if 'haplotype_count' in statistics:
-        results['haplotype_count'] = out_n_distinct.get().astype(int)
+    values = garud_h_windows(matrix.haplotypes, win_start, win_stop)
+    for name, column in zip(_FUSED_GARUD_STATS, values):
+        if name in statistics:
+            results[name] = column.astype(int) if name == 'haplotype_count' else column
 
 
 # ---------------------------------------------------------------------------
