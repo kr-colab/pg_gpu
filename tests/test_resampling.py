@@ -198,6 +198,14 @@ class TestMovingWindowHelpers:
         out = _moving_nansum(cp.asarray([1., 2., 3.]), size=2, step=1)
         np.testing.assert_array_equal(cp.asnumpy(out), [3., 5.])
 
+    def test_nanmean_strided_with_nan(self):
+        # Overlapping windows (step < size) combined with the non-NaN-count
+        # denominator: [1,nan]->1, [nan,3]->3, [3,4]->3.5. Pins that the mean
+        # divides by the finite count per window, not the window size, under
+        # overlap -- the one path the non-overlapping nanmean tests skip.
+        out = _moving_nanmean(cp.asarray([1., cp.nan, 3., 4.]), size=2, step=1)
+        np.testing.assert_array_equal(cp.asnumpy(out), [1.0, 3.0, 3.5])
+
     def test_window_larger_than_data_is_empty(self):
         # No window fits, so the result is empty rather than an error.
         assert _moving_nanmean(cp.asarray([1., 2.]), size=5).shape == (0,)

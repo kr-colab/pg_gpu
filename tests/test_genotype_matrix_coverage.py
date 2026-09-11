@@ -104,10 +104,18 @@ class TestDeviceTransfer:
         arr[101] = False
         gm.set_accessible_mask(AccessibleMask(arr, offset=0))
         assert gm._accessible_idx is not None
+        idx0 = np.asarray(gm._accessible_idx).copy()
+        geno0 = np.asarray(gm.genotypes).copy()
+        pos0 = np.asarray(gm.positions).copy()
         gm.transfer_to_gpu()
         assert isinstance(gm._accessible_idx, cp.ndarray)
         gm.transfer_to_cpu()
         assert isinstance(gm._accessible_idx, np.ndarray)
+        # The round trip must preserve the index values, genotypes, and
+        # positions -- not merely their array namespace.
+        np.testing.assert_array_equal(np.asarray(gm._accessible_idx), idx0)
+        np.testing.assert_array_equal(np.asarray(gm.genotypes), geno0)
+        np.testing.assert_array_equal(np.asarray(gm.positions), pos0)
 
 
 class TestFilter:
@@ -188,7 +196,11 @@ class TestAccessibleMaskLifecycle:
         gm.set_accessible_mask(AccessibleMask(arr, offset=0))
         idx = gm._accessible_idx
         assert idx is not None
-        assert 1 not in (idx.get() if hasattr(idx, "get") else idx)
+        # Exactly the two unmasked variants (positions 1 and 201), in order --
+        # an off-by-one that kept the wrong variant would still satisfy a bare
+        # "1 not in idx".
+        np.testing.assert_array_equal(
+            idx.get() if hasattr(idx, "get") else idx, [0, 2])
 
 
 @pytest.fixture

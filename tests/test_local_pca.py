@@ -211,6 +211,20 @@ class TestBatchedVsLoop:
                     assert float(np.dot(v, prev)) > 0.0
                 prev = v
 
+    def test_streaming_dense_matches_dense_eigh(self):
+        # streaming-dense is a separate per-window code path from the batched
+        # dense-eigh engine; on the same valid workload it must reproduce the
+        # eigenvalues and the eigenvectors (the latter up to per-window sign).
+        from .conftest import simulate_hm
+        hm = simulate_hm(n_samples=15, seq_length=50_000, seed=7)
+        kw = dict(window_size=20, step_size=20, window_type='snp', k=2)
+        d = local_pca(hm, engine='dense-eigh', **kw)
+        s = local_pca(hm, engine='streaming-dense', **kw)
+        np.testing.assert_allclose(s.eigvals, d.eigvals, rtol=1e-6, atol=1e-8,
+                                   equal_nan=True)
+        np.testing.assert_allclose(np.abs(s.eigvecs), np.abs(d.eigvecs),
+                                   rtol=1e-6, atol=1e-6, equal_nan=True)
+
 
 # ---------------------------------------------------------------------------
 # NaN / sparse-window handling
@@ -417,11 +431,15 @@ class TestCorners:
         xy = rng.standard_normal((50, 2))
         xy[0] = np.nan
         xy[5] = np.nan
-        # Should not raise
         out = corners(xy, prop=0.1, k=3, random_state=0)
-        # NaN indices should not appear in output
-        assert 0 not in out
-        assert 5 not in out
+        # The returned corners must be the correct ORIGINAL-row indices: equal
+        # to corners on the NaN-free subset mapped back through the surviving
+        # row numbers. A back-mapping bug (returning compacted-array positions)
+        # would still exclude the NaN rows but point at the wrong originals.
+        valid_idx = np.where(~np.isnan(xy).any(axis=1))[0]
+        ref = np.asarray(corners(xy[valid_idx], prop=0.1, k=3, random_state=0))
+        assert sorted(np.asarray(out).ravel().tolist()) == \
+            sorted(valid_idx[ref].ravel().tolist())
 
 
 # ---------------------------------------------------------------------------
