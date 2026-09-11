@@ -14,6 +14,7 @@ from typing import Union, Optional, Dict, Callable
 from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix
+from ._haplotype_hash import row_hashes
 
 
 def _apply_span_normalize(value, matrix, span_normalize):
@@ -1189,12 +1190,8 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
     return float(diversity)
 
 
-_HASH_SEED = 42  # fixed so identical inputs produce identical groupings across calls
-_HASH_TOL = 1e-3  # collision-safe for float32 dot products of 0/1 vectors at our n_var
-
-
 def _count_unique_haplotypes_gpu(haplotypes):
-    """Count unique haplotypes on GPU via dot-product hashing.
+    """Count unique haplotypes on GPU via exact row hashing.
 
     Caller must guarantee the input contains no missing data (-1).
 
@@ -1203,22 +1200,19 @@ def _count_unique_haplotypes_gpu(haplotypes):
     n_unique : int
     counts : cupy.ndarray of group sizes (unsorted)
     """
-    n_haplotypes, n_var = haplotypes.shape
-    rng = cp.random.RandomState(seed=_HASH_SEED)
-    w1 = rng.standard_normal(n_var, dtype=cp.float32)
-    w2 = rng.standard_normal(n_var, dtype=cp.float32)
-    h_f32 = haplotypes.astype(cp.float32)
-    hash1 = h_f32 @ w1
-    hash2 = h_f32 @ w2
+    n_haplotypes = haplotypes.shape[0]
+    hash1, hash2 = row_hashes(haplotypes)
     order = cp.lexsort(cp.stack([hash2, hash1]))
     s1 = hash1[order]
     s2 = hash2[order]
-    diff = (cp.abs(s1[1:] - s1[:-1]) > _HASH_TOL) | (cp.abs(s2[1:] - s2[:-1]) > _HASH_TOL)
+    # Identical rows hash bit-identically, so any change in either hash
+    # starts a new group.
+    diff = (s1[1:] != s1[:-1]) | (s2[1:] != s2[:-1])
     boundaries = cp.concatenate([cp.ones(1, dtype=cp.bool_), diff])
     boundary_idx = cp.where(boundaries)[0]
     tail = cp.full(1, n_haplotypes, dtype=boundary_idx.dtype)
     counts_gpu = cp.diff(cp.concatenate([boundary_idx, tail]))
-    return boundary_idx.shape[0], counts_gpu
+    return int(boundary_idx.shape[0]), counts_gpu
 
 
 def _cluster_haplotypes_with_missing(haps):

@@ -387,7 +387,7 @@ Two-population (one kernel launch for all):
 
 Selection scan statistics:
 
-- ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1`` -- Garud's H statistics per window (prefix-sum hashing + shared-memory sort)
+- ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1`` -- Garud's H statistics per window (exact per-window haplotype hashing + GPU sort; no limit on haplotype count)
 - ``mean_nsl`` -- mean nSL per window (per-site nSL + scatter binning)
 
 Structure / dimensionality reduction:
