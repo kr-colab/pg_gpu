@@ -114,6 +114,85 @@ def gpu_stats_geno(biallelic01_vcf):
     )
 
 
+# Recombination-distance bin edges (Morgans), deliberately off the integer bp
+# grid. Positions are integers and the map below is linear, so every pair's
+# recombination distance is an integer multiple of the 1e-8 M/bp rate. A round
+# edge (e.g. 1e-4 M = 10000 bp) coincides with real pairs, and pg_gpu and
+# moments assign an exactly-on-edge pair to different bins (opposite half-open
+# conventions). Nudging each edge to a half-bp (1000.5, 10000.5, ... bp) leaves
+# no pair on a boundary, so the r-binned sums match to machine precision.
+R_BINS = [0.0, 1.0005e-5, 1.00005e-4, 1.000005e-3, 1.0000005e-2]
+
+
+@pytest.fixture(scope="module")
+def rec_map(tmp_path_factory):
+    """A linear recombination map, 1 cM/Mb (1e-8 Morgans/bp), spanning the
+    example region. Linear so both tools assign identical genetic positions by
+    interpolation, isolating the recombination binning itself."""
+    path = os.path.join(str(tmp_path_factory.mktemp("recmap")), "rec.map")
+    with open(path, "w") as f:
+        f.write("pos\tcM\n0\t0.0\n1000000\t1.0\n")
+    return path
+
+
+@pytest.fixture(scope="module")
+def moments_stats_rbinned(rec_map):
+    """moments reference for the recombination-distance-binned haplotype path."""
+    return moments.LD.Parsing.compute_ld_statistics(
+        VCF, rec_map_file=rec_map, map_name="cM", map_sep="\t",
+        pop_file=POP_FILE, pops=POPS, r_bins=R_BINS,
+        use_genotypes=False, use_h5=False, report=False, cM=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def gpu_stats_rbinned(biallelic01_vcf, rec_map):
+    """pg_gpu stats binned by recombination distance (is_biallelic_01 subset,
+    same map and r_bins as the moments reference)."""
+    return compute_ld_statistics(
+        biallelic01_vcf, rec_map_file=rec_map, pop_file=POP_FILE, pops=POPS,
+        r_bins=R_BINS, use_genotypes=False, report=False,
+    )
+
+
+@pytest.fixture(scope="module")
+def masked_vcf(biallelic01_vcf, tmp_path_factory):
+    """The is_biallelic_01 VCF with ~10% of genotype calls set to missing
+    (``.|.``), to exercise the phased missing-data path. Deterministic."""
+    import random
+    rng = random.Random(0)
+    out = os.path.join(str(tmp_path_factory.mktemp("masked")), "masked.vcf")
+    with open(biallelic01_vcf) as fin, open(out, "w") as fout:
+        for line in fin:
+            if line.startswith("#"):
+                fout.write(line)
+                continue
+            parts = line.rstrip("\n").split("\t")
+            for c in range(9, len(parts)):
+                if rng.random() < 0.10:
+                    parts[c] = ".|."
+            fout.write("\t".join(parts) + "\n")
+    return out
+
+
+@pytest.fixture(scope="module")
+def moments_stats_masked(masked_vcf):
+    """moments reference on the masked VCF (haplotype estimator)."""
+    return moments.LD.Parsing.compute_ld_statistics(
+        masked_vcf, pop_file=POP_FILE, pops=POPS, bp_bins=BP_BINS,
+        use_genotypes=False, use_h5=False, report=False,
+    )
+
+
+@pytest.fixture(scope="module")
+def gpu_stats_masked(masked_vcf):
+    """pg_gpu stats on the masked VCF (haplotype estimator, same file)."""
+    return compute_ld_statistics(
+        masked_vcf, pop_file=POP_FILE, pops=POPS, bp_bins=BP_BINS,
+        use_genotypes=False, report=False,
+    )
+
+
 class TestOutputFormat:
     """Verify the output dict has the correct structure."""
 
@@ -177,6 +256,76 @@ class TestLDStatistics:
         for i in range(len(gpu_stats['bins'])):
             np.testing.assert_allclose(forced['sums'][i], gpu_stats['sums'][i],
                 rtol=1e-6, err_msg=f"chunk_size changed sums in bin {i}")
+
+
+class TestRecombinationBinnedParity:
+    """The recombination-distance binning path (r_bins + a genetic map) must
+    match moments, the same as the bp-binning path. Uses the haplotype
+    estimator; R_BINS explains why the edges sit off the integer bp grid."""
+
+    def test_ld_bins_match(self, moments_stats_rbinned, gpu_stats_rbinned):
+        for m_bin, g_bin in zip(moments_stats_rbinned['bins'],
+                                gpu_stats_rbinned['bins']):
+            assert np.isclose(m_bin[0], g_bin[0])
+            assert np.isclose(m_bin[1], g_bin[1])
+
+    def test_ld_sums_match(self, moments_stats_rbinned, gpu_stats_rbinned):
+        for i in range(len(moments_stats_rbinned['bins'])):
+            np.testing.assert_allclose(
+                gpu_stats_rbinned['sums'][i], moments_stats_rbinned['sums'][i],
+                rtol=1e-6, err_msg=f"r-binned LD sums mismatch in bin {i}")
+
+    def test_het_sums_match(self, moments_stats_rbinned, gpu_stats_rbinned):
+        np.testing.assert_allclose(
+            gpu_stats_rbinned['sums'][-1], moments_stats_rbinned['sums'][-1],
+            rtol=1e-6, err_msg="r-binned heterozygosity sums mismatch")
+
+    def test_bins_receive_pairs(self, gpu_stats_rbinned):
+        # Guard against a vacuous match: every LD bin must actually hold pairs,
+        # so the parity assertions above run on real data.
+        for i in range(len(gpu_stats_rbinned['bins'])):
+            assert np.any(np.asarray(gpu_stats_rbinned['sums'][i]) != 0)
+
+
+class TestMissingDataHaplotypeParity:
+    """Missing data on the phased haplotype path. pg_gpu drops the missing
+    sample from each pair and stays finite; moments returns NaN for a bin when
+    any pair in it is degenerate under missing (one NaN pair poisons the summed
+    bin). Where moments is finite the two must agree, and pg_gpu must be finite
+    throughout. The unphased genotype path is deliberately not compared: moments
+    fills missing as reference (allel to_n_alt fill=0) while pg_gpu drops it, so
+    the two are not comparable once any call is missing."""
+
+    def test_missing_data_is_present(self, masked_vcf):
+        import allel
+        gt = allel.GenotypeArray(allel.read_vcf(masked_vcf)['calldata/GT'])
+        frac_missing = float((gt.to_n_alt(fill=-1) < 0).mean())
+        assert 0.05 < frac_missing < 0.2
+
+    def test_gpu_finite_everywhere(self, gpu_stats_masked):
+        # pg_gpu does not inherit moments' NaN poisoning under missing data.
+        for i in range(len(gpu_stats_masked['sums'])):
+            assert np.all(np.isfinite(np.asarray(gpu_stats_masked['sums'][i])))
+
+    def test_ld_sums_match_where_moments_finite(self, moments_stats_masked,
+                                                gpu_stats_masked):
+        compared = 0
+        for i in range(len(moments_stats_masked['bins'])):
+            m = np.asarray(moments_stats_masked['sums'][i])
+            g = np.asarray(gpu_stats_masked['sums'][i])
+            finite = np.isfinite(m)
+            assert np.any(finite), f"bin {i}: no finite moments terms to compare"
+            np.testing.assert_allclose(g[finite], m[finite], rtol=1e-6,
+                err_msg=f"missing-data LD sums mismatch in bin {i}")
+            compared += int(np.sum(finite))
+        assert compared > 0
+
+    def test_het_sums_match(self, moments_stats_masked, gpu_stats_masked):
+        m = np.asarray(moments_stats_masked['sums'][-1])
+        g = np.asarray(gpu_stats_masked['sums'][-1])
+        finite = np.isfinite(m)
+        np.testing.assert_allclose(g[finite], m[finite], rtol=1e-6,
+            err_msg="missing-data heterozygosity sums mismatch")
 
 
 class TestHeterozygosity:
