@@ -114,6 +114,47 @@ def gpu_stats_geno(biallelic01_vcf):
     )
 
 
+# Recombination-distance bin edges (Morgans), deliberately off the integer bp
+# grid. Positions are integers and the map below is linear, so every pair's
+# recombination distance is an integer multiple of the 1e-8 M/bp rate. A round
+# edge (e.g. 1e-4 M = 10000 bp) coincides with real pairs, and pg_gpu and
+# moments assign an exactly-on-edge pair to different bins (opposite half-open
+# conventions). Nudging each edge to a half-bp (1000.5, 10000.5, ... bp) leaves
+# no pair on a boundary, so the r-binned sums match to machine precision.
+R_BINS = [0.0, 1.0005e-5, 1.00005e-4, 1.000005e-3, 1.0000005e-2]
+
+
+@pytest.fixture(scope="module")
+def rec_map(tmp_path_factory):
+    """A linear recombination map, 1 cM/Mb (1e-8 Morgans/bp), spanning the
+    example region. Linear so both tools assign identical genetic positions by
+    interpolation, isolating the recombination binning itself."""
+    path = os.path.join(str(tmp_path_factory.mktemp("recmap")), "rec.map")
+    with open(path, "w") as f:
+        f.write("pos\tcM\n0\t0.0\n1000000\t1.0\n")
+    return path
+
+
+@pytest.fixture(scope="module")
+def moments_stats_rbinned(rec_map):
+    """moments reference for the recombination-distance-binned haplotype path."""
+    return moments.LD.Parsing.compute_ld_statistics(
+        VCF, rec_map_file=rec_map, map_name="cM", map_sep="\t",
+        pop_file=POP_FILE, pops=POPS, r_bins=R_BINS,
+        use_genotypes=False, use_h5=False, report=False, cM=True,
+    )
+
+
+@pytest.fixture(scope="module")
+def gpu_stats_rbinned(biallelic01_vcf, rec_map):
+    """pg_gpu stats binned by recombination distance (is_biallelic_01 subset,
+    same map and r_bins as the moments reference)."""
+    return compute_ld_statistics(
+        biallelic01_vcf, rec_map_file=rec_map, pop_file=POP_FILE, pops=POPS,
+        r_bins=R_BINS, use_genotypes=False, report=False,
+    )
+
+
 class TestOutputFormat:
     """Verify the output dict has the correct structure."""
 
@@ -177,6 +218,35 @@ class TestLDStatistics:
         for i in range(len(gpu_stats['bins'])):
             np.testing.assert_allclose(forced['sums'][i], gpu_stats['sums'][i],
                 rtol=1e-6, err_msg=f"chunk_size changed sums in bin {i}")
+
+
+class TestRecombinationBinnedParity:
+    """The recombination-distance binning path (r_bins + a genetic map) must
+    match moments, the same as the bp-binning path. Uses the haplotype
+    estimator; R_BINS explains why the edges sit off the integer bp grid."""
+
+    def test_ld_bins_match(self, moments_stats_rbinned, gpu_stats_rbinned):
+        for m_bin, g_bin in zip(moments_stats_rbinned['bins'],
+                                gpu_stats_rbinned['bins']):
+            assert np.isclose(m_bin[0], g_bin[0])
+            assert np.isclose(m_bin[1], g_bin[1])
+
+    def test_ld_sums_match(self, moments_stats_rbinned, gpu_stats_rbinned):
+        for i in range(len(moments_stats_rbinned['bins'])):
+            np.testing.assert_allclose(
+                gpu_stats_rbinned['sums'][i], moments_stats_rbinned['sums'][i],
+                rtol=1e-6, err_msg=f"r-binned LD sums mismatch in bin {i}")
+
+    def test_het_sums_match(self, moments_stats_rbinned, gpu_stats_rbinned):
+        np.testing.assert_allclose(
+            gpu_stats_rbinned['sums'][-1], moments_stats_rbinned['sums'][-1],
+            rtol=1e-6, err_msg="r-binned heterozygosity sums mismatch")
+
+    def test_bins_receive_pairs(self, gpu_stats_rbinned):
+        # Guard against a vacuous match: every LD bin must actually hold pairs,
+        # so the parity assertions above run on real data.
+        for i in range(len(gpu_stats_rbinned['bins'])):
+            assert np.any(np.asarray(gpu_stats_rbinned['sums'][i]) != 0)
 
 
 class TestHeterozygosity:
