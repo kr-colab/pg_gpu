@@ -88,6 +88,20 @@ class TestMovingGarudH:
         assert np.all(h1 >= 0) and np.all(h1 <= 1)
         assert np.all(h12 >= h1)
 
+    def test_moving_garud_h_no_windows(self):
+        hap = np.random.default_rng(0).integers(0, 2, (10, 30), dtype=np.int8)
+        matrix = HaplotypeMatrix(hap, np.arange(30) * 100, 0, 3000)
+        out = selection.moving_garud_h(matrix, size=50)
+        assert len(out) == 4
+        assert all(o.shape == (0,) for o in out)
+
+    @pytest.mark.parametrize("kwargs", [dict(stop=40), dict(start=-1), dict(step=0)])
+    def test_moving_garud_h_rejects_bad_windows(self, kwargs):
+        hap = np.random.default_rng(0).integers(0, 2, (10, 30), dtype=np.int8)
+        matrix = HaplotypeMatrix(hap, np.arange(30) * 100, 0, 3000)
+        with pytest.raises(ValueError):
+            selection.moving_garud_h(matrix, size=10, **kwargs)
+
 
 class TestEHHDecay:
     """Test EHH decay computation."""

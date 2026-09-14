@@ -10,6 +10,8 @@ import numpy as np
 import allel
 from pg_gpu import HaplotypeMatrix, selection
 
+from .conftest import founder_haplotypes
+
 
 @pytest.fixture
 def simulated_data():
@@ -244,6 +246,17 @@ class TestGarudHComparison:
                 f"H123: pg={h123_p}, allel={h123_a}"
             assert np.isclose(h2h1_p, h2h1_a, rtol=1e-10), \
                 f"H2/H1: pg={h2h1_p}, allel={h2h1_a}"
+
+    @pytest.mark.parametrize("n_hap,step", [(40, None), (40, 7), (2200, 7)])
+    def test_moving_garud_h_correspondence(self, n_hap, step):
+        n_var = 200
+        hap = founder_haplotypes(np.random.default_rng(5), n_hap, n_var, 25)
+        expected = allel.moving_garud_h(hap.T, 20, step=step)
+
+        matrix = HaplotypeMatrix(hap, np.arange(n_var) * 1000, 0, n_var * 1000)
+        got = selection.moving_garud_h(matrix, size=20, step=step)
+        for name, e, g in zip(("H1", "H12", "H123", "H2/H1"), expected, got):
+            np.testing.assert_allclose(g, e, rtol=1e-10, err_msg=name)
 
 
 class TestStandardizeComparison:

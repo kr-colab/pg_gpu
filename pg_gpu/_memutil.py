@@ -81,6 +81,32 @@ def estimate_fused_chunk_size(n_hap, memory_fraction=0.35):
     return chunk
 
 
+# Bytes a Garud H batch holds per (window, haplotype) pair: the two hashes
+# (16), two per-row argsort passes with their gathers (about 64 at peak),
+# and sort scratch. The measured peak is 80; 96 leaves headroom for pool
+# rounding.
+_GARUD_BYTES_PER_PAIR = 96
+
+
+def estimate_garud_window_batch(n_hap, memory_fraction=0.3):
+    """Estimate how many windows a Garud H hash-and-sort batch can hold.
+
+    Parameters
+    ----------
+    n_hap : int
+        Number of haplotypes.
+    memory_fraction : float
+        Fraction of free GPU memory to budget for the batch.
+
+    Returns
+    -------
+    int
+        Number of windows per batch, at least 1.
+    """
+    return estimate_variant_chunk_size(max(n_hap, 1), bytes_per_element=_GARUD_BYTES_PER_PAIR,
+                                       n_intermediates=1, memory_fraction=memory_fraction)
+
+
 def free_gpu_pool():
     """Release unused GPU memory back to the device."""
     cp.cuda.Stream.null.synchronize()

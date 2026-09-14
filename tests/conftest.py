@@ -206,3 +206,24 @@ def canonical_hap_rows(call_genotype):
     haps[:, 0::2] = call_genotype[:, :, 0]
     haps[:, 1::2] = call_genotype[:, :, 1]
     return haps.T
+
+
+def founder_haplotypes(rng, n_hap, n_var, n_founders):
+    """``(n_hap, n_var)`` int8 rows drawn with replacement from random founders.
+
+    Founder alleles come from raw random bytes: ``Generator.integers`` slows
+    to microseconds per value on arrays this large.
+    """
+    raw = np.frombuffer(rng.bytes(n_founders * n_var), dtype=np.uint8)
+    founders = (raw & 1).astype(np.int8).reshape(n_founders, n_var)
+    return founders[rng.integers(0, n_founders, size=n_hap)]
+
+
+def garud_reference(hap):
+    """Garud H1, H12, H123, H2/H1 and the distinct count from exact unique rows."""
+    _, counts = np.unique(hap, axis=0, return_counts=True)
+    f = np.sort(counts)[::-1] / hap.shape[0]
+    h1 = np.sum(f ** 2)
+    return (h1, np.sum(f[:2]) ** 2 + np.sum(f[2:] ** 2),
+            np.sum(f[:3]) ** 2 + np.sum(f[3:] ** 2), (h1 - f[0] ** 2) / h1,
+            len(counts))

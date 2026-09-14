@@ -9,8 +9,8 @@ and accumulates, in a single pass over ``stream.iter_gpu_chunks()``:
 * Joint SFS projected from the full panel to a small display grid
   via per-variant hypergeometric sampling -- every variant from
   every haplotype contributes, no subsampling.
-* Garud's H per population (uses a 1,000-haplotype subsample because
-  the fused Garud kernel caps near 1024 haplotypes).
+* Garud's H per population (uses a 1,000-haplotype subsample to keep
+  the scan quick; any haplotype count works).
 
 Then -- after the streaming walk -- materializes a 1 Mb sub-region
 with a 5,000-haplotype subsample so the pairwise-r^2 heatmap can
@@ -90,7 +90,7 @@ def parse_args():
                         "SFS, in haplotypes per population")
     p.add_argument("--garud-subsample", type=int, default=1_000,
                    help="haplotypes drawn per population for Garud's H "
-                        "(kernel caps near 1024)")
+                        "(a speed knob; any count works)")
     return p.parse_args()
 
 
