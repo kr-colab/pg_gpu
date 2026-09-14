@@ -692,6 +692,23 @@ def _build_scatter_indices(pos_cpu, chrom_start, chrom_end,
             k_safe, contains, win_idx_gpu, mask_gpu)
 
 
+def _achaz_coeffs_per_window(n_harm_w, w1, w2):
+    """(alpha, beta) per window from _achaz_variance_coefficients(w1, w2, n).
+
+    Evaluated once per distinct value of n_harm_w rather than per window.
+    NaN for n < 3.
+    """
+    from .diversity import _achaz_variance_coefficients
+
+    uniq_n, inv_idx = np.unique(n_harm_w, return_inverse=True)
+    alpha_lut = np.full(uniq_n.shape, np.nan)
+    beta_lut = np.full(uniq_n.shape, np.nan)
+    for i, nv in enumerate(uniq_n):
+        if nv >= 3:
+            alpha_lut[i], beta_lut[i] = _achaz_variance_coefficients(w1, w2, int(nv))
+    return alpha_lut[inv_idx], beta_lut[inv_idx]
+
+
 def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
                               statistics, populations, missing_data,
                               span_normalize, chrom=None):
@@ -833,21 +850,30 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     if 'fay_wu_h' in stats_set:
         results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get() / spans
 
-    # Neutrality tests — unified Achaz (2009) variance framework
+    # Neutrality tests — Achaz (2009) variance framework, with the effective
+    # sample size the per-window harmonic mean of n_valid rather than the
+    # nominal n_hap.
     need_variance = stats_set & {'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}
     if need_variance:
-        from .diversity import _achaz_variance_coefficients
+        from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
         S = seg_count.get()
-        a1 = sum(1.0 / i for i in range(1, n_hap))
-        a2 = sum(1.0 / (i ** 2) for i in range(1, n_hap))
-        theta_est = S / a1
-        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
+
+        inv_valid = cp.where(has_data, 1.0 / n, 0.0)
+        sum_inv_w, count_valid_w = cp.stack([
+            scatter_sum(inv_valid), scatter_sum(has_data.astype(cp.float64))
+        ]).get()
+        n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
+
+        a1, a2 = _harmonic_a1_a2_array(n_harm_w)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            theta_est = S / a1
+            theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
 
         def windowed_test(w1, w2, numerator_arr):
-            alpha, beta = _achaz_variance_coefficients(w1, w2, n_hap)
-            var = alpha * theta_est + beta * theta_sq_est
+            alpha, beta = _achaz_coeffs_per_window(n_harm_w, w1, w2)
             with np.errstate(invalid='ignore', divide='ignore'):
-                return np.where((var > 0) & (S >= 3),
+                var = alpha * theta_est + beta * theta_sq_est
+                return np.where((var > 0) & (S >= 3) & (n_harm_w >= 3),
                                 numerator_arr / np.sqrt(var), np.nan)
 
     if stats_set & {'tajimas_d', 'zeng_dh'}:
@@ -1473,6 +1499,80 @@ def _filter_fused_allele_cap_raw(hap_raw, positions, cap_source=None):
     return hap_raw, positions, keep_idx
 
 
+def _fused_tajimas_d(hap, positions, ws_gpu, we_gpu, ws_cpu, we_cpu,
+                     n_windows, mpd_sum, seg_count):
+    """Tajima (1989) D for the fused-kernel engines.
+
+    Uses the per-window harmonic mean of ``n_valid`` over sites with
+    ``n_valid >= 2`` in place of the nominal ``n_hap``.
+
+    Parameters
+    ----------
+    hap : cupy.ndarray, shape (n_hap, n_var)
+        Aligned with ``positions`` -- both already reflect any
+        multiallelic-cap filtering the caller applied.
+    positions : cupy.ndarray, shape (n_var,)
+    ws_gpu, we_gpu : cupy.ndarray, shape (n_windows,)
+        Window start/stop coordinates (right-open), on GPU.
+    ws_cpu, we_cpu : numpy.ndarray, shape (n_windows,)
+        The same, on host.
+    n_windows : int
+    mpd_sum, seg_count : numpy.ndarray, shape (n_windows,)
+        Raw per-window sums from ``_fused_windowed_kernel_v2``.
+
+    Returns
+    -------
+    numpy.ndarray, float64, shape (n_windows,)
+    """
+    from ._memutil import allele_counts
+    from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
+
+    # Site-to-window membership: a variant belongs to window w iff
+    # ws[w] <= pos < we[w]; windows may overlap, so a site's member windows
+    # are the consecutive run [k_lo, k_hi].
+    k_hi = cp.searchsorted(ws_gpu, positions, side='right') - 1
+    k_lo = cp.searchsorted(we_gpu, positions, side='right')
+    depth = (np.searchsorted(ws_cpu, ws_cpu, side='right')
+             - np.searchsorted(we_cpu, ws_cpu, side='right'))
+    n_per_var = max(1, int(depth.max(initial=0)))
+    site_win = (k_hi[None, :]
+               - cp.arange(n_per_var, dtype=cp.int64)[:, None])
+    site_ok = site_win >= k_lo[None, :]
+
+    _, n_valid = allele_counts(hap)
+    has_data = n_valid >= 2
+    inv_valid = cp.where(has_data, 1.0 / n_valid.astype(cp.float64), 0.0)
+    valid_flag = has_data.astype(cp.float64)
+
+    member_win = site_win[site_ok]
+    sum_inv_w, count_valid_w = cp.stack([
+        _scatter_sum(cp.broadcast_to(inv_valid, site_win.shape)[site_ok],
+                    member_win, n_windows),
+        _scatter_sum(cp.broadcast_to(valid_flag, site_win.shape)[site_ok],
+                    member_win, n_windows),
+    ]).get()
+    n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
+
+    n_f = n_harm_w.astype(np.float64)
+    a1, a2 = _harmonic_a1_a2_array(n_harm_w)
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        b1 = (n_f + 1) / (3 * (n_f - 1))
+        b2 = 2 * (n_f ** 2 + n_f + 3) / (9 * n_f * (n_f - 1))
+        c1 = b1 - 1 / a1
+        c2 = b2 - (n_f + 2) / (a1 * n_f) + a2 / a1 ** 2
+        e1 = c1 / a1
+        e2 = c2 / (a1 ** 2 + a2)
+
+        S = seg_count
+        d_num = mpd_sum - S / a1
+        d_var = e1 * S + e2 * S * (S - 1)
+        d_std = np.sqrt(np.maximum(d_var, 0))
+        tajd = np.where(d_std > 0, d_num / d_std, np.nan)
+    tajd[(S < 3) | (n_harm_w < 3)] = np.nan
+    return tajd
+
+
 _fused_windowed_kernel_v2 = cp.RawKernel(r'''
 #define MAX_ALLELES 8   /* keep in sync with _FUSED_MAX_ALLELES (host guard) */
 extern "C" __global__
@@ -1990,23 +2090,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             results['singletons'] = sing_count.astype(int)
 
         if 'tajimas_d' in statistics:
-            n = n_hap
-            a1 = np.sum(1.0 / np.arange(1, n))
-            a2 = np.sum(1.0 / np.arange(1, n) ** 2)
-            b1 = (n + 1) / (3 * (n - 1))
-            b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
-            c1 = b1 - 1 / a1
-            c2 = b2 - (n + 2) / (a1 * n) + a2 / a1 ** 2
-            e1 = c1 / a1
-            e2 = c2 / (a1 ** 2 + a2)
-
-            S = seg_count
-            d_num = mpd_sum - S / a1
-            d_var = e1 * S + e2 * S * (S - 1)
-            d_std = np.sqrt(np.maximum(d_var, 0))
-            tajd = np.where(d_std > 0, d_num / d_std, np.nan)
-            tajd[S < 3] = np.nan
-            results['tajimas_d'] = tajd
+            results['tajimas_d'] = _fused_tajimas_d(
+                matrix.haplotypes, positions, ws_gpu, we_gpu, ws_cpu, we_cpu,
+                n_windows, mpd_sum, seg_count)
 
         if 'theta_h' in statistics:
             if per_base:
@@ -2511,23 +2597,10 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             results['singletons'] = sing_count.astype(int)
 
         if 'tajimas_d' in statistics:
-            n = n_hap
-            a1 = np.sum(1.0 / np.arange(1, n))
-            a2 = np.sum(1.0 / np.arange(1, n) ** 2)
-            b1 = (n + 1) / (3 * (n - 1))
-            b2 = 2 * (n ** 2 + n + 3) / (9 * n * (n - 1))
-            c1 = b1 - 1 / a1
-            c2 = b2 - (n + 2) / (a1 * n) + a2 / a1 ** 2
-            e1 = c1 / a1
-            e2 = c2 / (a1 ** 2 + a2)
-
-            S = seg_count
-            d_num = mpd_sum - S / a1
-            d_var = e1 * S + e2 * S * (S - 1)
-            d_std = np.sqrt(np.maximum(d_var, 0))
-            tajd = np.where(d_std > 0, d_num / d_std, np.nan)
-            tajd[S < 3] = np.nan
-            results['tajimas_d'] = tajd
+            # hap_raw/positions already reflect the multiallelic-cap filter.
+            results['tajimas_d'] = _fused_tajimas_d(
+                hap_raw, positions, ws_gpu, we_gpu, ws_cpu, we_cpu,
+                n_windows, mpd_sum, seg_count)
 
         if 'theta_h' in statistics:
             if per_base:
@@ -2861,7 +2934,7 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
     # mirroring diversity._ac_contribution and the scatter engine so all three
     # single-pop windowed engines agree with the scalar diversity functions.
     from ._memutil import allele_counts
-    from .diversity import _ac_contribution, _achaz_variance_coefficients
+    from .diversity import _ac_contribution
 
     ac, n_valid_i = allele_counts(hap)
     n_v = n_valid_i.astype(cp.float64)
@@ -2926,20 +2999,28 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
             he_sum / variant_counts.astype(cp.float64), cp.nan).get()
 
     if 'tajimas_d' in statistics:
-        # numerator = pi - theta_w (per-allele sums); Achaz (2009) variance from
-        # a single n_hap and mutation-count S, matching the scatter engine.
+        # numerator = pi - theta_w (per-allele sums); Achaz (2009) variance
+        # from the per-window effective sample size and mutation-count S.
+        from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
         pi_sum_td = _scatter_sum(pi_contrib, bin_idx, n_windows)
         watt_sum_td = _scatter_sum(watt_contrib, bin_idx, n_windows)
-        S = seg_count.get()
-        a1 = sum(1.0 / i for i in range(1, n_hap_int))
-        a2 = sum(1.0 / (i ** 2) for i in range(1, n_hap_int))
-        theta_est = S / a1
-        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
-        alpha, beta = _achaz_variance_coefficients('pi', 'watterson', n_hap_int)
-        var = alpha * theta_est + beta * theta_sq_est
-        num = (pi_sum_td - watt_sum_td).get()
+        inv_valid_td = cp.where(has_data, 1.0 / n_v, 0.0)
+        S, num, sum_inv_w, count_valid_w = cp.stack([
+            seg_count,
+            pi_sum_td - watt_sum_td,
+            _scatter_sum(inv_valid_td, bin_idx, n_windows),
+            _scatter_sum(has_data.astype(cp.float64), bin_idx, n_windows),
+        ]).get()
+        n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
+
+        a1, a2 = _harmonic_a1_a2_array(n_harm_w)
         with np.errstate(invalid='ignore', divide='ignore'):
-            tajd = np.where((var > 0) & (S >= 3), num / np.sqrt(var), np.nan)
+            theta_est = S / a1
+            theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
+            alpha, beta = _achaz_coeffs_per_window(n_harm_w, 'pi', 'watterson')
+            var = alpha * theta_est + beta * theta_sq_est
+            tajd = np.where((var > 0) & (S >= 3) & (n_harm_w >= 3),
+                            num / np.sqrt(var), np.nan)
         results['tajimas_d'] = tajd
 
     # two-population statistics

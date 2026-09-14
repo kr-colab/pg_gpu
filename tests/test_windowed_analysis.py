@@ -1223,15 +1223,10 @@ class TestMultiallelicSinglePop:
                 float(np.nanmean(diversity.heterozygosity_expected(sub))),
                 rtol=1e-9, atol=1e-11)
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "windowed tajimas_d variance uses nominal n_hap; the scalar uses the "
-        "harmonic-mean effective n over per-site n_valid, so they diverge under "
-        "missing data (issue #100). Fixing the windowed effective-n convention "
-        "needs outside input; remove this marker when reconciled."))
     def test_per_variant_missing_data_tajimas_d_matches_scalar(self,
                                                                sim_hm_missing):
-        """Per-window tajimas_d should equal the scalar on the window subset;
-        currently diverges with missing data (effective-n convention)."""
+        """Per-window tajimas_d must equal the scalar on the window subset
+        under missing data (per-window harmonic-mean effective n)."""
         from pg_gpu.windowed_analysis import windowed_statistics
         hm = sim_hm_missing
         window_size = 25_000
