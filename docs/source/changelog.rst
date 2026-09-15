@@ -177,6 +177,13 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* Several ``HaplotypeMatrix``/``GenotypeMatrix`` methods that subset or
+  convert a matrix by variant (``get_subset``, ``get_subset_from_range``,
+  ``restrict_to_biallelic``, ``restrict_to_segregating``,
+  ``exclude_missing_sites``, ``filter_variants_by_missing``,
+  ``from_haplotype_matrix``, ``to_haplotype_matrix``) dropped ``samples``
+  and/or ``fields`` on the result instead of carrying/slicing them as
+  ``filter`` already did. All now match ``filter``.
 * Windowed Garud's H made three float64 copies of the haplotype matrix
   (109 GB each for 2,940 haplotypes across 4.7 million sites) and, for
   a Garud-only request, a transposed int8 copy on top. Each window is

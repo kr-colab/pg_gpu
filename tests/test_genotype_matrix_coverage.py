@@ -146,6 +146,43 @@ class TestFilter:
         assert out.n_total_sites is None
 
 
+class TestSamplesFieldsPreservation:
+
+    def test_restrict_to_segregating_slices_fields(self):
+        # variants 0 and 2 are monomorphic (all-ref) and get dropped; only
+        # variant 1 (het in both individuals) is segregating.
+        geno = np.array([[0, 1, 0], [0, 1, 0]], dtype=np.int8)
+        gm = GenotypeMatrix(geno, np.array([100, 200, 300]), 0, 300,
+                            samples=['a', 'b'],
+                            fields={'MQ': np.array([10.0, 20.0, 30.0],
+                                                   dtype=np.float32)})
+        out = gm.restrict_to_segregating()
+        assert out.samples == ['a', 'b']
+        np.testing.assert_array_equal(out.fields['MQ'], [20.0])
+
+    def test_from_haplotype_matrix_preserves_samples_and_fields(self):
+        from pg_gpu import HaplotypeMatrix
+        hap = np.array([[0, 1, 0], [0, 1, 0], [1, 0, 1], [1, 0, 1]],
+                       dtype=np.int8)
+        pos = np.array([100, 200, 300])
+        hm = HaplotypeMatrix(hap, pos, 0, 300, samples=['x', 'y'],
+                             fields={'MQ': np.array([1.0, 2.0, 3.0],
+                                                    dtype=np.float32)})
+        gm = GenotypeMatrix.from_haplotype_matrix(hm)
+        assert gm.samples == ['x', 'y']
+        np.testing.assert_array_equal(gm.fields['MQ'], hm.fields['MQ'])
+
+    def test_to_haplotype_matrix_preserves_samples_fields_and_sample_sets(self):
+        geno = np.array([[0, 1, 2], [2, 1, 0]], dtype=np.int8)
+        gm = GenotypeMatrix(geno, np.array([100, 200, 300]), 0, 300,
+                            samples=['x', 'y'], sample_sets={'all': [0, 1]},
+                            fields={'DP': np.array([5, 10, 15], dtype=np.int32)})
+        hm = gm.to_haplotype_matrix()
+        assert hm.samples == ['x', 'y']
+        np.testing.assert_array_equal(hm.fields['DP'], gm.fields['DP'])
+        assert hm._sample_sets == {'all': [0, 1, 2, 3]}
+
+
 class TestLoadPopFile:
 
     def test_no_sample_names_raises(self):

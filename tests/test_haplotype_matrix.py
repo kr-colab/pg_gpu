@@ -309,6 +309,57 @@ def test_get_subset(sample_vcf):
     assert isinstance(subset2, HaplotypeMatrix)
     assert subset2.shape == (20, 5)
 
+
+def _matrix_with_fields(n_var=30, n_hap=10, seed=0):
+    """A matrix with samples and a per-variant/per-genotype field each."""
+    rng = np.random.RandomState(seed)
+    hap = rng.randint(0, 2, size=(n_hap, n_var)).astype(np.int8)
+    pos = np.sort(rng.choice(np.arange(1, 10_000), n_var, replace=False))
+    fields = {
+        'MQ': rng.random(n_var).astype(np.float32),
+        'GQ': rng.randint(0, 100, size=(n_var, n_hap // 2)).astype(np.int32),
+    }
+    samples = [f's{i}' for i in range(n_hap // 2)]
+    return HaplotypeMatrix(hap, pos, 0, 10_000, samples=samples,
+                           fields=fields)
+
+
+def _host(arr):
+    return cp.asnumpy(arr) if isinstance(arr, cp.ndarray) else np.asarray(arr)
+
+
+def _assert_fields_match_keep(original, result):
+    """result's fields equal original's fields sliced to result's positions."""
+    orig_pos = _host(original.positions)
+    keep = np.searchsorted(orig_pos, _host(result.positions))
+    for tag, arr in original.fields.items():
+        np.testing.assert_array_equal(result.fields[tag], arr[keep])
+
+
+@pytest.mark.parametrize("subset_fn", [
+    lambda m: m.get_subset(np.array([1, 3, 5, 7], dtype=np.int64)),
+    lambda m: m.get_subset_from_range(int(m.positions[2]), int(m.positions[8])),
+    lambda m: m.restrict_to_biallelic(),
+    lambda m: m.restrict_to_segregating(),
+    lambda m: m.exclude_missing_sites(),
+    lambda m: m.filter_variants_by_missing(1.0),
+])
+def test_variant_subset_methods_preserve_samples_and_fields(subset_fn):
+    m = _matrix_with_fields()
+    result = subset_fn(m)
+    assert result.samples == m.samples
+    assert set(result.fields.keys()) == set(m.fields.keys())
+    _assert_fields_match_keep(m, result)
+
+
+def test_variant_subset_methods_empty_result_keeps_field_keys():
+    m = _matrix_with_fields()
+    empty = m.get_subset(np.array([], dtype=np.int64))
+    assert empty.samples == m.samples
+    assert set(empty.fields.keys()) == set(m.fields.keys())
+    assert empty.fields['MQ'].shape == (0,)
+    assert empty.fields['GQ'].shape == (0, m.fields['GQ'].shape[1])
+
 def test_transfer_to_gpu():
     """Test transferring data from CPU to GPU."""
     # Create a small dummy haplotype matrix (using NumPy)
