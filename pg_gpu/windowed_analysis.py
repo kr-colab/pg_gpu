@@ -927,7 +927,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
                               span_normalize, chrom=None):
     """Compute windowed two-population stats via scatter-add on GPU.
 
-    Same pattern as _windowed_thetas_scatter but for fst, dxy, da.
+    Same pattern as _windowed_thetas_scatter but for fst, fst_wc, dxy, da.
     Uses per-site valid counts for correct missing data handling.
     """
     from ._utils import get_population_matrix
@@ -936,7 +936,22 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
+    stats_set = set(statistics)
     pop1_name, pop2_name = populations[0], populations[1]
+
+    if 'fst_wc' in stats_set:
+        # fst_wc pairs consecutive rows of each population into individuals;
+        # the other statistics here take any row list, so this check is
+        # specific to fst_wc, mirroring the fused engine's equivalent.
+        from ._warnings import check_paired_rows
+        for pop in (pop1_name, pop2_name):
+            rows = (haplotype_matrix.sample_sets.get(pop)
+                    if isinstance(pop, str) else list(pop))
+            if rows is None:
+                continue
+            label = pop if isinstance(pop, str) else "row list"
+            check_paired_rows(rows, f"windowed fst_wc({label})")
+
     mat1 = get_population_matrix(haplotype_matrix, pop1_name)
     mat2 = get_population_matrix(haplotype_matrix, pop2_name)
 
@@ -1002,7 +1017,11 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     # Compute per-site components (single pass over the data)
     mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
 
-    stats_set = set(statistics)
+    if 'fst_wc' in stats_set:
+        from .divergence import _wc_site_components
+        wc_a, wc_abc = _wc_site_components(hap1, hap2)
+        wc_a_sum = scatter_sum(wc_a)
+        wc_abc_sum = scatter_sum(wc_abc)
 
     # Scatter-add per-site components into windows (deduplicated)
     need_between = stats_set & {'fst', 'fst_hudson', 'dxy', 'da'}
@@ -1031,6 +1050,10 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
 
     if 'da' in stats_set:
         results['da'] = ((between_sum - (pi1_sum + pi2_sum) / 2.0) / spans_gpu).get()
+
+    if 'fst_wc' in stats_set:
+        results['fst_wc'] = cp.where(wc_abc_sum > 0, wc_a_sum / wc_abc_sum,
+                                     cp.nan).get()
 
     # Windows with no accessible bases get NaN for every per-base rate.
     if zero_span.any():
@@ -1241,7 +1264,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     scatter_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
                       'theta_h', 'theta_l', 'fay_wu_h', 'singletons',
                       'normalized_fay_wu_h', 'zeng_e', 'zeng_dh', 'max_daf'}
-    scatter_twopop = {'fst', 'fst_hudson', 'dxy', 'da'}
+    scatter_twopop = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
     requested = set(statistics)
 
     if missing_data in ('include', 'exclude'):
