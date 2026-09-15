@@ -177,6 +177,13 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* Windowed ``fst_wc`` could only be computed by the fused CUDA kernel
+  (``missing_data='include'``) or a slow per-window scalar loop
+  (``'exclude'``), since nothing exposed Weir-Cockerham's per-site
+  decomposition for the vectorized scatter engine to reuse. It now shares
+  that decomposition with the scalar function and runs through the same
+  fast scatter path as the other two-population statistics under both
+  modes.
 * Windowed Garud's H made three float64 copies of the haplotype matrix
   (109 GB each for 2,940 haplotypes across 4.7 million sites) and, for
   a Garud-only request, a transposed int8 copy on top. Each window is
