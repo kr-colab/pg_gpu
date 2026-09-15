@@ -1168,9 +1168,18 @@ class HaplotypeMatrix:
         result.chrom_end = self.chrom_end
         result.n_total_sites = self.n_total_sites
         result.samples = self.samples
-        result.fields = {}
+        result.fields = {tag: arr[:0] for tag, arr in self.fields.items()}
         result.accessible_mask = None
         return result
+
+    def _sliced_fields(self, keep_idx):
+        """self.fields sliced on axis 0 by keep_idx.
+
+        fields are host numpy arrays regardless of matrix device, so the
+        index is moved to host first.
+        """
+        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
+        return {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
 
     def get_subset(self, positions) -> "HaplotypeMatrix":
         """
@@ -1214,6 +1223,8 @@ class HaplotypeMatrix:
             subset_positions,
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
+            samples=self.samples,
+            fields=self._sliced_fields(positions),
         )
 
     def get_subset_from_range(self, low: int, high: int) -> "HaplotypeMatrix":
@@ -1262,6 +1273,7 @@ class HaplotypeMatrix:
             sample_sets=self._sample_sets,
             samples=self.samples,
             accessible_mask=sliced_mask,
+            fields=self._sliced_fields(indices),
         )
 
     def _keep_sites(self, keep) -> "HaplotypeMatrix":
@@ -1269,10 +1281,11 @@ class HaplotypeMatrix:
 
         Dropping sites changes neither the chromosome extent nor which
         bases are accessible, so the child carries the parent's bounds,
-        accessibility mask, sample sets, and n_total_sites -- the rule
-        every same-region site filter follows. An empty selection routes
-        through get_subset, which builds a valid 0-variant matrix (the
-        constructor rejects empty arrays).
+        accessibility mask, sample sets, n_total_sites, and samples, and
+        slices fields to the kept sites -- the rule every same-region site
+        filter follows. An empty selection routes through get_subset, which
+        builds a valid 0-variant matrix (the constructor rejects empty
+        arrays).
         """
         if len(keep) == 0:
             return self.get_subset(keep)
@@ -1283,6 +1296,8 @@ class HaplotypeMatrix:
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
             accessible_mask=self.accessible_mask,
+            samples=self.samples,
+            fields=self._sliced_fields(keep),
         )
 
     def restrict_to_biallelic(self, *, warn_context=None) -> "HaplotypeMatrix":
