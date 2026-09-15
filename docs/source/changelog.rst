@@ -198,6 +198,12 @@ Bug fixes
   share the exact haplotype hash of the windowed scan.
   ``moving_garud_h`` rejects windows outside the matrix instead of
   reading past it.
+* Windowed ``tajimas_d``, ``normalized_fay_wu_h``, ``zeng_e``, and
+  ``zeng_dh`` computed their null variance from the nominal haplotype
+  count instead of the harmonic mean of per-site valid counts the scalar
+  functions use, so values diverged from the scalar reference under
+  missing data. All four windowed engines now use the same per-window
+  effective sample size the scalar functions do.
 * ``HaplotypeMatrix.pairwise_r2`` and ``windowed_r_squared`` rejected
   ``estimator='auto'`` -- the default name for the LD estimator
   everywhere else -- with an "unknown estimator" error. They accept it
