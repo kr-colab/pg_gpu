@@ -16,6 +16,7 @@ from tqdm import tqdm
 from .haplotype_matrix import HaplotypeMatrix
 from . import ld_statistics
 from . import divergence
+from .divergence import _twopop_site_components
 from . import diversity
 from ._haplotype_hash import garud_h_windows
 
@@ -878,48 +879,6 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
                 results[name] = np.where(zero_span, np.nan, results[name])
 
     return pd.DataFrame(results)
-
-
-def _twopop_site_components(hap1, hap2):
-    """Compute per-site two-population components on GPU.
-
-    Returns (mpd1, mpd2, between) where:
-      mpd1 = within-pop1 mean pairwise difference per site
-      mpd2 = within-pop2 mean pairwise difference per site
-      between = between-pop mean pairwise difference per site
-
-    Per-allele (multiallelic-correct): the same-allele pair counts sum over
-    every allele column on a shared allele-index width K, so ``between``
-    equals the per-site Dxy (``1 - sum_a p1_a p2_a``) and mpd1/mpd2 the
-    per-site within-pop pi -- identical to the scalar ``divergence`` functions
-    (``_hudson_fst_from_counts`` / ``dxy``). Reduces to the biallelic
-    ancestral/derived form when there are two alleles. All quantities use
-    per-site valid counts (missing-data aware).
-    """
-    from .divergence import _aligned_pop_counts
-
-    ac1, ac2, n1, n2 = _aligned_pop_counts(hap1, hap2)
-    ac1 = ac1.astype(cp.float64)
-    ac2 = ac2.astype(cp.float64)
-    n1 = n1.astype(cp.float64)
-    n2 = n2.astype(cp.float64)
-
-    # Within-pop mean pairwise differences (same pairs summed over alleles)
-    n1_pairs = n1 * (n1 - 1) / 2
-    n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
-    mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
-
-    n2_pairs = n2 * (n2 - 1) / 2
-    n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
-    mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
-
-    # Between-pop mean pairwise differences (per-allele cross term)
-    n_between = n1 * n2
-    n_between_same = cp.sum(ac1 * ac2, axis=1)
-    between = cp.where(n_between > 0,
-                       (n_between - n_between_same) / n_between, 0.0)
-
-    return mpd1, mpd2, between
 
 
 def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
