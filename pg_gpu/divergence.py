@@ -84,6 +84,54 @@ def dxy_components(pop1_haps, pop2_haps):
     return total_diffs, total_comps, n_sites
 
 
+def _twopop_site_components(hap1, hap2):
+    """Compute per-site two-population components on GPU.
+
+    Returns (mpd1, mpd2, between) where:
+      mpd1 = within-pop1 mean pairwise difference per site
+      mpd2 = within-pop2 mean pairwise difference per site
+      between = between-pop mean pairwise difference (Dxy) per site
+
+    A site contributes to any of the three only where both populations have
+    at least one valid (non-missing) gamete -- the same joint condition
+    fst_hudson's own num/den masking and the fused kernel's per-site skip
+    already use. Within that joint set, mpd1/mpd2 are additionally zero
+    wherever that population alone doesn't have a pair (nv < 2); between
+    needs only one gamete from each side. Per-allele (multiallelic-correct):
+    the same-allele pair counts sum over every allele column on a shared
+    allele-index width K, so between equals the per-site Dxy
+    (``1 - sum_a p1_a p2_a``) and mpd1/mpd2 the per-site within-pop pi.
+    Reduces to the biallelic ancestral/derived form when there are two
+    alleles.
+    """
+    ac1, ac2, n1, n2 = _aligned_pop_counts(hap1, hap2)
+    ac1 = ac1.astype(cp.float64)
+    ac2 = ac2.astype(cp.float64)
+    n1 = n1.astype(cp.float64)
+    n2 = n2.astype(cp.float64)
+
+    joint = (n1 > 0) & (n2 > 0)
+
+    # Within-pop mean pairwise differences (same pairs summed over alleles),
+    # zero outside the joint site set even where the population alone has
+    # enough gametes for its own pair.
+    n1_pairs = n1 * (n1 - 1) / 2
+    n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
+    mpd1 = cp.where(joint & (n1_pairs > 0), (n1_pairs - n1_same) / n1_pairs, 0.0)
+
+    n2_pairs = n2 * (n2 - 1) / 2
+    n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
+    mpd2 = cp.where(joint & (n2_pairs > 0), (n2_pairs - n2_same) / n2_pairs, 0.0)
+
+    # Between-pop mean pairwise differences (per-allele cross term)
+    n_between = n1 * n2
+    n_between_same = cp.sum(ac1 * ac2, axis=1)
+    between = cp.where(n_between > 0,
+                       (n_between - n_between_same) / n_between, 0.0)
+
+    return mpd1, mpd2, between
+
+
 def fst(haplotype_matrix: HaplotypeMatrix,
         pop1: Union[str, list],
         pop2: Union[str, list],
@@ -580,20 +628,27 @@ def da(haplotype_matrix: HaplotypeMatrix,
     float
         Net divergence (Da)
     """
-    # Get Dxy
-    dxy_value = dxy(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                   span_normalize=span_normalize)
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
 
-    # Get within-population diversities
-    pi1 = _diversity_pi(haplotype_matrix, population=pop1, missing_data=missing_data,
-              span_normalize=span_normalize)
-    pi2 = _diversity_pi(haplotype_matrix, population=pop2, missing_data=missing_data,
-              span_normalize=span_normalize)
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2])
+        if haplotype_matrix.num_variants == 0:
+            return 0.0
 
-    # Calculate Da
-    da_value = dxy_value - (pi1 + pi2) / 2.0
+    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
+    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
+    pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
+    pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    return da_value
+    # dxy and the within-pop pi terms share one site set: a site counts
+    # toward any of the three only where both populations have data (see
+    # _twopop_site_components), matching fst_hudson's own convention.
+    mpd1, mpd2, between = _twopop_site_components(pop1_haps, pop2_haps)
+    da_raw = cp.sum(between) - (cp.sum(mpd1) + cp.sum(mpd2)) / 2.0
+
+    return _apply_span_normalize(da_raw, haplotype_matrix, span_normalize)
 
 
 def pi_within_population(haplotype_matrix: HaplotypeMatrix,

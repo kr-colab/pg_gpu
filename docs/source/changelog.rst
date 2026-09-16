@@ -177,6 +177,12 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``da``, and the windowed scatter engine's ``fst``/``fst_hudson``, computed
+  their within-population terms independently of the other population
+  instead of restricting every term to sites where both populations have
+  data (as ``fst_hudson`` and the fused kernel already did), so they gave
+  the wrong answer whenever one population was entirely missing at a site.
+  All three now share one site set, matching the fused kernel.
 * Windowed Garud's H made three float64 copies of the haplotype matrix
   (109 GB each for 2,940 haplotypes across 4.7 million sites) and, for
   a Garud-only request, a transposed int8 copy on top. Each window is
