@@ -880,6 +880,35 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     return pd.DataFrame(results)
 
 
+def _per_population_scatter_singles(haplotype_matrix, window_size, step_size,
+                                     statistics, populations, missing_data,
+                                     span_normalize, chrom=None):
+    """Compute single-population scatter stats once per named population.
+
+    Suffixes every column "<stat>_<pop>" to match the naming the Python-loop
+    fallback already uses whenever 2+ populations are named. Callers with 0
+    or 1 population should call ``_windowed_thetas_scatter`` directly instead
+    -- its bare-name convention is unambiguous there.
+    """
+    merged = None
+    for pop in populations:
+        df = _windowed_thetas_scatter(
+            haplotype_matrix, window_size, step_size,
+            statistics, [pop], missing_data, span_normalize, chrom=chrom)
+        if df is None:
+            return None
+        df = df.rename(columns={
+            stat: f"{stat}_{pop}" for stat in statistics if stat in df.columns
+        })
+        if merged is None:
+            merged = df
+        else:
+            for col in df.columns:
+                if col not in CANONICAL_WINDOW_PREFIX:
+                    merged[col] = df[col].values
+    return merged
+
+
 def _twopop_site_components(hap1, hap2):
     """Compute per-site two-population components on GPU.
 
@@ -1245,8 +1274,11 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     requested = set(statistics)
 
     if missing_data in ('include', 'exclude'):
-        # Pure single-pop request
-        if requested <= scatter_single and len(populations or []) <= 1:
+        n_pops = len(populations or [])
+
+        # Pure single-pop request, 0 or 1 population: bare names are
+        # unambiguous.
+        if requested <= scatter_single and n_pops <= 1:
             result = _windowed_thetas_scatter(
                 haplotype_matrix, window_size, step_size,
                 statistics, populations, missing_data, span_normalize,
@@ -1254,36 +1286,54 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             if result is not None:
                 return result
 
+        # A single-pop stat with 2+ named populations can't share one bare
+        # column, so compute it once per population, suffixed "<stat>_<pop>"
+        # to match the naming the Python-loop fallback already uses. This
+        # matters for both modes: 'include' collapses onto one bare column by
+        # routing to the fused engine with just the first population, and
+        # 'exclude' does the same whenever the other requested statistic is
+        # one _windowed_twopop_scatter also handles (fst/fst_hudson/dxy/da) --
+        # only a twopop stat outside that set (fst_wc) happens to fall
+        # through to the correct per-population fallback on its own. Whatever
+        # else was requested recurses back through this function; the
+        # remainder excludes every scatter_single member by construction, so
+        # it can never re-enter this branch.
+        single_part = sorted(requested & scatter_single)
+        if single_part and n_pops >= 2:
+            df1 = _per_population_scatter_singles(
+                haplotype_matrix, window_size, step_size,
+                single_part, populations, missing_data, span_normalize,
+                chrom=chrom)
+            rest = sorted(requested - set(single_part))
+            if df1 is not None and not rest:
+                return df1
+            if df1 is not None:
+                df2 = windowed_analysis(
+                    haplotype_matrix,
+                    window_size=window_size,
+                    step_size=step_size,
+                    statistics=rest,
+                    populations=populations,
+                    missing_data=missing_data,
+                    span_normalize=span_normalize,
+                    accessible_bed=None,  # already applied above
+                    chrom=chrom,
+                    **kwargs,
+                )
+                if df2 is not None and not df2.empty:
+                    for col in df2.columns:
+                        if col not in CANONICAL_WINDOW_PREFIX:
+                            df1[col] = df2[col].values
+                    return df1
+
         # Pure two-pop request
-        if requested <= scatter_twopop and len(populations or []) == 2:
+        if requested <= scatter_twopop and n_pops == 2:
             result = _windowed_twopop_scatter(
                 haplotype_matrix, window_size, step_size,
                 statistics, populations, missing_data, span_normalize,
                 chrom=chrom)
             if result is not None:
                 return result
-
-        # Mixed single + two-pop request
-        single_stats = sorted(requested & scatter_single)
-        twopop_stats = sorted(requested & scatter_twopop)
-        if (single_stats and twopop_stats
-                and requested <= (scatter_single | scatter_twopop)
-                and len(populations or []) == 2):
-            df1 = _windowed_thetas_scatter(
-                haplotype_matrix, window_size, step_size,
-                single_stats, [populations[0]], missing_data, span_normalize,
-                chrom=chrom)
-            df2 = _windowed_twopop_scatter(
-                haplotype_matrix, window_size, step_size,
-                twopop_stats, populations, missing_data, span_normalize,
-                chrom=chrom)
-            if df1 is not None and df2 is not None:
-                # Both DataFrames share the canonical prefix; copy only the
-                # per-stat columns from df2 into df1.
-                for col in df2.columns:
-                    if col not in CANONICAL_WINDOW_PREFIX:
-                        df1[col] = df2[col].values
-                return df1
 
     # Fused CUDA kernel path for more complex stat combinations.
     fused_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',

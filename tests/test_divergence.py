@@ -422,10 +422,35 @@ class TestEdgeCases:
             'pop2': list(range(20, 40))
         }
 
-        # FST should be 0 (no variation to differentiate)
+        # FST is undefined with no polymorphism anywhere (0/0), not 0: there's
+        # no between-population diversity to normalize against.
         fst_val = divergence.fst(matrix, 'pop1', 'pop2')
-        assert fst_val == 0.0
+        assert np.isnan(fst_val)
 
-        # Dxy should be 0
+        # Dxy should be 0 (a sum, not a ratio -- well-defined at zero)
         dxy_val = divergence.dxy(matrix, 'pop1', 'pop2')
         assert dxy_val == 0.0
+
+    def test_fst_nan_when_undefined(self):
+        """fst_hudson and fst_weir_cockerham return NaN, not 0.0, when the
+        ratio has no denominator: no site with data in both populations."""
+        n_variants = 30
+        haplotypes = np.random.randint(0, 2, size=(20, n_variants))
+        positions = np.arange(n_variants) * 1000
+
+        matrix = HaplotypeMatrix(haplotypes, positions)
+        matrix.sample_sets = {
+            'pop1': list(range(10)),
+            'pop2': list(range(10, 20)),
+        }
+        # Every site missing in pop1 -- pop2 never has anything to pair with.
+        matrix.haplotypes[0:10, :] = -1
+
+        assert np.isnan(divergence.fst_hudson(matrix, 'pop1', 'pop2'))
+        assert np.isnan(divergence.fst_weir_cockerham(matrix, 'pop1', 'pop2'))
+
+        # 'exclude' mode short-circuits to the same empty-matrix case.
+        assert np.isnan(divergence.fst_hudson(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))
+        assert np.isnan(divergence.fst_weir_cockerham(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))
