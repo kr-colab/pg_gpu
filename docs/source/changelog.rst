@@ -177,6 +177,12 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``pairwise_r2`` and the naive ``r2`` estimator behind ``zns``/``omega``
+  computed the joint 11-frequency over the pairwise-complete sample but
+  each site's own frequency over its separate, larger marginal sample,
+  biasing ``D`` and ``r2`` under structured missing data with
+  ``missing_data='include'``. Both frequencies now come from the same
+  pairwise-complete sample.
 * Windowed Garud's H made three float64 copies of the haplotype matrix
   (109 GB each for 2,940 haplotypes across 4.7 million sites) and, for
   a Garud-only request, a transposed int8 copy on top. Each window is

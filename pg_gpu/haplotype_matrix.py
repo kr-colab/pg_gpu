@@ -1763,8 +1763,8 @@ class HaplotypeMatrix:
     def _pairwise_ld_core(self, hap_clean=None, valid_mask=None):
         """Shared computation for pairwise LD methods.
 
-        Computes allele frequencies, joint frequencies, and D matrix from
-        haplotype data, handling missing values.
+        Computes pairwise-complete allele frequencies, joint frequencies, and
+        D matrix from haplotype data, handling missing values.
 
         Parameters
         ----------
@@ -1778,9 +1778,11 @@ class HaplotypeMatrix:
         Returns
         -------
         D : cupy.ndarray, shape (m, m)
-            Pairwise D = p_AB - p_A*p_B.
-        p : cupy.ndarray, shape (m,)
-            Per-site allele frequencies.
+            Pairwise D = p_AB - p_i*p_j.
+        p_i, p_j : cupy.ndarray, shape (m, m)
+            Allele frequency at site i (resp. j) restricted to the gametes
+            valid at both sites of the pair (m, m), not a per-site (m,)
+            vector.
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
@@ -1790,15 +1792,20 @@ class HaplotypeMatrix:
             valid_mask = (ind >= 0).astype(cp.float64)
             hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
 
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        p = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
-
         joint_n = valid_mask.T @ valid_mask
         joint_11 = hap_clean.T @ hap_clean
+        # p_i/p_j must share joint_n/joint_11's sample set (gametes valid at
+        # both sites), not each site's own larger marginal set, or D's two
+        # terms disagree on where their data comes from.
+        sum_i = hap_clean.T @ valid_mask
+        sum_j = sum_i.T  # full index range, not a tile, so this is exact
+
+        p_i = cp.where(joint_n > 0, sum_i / joint_n, 0.0)
+        p_j = cp.where(joint_n > 0, sum_j / joint_n, 0.0)
         p_AB = cp.where(joint_n > 0, joint_11 / joint_n, 0.0)
 
-        D = p_AB - cp.outer(p, p)
-        return D, p
+        D = p_AB - p_i * p_j
+        return D, p_i, p_j
 
     def pairwise_LD_v(self) -> cp.ndarray:
         """Pairwise linkage disequilibrium (D statistic) via matrix multiply.
@@ -1809,7 +1816,7 @@ class HaplotypeMatrix:
         from ._warnings import _warn_biallelic_only
         bmask = self._biallelic_mask()
         _warn_biallelic_only(int((~bmask).sum()), context="pairwise_LD_v")
-        D, _ = self._pairwise_ld_core()
+        D, _, _ = self._pairwise_ld_core()
         bad = ~bmask
         D[bad, :] = cp.nan
         D[:, bad] = cp.nan
@@ -1863,9 +1870,9 @@ class HaplotypeMatrix:
         from ._warnings import _warn_biallelic_only
         bmask = self._biallelic_mask()
         _warn_biallelic_only(int((~bmask).sum()), context="pairwise_r2")
-        D, p = self._pairwise_ld_core()
-        denom_squared = cp.outer(p * (1 - p), p * (1 - p))
-        r2 = cp.where(denom_squared > 0, (D ** 2) / denom_squared, cp.nan)
+        D, p_i, p_j = self._pairwise_ld_core()
+        denom = (p_i * (1 - p_i)) * (p_j * (1 - p_j))
+        r2 = cp.where(denom > 0, (D ** 2) / denom, cp.nan)
         bad = ~bmask
         r2[bad, :] = cp.nan
         r2[:, bad] = cp.nan
@@ -1920,11 +1927,11 @@ class HaplotypeMatrix:
             active_idx = np.where(active)[0] + w_start
             active_idx_gpu = cp.asarray(active_idx)
 
-            D, p_w = self._pairwise_ld_core(
+            D, p_i, p_j = self._pairwise_ld_core(
                 hap_clean[:, active_idx_gpu],
                 valid_mask[:, active_idx_gpu],
             )
-            denom = cp.outer(p_w * (1 - p_w), p_w * (1 - p_w))
+            denom = (p_i * (1 - p_i)) * (p_j * (1 - p_j))
             r2_mat = cp.where(denom > 0, (D ** 2) / denom, 0.0)
             cp.fill_diagonal(r2_mat, 0.0)
 
