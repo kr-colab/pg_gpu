@@ -177,6 +177,13 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``fst_hudson`` and ``fst_weir_cockerham`` returned ``0.0`` for an
+  undefined ratio while every windowed engine already used ``NaN`` for
+  the same case; they now return ``NaN`` too. Separately,
+  ``windowed_analysis`` silently collapsed a single-population
+  statistic (e.g. ``pi``) onto one bare column holding only the first
+  population's value whenever 2+ populations were named alongside a
+  two-population statistic; it now names one column per population.
 * Windowed Garud's H made three float64 copies of the haplotype matrix
   (109 GB each for 2,940 haplotypes across 4.7 million sites) and, for
   a Garud-only request, a transposed int8 copy on top. Each window is

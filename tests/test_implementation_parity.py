@@ -42,6 +42,7 @@ from pg_gpu.windowed_analysis import (
     _windowed_thetas_scatter,
     _windowed_twopop_scatter,
     windowed_statistics_fused,
+    windowed_analysis,
     N_DAF_BINS,
 )
 
@@ -495,3 +496,54 @@ def test_daf_hist_matches_scalar(request, condition):
     got_fused = np.array([np.asarray(out[f"daf_bin_{b}"])[0]
                           for b in range(N_DAF_BINS)])
     np.testing.assert_allclose(got_fused, ref, rtol=RTOL, atol=ATOL)
+
+
+@pytest.mark.parametrize("missing_data", ["include", "exclude"])
+def test_windowed_analysis_single_stat_two_named_pops(clean_hm, missing_data):
+    """A single-pop stat requested alongside a two-pop stat, with exactly 2
+    named populations, must compute and suffix every population -- not just
+    the first -- for both 'include' and 'exclude', matching the scalar
+    reference for each population directly."""
+    hm = clean_hm
+    W = _whole_window_size(hm)
+    df = windowed_analysis(
+        hm, window_size=W, step_size=W,
+        statistics=["pi", "fst_wc"], populations=[POP1, POP2],
+        missing_data=missing_data, span_normalize=False)
+    assert {"pi_pop1", "pi_pop2", "fst_wc"} <= set(df.columns)
+
+    pi1_ref = diversity.pi(hm, population=POP1, span_normalize=False,
+                           missing_data=missing_data)
+    pi2_ref = diversity.pi(hm, population=POP2, span_normalize=False,
+                           missing_data=missing_data)
+    fst_wc_ref = divergence.fst_weir_cockerham(hm, POP1, POP2,
+                                               missing_data=missing_data)
+
+    assert np.isclose(df["pi_pop1"].iloc[0], pi1_ref, rtol=RTOL, atol=ATOL)
+    assert np.isclose(df["pi_pop2"].iloc[0], pi2_ref, rtol=RTOL, atol=ATOL)
+    assert np.isclose(df["fst_wc"].iloc[0], fst_wc_ref, rtol=RTOL, atol=ATOL)
+    # The regression this guards against silently dropped pop2 and returned
+    # pop1's value under a bare 'pi' column instead.
+    assert not np.isclose(pi1_ref, pi2_ref, rtol=RTOL, atol=ATOL)
+
+
+def test_windowed_analysis_single_stat_three_pops():
+    """The per-population suffixing generalizes past 2 named populations."""
+    hm = simulate_hm(n_samples=30, seq_length=200_000, seed=13,
+                     mutation_model="binary")
+    hm.transfer_to_gpu()
+    nhap = hm.num_haplotypes
+    third = nhap // 3
+    pops = {"a": list(range(third)), "b": list(range(third, 2 * third)),
+            "c": list(range(2 * third, nhap))}
+    hm.sample_sets = pops
+
+    W = _whole_window_size(hm)
+    df = windowed_analysis(hm, window_size=W, step_size=W,
+                           statistics=["pi"], populations=list(pops),
+                           missing_data="include", span_normalize=False)
+    assert {"pi_a", "pi_b", "pi_c"} <= set(df.columns)
+    for name in pops:
+        ref = diversity.pi(hm, population=name, span_normalize=False,
+                           missing_data="include")
+        assert np.isclose(df[f"pi_{name}"].iloc[0], ref, rtol=RTOL, atol=ATOL)

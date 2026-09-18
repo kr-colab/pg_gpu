@@ -1746,7 +1746,9 @@ class TestOneGridAllModes:
                                   missing_data='include')
         assert list(wa_ex['start']) == list(wa_in['start'])
         assert list(wa_ex['end']) == list(wa_in['end'])
-        assert 'fst_hudson' in wa_ex.columns and 'pi' in wa_ex.columns
+        # 'pi' is per-population here since 2 populations are named alongside
+        # a two-pop stat; 'fst_hudson' stays bare since it's exactly a pair.
+        assert {'fst_hudson', 'pi_p1', 'pi_p2'} <= set(wa_ex.columns)
 
     def test_exclude_fst_lands_on_labeled_window(self):
         from pg_gpu import divergence
