@@ -301,13 +301,16 @@ def _tile_counts(hi, vi, hj, vj):
     return c1, c2, c3, c4, n
 
 
-def _tile_r2_naive(hi, vi, hj, vj, pi, pqi, pj, pqj):
-    """Compute naive r² for a tile (frequency-based, biased)."""
-    joint_n = vi.T @ vj
-    joint_11 = hi.T @ hj
-    p_AB = cp.where(joint_n > 0, joint_11 / joint_n, 0.0)
-    D = p_AB - cp.outer(pi, pj)
-    denom = cp.outer(pqi, pqj)
+def _tile_r2_naive(hi, vi, hj, vj):
+    """Compute naive r² for a tile (the classical frequency-based estimator)."""
+    # Built on the same pairwise-complete counts as _tile_sigma_d2, so p_i/p_j
+    # come from the gametes valid at both sites rather than each site's own
+    # (possibly larger) marginal valid set.
+    c1, c2, c3, c4, n = _tile_counts(hi, vi, hj, vj)
+    D = cp.where(n > 0, (c1 * c4 - c2 * c3) / (n * n), 0.0)
+    p_i = cp.where(n > 0, (c1 + c2) / n, 0.0)
+    p_j = cp.where(n > 0, (c1 + c3) / n, 0.0)
+    denom = (p_i * (1 - p_i)) * (p_j * (1 - p_j))
     return cp.where(denom > 0, (D ** 2) / denom, 0.0)
 
 
@@ -572,12 +575,6 @@ def _zns_tiled(mat, missing_data='include', tile_size=512, use_projection=False)
     total = 0.0
     n_pairs = 0
 
-    if not use_projection:
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        p = cp.where(n_valid > 0,
-                     cp.sum(hap_clean, axis=0) / n_valid, 0.0)
-        pq = p * (1 - p)
-
     for i0 in range(0, m, B):
         i1 = min(i0 + B, m)
         hi = hap_clean[:, i0:i1]
@@ -599,9 +596,7 @@ def _zns_tiled(mat, missing_data='include', tile_size=512, use_projection=False)
                     total += 2.0 * float(cp.sum(tile).get())
                     n_pairs += 2 * int(cp.sum(valid).get())
             else:
-                r2_tile = _tile_r2_naive(
-                    hi, vi, hj, vj,
-                    p[i0:i1], pq[i0:i1], p[j0:j1], pq[j0:j1])
+                r2_tile = _tile_r2_naive(hi, vi, hj, vj)
                 if i0 == j0:
                     cp.fill_diagonal(r2_tile, 0.0)
                     total += float(cp.sum(r2_tile).get())
@@ -658,11 +653,6 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
     hc = hc[:, seg_idx]
     vm = vm[:, seg_idx]
 
-    if not use_projection:
-        n_valid = n_valid[seg_idx]
-        p = cp.where(n_valid > 0, cp.sum(hc, axis=0) / n_valid, 0.0)
-        pq = p * (1 - p)
-
     B = tile_size
     total = 0.0
     n_pairs = 0
@@ -688,9 +678,7 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
                     total += 2.0 * float(cp.sum(tile).get())
                     n_pairs += 2 * int(cp.sum(valid).get())
             else:
-                r2_tile = _tile_r2_naive(
-                    hi, vi, hj, vj,
-                    p[i0:i1], pq[i0:i1], p[j0:j1], pq[j0:j1])
+                r2_tile = _tile_r2_naive(hi, vi, hj, vj)
                 if i0 == j0:
                     cp.fill_diagonal(r2_tile, 0.0)
                     total += float(cp.sum(r2_tile).get())

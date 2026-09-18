@@ -86,6 +86,76 @@ def test_zns_naive_matches_direct_pairwise_correlation():
     _agree(zns(hm, estimator="r2"), float(np.mean(r2s)))
 
 
+def test_pairwise_r2_pairwise_complete_under_missing_data():
+    """r2 under missing_data='include' must use one sample set -- the pair's
+    jointly-valid haplotypes -- for both the joint 11-frequency and each
+    site's own frequency, not a site's separate (larger) marginal valid set.
+
+    Site 0 is missing on haplotypes 0-3, present (0,0,0,0,1,1,1,1,0,0,0,0) on
+    4-15. Site 1 is missing on haplotypes 12-15, present
+    (1,1,1,1,0,0,0,0,1,1,1,1) on 0-11. Their only shared valid haplotypes are
+    4-11, where the two columns are identical -- a perfect correlation, r2
+    exactly 1. Each site's own marginal frequency (1/3 and 2/3, computed over
+    its own full valid set) differs from its frequency restricted to that
+    shared set (1/2 for both); using the marginal frequencies for D and the
+    r2 denominator gives 25/16 -- not just wrong, but impossible for a real
+    r2, which cannot exceed 1.
+    """
+    hap = np.array([
+        [-1, 1], [-1, 1], [-1, 1], [-1, 1],
+        [0, 0], [0, 0], [0, 0], [0, 0],
+        [1, 1], [1, 1], [1, 1], [1, 1],
+        [0, -1], [0, -1], [0, -1], [0, -1],
+    ], dtype=np.int8)
+    pos = np.array([100, 200], dtype=np.int64)
+    hm = HaplotypeMatrix(hap, pos, 0, 1000)
+    hm.transfer_to_gpu()
+
+    r2 = cp.asnumpy(hm.pairwise_r2())
+    assert np.isclose(r2[0, 1], 1.0, rtol=1e-9, atol=1e-12)
+
+    # A 2-site matrix has exactly one pair, so ZnS (the tiled naive path) is
+    # that pair's r2 -- checks the tiled and dense paths agree.
+    _agree(zns(hm, estimator="r2"), 1.0)
+
+
+def test_pairwise_r2_matches_pairwise_complete_correlation_multi_site():
+    """General oracle: with several sites each missing a distinct block of
+    haplotypes (so every pair overlaps on a different subset), r2 under
+    missing_data='include' must equal the direct Pearson correlation squared
+    computed independently in numpy, restricted to each pair's own jointly-
+    valid haplotypes."""
+    rng = np.random.RandomState(0)
+    n_hap, n_var = 24, 5
+    hap = rng.randint(0, 2, size=(n_hap, n_var)).astype(np.int8)
+    block = n_hap // n_var
+    for v in range(n_var):
+        hap[v * block:(v + 1) * block, v] = -1
+    pos = ((np.arange(n_var) + 1) * 100).astype(np.int64)
+    hm = HaplotypeMatrix(hap, pos, 0, 1000)
+    hm.transfer_to_gpu()
+
+    r2 = cp.asnumpy(hm.pairwise_r2())
+    hap_f = hap.astype(np.float64)
+    expected = np.zeros((n_var, n_var))
+    for i in range(n_var):
+        for j in range(i + 1, n_var):
+            valid = (hap[:, i] >= 0) & (hap[:, j] >= 0)
+            ai, aj = hap_f[valid, i], hap_f[valid, j]
+            # The fix should not be exercised on a degenerate (zero-variance)
+            # pair -- assert the construction avoids that rather than
+            # silently skip it.
+            assert ai.std() > 0 and aj.std() > 0, (i, j)
+            expected[i, j] = expected[j, i] = np.corrcoef(ai, aj)[0, 1] ** 2
+
+    for i in range(n_var):
+        for j in range(i + 1, n_var):
+            assert np.isclose(r2[i, j], expected[i, j], rtol=1e-9, atol=1e-9), (i, j)
+
+    iu = np.triu_indices(n_var, k=1)
+    _agree(zns(hm, estimator="r2"), float(expected[iu].mean()))
+
+
 @pytest.mark.parametrize("use_projection", [False, True], ids=["naive", "proj"])
 def test_zns_from_precomputed_tiling_invariant(use_projection):
     # tile_size is an implementation detail: a small tile forces the
