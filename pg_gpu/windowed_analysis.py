@@ -1509,11 +1509,13 @@ def _fused_tajimas_d(mpd_sum, seg_count, sum_inv_w, count_valid_w,
 
     Uses the per-window harmonic mean of ``n_valid`` over sites with
     ``n_valid >= 2`` in place of the nominal ``n_hap`` for the variance term,
-    matching the scalar reference's ``_compute_neutrality_test``. The
-    numerator uses ``watterson_num_w`` directly rather than
-    ``seg_count / a1(harmonic_mean_n)``, since the scalar Watterson estimator
-    sums each site's own ``a1_inv[n_valid]`` contribution rather than
-    normalizing the window total by one shared n.
+    matching the scalar reference's ``_compute_neutrality_test``, and the
+    same ``_achaz_coeffs_per_window`` the scatter and generic engines use
+    (Achaz's alpha/beta for the ``('pi', 'watterson')`` pair are Tajima's
+    original c1/c2). The numerator uses ``watterson_num_w`` directly rather
+    than ``seg_count / a1(harmonic_mean_n)``, since the scalar Watterson
+    estimator sums each site's own ``a1_inv[n_valid]`` contribution rather
+    than normalizing the window total by one shared n.
 
     Parameters
     ----------
@@ -1528,23 +1530,18 @@ def _fused_tajimas_d(mpd_sum, seg_count, sum_inv_w, count_valid_w,
     from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
 
     n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
-    n_f = n_harm_w.astype(np.float64)
     a1, a2 = _harmonic_a1_a2_array(n_harm_w)
+    uniq_n, inv_idx = np.unique(n_harm_w, return_inverse=True)
+    alpha, beta = _achaz_coeffs_per_window(uniq_n, inv_idx, 'pi', 'watterson')
 
+    S = seg_count
+    d_num = mpd_sum - watterson_num_w
     with np.errstate(invalid='ignore', divide='ignore'):
-        b1 = (n_f + 1) / (3 * (n_f - 1))
-        b2 = 2 * (n_f ** 2 + n_f + 3) / (9 * n_f * (n_f - 1))
-        c1 = b1 - 1 / a1
-        c2 = b2 - (n_f + 2) / (a1 * n_f) + a2 / a1 ** 2
-        e1 = c1 / a1
-        e2 = c2 / (a1 ** 2 + a2)
-
-        S = seg_count
-        d_num = mpd_sum - watterson_num_w
-        d_var = e1 * S + e2 * S * (S - 1)
-        d_std = np.sqrt(np.maximum(d_var, 0))
-        tajd = np.where(d_std > 0, d_num / d_std, np.nan)
-    tajd[(S < 3) | (n_harm_w < 3)] = np.nan
+        theta_est = S / a1
+        theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
+        var = alpha * theta_est + beta * theta_sq_est
+        tajd = np.where((var > 0) & (S >= 3) & (n_harm_w >= 3),
+                        d_num / np.sqrt(var), np.nan)
     return tajd
 
 
