@@ -754,7 +754,6 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     # path). mut = per-variant mutation count = (#alleles present) - 1.
     n = n_valid.astype(cp.float64)
     has_data = n_valid >= 2
-    # enqueued early to overlap with the GPU work below
     all_complete = cp.all(n_valid == n_hap)
     alleles_present = (ac > 0).sum(axis=1)
     mut = cp.where(has_data, cp.maximum(alleles_present - 1, 0), 0).astype(cp.float64)
@@ -2062,15 +2061,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
              out_mpd, out_seg, out_sing, out_count, out_theta_h, out_max_daf,
              out_sum_inv, out_count_valid, out_watterson_num))
 
-        mpd_sum = out_mpd.get()
-        seg_count = out_seg.get()
-        sing_count = out_sing.get()
-        var_count = out_count.get()
-        theta_h_sum = out_theta_h.get()
-        max_daf = out_max_daf.get()
-        sum_inv_w = out_sum_inv.get()
-        count_valid_w = out_count_valid.get()
-        watterson_num_w = out_watterson_num.get()
+        (mpd_sum, seg_count, sing_count, var_count, theta_h_sum, max_daf,
+         sum_inv_w, count_valid_w, watterson_num_w) = cp.stack([
+            out_mpd, out_seg, out_sing, out_count, out_theta_h, out_max_daf,
+            out_sum_inv, out_count_valid, out_watterson_num,
+        ]).get()
         # The later stages read the un-transposed matrix; release the copy
         # so their batches can use the memory.
         del hap
@@ -2588,15 +2583,11 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             free_gpu_pool()
 
         # Post-processing (identical to non-chunked)
-        mpd_sum = acc_mpd.get()
-        seg_count = acc_seg.get()
-        sing_count = acc_sing.get()
-        var_count = acc_count.get()
-        theta_h_sum = acc_theta_h.get()
-        max_daf_arr = acc_max_daf.get()
-        sum_inv_w = acc_sum_inv.get()
-        count_valid_w = acc_count_valid.get()
-        watterson_num_w = acc_watterson_num.get()
+        (mpd_sum, seg_count, sing_count, var_count, theta_h_sum, max_daf_arr,
+         sum_inv_w, count_valid_w, watterson_num_w) = cp.stack([
+            acc_mpd, acc_seg, acc_sing, acc_count, acc_theta_h, acc_max_daf,
+            acc_sum_inv, acc_count_valid, acc_watterson_num,
+        ]).get()
 
         results['n_variants'] = var_count.astype(int)
 
@@ -2963,7 +2954,6 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
     ac, n_valid_i = allele_counts(hap)
     n_v = n_valid_i.astype(cp.float64)
     has_data = n_valid_i >= 2
-    # enqueued early to overlap with the GPU work below
     all_complete = cp.all(n_valid_i == n_hap_int)
     derived = ac[:, 1:]                        # per-derived-allele counts
     # per-site mutation count = (#alleles present) - 1  (tskit segregating)
