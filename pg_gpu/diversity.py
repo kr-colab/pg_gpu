@@ -293,7 +293,7 @@ def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')
     S = int(cp.sum(cp.where(has_data, (ac > 0).sum(axis=1) - 1, 0)).get())
 
     valid_n = n_valid[has_data].astype(cp.float64)
-    n_harm = _harmonic_mean_n(valid_n.shape[0], float(cp.sum(1.0 / valid_n).get()))
+    n_harm = int(_harmonic_mean_n(valid_n.shape[0], float(cp.sum(1.0 / valid_n).get())))
 
     return {'thetas': thetas, 'S': S, 'n_harmonic_mean': n_harm}
 
@@ -364,14 +364,15 @@ def _harmonic_mean_n(valid_count, sum_inv_valid):
 
     ``valid_count`` and ``sum_inv_valid`` (sum of ``1 / n_valid``) are both
     taken over sites with ``n_valid >= 2``. Zero when there are no such
-    sites. Works on a scalar or a numpy array.
+    sites. Works on a scalar or a numpy array; always returns an int64
+    array (0-d for scalar input).
     """
     valid_count = np.asarray(valid_count, dtype=np.float64)
     sum_inv_valid = np.asarray(sum_inv_valid, dtype=np.float64)
     n_harm = np.round(np.divide(valid_count, sum_inv_valid,
                                 out=np.zeros_like(valid_count),
                                 where=sum_inv_valid > 0))
-    return int(n_harm) if n_harm.ndim == 0 else n_harm
+    return n_harm.astype(np.int64)
 
 
 @lru_cache(maxsize=128)
