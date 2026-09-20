@@ -1220,9 +1220,8 @@ class TestMultiallelicSinglePop:
                                chrom_end=sim_hm.chrom_end)
 
     def test_per_variant_missing_data_matches_scalar(self, sim_hm_missing):
-        """With missing data, the per-variant engine still matches the scalar for
-        the stats that use per-site n_valid (everything except tajimas_d, whose
-        variance effective-n is a separate issue -- see the xfail below)."""
+        """With missing data, the per-variant engine still matches the scalar
+        for the stats that use per-site n_valid."""
         from pg_gpu.windowed_analysis import windowed_statistics
         hm = sim_hm_missing
         window_size = 25_000
@@ -1274,6 +1273,54 @@ class TestMultiallelicSinglePop:
                 assert np.isnan(td_w) and np.isnan(td_ref)
             else:
                 assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
+
+    def _check_fused_missing_data(self, hm, fn, **kwargs):
+        """Shared body for the fused/chunked missing-data checks below."""
+        window_size = 25_000
+        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        stats = ('pi', 'theta_w', 'segregating_sites', 'singletons',
+                 'tajimas_d')
+        r = fn(hm, bp_bins=bp, statistics=stats, per_base=False, chrom='1',
+              **kwargs)
+        for i, start in enumerate(r['start']):
+            stop = start + window_size
+            if stop > hm.chrom_end:
+                continue
+            sub = self._window_subset(hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(r['pi'][i], diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert np.isclose(r['theta_w'][i],
+                              diversity.theta_w(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert r['segregating_sites'][i] == diversity.segregating_sites(sub)
+            assert r['singletons'][i] == diversity.singleton_count(sub)
+            td_w, td_ref = r['tajimas_d'][i], diversity.tajimas_d(sub)
+            if np.isnan(td_w) or np.isnan(td_ref):
+                assert np.isnan(td_w) and np.isnan(td_ref)
+            else:
+                assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
+
+    def test_fused_missing_data_matches_scalar(self, sim_hm_missing):
+        """Fused CUDA kernel: pi/theta_w/segregating_sites/singletons/
+        tajimas_d per window equal the scalar functions on the window
+        subset, under missing data."""
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        self._check_fused_missing_data(sim_hm_missing, windowed_statistics_fused)
+
+    def test_chunked_missing_data_matches_scalar(self, sim_hm_missing,
+                                                 monkeypatch):
+        """Chunked fused engine: same check as the fused test above, with
+        chunking forced to a small size so multiple chunks per window are
+        actually exercised."""
+        from pg_gpu import _memutil
+        from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked
+        monkeypatch.setattr(_memutil, 'estimate_fused_chunk_size',
+                            lambda n_hap: 10)
+        self._check_fused_missing_data(sim_hm_missing,
+                                       windowed_statistics_fused_chunked)
 
 
 class TestMultiallelicTwoPop:
