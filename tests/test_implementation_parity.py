@@ -366,10 +366,6 @@ def _supported_paths(stat):
 # Known divergences and engine limitations -> xfail with a reason
 # ---------------------------------------------------------------------------
 
-_FUSED_MISSING = (
-    "the fused kernel's per-site sample-size handling under missing data still "
-    "diverges from the scalar for this estimator. #135"
-)
 _FS_VARIANCE = (
     "FrequencySpectrum computes the Achaz neutrality-test variance at a single "
     "modal sample size while summing the numerator over variable per-site "
@@ -392,10 +388,6 @@ _FS_MULTIALLELIC = (
 # skip is handled separately, so a fused rule with conditions=None never reaches
 # the (skipped) missing_exclude cell.
 _XFAILS = {
-    # fused kernel still mishandles missing data for these two estimators.
-    ("theta_w", "fused"): [(_FUSED_MISSING, _WHEN_PARTIAL)],
-    ("tajimas_d", "fused"): [(_FUSED_MISSING, _WHEN_PARTIAL)],
-
     # neutrality-test variance differs under variable per-site sample sizes,
     # and the FS path additionally diverges under multiallelic sites.
     ("tajimas_d", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),

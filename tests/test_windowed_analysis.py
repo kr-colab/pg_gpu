@@ -759,6 +759,34 @@ class TestFusedMissingData:
         self._compare_fused_vs_scatter(hm)
 
 
+def test_fused_tajimas_d_and_theta_w_match_scalar_under_missing_data():
+    """The fused single-pop kernel's tajimas_d and theta_w must match the
+    scalar reference under missing data, using the same per-site n_valid the
+    scalar uses for both the Watterson numerator and the variance term."""
+    from pg_gpu.windowed_analysis import windowed_statistics_fused
+
+    rng = np.random.RandomState(0)
+    n_hap, n_var = 8, 60
+    hap = rng.randint(0, 2, size=(n_hap, n_var)).astype(np.int8)
+    hap[rng.random(hap.shape) < 0.3] = -1
+    pos = np.arange(1, n_var + 1) * 100
+    hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+    hm.transfer_to_gpu()
+
+    bp_bins = np.array([0.0, float((n_var + 1) * 100)])
+    out = windowed_statistics_fused(
+        hm, bp_bins=bp_bins, statistics=('tajimas_d', 'theta_w'),
+        population=None, per_base=False, missing_data='include')
+
+    d_fused = float(np.asarray(out['tajimas_d'])[0])
+    theta_w_fused = float(np.asarray(out['theta_w'])[0])
+    d_scalar = diversity.tajimas_d(hm)
+    theta_w_scalar = diversity.theta_w(hm, span_normalize=False)
+
+    assert np.isclose(theta_w_fused, theta_w_scalar, rtol=1e-9, atol=1e-11)
+    assert np.isclose(d_fused, d_scalar, rtol=1e-9, atol=1e-11)
+
+
 def _leading_gap_hm(seq_len=100_000, first_pos=243):
     """Haplotype matrix with chrom_start=0 and a first variant > 0."""
     rng = np.random.RandomState(7)
