@@ -692,15 +692,17 @@ def _build_scatter_indices(pos_cpu, chrom_start, chrom_end,
             k_safe, contains, win_idx_gpu, mask_gpu)
 
 
-def _achaz_coeffs_per_window(n_harm_w, w1, w2):
+def _achaz_coeffs_per_window(uniq_n, inv_idx, w1, w2):
     """(alpha, beta) per window from _achaz_variance_coefficients(w1, w2, n).
 
-    Evaluated once per distinct value of n_harm_w rather than per window.
-    NaN for n < 3.
+    ``uniq_n``/``inv_idx`` are ``np.unique(n_harm_w, return_inverse=True)``,
+    computed once by the caller and shared across every weight pair it needs
+    for this ``n_harm_w`` -- a caller requesting several neutrality tests in
+    one call (e.g. tajimas_d and zeng_e) evaluates the same set of distinct
+    n only once, not once per pair. NaN for n < 3.
     """
     from .diversity import _achaz_variance_coefficients
 
-    uniq_n, inv_idx = np.unique(n_harm_w, return_inverse=True)
     alpha_lut = np.full(uniq_n.shape, np.nan)
     beta_lut = np.full(uniq_n.shape, np.nan)
     for i, nv in enumerate(uniq_n):
@@ -869,8 +871,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             theta_est = S / a1
             theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
 
+        uniq_n, inv_idx = np.unique(n_harm_w, return_inverse=True)
+
         def windowed_test(w1, w2, numerator_arr):
-            alpha, beta = _achaz_coeffs_per_window(n_harm_w, w1, w2)
+            alpha, beta = _achaz_coeffs_per_window(uniq_n, inv_idx, w1, w2)
             with np.errstate(invalid='ignore', divide='ignore'):
                 var = alpha * theta_est + beta * theta_sq_est
                 return np.where((var > 0) & (S >= 3) & (n_harm_w >= 3),
@@ -3030,10 +3034,11 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
         n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
 
         a1, a2 = _harmonic_a1_a2_array(n_harm_w)
+        uniq_n, inv_idx = np.unique(n_harm_w, return_inverse=True)
         with np.errstate(invalid='ignore', divide='ignore'):
             theta_est = S / a1
             theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
-            alpha, beta = _achaz_coeffs_per_window(n_harm_w, 'pi', 'watterson')
+            alpha, beta = _achaz_coeffs_per_window(uniq_n, inv_idx, 'pi', 'watterson')
             var = alpha * theta_est + beta * theta_sq_est
             tajd = np.where((var > 0) & (S >= 3) & (n_harm_w >= 3),
                             num / np.sqrt(var), np.nan)
