@@ -860,11 +860,16 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
         S = seg_count.get()
 
-        inv_valid = cp.where(has_data, 1.0 / n, 0.0)
-        sum_inv_w, count_valid_w = cp.stack([
-            scatter_sum(inv_valid), scatter_sum(has_data.astype(cp.float64))
-        ]).get()
-        n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
+        if bool(cp.all(n_valid == n_hap)):
+            # No missing data anywhere: every window's harmonic mean is
+            # trivially n_hap, so skip the two scatter passes entirely.
+            n_harm_w = np.full(n_windows, n_hap, dtype=np.int64)
+        else:
+            inv_valid = cp.where(has_data, 1.0 / n, 0.0)
+            sum_inv_w, count_valid_w = cp.stack([
+                scatter_sum(inv_valid), scatter_sum(has_data.astype(cp.float64))
+            ]).get()
+            n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
 
         a1, a2 = _harmonic_a1_a2_array(n_harm_w)
         with np.errstate(invalid='ignore', divide='ignore'):
@@ -3021,14 +3026,20 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
         from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
         pi_sum_td = _scatter_sum(pi_contrib, bin_idx, n_windows)
         watt_sum_td = _scatter_sum(watt_contrib, bin_idx, n_windows)
-        inv_valid_td = cp.where(has_data, 1.0 / n_v, 0.0)
-        S, num, sum_inv_w, count_valid_w = cp.stack([
-            seg_count,
-            pi_sum_td - watt_sum_td,
-            _scatter_sum(inv_valid_td, bin_idx, n_windows),
-            _scatter_sum(has_data.astype(cp.float64), bin_idx, n_windows),
-        ]).get()
-        n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
+        if bool(cp.all(n_valid_i == n_hap_int)):
+            # No missing data anywhere: skip the two harmonic-mean passes,
+            # every window's effective n is trivially n_hap.
+            S, num = cp.stack([seg_count, pi_sum_td - watt_sum_td]).get()
+            n_harm_w = np.full(n_windows, n_hap_int, dtype=np.int64)
+        else:
+            inv_valid_td = cp.where(has_data, 1.0 / n_v, 0.0)
+            S, num, sum_inv_w, count_valid_w = cp.stack([
+                seg_count,
+                pi_sum_td - watt_sum_td,
+                _scatter_sum(inv_valid_td, bin_idx, n_windows),
+                _scatter_sum(has_data.astype(cp.float64), bin_idx, n_windows),
+            ]).get()
+            n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
 
         a1, a2 = _harmonic_a1_a2_array(n_harm_w)
         uniq_n, inv_idx = np.unique(n_harm_w, return_inverse=True)
