@@ -375,11 +375,6 @@ _FS_VARIANCE = (
     "modal sample size while summing the numerator over variable per-site "
     "sample sizes, diverging from the scalar under missing data. #135"
 )
-_SCATTER_VARIANCE = (
-    "the scatter neutrality-test variance uses full-sample harmonic numbers "
-    "rather than per-site valid counts, diverging from the scalar under "
-    "missing data. #135"
-)
 _DA_SCATTER_EXCLUDE = (
     "under missing_data='exclude' the scatter da's within-population pi terms "
     "use a different site set than the scalar (dxy agrees), so da diverges. #135"
@@ -405,13 +400,10 @@ _XFAILS = {
     # and the FS path additionally diverges under multiallelic sites.
     ("tajimas_d", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
                           (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("tajimas_d", "scatter"): [(_SCATTER_VARIANCE, _WHEN_PARTIAL)],
     ("normalized_fay_wu_h", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
                                     (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("normalized_fay_wu_h", "scatter"): [(_SCATTER_VARIANCE, _WHEN_PARTIAL)],
     ("zeng_e", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
                        (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("zeng_e", "scatter"): [(_SCATTER_VARIANCE, _WHEN_PARTIAL)],
 
     # FS per-allele SFS diverges from the scalar per-allele counts (multiallelic).
     ("pi", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
