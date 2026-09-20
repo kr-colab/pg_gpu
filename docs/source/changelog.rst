@@ -204,6 +204,12 @@ Bug fixes
   functions use, so values diverged from the scalar reference under
   missing data. All four windowed engines now use the same per-window
   effective sample size the scalar functions do.
+* The fused engine's ``tajimas_d`` built a temporary proportional to the
+  window-overlap depth times the variant count, large enough to run out
+  of memory on large, deeply overlapping window grids; it and the fused
+  ``theta_w`` now come from a small per-window accumulator computed
+  inside the kernel itself, and agree with the scalar reference under
+  missing data (previously only ``tajimas_d``'s variance term did).
 * ``HaplotypeMatrix.pairwise_r2`` and ``windowed_r_squared`` rejected
   ``estimator='auto'`` -- the default name for the LD estimator
   everywhere else -- with an "unknown estimator" error. They accept it

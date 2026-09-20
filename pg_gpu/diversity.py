@@ -171,8 +171,6 @@ def _achaz_variance_coefficients(w1_name, w2_name, n):
     """Cached Achaz (2009) Eq. 9 variance coefficients for named weight pairs.
 
     This is the single source of truth for all neutrality test variances.
-    Unbounded cache: each entry is two floats, and callers key it by the
-    sample sizes actually seen, not an unbounded input.
     """
     v1 = WEIGHT_REGISTRY[w1_name](n)
     v2 = WEIGHT_REGISTRY[w2_name](n)
