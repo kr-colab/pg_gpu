@@ -754,6 +754,8 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     # path). mut = per-variant mutation count = (#alleles present) - 1.
     n = n_valid.astype(cp.float64)
     has_data = n_valid >= 2
+    # enqueued early to overlap with the GPU work below
+    all_complete = cp.all(n_valid == n_hap)
     alleles_present = (ac > 0).sum(axis=1)
     mut = cp.where(has_data, cp.maximum(alleles_present - 1, 0), 0).astype(cp.float64)
 
@@ -860,7 +862,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
         S = seg_count.get()
 
-        if bool(cp.all(n_valid == n_hap)):
+        if bool(all_complete):
             # No missing data anywhere: every window's harmonic mean is
             # trivially n_hap, so skip the two scatter passes entirely.
             n_harm_w = np.full(n_windows, n_hap, dtype=np.int64)
@@ -2961,6 +2963,8 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
     ac, n_valid_i = allele_counts(hap)
     n_v = n_valid_i.astype(cp.float64)
     has_data = n_valid_i >= 2
+    # enqueued early to overlap with the GPU work below
+    all_complete = cp.all(n_valid_i == n_hap_int)
     derived = ac[:, 1:]                        # per-derived-allele counts
     # per-site mutation count = (#alleles present) - 1  (tskit segregating)
     alleles_present = (ac > 0).sum(axis=1)
@@ -3026,7 +3030,7 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
         from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
         pi_sum_td = _scatter_sum(pi_contrib, bin_idx, n_windows)
         watt_sum_td = _scatter_sum(watt_contrib, bin_idx, n_windows)
-        if bool(cp.all(n_valid_i == n_hap_int)):
+        if bool(all_complete):
             # No missing data anywhere: skip the two harmonic-mean passes,
             # every window's effective n is trivially n_hap.
             S, num = cp.stack([seg_count, pi_sum_td - watt_sum_td]).get()
