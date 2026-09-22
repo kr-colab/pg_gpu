@@ -366,19 +366,10 @@ def _supported_paths(stat):
 # Known divergences and engine limitations -> xfail with a reason
 # ---------------------------------------------------------------------------
 
-_FUSED_MISSING = (
-    "the fused kernel's per-site sample-size handling under missing data still "
-    "diverges from the scalar for this estimator. #135"
-)
 _FS_VARIANCE = (
     "FrequencySpectrum computes the Achaz neutrality-test variance at a single "
     "modal sample size while summing the numerator over variable per-site "
     "sample sizes, diverging from the scalar under missing data. #135"
-)
-_SCATTER_VARIANCE = (
-    "the scatter neutrality-test variance uses full-sample harmonic numbers "
-    "rather than per-site valid counts, diverging from the scalar under "
-    "missing data. #135"
 )
 _DA_SCATTER_EXCLUDE = (
     "under missing_data='exclude' the scatter da's within-population pi terms "
@@ -397,21 +388,14 @@ _FS_MULTIALLELIC = (
 # skip is handled separately, so a fused rule with conditions=None never reaches
 # the (skipped) missing_exclude cell.
 _XFAILS = {
-    # fused kernel still mishandles missing data for these two estimators.
-    ("theta_w", "fused"): [(_FUSED_MISSING, _WHEN_PARTIAL)],
-    ("tajimas_d", "fused"): [(_FUSED_MISSING, _WHEN_PARTIAL)],
-
     # neutrality-test variance differs under variable per-site sample sizes,
     # and the FS path additionally diverges under multiallelic sites.
     ("tajimas_d", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
                           (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("tajimas_d", "scatter"): [(_SCATTER_VARIANCE, _WHEN_PARTIAL)],
     ("normalized_fay_wu_h", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
                                     (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("normalized_fay_wu_h", "scatter"): [(_SCATTER_VARIANCE, _WHEN_PARTIAL)],
     ("zeng_e", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
                        (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("zeng_e", "scatter"): [(_SCATTER_VARIANCE, _WHEN_PARTIAL)],
 
     # FS per-allele SFS diverges from the scalar per-allele counts (multiallelic).
     ("pi", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],

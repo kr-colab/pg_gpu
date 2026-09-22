@@ -166,7 +166,7 @@ def _achaz_alpha_beta(v1, v2, n):
     return float(alpha_n), float(beta_n)
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=None)
 def _achaz_variance_coefficients(w1_name, w2_name, n):
     """Cached Achaz (2009) Eq. 9 variance coefficients for named weight pairs.
 
@@ -292,11 +292,8 @@ def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')
     has_data = n_valid >= 2
     S = int(cp.sum(cp.where(has_data, (ac > 0).sum(axis=1) - 1, 0)).get())
 
-    if cp.any(has_data):
-        valid_n = n_valid[has_data].astype(cp.float64)
-        n_harm = round(float(len(valid_n) / cp.sum(1.0 / valid_n).get()))
-    else:
-        n_harm = 0
+    valid_n = n_valid[has_data].astype(cp.float64)
+    n_harm = int(_harmonic_mean_n(valid_n.shape[0], float(cp.sum(1.0 / valid_n).get())))
 
     return {'thetas': thetas, 'S': S, 'n_harmonic_mean': n_harm}
 
@@ -354,6 +351,30 @@ def _harmonic_sums(n):
     return H
 
 
+@lru_cache(maxsize=64)
+def _harmonic_sums_sq(n):
+    """Precompute H2[i] = sum(1/j^2 for j=1..i) for i=0..n."""
+    H2 = np.zeros(n + 1)
+    H2[1:] = np.cumsum(1.0 / np.arange(1, n + 1) ** 2)
+    return H2
+
+
+def _harmonic_mean_n(valid_count, sum_inv_valid):
+    """Harmonic mean of per-site valid counts: round(valid_count / sum_inv_valid).
+
+    ``valid_count`` and ``sum_inv_valid`` (sum of ``1 / n_valid``) are both
+    taken over sites with ``n_valid >= 2``. Zero when there are no such
+    sites. Works on a scalar or a numpy array; always returns an int64
+    array (0-d for scalar input).
+    """
+    valid_count = np.asarray(valid_count, dtype=np.float64)
+    sum_inv_valid = np.asarray(sum_inv_valid, dtype=np.float64)
+    n_harm = np.round(np.divide(valid_count, sum_inv_valid,
+                                out=np.zeros_like(valid_count),
+                                where=sum_inv_valid > 0))
+    return n_harm.astype(np.int64)
+
+
 @lru_cache(maxsize=128)
 def _harmonic_a1_a2(n):
     """Return (a1, a2) harmonic number sums for sample size n.
@@ -362,6 +383,20 @@ def _harmonic_a1_a2(n):
     """
     k = np.arange(1, n, dtype=np.float64)
     return float(np.sum(1.0 / k)), float(np.sum(1.0 / (k * k)))
+
+
+def _harmonic_a1_a2_array(n_arr):
+    """(a1, a2), as in ``_harmonic_a1_a2``, for each entry of an integer array.
+
+    NaN where n < 2.
+    """
+    n_arr = np.asarray(n_arr)
+    n_max = int(n_arr.max()) if n_arr.size else 0
+    H1 = _harmonic_sums(max(n_max - 1, 0))
+    H2 = _harmonic_sums_sq(max(n_max - 1, 0))
+    idx = np.clip(n_arr - 1, 0, H1.shape[0] - 1)
+    valid = n_arr >= 2
+    return np.where(valid, H1[idx], np.nan), np.where(valid, H2[idx], np.nan)
 
 
 @lru_cache(maxsize=64)

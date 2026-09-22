@@ -759,6 +759,34 @@ class TestFusedMissingData:
         self._compare_fused_vs_scatter(hm)
 
 
+def test_fused_tajimas_d_and_theta_w_match_scalar_under_missing_data():
+    """The fused single-pop kernel's tajimas_d and theta_w must match the
+    scalar reference under missing data, using the same per-site n_valid the
+    scalar uses for both the Watterson numerator and the variance term."""
+    from pg_gpu.windowed_analysis import windowed_statistics_fused
+
+    rng = np.random.RandomState(0)
+    n_hap, n_var = 8, 60
+    hap = rng.randint(0, 2, size=(n_hap, n_var)).astype(np.int8)
+    hap[rng.random(hap.shape) < 0.3] = -1
+    pos = np.arange(1, n_var + 1) * 100
+    hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+    hm.transfer_to_gpu()
+
+    bp_bins = np.array([0.0, float((n_var + 1) * 100)])
+    out = windowed_statistics_fused(
+        hm, bp_bins=bp_bins, statistics=('tajimas_d', 'theta_w'),
+        population=None, per_base=False, missing_data='include')
+
+    d_fused = float(np.asarray(out['tajimas_d'])[0])
+    theta_w_fused = float(np.asarray(out['theta_w'])[0])
+    d_scalar = diversity.tajimas_d(hm)
+    theta_w_scalar = diversity.theta_w(hm, span_normalize=False)
+
+    assert np.isclose(theta_w_fused, theta_w_scalar, rtol=1e-9, atol=1e-11)
+    assert np.isclose(d_fused, d_scalar, rtol=1e-9, atol=1e-11)
+
+
 def _leading_gap_hm(seq_len=100_000, first_pos=243):
     """Haplotype matrix with chrom_start=0 and a first variant > 0."""
     rng = np.random.RandomState(7)
@@ -1192,9 +1220,8 @@ class TestMultiallelicSinglePop:
                                chrom_end=sim_hm.chrom_end)
 
     def test_per_variant_missing_data_matches_scalar(self, sim_hm_missing):
-        """With missing data, the per-variant engine still matches the scalar for
-        the stats that use per-site n_valid (everything except tajimas_d, whose
-        variance effective-n is a separate issue -- see the xfail below)."""
+        """With missing data, the per-variant engine still matches the scalar
+        for the stats that use per-site n_valid."""
         from pg_gpu.windowed_analysis import windowed_statistics
         hm = sim_hm_missing
         window_size = 25_000
@@ -1223,15 +1250,10 @@ class TestMultiallelicSinglePop:
                 float(np.nanmean(diversity.heterozygosity_expected(sub))),
                 rtol=1e-9, atol=1e-11)
 
-    @pytest.mark.xfail(strict=True, reason=(
-        "windowed tajimas_d variance uses nominal n_hap; the scalar uses the "
-        "harmonic-mean effective n over per-site n_valid, so they diverge under "
-        "missing data (issue #100). Fixing the windowed effective-n convention "
-        "needs outside input; remove this marker when reconciled."))
     def test_per_variant_missing_data_tajimas_d_matches_scalar(self,
                                                                sim_hm_missing):
-        """Per-window tajimas_d should equal the scalar on the window subset;
-        currently diverges with missing data (effective-n convention)."""
+        """Per-window tajimas_d must equal the scalar on the window subset
+        under missing data (per-window harmonic-mean effective n)."""
         from pg_gpu.windowed_analysis import windowed_statistics
         hm = sim_hm_missing
         window_size = 25_000
@@ -1251,6 +1273,54 @@ class TestMultiallelicSinglePop:
                 assert np.isnan(td_w) and np.isnan(td_ref)
             else:
                 assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
+
+    def _check_fused_missing_data(self, hm, fn, **kwargs):
+        """Shared body for the fused/chunked missing-data checks below."""
+        window_size = 25_000
+        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        stats = ('pi', 'theta_w', 'segregating_sites', 'singletons',
+                 'tajimas_d')
+        r = fn(hm, bp_bins=bp, statistics=stats, per_base=False, chrom='1',
+              **kwargs)
+        for i, start in enumerate(r['start']):
+            stop = start + window_size
+            if stop > hm.chrom_end:
+                continue
+            sub = self._window_subset(hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(r['pi'][i], diversity.pi(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert np.isclose(r['theta_w'][i],
+                              diversity.theta_w(sub, span_normalize=False),
+                              rtol=1e-9, atol=1e-11)
+            assert r['segregating_sites'][i] == diversity.segregating_sites(sub)
+            assert r['singletons'][i] == diversity.singleton_count(sub)
+            td_w, td_ref = r['tajimas_d'][i], diversity.tajimas_d(sub)
+            if np.isnan(td_w) or np.isnan(td_ref):
+                assert np.isnan(td_w) and np.isnan(td_ref)
+            else:
+                assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
+
+    def test_fused_missing_data_matches_scalar(self, sim_hm_missing):
+        """Fused CUDA kernel: pi/theta_w/segregating_sites/singletons/
+        tajimas_d per window equal the scalar functions on the window
+        subset, under missing data."""
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        self._check_fused_missing_data(sim_hm_missing, windowed_statistics_fused)
+
+    def test_chunked_missing_data_matches_scalar(self, sim_hm_missing,
+                                                 monkeypatch):
+        """Chunked fused engine: same check as the fused test above, with
+        chunking forced to a small size so multiple chunks per window are
+        actually exercised."""
+        from pg_gpu import _memutil
+        from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked
+        monkeypatch.setattr(_memutil, 'estimate_fused_chunk_size',
+                            lambda n_hap: 10)
+        self._check_fused_missing_data(sim_hm_missing,
+                                       windowed_statistics_fused_chunked)
 
 
 class TestMultiallelicTwoPop:

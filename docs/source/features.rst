@@ -627,16 +627,13 @@ falls back to a slower route that produces the same numbers.
 
 The rule to expect is that a windowed statistic gives the same answer
 as calling the plain function on just that window's variants. Alleles
-are counted separately here too, the same as everywhere else. There is
-one known exception:
+are counted separately here too, the same as everywhere else. This
+includes the neutrality tests (``tajimas_d``, ``normalized_fay_wu_h``,
+``zeng_e``, ``zeng_dh``): under missing data, each window uses the
+harmonic mean of its own per-site valid sample counts, the same
+quantity the plain functions use.
 
-* When data is missing, the windowed neutrality tests (``tajimas_d``,
-  ``normalized_fay_wu_h``, ``zeng_e``, ``zeng_dh``) use the full sample
-  size in their variance formula, while the plain versions use an
-  average of the per-site sample sizes. Without missing data the two
-  agree.
-
-One more limit: the windowed kernels can handle at most 8 alleles at a
+One limit: the windowed kernels can handle at most 8 alleles at a
 single site. Anything beyond that is skipped, and a
 ``MultiallelicCapWarning`` tells you how many sites that affected. DNA
 has 4 bases, so in practice this never comes up. The plain
