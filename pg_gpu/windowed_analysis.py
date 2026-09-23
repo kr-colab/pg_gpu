@@ -979,14 +979,10 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         # fst_wc pairs consecutive rows of each population into individuals;
         # the other statistics here take any row list, so this check is
         # specific to fst_wc, mirroring the fused engine's equivalent.
-        from ._warnings import check_paired_rows
-        for pop in (pop1_name, pop2_name):
-            rows = (haplotype_matrix.sample_sets.get(pop)
-                    if isinstance(pop, str) else list(pop))
-            if rows is None:
-                continue
-            label = pop if isinstance(pop, str) else "row list"
-            check_paired_rows(rows, f"windowed fst_wc({label})")
+        from ._warnings import check_paired_rows_for_populations
+        check_paired_rows_for_populations(
+            haplotype_matrix.sample_sets, pop1_name, pop2_name,
+            "windowed fst_wc")
 
     mat1 = get_population_matrix(haplotype_matrix, pop1_name)
     mat2 = get_population_matrix(haplotype_matrix, pop2_name)
@@ -1050,17 +1046,21 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         spans = np.ones(n_windows)
         zero_span = np.zeros(n_windows, dtype=bool)
 
-    # Compute per-site components (single pass over the data)
-    mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
+    # Compute per-site components (single pass over the data). Only needed
+    # for the gamete statistics, not a pure fst_wc request.
+    need_between = stats_set & {'fst', 'fst_hudson', 'dxy', 'da'}
+    if need_between:
+        mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
 
     if 'fst_wc' in stats_set:
         from .divergence import _wc_site_components
-        wc_a, wc_abc = _wc_site_components(hap1, hap2)
+        k = max(int(hap1.max()) if hap1.size else 0,
+                int(hap2.max()) if hap2.size else 0, 0) + 1
+        wc_a, wc_abc = _wc_site_components(hap1, hap2, k)
         wc_a_sum = scatter_sum(wc_a)
         wc_abc_sum = scatter_sum(wc_abc)
 
     # Scatter-add per-site components into windows (deduplicated)
-    need_between = stats_set & {'fst', 'fst_hudson', 'dxy', 'da'}
     between_sum = scatter_sum(between) if need_between else None
 
     if stats_set & {'fst', 'fst_hudson', 'da'}:
@@ -2145,16 +2145,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         if 'fst_wc' in statistics:
             # The kernel pairs consecutive subset rows into individuals for
             # Weir-Cockerham; the gamete statistics take any row list.
-            from ._warnings import check_paired_rows
-            for pop in (pop1, pop2):
-                # .get: an unknown name skips the check and reaches
-                # get_population_matrix below for its proper ValueError.
-                rows = (haplotype_matrix.sample_sets.get(pop)
-                        if isinstance(pop, str) else list(pop))
-                if rows is None:
-                    continue
-                label = pop if isinstance(pop, str) else "row list"
-                check_paired_rows(rows, f"windowed fst_wc({label})")
+            from ._warnings import check_paired_rows_for_populations
+            check_paired_rows_for_populations(
+                haplotype_matrix.sample_sets, pop1, pop2, "windowed fst_wc")
 
         # Use the original (unsubsetted) matrix for population lookup
         m1 = get_population_matrix(haplotype_matrix, pop1)

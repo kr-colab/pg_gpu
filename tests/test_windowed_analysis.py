@@ -498,8 +498,8 @@ class TestChunkedFused:
                                        err_msg=f"Mismatch in {k}")
 
     def test_two_pop_scatter_matches_fused_for_fst_wc(self, matrix_with_pops):
-        """The scatter engine (now handling fst_wc) must agree exactly with
-        the fused kernel, not just approximately."""
+        """The scatter engine's fst_wc must agree exactly with the fused
+        kernel, not just approximately."""
         from pg_gpu.windowed_analysis import (
             windowed_analysis,
             windowed_statistics_fused,
@@ -660,7 +660,7 @@ class TestTwoPopColumnNaming:
     def test_mixed_single_and_fst_wc_matches_scalar(self):
         """A mixed single+two-pop request including fst_wc routes through
         the generic mixed-dispatch path (_windowed_thetas_scatter +
-        _windowed_twopop_scatter) now that fst_wc is scatter-eligible."""
+        _windowed_twopop_scatter)."""
         from pg_gpu import diversity, divergence
 
         rng = np.random.RandomState(11)
@@ -689,8 +689,10 @@ class TestTwoPopColumnNaming:
                                                  span_normalize=False),
                               rtol=1e-9, atol=1e-12)
             wc_ref = divergence.fst_weir_cockerham(sub, 'p1', 'p2')
-            if np.isnan(wc_w) or np.isnan(wc_ref):
-                assert np.isnan(wc_w) and np.isnan(wc_ref)
+            if np.isnan(wc_w):
+                # fst_weir_cockerham returns 0.0, not NaN, for this
+                # undefined-ratio case.
+                assert wc_ref == 0.0
             else:
                 assert np.isclose(wc_w, wc_ref, rtol=1e-9, atol=1e-12)
 
@@ -1438,8 +1440,10 @@ class TestMultiallelicTwoPop:
                               divergence.da(sub, 'p1', 'p2', span_normalize=False),
                               rtol=1e-9, atol=1e-12)
             wc_ref = divergence.fst_weir_cockerham(sub, 'p1', 'p2')
-            if np.isnan(wc_w) or np.isnan(wc_ref):
-                assert np.isnan(wc_w) and np.isnan(wc_ref)
+            if np.isnan(wc_w):
+                # fst_weir_cockerham returns 0.0, not NaN, for this
+                # undefined-ratio case.
+                assert wc_ref == 0.0
             else:
                 assert np.isclose(wc_w, wc_ref, rtol=1e-9, atol=1e-12)
             fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')

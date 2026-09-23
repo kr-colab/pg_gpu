@@ -275,7 +275,7 @@ def _pop_wc_stats(pop_haps, k):
     return ac, het, n
 
 
-def _wc_site_components(pop1_haps, pop2_haps):
+def _wc_site_components(pop1_haps, pop2_haps, k):
     """Per-site Weir & Cockerham (1984) FST components, summed over alleles.
 
     Same per-allele variance components (a, b, c) fst_weir_cockerham
@@ -289,6 +289,8 @@ def _wc_site_components(pop1_haps, pop2_haps):
         Haplotype data for each population. Consecutive rows are paired
         into diploid individuals; callers must check pairing themselves
         (see fst_weir_cockerham).
+    k : int
+        Number of distinct alleles (max allele index over both populations, plus one).
 
     Returns
     -------
@@ -306,9 +308,6 @@ def _wc_site_components(pop1_haps, pop2_haps):
     # is het for alleles 1 and 2 but homozygous for allele 0. Multiallelic form
     # matches scikit-allel's weir_cockerham_fst (a/b/c are (n_var, K); sum over
     # alleles per site here, and over sites too by the caller).
-    k = max(int(pop1_haps.max()) if pop1_haps.size else 0,
-            int(pop2_haps.max()) if pop2_haps.size else 0, 0) + 1
-
     ac1, het1, n1 = _pop_wc_stats(pop1_haps, k)
     ac2, het2, n2 = _pop_wc_stats(pop2_haps, k)
 
@@ -337,6 +336,8 @@ def _wc_site_components(pop1_haps, pop2_haps):
                      + n2t * (p2[vt] - p_bar[vt])**2) / ((r - 1) * (nt / r)[:, None])
     h_bar[vt] = (het1[vt] + het2[vt]) / nt[:, None]
 
+    # W-C variance components (Eqs 2, 3, 4 from Weir & Cockerham 1984), per
+    # allele, only where estimable (n_bar > 1). Sum over alleles AND sites.
     a = cp.zeros_like(ac1)
     b = cp.zeros_like(ac1)
     c = cp.zeros_like(ac1)
@@ -405,7 +406,9 @@ def fst_weir_cockerham(haplotype_matrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    a_site, abc_site = _wc_site_components(pop1_haps, pop2_haps)
+    k = max(int(pop1_haps.max()) if pop1_haps.size else 0,
+            int(pop2_haps.max()) if pop2_haps.size else 0, 0) + 1
+    a_site, abc_site = _wc_site_components(pop1_haps, pop2_haps, k)
     sum_a = float(cp.sum(a_site).get())
     sum_abc = float(cp.sum(abc_site).get())
     if sum_abc > 0:
