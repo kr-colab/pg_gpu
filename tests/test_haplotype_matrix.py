@@ -6,6 +6,7 @@ import cupy as cp
 import numpy as np
 
 from pg_gpu.haplotype_matrix import HaplotypeMatrix
+from pg_gpu.accessible import AccessibleMask
 
 @pytest.fixture
 def sample_ts():
@@ -308,6 +309,141 @@ def test_get_subset(sample_vcf):
     subset2 = hap_matrix.get_subset(np.array([0, 1, 2, 3, 4]))
     assert isinstance(subset2, HaplotypeMatrix)
     assert subset2.shape == (20, 5)
+
+
+def _matrix_with_fields(n_var=30, n_hap=10, seed=0):
+    """A matrix with samples and a per-variant/per-genotype field each."""
+    rng = np.random.RandomState(seed)
+    hap = rng.randint(0, 2, size=(n_hap, n_var)).astype(np.int8)
+    pos = np.sort(rng.choice(np.arange(1, 10_000), n_var, replace=False))
+    fields = {
+        'MQ': rng.random(n_var).astype(np.float32),
+        'GQ': rng.randint(0, 100, size=(n_var, n_hap // 2)).astype(np.int32),
+    }
+    samples = [f's{i}' for i in range(n_hap // 2)]
+    return HaplotypeMatrix(hap, pos, 0, 10_000, samples=samples,
+                           fields=fields)
+
+
+def _host(arr):
+    return cp.asnumpy(arr) if isinstance(arr, cp.ndarray) else np.asarray(arr)
+
+
+def _assert_fields_match_keep(original, result):
+    """result's fields equal original's fields sliced to result's positions."""
+    orig_pos = _host(original.positions)
+    keep = np.searchsorted(orig_pos, _host(result.positions))
+    for tag, arr in original.fields.items():
+        np.testing.assert_array_equal(result.fields[tag], arr[keep])
+
+
+@pytest.mark.parametrize("subset_fn", [
+    lambda m: m.get_subset(np.array([1, 3, 5, 7], dtype=np.int64)),
+    lambda m: m.get_subset_from_range(int(m.positions[2]), int(m.positions[8])),
+    lambda m: m.restrict_to_biallelic(),
+    lambda m: m.restrict_to_segregating(),
+    lambda m: m.exclude_missing_sites(),
+    lambda m: m.filter_variants_by_missing(1.0),
+])
+def test_variant_subset_methods_preserve_samples_and_fields(subset_fn):
+    m = _matrix_with_fields()
+    result = subset_fn(m)
+    assert result.samples == m.samples
+    assert set(result.fields.keys()) == set(m.fields.keys())
+    _assert_fields_match_keep(m, result)
+
+
+def _matrix_with_fields_and_mask(n_var=30, n_hap=10, seed=0):
+    """_matrix_with_fields with an accessible mask hiding a third of the
+    variants, so _accessible_idx is a real, non-trivial subset -- unlike
+    _matrix_with_fields, where the view and the underlying storage
+    coincide and view-vs-underlying indexing bugs can't show up.
+
+    Returns (matrix, positions, fields): the position/field arrays as they
+    stood before the mask was attached, for an alignment check that
+    doesn't reuse the matrix's own (possibly buggy) view indexing.
+    """
+    m = _matrix_with_fields(n_var=n_var, n_hap=n_hap, seed=seed)
+    pos = _host(m.positions)
+    fields = {tag: _host(arr).copy() for tag, arr in m.fields.items()}
+    mask = np.ones(m.chrom_end - m.chrom_start + 1, dtype=bool)
+    mask[pos[::3]] = False
+    m.set_accessible_mask(AccessibleMask(mask, offset=m.chrom_start))
+    assert 0 < len(m.positions) < n_var
+    return m, pos, fields
+
+
+def _assert_fields_match_positions(raw_pos, raw_fields, result):
+    """result's fields equal raw_fields looked up by position in raw_pos."""
+    result_pos = _host(result.positions)
+    keep = np.searchsorted(raw_pos, result_pos)
+    assert np.array_equal(raw_pos[keep], result_pos)
+    for tag, arr in raw_fields.items():
+        np.testing.assert_array_equal(result.fields[tag], arr[keep])
+
+
+@pytest.mark.parametrize("subset_fn", [
+    lambda m: m.get_subset(np.array([1, 3, 5, 7], dtype=np.int64)),
+    lambda m: m.get_subset_from_range(int(m.positions[2]), int(m.positions[8])),
+    lambda m: m.restrict_to_biallelic(),
+    lambda m: m.restrict_to_segregating(),
+    lambda m: m.filter_variants_by_missing(1.0),
+    lambda m: m.filter(),
+])
+def test_variant_subset_methods_preserve_fields_under_accessible_mask(subset_fn):
+    m, raw_pos, raw_fields = _matrix_with_fields_and_mask()
+    result = subset_fn(m)
+    assert result.samples == m.samples
+    assert set(result.fields.keys()) == set(raw_fields.keys())
+    _assert_fields_match_positions(raw_pos, raw_fields, result)
+
+
+def test_exclude_missing_sites_no_missing_returns_self_with_fields_unchanged():
+    """With nothing to exclude, exclude_missing_sites returns the matrix
+    itself, mask and all -- fields legitimately stays at its full,
+    underlying length rather than the (smaller) view's, matching every
+    masked matrix's fields contract."""
+    m, raw_pos, raw_fields = _matrix_with_fields_and_mask()
+    result = m.exclude_missing_sites()
+    assert result is m
+    for tag, arr in raw_fields.items():
+        np.testing.assert_array_equal(result.fields[tag], arr)
+
+
+def test_exclude_missing_sites_preserves_fields_under_accessible_mask():
+    """With something to exclude, exclude_missing_sites takes the general
+    _keep_sites path, which drops the mask like every other subset method
+    -- fields must then align with the (unmasked) result one-to-one."""
+    rng = np.random.RandomState(0)
+    n_var, n_hap = 30, 10
+    hap = rng.randint(0, 2, size=(n_hap, n_var)).astype(np.int8)
+    pos = np.sort(rng.choice(np.arange(1, 10_000), n_var, replace=False))
+    fields = {
+        'MQ': rng.random(n_var).astype(np.float32),
+        'GQ': rng.randint(0, 100, size=(n_var, n_hap // 2)).astype(np.int32),
+    }
+    samples = [f's{i}' for i in range(n_hap // 2)]
+    hap[0, 1] = -1  # a missing call at a site that stays visible below
+    m = HaplotypeMatrix(hap, pos, 0, 10_000, samples=samples, fields=fields)
+    mask = np.ones(10_001, dtype=bool)
+    mask[pos[::3]] = False
+    m.set_accessible_mask(AccessibleMask(mask, offset=0))
+    assert 0 < len(m.positions) < n_var
+
+    result = m.exclude_missing_sites()
+    assert result is not m
+    assert result.samples == m.samples
+    assert set(result.fields.keys()) == set(fields.keys())
+    _assert_fields_match_positions(pos, fields, result)
+
+
+def test_variant_subset_methods_empty_result_keeps_field_keys():
+    m = _matrix_with_fields()
+    empty = m.get_subset(np.array([], dtype=np.int64))
+    assert empty.samples == m.samples
+    assert set(empty.fields.keys()) == set(m.fields.keys())
+    assert empty.fields['MQ'].shape == (0,)
+    assert empty.fields['GQ'].shape == (0, m.fields['GQ'].shape[1])
 
 def test_transfer_to_gpu():
     """Test transferring data from CPU to GPU."""

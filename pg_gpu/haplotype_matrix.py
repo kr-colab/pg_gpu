@@ -1168,9 +1168,28 @@ class HaplotypeMatrix:
         result.chrom_end = self.chrom_end
         result.n_total_sites = self.n_total_sites
         result.samples = self.samples
-        result.fields = {}
+        result.fields = {tag: arr[:0] for tag, arr in self.fields.items()}
         result.accessible_mask = None
         return result
+
+    def _sliced_fields(self, keep_idx, space='view'):
+        """self.fields sliced by keep_idx.
+
+        keep_idx is relative to the current (possibly masked) view by
+        default; pass space='underlying' when it already indexes the full
+        array, as filter() does.
+        """
+        assert space in ('view', 'underlying'), f"unknown space: {space!r}"
+        if not self.fields:
+            return {}
+        # fields are host arrays regardless of matrix device.
+        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
+        if space == 'view' and self._accessible_idx is not None:
+            accessible_np = (self._accessible_idx.get()
+                             if hasattr(self._accessible_idx, 'get')
+                             else self._accessible_idx)
+            keep_idx_np = accessible_np[keep_idx_np]
+        return {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
 
     def get_subset(self, positions) -> "HaplotypeMatrix":
         """
@@ -1214,6 +1233,8 @@ class HaplotypeMatrix:
             subset_positions,
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
+            samples=self.samples,
+            fields=self._sliced_fields(positions),
         )
 
     def get_subset_from_range(self, low: int, high: int) -> "HaplotypeMatrix":
@@ -1262,6 +1283,7 @@ class HaplotypeMatrix:
             sample_sets=self._sample_sets,
             samples=self.samples,
             accessible_mask=sliced_mask,
+            fields=self._sliced_fields(indices),
         )
 
     def _keep_sites(self, keep) -> "HaplotypeMatrix":
@@ -1269,10 +1291,11 @@ class HaplotypeMatrix:
 
         Dropping sites changes neither the chromosome extent nor which
         bases are accessible, so the child carries the parent's bounds,
-        accessibility mask, sample sets, and n_total_sites -- the rule
-        every same-region site filter follows. An empty selection routes
-        through get_subset, which builds a valid 0-variant matrix (the
-        constructor rejects empty arrays).
+        accessibility mask, sample sets, n_total_sites, and samples, and
+        slices fields to the kept sites -- the rule every same-region site
+        filter follows. An empty selection routes through get_subset, which
+        builds a valid 0-variant matrix (the constructor rejects empty
+        arrays).
         """
         if len(keep) == 0:
             return self.get_subset(keep)
@@ -1283,6 +1306,8 @@ class HaplotypeMatrix:
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
             accessible_mask=self.accessible_mask,
+            samples=self.samples,
+            fields=self._sliced_fields(keep),
         )
 
     def restrict_to_biallelic(self, *, warn_context=None) -> "HaplotypeMatrix":
@@ -1650,37 +1675,16 @@ class HaplotypeMatrix:
         keep_idx = xp.where(keep_v)[0]
 
         if int(keep_idx.size) == 0:
-            # Constructor rejects empty matrices; mirror the empty-subset
-            # workaround in ``get_subset`` so a too-aggressive filter
-            # returns a structured empty matrix rather than raising.
-            if self._device == 'GPU':
-                empty_haps = cp.empty((n_haps, 0), dtype=haps_src.dtype)
-                empty_pos = cp.array([], dtype=pos_src.dtype)
-            else:
-                empty_haps = np.empty((n_haps, 0), dtype=haps_src.dtype)
-                empty_pos = np.array([], dtype=pos_src.dtype)
-            result = object.__new__(HaplotypeMatrix)
-            result._haplotypes = empty_haps
-            result._positions = empty_pos
-            result._accessible_idx = None
-            result._hap_filtered = None
-            result._pos_filtered = None
-            result._accessible_mask = None
-            result.chrom_start = self.chrom_start
-            result.chrom_end = self.chrom_end
-            result._sample_sets = self._sample_sets
-            result._device = self._device
+            # The variant axis changed, unlike _empty_subset()'s default.
+            result = self._empty_subset()
             result.n_total_sites = None
-            result.samples = self.samples
-            result.fields = {tag: arr[:0] for tag, arr in self.fields.items()}
             return result
 
         new_haps = haps[:, keep_idx]
         new_pos = pos_src[keep_idx]
-        # Fields are numpy arrays; slice with a host-side index regardless
-        # of where the haplotype matrix lives.
-        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
-        new_fields = {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
+        # keep_idx already indexes the underlying array (haps_src), not the
+        # (possibly masked) view.
+        new_fields = self._sliced_fields(keep_idx, space='underlying')
 
         return HaplotypeMatrix(
             new_haps, new_pos,

@@ -381,6 +381,9 @@ class TestHaplotypeMatrixFilter:
         empty = loaded.filter(variants=keep_none)
         assert empty._haplotypes.shape[1] == 0
         assert empty.fields["MQ"].shape == (0,)
+        # Unlike _empty_subset()'s default of preserving it, filter()
+        # drops n_total_sites here since the variant axis changed.
+        assert empty.n_total_sites is None
 
     def test_shape_mismatch_raises(self, tmp_path):
         hm = _simulate_hm()

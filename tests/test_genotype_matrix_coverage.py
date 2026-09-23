@@ -146,6 +146,129 @@ class TestFilter:
         assert out.n_total_sites is None
 
 
+class TestSamplesFieldsPreservation:
+
+    def test_restrict_to_segregating_slices_fields(self):
+        # variants 0 and 2 are monomorphic (all-ref) and get dropped; only
+        # variant 1 (het in both individuals) is segregating.
+        geno = np.array([[0, 1, 0], [0, 1, 0]], dtype=np.int8)
+        gm = GenotypeMatrix(geno, np.array([100, 200, 300]), 0, 300,
+                            samples=['a', 'b'],
+                            fields={'MQ': np.array([10.0, 20.0, 30.0],
+                                                   dtype=np.float32)})
+        out = gm.restrict_to_segregating()
+        assert out.samples == ['a', 'b']
+        np.testing.assert_array_equal(out.fields['MQ'], [20.0])
+
+    def test_from_haplotype_matrix_preserves_samples_and_fields(self):
+        from pg_gpu import HaplotypeMatrix
+        hap = np.array([[0, 1, 0], [0, 1, 0], [1, 0, 1], [1, 0, 1]],
+                       dtype=np.int8)
+        pos = np.array([100, 200, 300])
+        hm = HaplotypeMatrix(hap, pos, 0, 300, samples=['x', 'y'],
+                             fields={'MQ': np.array([1.0, 2.0, 3.0],
+                                                    dtype=np.float32)})
+        gm = GenotypeMatrix.from_haplotype_matrix(hm)
+        assert gm.samples == ['x', 'y']
+        np.testing.assert_array_equal(gm.fields['MQ'], hm.fields['MQ'])
+
+    def test_to_haplotype_matrix_preserves_samples_fields_and_sample_sets(self):
+        geno = np.array([[0, 1, 2], [2, 1, 0]], dtype=np.int8)
+        gm = GenotypeMatrix(geno, np.array([100, 200, 300]), 0, 300,
+                            samples=['x', 'y'], sample_sets={'all': [0, 1]},
+                            fields={'DP': np.array([5, 10, 15], dtype=np.int32)})
+        hm = gm.to_haplotype_matrix()
+        assert hm.samples == ['x', 'y']
+        np.testing.assert_array_equal(hm.fields['DP'], gm.fields['DP'])
+        assert hm._sample_sets == {'all': [0, 1, 2, 3]}
+
+
+class TestFieldsUnderAccessibleMask:
+    """The above tests never attach an accessible mask, so the view and the
+    underlying storage always coincide -- exactly the condition where a
+    view-vs-underlying fields indexing bug can't show up. These attach one."""
+
+    @staticmethod
+    def _assert_fields_match_positions(raw_pos, raw_fields, result):
+        pos = result.positions
+        result_pos = pos.get() if isinstance(pos, cp.ndarray) else np.asarray(pos)
+        keep = np.searchsorted(raw_pos, result_pos)
+        assert np.array_equal(raw_pos[keep], result_pos)
+        for tag, arr in raw_fields.items():
+            np.testing.assert_array_equal(result.fields[tag], arr[keep])
+
+    def test_restrict_to_segregating_under_accessible_mask(self):
+        # variant 1 is masked out; among the rest, variant 0 is monomorphic
+        # and variant 2 is segregating.
+        geno = np.array([[0, 0, 0], [0, 0, 1]], dtype=np.int8)
+        pos = np.array([100, 200, 300])
+        fields = {'MQ': np.array([10.0, 20.0, 30.0], dtype=np.float32)}
+        gm = GenotypeMatrix(geno, pos, 0, 300, samples=['a', 'b'],
+                            fields=fields)
+        mask = np.ones(301, dtype=bool)
+        mask[200] = False
+        gm.set_accessible_mask(AccessibleMask(mask, offset=0))
+        assert len(gm.positions) == 2
+
+        out = gm.restrict_to_segregating()
+        self._assert_fields_match_positions(pos, fields, out)
+
+    def test_filter_under_accessible_mask(self):
+        # variant 1 is masked out; filter() ignores the mask and operates
+        # on the full underlying data (space='underlying' in
+        # _sliced_fields), so the result covers all three variants.
+        geno = np.array([[0, 0, 0], [0, 0, 1]], dtype=np.int8)
+        pos = np.array([100, 200, 300])
+        fields = {'MQ': np.array([10.0, 20.0, 30.0], dtype=np.float32)}
+        gm = GenotypeMatrix(geno, pos, 0, 300, samples=['a', 'b'],
+                            fields=fields)
+        mask = np.ones(301, dtype=bool)
+        mask[200] = False
+        gm.set_accessible_mask(AccessibleMask(mask, offset=0))
+        assert len(gm.positions) == 2
+
+        out = gm.filter()
+        self._assert_fields_match_positions(pos, fields, out)
+
+    def test_from_haplotype_matrix_under_accessible_mask(self):
+        from pg_gpu import HaplotypeMatrix
+        # Variant 1 (position 200) is masked out on the HaplotypeMatrix
+        # side; converting a masked matrix with fields used to crash here
+        # (length-mismatched boolean index).
+        hap = np.array([[0, 1, 0], [0, 1, 0], [1, 0, 1], [1, 0, 1]],
+                       dtype=np.int8)
+        pos = np.array([100, 200, 300])
+        fields = {'MQ': np.array([1.0, 2.0, 3.0], dtype=np.float32)}
+        hm = HaplotypeMatrix(hap, pos, 0, 300, samples=['x', 'y'],
+                             fields=fields)
+        mask = np.ones(301, dtype=bool)
+        mask[200] = False
+        hm.set_accessible_mask(AccessibleMask(mask, offset=0))
+        assert len(hm.positions) == 2
+
+        gm = GenotypeMatrix.from_haplotype_matrix(hm)
+        self._assert_fields_match_positions(pos, fields, gm)
+
+    def test_to_haplotype_matrix_under_accessible_mask(self):
+        # Variant 1 (position 200) is masked out.
+        geno = np.array([[0, 1, 2], [2, 1, 0]], dtype=np.int8)
+        pos = np.array([100, 200, 300])
+        fields = {'DP': np.array([5, 10, 15], dtype=np.int32)}
+        gm = GenotypeMatrix(geno, pos, 0, 300, samples=['x', 'y'],
+                            fields=fields)
+        mask = np.ones(301, dtype=bool)
+        mask[200] = False
+        gm.set_accessible_mask(AccessibleMask(mask, offset=0))
+        assert len(gm.positions) == 2
+
+        hm = gm.to_haplotype_matrix()
+        self._assert_fields_match_positions(pos, fields, hm)
+
+        # to_haplotype_matrix must copy, not alias, gm's field arrays.
+        hm.fields['DP'][0] = -1
+        assert gm.fields['DP'][0] != -1
+
+
 class TestLoadPopFile:
 
     def test_no_sample_names_raises(self):
