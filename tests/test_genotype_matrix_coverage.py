@@ -215,8 +215,8 @@ class TestFieldsUnderAccessibleMask:
 
     def test_filter_under_accessible_mask(self):
         # variant 1 is masked out; filter() ignores the mask and operates
-        # on the full underlying data (space='underlying' in
-        # _sliced_fields), so the result covers all three variants.
+        # on the full underlying data (slice_fields with no accessible
+        # index), so the result covers all three variants.
         geno = np.array([[0, 0, 0], [0, 0, 1]], dtype=np.int8)
         pos = np.array([100, 200, 300])
         fields = {'MQ': np.array([10.0, 20.0, 30.0], dtype=np.float32)}

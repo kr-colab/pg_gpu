@@ -5,7 +5,7 @@ import tskit
 import warnings
 from collections import Counter, OrderedDict
 
-from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask
+from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask, slice_fields
 from .zarr_io import parse_region
 
 
@@ -1172,25 +1172,6 @@ class HaplotypeMatrix:
         result.accessible_mask = None
         return result
 
-    def _sliced_fields(self, keep_idx, space='view'):
-        """self.fields sliced by keep_idx.
-
-        keep_idx is relative to the current (possibly masked) view by
-        default; pass space='underlying' when it already indexes the full
-        array, as filter() does.
-        """
-        assert space in ('view', 'underlying'), f"unknown space: {space!r}"
-        if not self.fields:
-            return {}
-        # fields are host arrays regardless of matrix device.
-        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
-        if space == 'view' and self._accessible_idx is not None:
-            accessible_np = (self._accessible_idx.get()
-                             if hasattr(self._accessible_idx, 'get')
-                             else self._accessible_idx)
-            keep_idx_np = accessible_np[keep_idx_np]
-        return {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
-
     def get_subset(self, positions) -> "HaplotypeMatrix":
         """
         Get a subset of the haplotype matrix based on the provided positions.
@@ -1234,7 +1215,7 @@ class HaplotypeMatrix:
             sample_sets=self._sample_sets,
             n_total_sites=self.n_total_sites,
             samples=self.samples,
-            fields=self._sliced_fields(positions),
+            fields=slice_fields(self.fields, positions, self._accessible_idx),
         )
 
     def get_subset_from_range(self, low: int, high: int) -> "HaplotypeMatrix":
@@ -1283,7 +1264,7 @@ class HaplotypeMatrix:
             sample_sets=self._sample_sets,
             samples=self.samples,
             accessible_mask=sliced_mask,
-            fields=self._sliced_fields(indices),
+            fields=slice_fields(self.fields, indices, self._accessible_idx),
         )
 
     def _keep_sites(self, keep) -> "HaplotypeMatrix":
@@ -1307,7 +1288,7 @@ class HaplotypeMatrix:
             n_total_sites=self.n_total_sites,
             accessible_mask=self.accessible_mask,
             samples=self.samples,
-            fields=self._sliced_fields(keep),
+            fields=slice_fields(self.fields, keep, self._accessible_idx),
         )
 
     def restrict_to_biallelic(self, *, warn_context=None) -> "HaplotypeMatrix":
@@ -1684,7 +1665,7 @@ class HaplotypeMatrix:
         new_pos = pos_src[keep_idx]
         # keep_idx already indexes the underlying array (haps_src), not the
         # (possibly masked) view.
-        new_fields = self._sliced_fields(keep_idx, space='underlying')
+        new_fields = slice_fields(self.fields, keep_idx)
 
         return HaplotypeMatrix(
             new_haps, new_pos,
