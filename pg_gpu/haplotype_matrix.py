@@ -1674,29 +1674,9 @@ class HaplotypeMatrix:
         keep_idx = xp.where(keep_v)[0]
 
         if int(keep_idx.size) == 0:
-            # Constructor rejects empty matrices; mirror the empty-subset
-            # workaround in ``get_subset`` so a too-aggressive filter
-            # returns a structured empty matrix rather than raising.
-            if self._device == 'GPU':
-                empty_haps = cp.empty((n_haps, 0), dtype=haps_src.dtype)
-                empty_pos = cp.array([], dtype=pos_src.dtype)
-            else:
-                empty_haps = np.empty((n_haps, 0), dtype=haps_src.dtype)
-                empty_pos = np.array([], dtype=pos_src.dtype)
-            result = object.__new__(HaplotypeMatrix)
-            result._haplotypes = empty_haps
-            result._positions = empty_pos
-            result._accessible_idx = None
-            result._hap_filtered = None
-            result._pos_filtered = None
-            result._accessible_mask = None
-            result.chrom_start = self.chrom_start
-            result.chrom_end = self.chrom_end
-            result._sample_sets = self._sample_sets
-            result._device = self._device
+            # The variant axis changed, unlike _empty_subset()'s default.
+            result = self._empty_subset()
             result.n_total_sites = None
-            result.samples = self.samples
-            result.fields = {tag: arr[:0] for tag, arr in self.fields.items()}
             return result
 
         new_haps = haps[:, keep_idx]
