@@ -1179,6 +1179,7 @@ class HaplotypeMatrix:
         default; pass space='underlying' when it already indexes the full
         array, as filter() does.
         """
+        assert space in ('view', 'underlying'), f"unknown space: {space!r}"
         if not self.fields:
             return {}
         # fields are host arrays regardless of matrix device.

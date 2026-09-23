@@ -388,6 +388,7 @@ def _assert_fields_match_positions(raw_pos, raw_fields, result):
     lambda m: m.restrict_to_biallelic(),
     lambda m: m.restrict_to_segregating(),
     lambda m: m.filter_variants_by_missing(1.0),
+    lambda m: m.filter(),
 ])
 def test_variant_subset_methods_preserve_fields_under_accessible_mask(subset_fn):
     m, raw_pos, raw_fields = _matrix_with_fields_and_mask()

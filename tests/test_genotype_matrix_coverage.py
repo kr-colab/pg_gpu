@@ -213,6 +213,23 @@ class TestFieldsUnderAccessibleMask:
         out = gm.restrict_to_segregating()
         self._assert_fields_match_positions(pos, fields, out)
 
+    def test_filter_under_accessible_mask(self):
+        # variant 1 is masked out; filter() ignores the mask and operates
+        # on the full underlying data (space='underlying' in
+        # _sliced_fields), so the result covers all three variants.
+        geno = np.array([[0, 0, 0], [0, 0, 1]], dtype=np.int8)
+        pos = np.array([100, 200, 300])
+        fields = {'MQ': np.array([10.0, 20.0, 30.0], dtype=np.float32)}
+        gm = GenotypeMatrix(geno, pos, 0, 300, samples=['a', 'b'],
+                            fields=fields)
+        mask = np.ones(301, dtype=bool)
+        mask[200] = False
+        gm.set_accessible_mask(AccessibleMask(mask, offset=0))
+        assert len(gm.positions) == 2
+
+        out = gm.filter()
+        self._assert_fields_match_positions(pos, fields, out)
+
     def test_from_haplotype_matrix_under_accessible_mask(self):
         from pg_gpu import HaplotypeMatrix
         # Variant 1 (position 200) is masked out on the HaplotypeMatrix
