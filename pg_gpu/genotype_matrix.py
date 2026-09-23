@@ -298,6 +298,24 @@ class GenotypeMatrix:
             self._pos_filtered = None
             self._device = 'CPU'
 
+    def _sliced_fields(self, keep_idx, space='view'):
+        """self.fields sliced by keep_idx.
+
+        keep_idx is relative to the current (possibly masked) view by
+        default; pass space='underlying' when it already indexes the full
+        array, as filter() does.
+        """
+        if not self.fields:
+            return {}
+        # fields are host arrays regardless of matrix device.
+        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
+        if space == 'view' and self._accessible_idx is not None:
+            accessible_np = (self._accessible_idx.get()
+                             if hasattr(self._accessible_idx, 'get')
+                             else self._accessible_idx)
+            keep_idx_np = accessible_np[keep_idx_np]
+        return {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
+
     @classmethod
     def from_haplotype_matrix(cls, hap_matrix):
         """Convert a HaplotypeMatrix to a GenotypeMatrix.
@@ -380,9 +398,8 @@ class GenotypeMatrix:
                 ind_indices = sorted(set(i // 2 for i in indices))
                 new_sample_sets[name] = ind_indices
 
-        # fields are host numpy arrays; biallelic is on GPU.
-        new_fields = {tag: arr[biallelic.get()]
-                     for tag, arr in hap_matrix.fields.items()}
+        # biallelic is relative to hap_matrix's (possibly masked) view.
+        new_fields = hap_matrix._sliced_fields(biallelic, space='view')
 
         return cls(geno, positions, hap_matrix.chrom_start,
                    hap_matrix.chrom_end, sample_sets=new_sample_sets,
@@ -429,13 +446,14 @@ class GenotypeMatrix:
                 for name, indices in self._sample_sets.items()
             }
 
+        # No filtering here, so the keep set is the whole view.
         return HaplotypeMatrix(hap, self.positions, self.chrom_start,
                                self.chrom_end,
                                n_total_sites=self.n_total_sites,
                                accessible_mask=self.accessible_mask,
                                sample_sets=new_sample_sets,
                                samples=self.samples,
-                               fields=self.fields)
+                               fields=self._sliced_fields(xp.arange(n_var)))
 
     @classmethod
     def from_vcf(cls, path, include_invariant=False, accessible_bed=None,
@@ -782,8 +800,7 @@ class GenotypeMatrix:
 
         new_geno = geno[:, keep_idx]
         new_pos = pos_src[keep_idx]
-        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
-        new_fields = {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
+        new_fields = self._sliced_fields(keep_idx, space='underlying')
 
         return GenotypeMatrix(
             new_geno, new_pos,
@@ -915,8 +932,7 @@ class GenotypeMatrix:
         keep_idx = cp.where(keep)[0]
         new_geno = self.genotypes[:, keep_idx]
         new_pos = self.positions[keep_idx]
-        # fields are host numpy arrays; keep_idx is on GPU.
-        new_fields = {tag: arr[keep_idx.get()] for tag, arr in self.fields.items()}
+        new_fields = self._sliced_fields(keep_idx)
 
         return GenotypeMatrix(new_geno, new_pos,
                               self.chrom_start, self.chrom_end,

@@ -1172,13 +1172,22 @@ class HaplotypeMatrix:
         result.accessible_mask = None
         return result
 
-    def _sliced_fields(self, keep_idx):
-        """self.fields sliced on axis 0 by keep_idx.
+    def _sliced_fields(self, keep_idx, space='view'):
+        """self.fields sliced by keep_idx.
 
-        fields are host numpy arrays regardless of matrix device, so the
-        index is moved to host first.
+        keep_idx is relative to the current (possibly masked) view by
+        default; pass space='underlying' when it already indexes the full
+        array, as filter() does.
         """
+        if not self.fields:
+            return {}
+        # fields are host arrays regardless of matrix device.
         keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
+        if space == 'view' and self._accessible_idx is not None:
+            accessible_np = (self._accessible_idx.get()
+                             if hasattr(self._accessible_idx, 'get')
+                             else self._accessible_idx)
+            keep_idx_np = accessible_np[keep_idx_np]
         return {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
 
     def get_subset(self, positions) -> "HaplotypeMatrix":
@@ -1692,10 +1701,9 @@ class HaplotypeMatrix:
 
         new_haps = haps[:, keep_idx]
         new_pos = pos_src[keep_idx]
-        # Fields are numpy arrays; slice with a host-side index regardless
-        # of where the haplotype matrix lives.
-        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
-        new_fields = {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
+        # keep_idx already indexes the underlying array (haps_src), not the
+        # (possibly masked) view.
+        new_fields = self._sliced_fields(keep_idx, space='underlying')
 
         return HaplotypeMatrix(
             new_haps, new_pos,
