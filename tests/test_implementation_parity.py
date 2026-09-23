@@ -288,7 +288,7 @@ _STATS = {
     "fst_wc": _Stat(
         True, "value",
         lambda hm, md: divergence.fst_weir_cockerham(hm, POP1, POP2, missing_data=md),
-        None, None, "fst_wc", "fst_wc"),
+        None, "fst_wc", "fst_wc", "fst_wc"),
     # The Achaz eta-family: the per-allele scalar path (via diversity_stats) is
     # the reference; the SFS dot-product (FrequencySpectrum.theta) is the one
     # path checked against it. Both are per-allele-correct, so they agree on
