@@ -497,6 +497,30 @@ class TestChunkedFused:
                                        equal_nan=True,
                                        err_msg=f"Mismatch in {k}")
 
+    def test_two_pop_scatter_matches_fused_for_fst_wc(self, matrix_with_pops):
+        """The scatter engine's fst_wc must agree exactly with the fused
+        kernel, not just approximately."""
+        from pg_gpu.windowed_analysis import (
+            windowed_analysis,
+            windowed_statistics_fused,
+        )
+
+        hm = matrix_with_pops
+        hm.transfer_to_gpu()
+
+        r_scatter = windowed_analysis(
+            hm, window_size=50_000, step_size=50_000,
+            statistics=['fst_wc'], populations=['pop1', 'pop2'],
+            span_normalize=False)
+
+        bp_bins = np.arange(0, 500_001, 50_000, dtype=np.float64)
+        r_fused = windowed_statistics_fused(
+            hm, bp_bins=bp_bins, statistics=('fst_wc',),
+            pop1='pop1', pop2='pop2', per_base=False)
+
+        np.testing.assert_allclose(r_scatter['fst_wc'].to_numpy(),
+                                   r_fused['fst_wc'], rtol=1e-10, atol=1e-14)
+
     def test_two_pop_chunked_with_population_subset(self, matrix_with_pops):
         """Chunked two-pop values must not depend on the population= subset.
 
@@ -633,6 +657,45 @@ class TestChunkedFused:
 class TestTwoPopColumnNaming:
     """One request, one column set, whichever engine serves it (#193)."""
 
+    def test_mixed_single_and_fst_wc_matches_scalar(self):
+        """A mixed single+two-pop request including fst_wc routes through
+        the generic mixed-dispatch path (_windowed_thetas_scatter +
+        _windowed_twopop_scatter)."""
+        from pg_gpu import diversity, divergence
+
+        rng = np.random.RandomState(11)
+        n_hap, n_var = 40, 300
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        pos = np.arange(1, n_var + 1) * 100
+        hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
+        hm.sample_sets = {'p1': list(range(20)), 'p2': list(range(20, 40))}
+
+        window_size = 5_000
+        df = windowed_analysis(hm, window_size=window_size,
+                               step_size=window_size,
+                               statistics=['pi', 'fst_wc'],
+                               populations=['p1', 'p2'], span_normalize=False)
+        assert 'pi' in df.columns and 'fst_wc' in df.columns
+
+        for start, pi_w, wc_w in zip(df['start'], df['pi'], df['fst_wc']):
+            stop = start + window_size
+            mask = (pos >= start) & (pos < stop)
+            if not mask.any():
+                continue
+            sub = HaplotypeMatrix(hap[:, mask], pos[mask], int(start),
+                                  int(stop))
+            sub.sample_sets = {'p1': list(range(20)), 'p2': list(range(20, 40))}
+            assert np.isclose(pi_w, diversity.pi(sub, population='p1',
+                                                 span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            wc_ref = divergence.fst_weir_cockerham(sub, 'p1', 'p2')
+            if np.isnan(wc_w):
+                # fst_weir_cockerham returns 0.0, not NaN, for this
+                # undefined-ratio case.
+                assert wc_ref == 0.0
+            else:
+                assert np.isclose(wc_w, wc_ref, rtol=1e-9, atol=1e-12)
+
     def test_two_pop_columns_match_across_modes(self):
         rng = np.random.RandomState(7)
         n_hap, n_var = 40, 400
@@ -641,9 +704,8 @@ class TestTwoPopColumnNaming:
         hm = HaplotypeMatrix(hap, pos, 0, (n_var + 1) * 100)
         hm.sample_sets = {"p1": list(range(20)), "p2": list(range(20, 40))}
 
-        # 'include' routes fst_wc to the fused engine, 'exclude' to the
-        # per-window fallback; both must name the column after the
-        # statistic alone.
+        # Both modes route fst_wc through the scatter engine; both must
+        # name the column after the statistic alone.
         frames = {
             mode: windowed_analysis(
                 hm, window_size=10_000, step_size=10_000,
@@ -1357,14 +1419,14 @@ class TestMultiallelicTwoPop:
         sub.sample_sets = hm.sample_sets
         return sub
 
-    def test_scatter_dxy_fst_da_match_scalar(self, sim_hm):
+    def test_scatter_dxy_fst_da_wc_match_scalar(self, sim_hm):
         window_size = 25_000
         df = windowed_analysis(sim_hm, window_size=window_size,
                                step_size=window_size,
-                               statistics=['dxy', 'fst', 'da'],
+                               statistics=['dxy', 'fst', 'da', 'fst_wc'],
                                populations=['p1', 'p2'], span_normalize=False)
-        for start, dxy_w, fst_w, da_w in zip(
-                df['start'], df['dxy'], df['fst'], df['da']):
+        for start, dxy_w, fst_w, da_w, wc_w in zip(
+                df['start'], df['dxy'], df['fst'], df['da'], df['fst_wc']):
             stop = start + window_size
             if stop > sim_hm.chrom_end:
                 continue
@@ -1377,6 +1439,13 @@ class TestMultiallelicTwoPop:
             assert np.isclose(da_w,
                               divergence.da(sub, 'p1', 'p2', span_normalize=False),
                               rtol=1e-9, atol=1e-12)
+            wc_ref = divergence.fst_weir_cockerham(sub, 'p1', 'p2')
+            if np.isnan(wc_w):
+                # fst_weir_cockerham returns 0.0, not NaN, for this
+                # undefined-ratio case.
+                assert wc_ref == 0.0
+            else:
+                assert np.isclose(wc_w, wc_ref, rtol=1e-9, atol=1e-12)
             fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')
             if np.isnan(fst_w) or np.isnan(fst_ref):
                 assert np.isnan(fst_w) and np.isnan(fst_ref)

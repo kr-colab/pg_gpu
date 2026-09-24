@@ -698,6 +698,18 @@ class TestUnpairedRowsWarning:
                                               statistics=('fst',),
                                               pop1='p1', pop2='p2'))
 
+    def test_scatter_windowed_fst_wc_warns_and_fst_alone_does_not(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        from pg_gpu._warnings import UnpairedRowsWarning
+        hm = self._hm()
+        hm.sample_sets = {'p1': [0, 2, 4, 6], 'p2': [8, 9, 10, 11]}
+        with pytest.warns(UnpairedRowsWarning):
+            windowed_analysis(hm, window_size=700, statistics=['fst_wc'],
+                              populations=['p1', 'p2'])
+        self._assert_quiet(
+            lambda: windowed_analysis(hm, window_size=700, statistics=['fst'],
+                                      populations=['p1', 'p2']))
+
     def test_load_pop_file_output_is_quiet(self):
         from pg_gpu import divergence
         hm = self._hm()
