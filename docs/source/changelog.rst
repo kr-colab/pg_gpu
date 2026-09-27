@@ -59,6 +59,22 @@ Results that change even for two-allele data
 
 Read this section if you are comparing against older pg_gpu results.
 
+* Haplotype identity with missing calls has one rule on every path.
+  ``garud_h``, ``moving_garud_h``, the windowed Garud's H columns,
+  ``haplotype_count``, ``haplotype_diversity``,
+  ``diplotype_frequency_spectrum`` and ``mu_ld`` used to treat ``-1`` as
+  a wildcard with first-match grouping. That grouping depended on row
+  order and merged haplotypes that share no called site, so H1 went up.
+  The windowed engine instead treated ``-1`` as one more allele, so
+  almost every haplotype was distinct and H1 went down. Now the complete
+  haplotypes (no missing call) set the distinct haplotypes, and EM
+  splits each incomplete haplotype across the complete ones it matches
+  at its called sites. This gives the maximum-likelihood frequencies when
+  calls are missing at random, and does not depend on row order. An
+  incomplete haplotype that matches no complete one is a distinct
+  haplotype of its own. A window with no complete haplotype returns NaN.
+  Values change on any data with missing calls; data with no missing
+  calls is unchanged. See :doc:`missing_data`.
 * Haplotype rows now follow one order everywhere: sample ``i`` owns rows
   ``2i`` and ``2i + 1``. ``from_ts`` already used this order, while
   ``from_vcf`` and ``from_zarr`` grouped all of the first gametes ahead of
@@ -177,6 +193,10 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``garud_h`` on a ``GenotypeMatrix`` ignored ``missing_data``, and
+  ``windowed_analysis`` with a Garud's H statistic or ``haplotype_count``
+  under ``missing_data='exclude'`` raised ``Unknown statistic``. Both now
+  apply ``missing_data``.
 * Several ``HaplotypeMatrix``/``GenotypeMatrix`` methods that subset or
   convert a matrix by variant (``get_subset``, ``get_subset_from_range``,
   ``restrict_to_biallelic``, ``restrict_to_segregating``,

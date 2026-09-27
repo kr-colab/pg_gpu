@@ -13,6 +13,7 @@ from typing import Union, Optional, Tuple
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix as _get_population_matrix
 from ._memutil import allele_counts
+from ._haplotype_groups import complete_sites, frequencies
 from ._haplotype_hash import garud_from_moments, garud_h_windows
 
 
@@ -115,8 +116,9 @@ def garud_h(matrix, population=None, missing_data='include'):
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples.
     missing_data : str
-        'include' - treat missing as wildcard (compatible with any allele).
-        'exclude' - filter to sites with no missing data.
+        'include' - estimate haplotype frequencies from haplotypes with
+        missing calls by EM (see Notes).
+        'exclude' - use only sites with no missing call.
 
     Returns
     -------
@@ -128,11 +130,26 @@ def garud_h(matrix, population=None, missing_data='include'):
         H123 statistic (top three combined).
     h2_h1 : float
         H2/H1 ratio indicating sweep softness.
+
+    Notes
+    -----
+    With ``missing_data='include'``, the complete haplotypes (no missing
+    call) set the distinct haplotypes. EM splits each incomplete haplotype
+    across the complete haplotypes it matches at its called sites, which
+    gives the maximum-likelihood frequencies when calls are missing at
+    random. The result does not depend on row order. An incomplete
+    haplotype that matches no complete haplotype counts as a distinct
+    haplotype of its own. With no complete haplotype, all four values are
+    NaN.
+
+    A haplotype is complete over L sites with probability (1 - m)^L at a
+    missing rate m, so data with many missing calls gives few complete
+    haplotypes. For such data, use ``missing_data='exclude'``.
     """
     from .genotype_matrix import GenotypeMatrix
 
     if isinstance(matrix, GenotypeMatrix):
-        return _garud_h_diploid(matrix, population)
+        return _garud_h_diploid(matrix, population, missing_data)
 
     haplotype_matrix = matrix
     if population is not None:
@@ -143,12 +160,9 @@ def garud_h(matrix, population=None, missing_data='include'):
 
     hap = haplotype_matrix.haplotypes
     if missing_data == 'exclude':
-        missing_per_var = cp.sum(hap < 0, axis=0)
-        hap = hap[:, missing_per_var == 0]
+        hap = complete_sites(hap)
 
-    f = _distinct_haplotype_frequencies_missing(hap)
-
-    return _garud_from_freqs(f)
+    return _garud_from_freqs(frequencies(hap).get())
 
 
 def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
@@ -175,8 +189,11 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices.
     missing_data : str
-        'include' - treat missing as wildcard in pattern matching
-        'exclude' - filter to sites with no missing data
+        'include' - EM haplotype frequencies in windows with missing
+        calls, as in ``garud_h``; NaN for a window with no complete
+        haplotype.
+        'exclude' - drop every site with a missing call, then tile the
+        windows over the remaining sites.
 
     Returns
     -------
@@ -202,8 +219,7 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
     hap = matrix.haplotypes
 
     if missing_data == 'exclude':
-        missing_per_var = cp.sum(hap < 0, axis=0)
-        hap = hap[:, missing_per_var == 0]
+        hap = complete_sites(hap)
 
     n_variants = hap.shape[1]
 
@@ -218,30 +234,27 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
             f"({n_variants}), size >= 1 and step >= 1; got start={start}, "
             f"stop={stop}, size={size}, step={step}")
     starts = np.arange(start, stop - size + 1, step, dtype=np.int64)
-
-    if bool(cp.any(hap < 0).get()):
-        # Fallback: per-window wildcard matching
-        results = np.empty((starts.size, 4), dtype=np.float64)
-        for i, w_start in enumerate(starts):
-            f = _distinct_haplotype_frequencies_missing(hap[:, w_start:w_start + size])
-            results[i] = _garud_from_freqs(f)
-        return tuple(results.T)
-
     return garud_h_windows(hap, starts, starts + size)[:4]
 
 
 def _garud_from_freqs(f):
-    """Compute H1/H12/H123/H2H1 from a descending-sorted frequency array."""
+    """Compute H1/H12/H123/H2H1 from a descending-sorted frequency array.
+
+    An empty array means the frequencies are undefined; all four are NaN.
+    """
     f = np.asarray(f, dtype=np.float64)
+    if f.size == 0:
+        return (float('nan'),) * 4
     top = np.zeros(3)
     top[:min(3, f.size)] = f[:3]
     return tuple(float(x) for x in garud_from_moments(float(np.sum(f ** 2)), *top))
 
 
-def _garud_h_diploid(genotype_matrix, population=None):
+def _garud_h_diploid(genotype_matrix, population=None, missing_data='include'):
     """Garud's H from diplotype frequencies (internal)."""
     from .diversity import diplotype_frequency_spectrum
-    freqs, _ = diplotype_frequency_spectrum(genotype_matrix, population)
+    freqs, _ = diplotype_frequency_spectrum(genotype_matrix, population,
+                                            missing_data=missing_data)
     return _garud_from_freqs(freqs)
 
 
@@ -686,61 +699,6 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
     out = np.zeros(n_variants, dtype=ehh_short.dtype)
     out[:ehh_short.shape[0]] = ehh_short
     return out
-
-
-# ---------------------------------------------------------------------------
-# Private helpers: haplotype frequency computation (for Garud's H)
-# ---------------------------------------------------------------------------
-
-def _distinct_haplotype_frequencies(hap):
-    """Compute distinct haplotype frequencies, sorted descending.
-
-    Returns
-    -------
-    freqs : ndarray, float64, sorted descending (CPU)
-    """
-    from .diversity import _count_unique_haplotypes_gpu
-    n_hap = hap.shape[0]
-    _, counts = _count_unique_haplotypes_gpu(hap)
-    freqs = cp.sort(counts)[::-1].astype(cp.float64) / n_hap
-    return freqs.get()
-
-
-def _distinct_haplotype_frequencies_missing(hap):
-    """Compute distinct haplotype frequencies treating -1 as wildcard.
-
-    Uses the exact GPU row hash when no missing data is present,
-    otherwise falls back to CPU wildcard matching.
-
-    Parameters
-    ----------
-    hap : cupy.ndarray, shape (n_haplotypes, n_variants)
-
-    Returns
-    -------
-    freqs : ndarray, float64, sorted descending (CPU)
-    """
-    if isinstance(hap, cp.ndarray):
-        has_missing = bool(cp.any(hap < 0).get())
-    else:
-        has_missing = bool(np.any(hap < 0))
-
-    if not has_missing:
-        if not isinstance(hap, cp.ndarray):
-            hap = cp.asarray(hap)
-        return _distinct_haplotype_frequencies(hap)
-
-    # Fallback: wildcard matching on CPU
-    from .diversity import _cluster_haplotypes_with_missing
-    from collections import Counter
-
-    n_hap = hap.shape[0]
-    hap_cpu = hap.get().astype(np.int8) if isinstance(hap, cp.ndarray) else hap
-
-    labels = _cluster_haplotypes_with_missing(hap_cpu)
-    counts = Counter(labels)
-    freqs = np.array(sorted(counts.values(), reverse=True)) / n_hap
-    return freqs
 
 
 # ---------------------------------------------------------------------------

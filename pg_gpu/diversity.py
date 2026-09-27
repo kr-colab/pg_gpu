@@ -14,7 +14,6 @@ from typing import Union, Optional, Dict, Callable
 from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import get_population_matrix
-from ._haplotype_hash import row_hashes
 
 
 def _apply_span_normalize(value, matrix, span_normalize):
@@ -1170,8 +1169,8 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
     """
     Calculate haplotype diversity for a population.
 
-    Haplotype diversity is defined as 1 - sum(p_i^2) where p_i is the
-    frequency of the i-th unique haplotype in the population.
+    Haplotype diversity is defined as n / (n - 1) * (1 - sum(p_i^2)), where
+    p_i is the frequency of the i-th distinct haplotype among n haplotypes.
 
     Parameters
     ----------
@@ -1180,126 +1179,43 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     missing_data : str
-        'include' - exclude haplotypes with any missing data
-        'exclude' - filter to sites with no missing data
+        'include' - estimate haplotype frequencies from haplotypes with
+        missing calls by EM, as in ``selection.garud_h``. NaN when no
+        haplotype is complete.
+        'exclude' - use only sites with no missing call.
 
     Returns
     -------
     float
         Haplotype diversity value
     """
+    from ._haplotype_groups import frequencies
 
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    haplotypes = matrix.haplotypes  # (n_hap, n_var)
-
-    if missing_data == 'exclude':
-        missing_per_var = cp.sum(haplotypes < 0, axis=0)
-        complete = cp.where(missing_per_var == 0)[0]
-        haplotypes = haplotypes[:, complete]
-
+    haplotypes = _haplotypes_for_grouping(haplotype_matrix, population,
+                                          missing_data)
     n_haplotypes = haplotypes.shape[0]
     if n_haplotypes <= 1:
         return 0.0
 
-    has_missing = bool(cp.any(haplotypes < 0).get())
+    f = frequencies(haplotypes)
+    if f.size == 0:
+        return float('nan')
+    return float((1.0 - cp.sum(f * f)) * n_haplotypes / (n_haplotypes - 1))
 
-    if has_missing:
-        # Fallback: wildcard matching requires CPU pairwise comparison
-        haplotypes_cpu = haplotypes.get() if hasattr(haplotypes, 'get') else haplotypes
-        cluster_id = _cluster_haplotypes_with_missing(haplotypes_cpu)
-        from collections import Counter
-        counts = Counter(cluster_id)
-        frequencies = np.array(list(counts.values())) / n_haplotypes
+
+def _haplotypes_for_grouping(haplotype_matrix, population, missing_data):
+    """Population rows on the GPU; with 'exclude', only complete sites."""
+    if population is not None:
+        matrix = _get_population_matrix(haplotype_matrix, population)
     else:
-        _, counts_gpu = _count_unique_haplotypes_gpu(haplotypes)
-        frequencies = (counts_gpu.astype(cp.float64) / n_haplotypes).get()
-
-    diversity = (1.0 - np.sum(frequencies ** 2)) * n_haplotypes / (n_haplotypes - 1)
-    return float(diversity)
-
-
-def _count_unique_haplotypes_gpu(haplotypes):
-    """Count unique haplotypes on GPU via exact row hashing.
-
-    Caller must guarantee the input contains no missing data (-1).
-
-    Returns
-    -------
-    n_unique : int
-    counts : cupy.ndarray of group sizes (unsorted)
-    """
-    n_haplotypes = haplotypes.shape[0]
-    hash1, hash2 = row_hashes(haplotypes)
-    order = cp.lexsort(cp.stack([hash2, hash1]))
-    s1 = hash1[order]
-    s2 = hash2[order]
-    # Identical rows hash bit-identically, so any change in either hash
-    # starts a new group.
-    diff = (s1[1:] != s1[:-1]) | (s2[1:] != s2[:-1])
-    boundaries = cp.concatenate([cp.ones(1, dtype=cp.bool_), diff])
-    boundary_idx = cp.where(boundaries)[0]
-    tail = cp.full(1, n_haplotypes, dtype=boundary_idx.dtype)
-    counts_gpu = cp.diff(cp.concatenate([boundary_idx, tail]))
-    return int(boundary_idx.shape[0]), counts_gpu
-
-
-def _cluster_haplotypes_with_missing(haps):
-    """Cluster haplotypes treating -1 as compatible with any allele.
-
-    Two haplotypes are in the same cluster if they match at all positions
-    where both are non-missing. Uses greedy assignment: each haplotype
-    joins the first compatible cluster.
-
-    Parameters
-    ----------
-    haps : ndarray, shape (n_haplotypes, n_variants)
-
-    Returns
-    -------
-    labels : list of int, length n_haplotypes
-    """
-    n = haps.shape[0]
-    has_any_missing = np.any(haps < 0)
-
-    if not has_any_missing:
-        # fast path: no missing data, use string hashing
-        hap_strings = [''.join(map(str, h)) for h in haps]
-        label_map = {}
-        labels = []
-        next_id = 0
-        for s in hap_strings:
-            if s not in label_map:
-                label_map[s] = next_id
-                next_id += 1
-            labels.append(label_map[s])
-        return labels
-
-    # slow path: pairwise comparison with wildcard matching
-    # representative haplotype per cluster (index into haps)
-    cluster_reps = [0]
-    labels = [0]
-
-    for i in range(1, n):
-        matched = False
-        for c_idx, rep in enumerate(cluster_reps):
-            # check if haps[i] matches haps[rep] at jointly non-missing sites
-            both_valid = (haps[i] >= 0) & (haps[rep] >= 0)
-            if np.all(haps[i][both_valid] == haps[rep][both_valid]):
-                labels.append(c_idx)
-                matched = True
-                break
-        if not matched:
-            cluster_reps.append(i)
-            labels.append(len(cluster_reps) - 1)
-
-    return labels
+        matrix = haplotype_matrix
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    haplotypes = matrix.haplotypes
+    if missing_data == 'exclude':
+        from ._haplotype_groups import complete_sites
+        haplotypes = complete_sites(haplotypes)
+    return haplotypes
 
 
 _get_population_matrix = get_population_matrix
@@ -1514,7 +1430,7 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
 
 def haplotype_count(haplotype_matrix: HaplotypeMatrix,
                     population: Optional[Union[str, list]] = None,
-                    missing_data: str = 'include') -> int:
+                    missing_data: str = 'include'):
     """Count distinct haplotypes.
 
     Parameters
@@ -1522,42 +1438,25 @@ def haplotype_count(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     missing_data : str
-        'include' - exclude haplotypes with any missing
-        'exclude' - filter to sites with no missing data
+        'include' - the complete haplotypes (no missing call) set the
+        distinct haplotypes; an incomplete haplotype that matches none of
+        them at its called sites adds one more (see ``selection.garud_h``).
+        'exclude' - use only sites with no missing call.
 
     Returns
     -------
-    int
+    int, or float NaN when ``'include'`` finds no complete haplotype
     """
+    from ._haplotype_groups import haplotype_groups
 
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    haplotypes = matrix.haplotypes
-    excluded = missing_data == 'exclude'
-
-    if excluded:
-        haplotypes = haplotypes[:, cp.sum(haplotypes < 0, axis=0) == 0]
-
+    haplotypes = _haplotypes_for_grouping(haplotype_matrix, population,
+                                          missing_data)
     if haplotypes.shape[0] <= 1:
         return haplotypes.shape[0]
-
-    # 'exclude' already removed every site with a -1, so the remainder is clean
-    has_missing = False if excluded else bool(cp.any(haplotypes < 0).get())
-
-    if has_missing:
-        # Wildcard matching requires CPU pairwise comparison
-        hap_cpu = haplotypes.get().astype(np.int8)
-        labels = _cluster_haplotypes_with_missing(hap_cpu)
-        return len(set(labels))
-
-    n_unique, _ = _count_unique_haplotypes_gpu(haplotypes)
-    return n_unique
+    res = haplotype_groups(haplotypes)
+    if res is None:
+        return float('nan')
+    return res[1]
 
 
 def daf_histogram(matrix, n_bins: int = 20,
@@ -1612,38 +1511,39 @@ def daf_histogram(matrix, n_bins: int = 20,
 
 
 def diplotype_frequency_spectrum(genotype_matrix,
-                                 population: Optional[Union[str, list]] = None):
+                                 population: Optional[Union[str, list]] = None,
+                                 missing_data: str = 'include'):
     """Count distinct multi-locus genotype patterns (diplotypes).
 
     Parameters
     ----------
     genotype_matrix : GenotypeMatrix
     population : str or list, optional
+    missing_data : str
+        'include' - EM frequencies from diplotypes with missing calls, with
+        the same rule as haplotypes in ``selection.garud_h``.
+        'exclude' - use only sites with no missing call.
 
     Returns
     -------
     freqs : ndarray, float64, sorted descending
-        Diplotype frequencies.
+        Diplotype frequencies. Empty when no diplotype is complete.
     n_diplotypes : int
-        Number of distinct diplotypes.
+        Number of distinct diplotypes, or NaN when no diplotype is complete.
     """
+    from ._haplotype_groups import complete_sites, haplotype_groups
+
     if population is not None:
         genotype_matrix = _get_population_matrix(genotype_matrix, population)
-    geno = genotype_matrix.genotypes
+    geno = cp.asarray(genotype_matrix.genotypes)
+    if missing_data == 'exclude':
+        geno = complete_sites(geno)
 
-    if isinstance(geno, cp.ndarray):
-        geno = geno.get()
-
-    geno = np.asarray(geno, dtype=np.int8)
-    n_ind = geno.shape[0]
-
-    # treat missing (-1) as wildcard for diplotype identity
-    labels = _cluster_haplotypes_with_missing(geno)
-    from collections import Counter
-    counts = Counter(labels)
-    freqs = np.array(sorted(counts.values(), reverse=True)) / n_ind
-
-    return freqs, len(counts)
+    res = haplotype_groups(geno)
+    if res is None:
+        return np.empty(0, dtype=np.float64), float('nan')
+    counts, n_distinct = res
+    return (cp.sort(counts)[::-1] / geno.shape[0]).get(), n_distinct
 
 
 def _daf_bin_index(dafs, n_bins):
