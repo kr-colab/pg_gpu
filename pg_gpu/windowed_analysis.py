@@ -16,7 +16,6 @@ from tqdm import tqdm
 from .haplotype_matrix import HaplotypeMatrix
 from . import ld_statistics
 from . import divergence
-from .divergence import _twopop_site_components
 from . import diversity
 from ._haplotype_hash import garud_h_windows
 
@@ -1009,7 +1008,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     # for the gamete statistics, not a pure fst_wc request.
     need_between = stats_set & {'fst', 'fst_hudson', 'dxy', 'da'}
     if need_between:
-        mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
+        mpd1, mpd2, between = divergence._twopop_site_components(hap1, hap2)
 
     if 'fst_wc' in stats_set:
         from .divergence import _wc_site_components
@@ -2820,14 +2819,14 @@ def _per_variant_fst_hudson_components(hap1, hap2, n1, n2):
     Returns (num, den) as CuPy arrays. Handles missing data (-1) by
     using per-site valid counts.
     """
-    mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
+    mpd1, mpd2, between = divergence._twopop_site_components(hap1, hap2)
     within = (mpd1 + mpd2) / 2.0
     return between - within, between
 
 
 def _per_variant_dxy(hap1, hap2, n1, n2):
     """Per-variant mean pairwise difference between populations (GPU)."""
-    _, _, between = _twopop_site_components(hap1, hap2)
+    _, _, between = divergence._twopop_site_components(hap1, hap2)
     return between
 
 

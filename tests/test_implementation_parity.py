@@ -305,6 +305,10 @@ _STATS = {
         False, "value",
         lambda hm, md: diversity.mu_sfs(hm, missing_data=md),
         None, None, "mu_sfs", None),
+    "fst": _Stat(
+        True, "value",
+        lambda hm, md: divergence.fst(hm, POP1, POP2, missing_data=md),
+        None, "fst", "fst", "fst"),
     "fst_hudson": _Stat(
         True, "value",
         lambda hm, md: divergence.fst_hudson(hm, POP1, POP2, missing_data=md),
@@ -506,14 +510,17 @@ def test_daf_hist_matches_scalar(request, condition):
     np.testing.assert_allclose(got_fused, ref, rtol=RTOL, atol=ATOL)
 
 
-@pytest.mark.parametrize("stat", ["da", "fst_hudson", "dxy", "fst_wc"])
-def test_population_gap_matches_scalar(population_gap_hm, stat):
-    """da/fst_hudson must agree across every path even when one population
-    is entirely missing at some sites, not just partially missing
-    (population_gap_hm; missing_hm never exercises this)."""
+@pytest.mark.parametrize("missing_data", ["include", "exclude"])
+@pytest.mark.parametrize("stat", ["da", "fst", "fst_hudson", "dxy", "fst_wc"])
+def test_population_gap_matches_scalar(population_gap_hm, stat, missing_data):
+    """da/fst/fst_hudson/dxy/fst_wc must agree across every path even when
+    one population is entirely missing at some sites, not just partially
+    missing (population_gap_hm; missing_hm never exercises this)."""
     hm = population_gap_hm
-    reference = _path_scalar(hm, stat, "include")
+    reference = _path_scalar(hm, stat, missing_data)
     for path in _supported_paths(stat):
-        value = _PATHS[path](hm, stat, "include")
+        if path == "fused" and missing_data == "exclude":
+            continue
+        value = _PATHS[path](hm, stat, missing_data)
         assert np.isclose(value, reference, rtol=RTOL, atol=ATOL), (
-            f"{stat}/{path}: got {value!r}, expected {reference!r}")
+            f"{stat}/{path}/{missing_data}: got {value!r}, expected {reference!r}")

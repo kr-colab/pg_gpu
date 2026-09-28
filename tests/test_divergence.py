@@ -429,3 +429,32 @@ class TestEdgeCases:
         # Dxy should be 0
         dxy_val = divergence.dxy(matrix, 'pop1', 'pop2')
         assert dxy_val == 0.0
+
+    def test_fst_tskit_masks_population_gap_sites(self):
+        """fst_tskit must restrict its within-population term to sites where
+        both populations have data, matching fst_hudson's convention --
+        not leak one population's own diversity at a site where the other
+        is entirely missing."""
+        n_variants = 40
+        rng = np.random.RandomState(2)
+        haplotypes = rng.randint(0, 2, size=(20, n_variants)).astype(np.int8)
+        positions = np.arange(n_variants) * 1000
+
+        matrix = HaplotypeMatrix(haplotypes.copy(), positions)
+        matrix.sample_sets = {
+            'pop1': list(range(10)),
+            'pop2': list(range(10, 20)),
+        }
+        # pop1 entirely missing at every other site.
+        matrix.haplotypes[0:10, 0:n_variants:2] = -1
+
+        gapped = divergence.fst_tskit(matrix, 'pop1', 'pop2')
+
+        # A site where pop1 is wholly missing must contribute nothing to
+        # either sum, so computing on the pre-filtered (both-populations-
+        # present) subset must give the identical value.
+        reference_matrix = matrix.exclude_missing_sites(
+            populations=['pop1', 'pop2'])
+        reference = divergence.fst_tskit(reference_matrix, 'pop1', 'pop2')
+
+        assert np.isclose(gapped, reference, rtol=1e-9, atol=1e-12)

@@ -219,8 +219,10 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     # Per-allele Hudson: within = mean within-pop pairwise diff, between = dxy,
     # FST = 1 - sum(within)/sum(between) (ratio-of-averages). den > 0 already
     # implies both pops have data and the site is polymorphic between them.
-    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
-    num, den = _hudson_fst_from_counts(ac1, nv1, ac2, nv2)
+    mpd1, mpd2, between = _twopop_site_components(pop1_haps, pop2_haps)
+    within = (mpd1 + mpd2) / 2.0
+    num = between - within
+    den = between
 
     valid_mask = den > 0
     if cp.any(valid_mask):
@@ -277,12 +279,13 @@ def fst_tskit(haplotype_matrix: HaplotypeMatrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    # Reuse the per-allele Hudson pieces: den = Hb (between), den - num = Hw
-    # (within). tskit combines them as (Hb - Hw) / (Hb + Hw), summed over sites.
-    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
-    num, den = _hudson_fst_from_counts(ac1, nv1, ac2, nv2)
-    between_sum = float(cp.sum(den).get())
-    within_sum = float(cp.sum(den - num).get())
+    # Hb (between) and Hw (within), jointly gated so a site with no data in
+    # one population never contributes the other's own diversity as Hw.
+    # tskit combines them as (Hb - Hw) / (Hb + Hw), summed over sites.
+    mpd1, mpd2, between = _twopop_site_components(pop1_haps, pop2_haps)
+    within = (mpd1 + mpd2) / 2.0
+    between_sum = float(cp.sum(between).get())
+    within_sum = float(cp.sum(within).get())
     total = between_sum + within_sum
     if total > 0:
         return (between_sum - within_sum) / total
