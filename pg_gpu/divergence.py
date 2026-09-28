@@ -199,7 +199,7 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     float
-        Hudson's FST estimate
+        Hudson's FST estimate, or NaN if no site has data in both populations
     """
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
@@ -209,7 +209,7 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
         if haplotype_matrix.num_variants == 0:
-            return 0.0
+            return float('nan')
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -227,7 +227,7 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     valid_mask = den > 0
     if cp.any(valid_mask):
         return float((cp.sum(num[valid_mask]) / cp.sum(den[valid_mask])).get())
-    return 0.0
+    return float('nan')
 
 
 def fst_tskit(haplotype_matrix: HaplotypeMatrix,
@@ -263,7 +263,7 @@ def fst_tskit(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     float
-        tskit's FST estimate
+        tskit's FST estimate, or NaN if no site has data in both populations
     """
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
@@ -272,7 +272,7 @@ def fst_tskit(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
         if haplotype_matrix.num_variants == 0:
-            return 0.0
+            return float('nan')
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -289,7 +289,7 @@ def fst_tskit(haplotype_matrix: HaplotypeMatrix,
     total = between_sum + within_sum
     if total > 0:
         return (between_sum - within_sum) / total
-    return 0.0
+    return float('nan')
 
 
 def _pop_wc_stats(pop_haps, k):
@@ -432,7 +432,8 @@ def fst_weir_cockerham(haplotype_matrix,
     Returns
     -------
     float
-        Weir & Cockerham's FST estimate
+        Weir & Cockerham's FST estimate, or NaN if no site has data in both
+        populations
     """
 
     if hasattr(haplotype_matrix, 'device') and haplotype_matrix.device == 'CPU':
@@ -442,7 +443,7 @@ def fst_weir_cockerham(haplotype_matrix,
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
         if haplotype_matrix.num_variants == 0:
-            return 0.0
+            return float('nan')
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -464,7 +465,7 @@ def fst_weir_cockerham(haplotype_matrix,
     sum_abc = float(cp.sum(abc_site).get())
     if sum_abc > 0:
         return sum_a / sum_abc
-    return 0.0
+    return float('nan')
 
 
 def fst_nei(haplotype_matrix: HaplotypeMatrix,
@@ -492,7 +493,7 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     float
-        Nei's GST estimate
+        Nei's GST estimate, or NaN if no site has data in both populations
     """
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
@@ -502,7 +503,7 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
         if haplotype_matrix.num_variants == 0:
-            return 0.0
+            return float('nan')
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -536,13 +537,13 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     valid_mask = (ht > 0) & (n1 > 0) & (n2 > 0)
 
     if not cp.any(valid_mask):
-        return 0.0
+        return float('nan')
 
     # Ratio-of-averages: sum(HT-HS) / sum(HT)
     sum_ht = float(cp.sum(ht[valid_mask]).get())
     sum_hs = float(cp.sum(hs[valid_mask]).get())
     if sum_ht == 0:
-        return 0.0
+        return float('nan')
     return (sum_ht - sum_hs) / sum_ht
 
 

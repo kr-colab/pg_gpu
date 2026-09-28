@@ -422,11 +422,11 @@ class TestEdgeCases:
             'pop2': list(range(20, 40))
         }
 
-        # FST should be 0 (no variation to differentiate)
+        # FST is a ratio, so NaN when there's no data to normalize against.
         fst_val = divergence.fst(matrix, 'pop1', 'pop2')
-        assert fst_val == 0.0
+        assert np.isnan(fst_val)
 
-        # Dxy should be 0
+        # Dxy is a sum, so 0 is well-defined.
         dxy_val = divergence.dxy(matrix, 'pop1', 'pop2')
         assert dxy_val == 0.0
 
@@ -458,3 +458,33 @@ class TestEdgeCases:
         reference = divergence.fst_tskit(reference_matrix, 'pop1', 'pop2')
 
         assert np.isclose(gapped, reference, rtol=1e-9, atol=1e-12)
+
+    def test_fst_nan_when_undefined(self):
+        """Every FST estimator returns NaN, not 0.0, when the ratio has no
+        denominator: no site with data in both populations."""
+        n_variants = 30
+        haplotypes = np.random.randint(0, 2, size=(20, n_variants))
+        positions = np.arange(n_variants) * 1000
+
+        matrix = HaplotypeMatrix(haplotypes, positions)
+        matrix.sample_sets = {
+            'pop1': list(range(10)),
+            'pop2': list(range(10, 20)),
+        }
+        # Every site missing in pop1 -- pop2 never has anything to pair with.
+        matrix.haplotypes[0:10, :] = -1
+
+        assert np.isnan(divergence.fst_hudson(matrix, 'pop1', 'pop2'))
+        assert np.isnan(divergence.fst_weir_cockerham(matrix, 'pop1', 'pop2'))
+        assert np.isnan(divergence.fst_tskit(matrix, 'pop1', 'pop2'))
+        assert np.isnan(divergence.fst_nei(matrix, 'pop1', 'pop2'))
+
+        # 'exclude' mode short-circuits to the same empty-matrix case.
+        assert np.isnan(divergence.fst_hudson(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))
+        assert np.isnan(divergence.fst_weir_cockerham(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))
+        assert np.isnan(divergence.fst_tskit(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))
+        assert np.isnan(divergence.fst_nei(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))

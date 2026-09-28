@@ -177,6 +177,10 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``fst_hudson``, ``fst_weir_cockerham``, ``fst_tskit``, and ``fst_nei``
+  returned ``0.0`` for an undefined ratio (no site with data in both
+  populations) while every windowed engine already used ``NaN`` for the
+  same case; they now return ``NaN`` too.
 * Several ``HaplotypeMatrix``/``GenotypeMatrix`` methods that subset or
   convert a matrix by variant (``get_subset``, ``get_subset_from_range``,
   ``restrict_to_biallelic``, ``restrict_to_segregating``,
