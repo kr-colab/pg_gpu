@@ -191,6 +191,16 @@ Bug fixes
   that decomposition with the scalar function and runs through the same
   fast scatter path as the other two-population statistics under both
   modes.
+* ``da``, and the windowed scatter engine's ``fst``/``fst_hudson``, computed
+  their within-population terms independently of the other population
+  instead of restricting every term to sites where both populations have
+  data (as ``fst_hudson`` and the fused kernel already did), so they gave
+  the wrong answer whenever one population was entirely missing at a site.
+  All three now share one site set, matching the fused kernel.
+* ``fst_tskit`` summed its within-population term over every site with no
+  such restriction at all, so it could count a site's within-population
+  diversity toward Hw even where the other population had no data there
+  to compare against. It now shares the same site set as ``fst_hudson``.
 * Windowed Garud's H made three float64 copies of the haplotype matrix
   (109 GB each for 2,940 haplotypes across 4.7 million sites) and, for
   a Garud-only request, a transposed int8 copy on top. Each window is
