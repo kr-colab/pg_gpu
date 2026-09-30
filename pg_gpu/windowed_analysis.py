@@ -940,48 +940,6 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     return pd.DataFrame(results)
 
 
-def _twopop_site_components(hap1, hap2):
-    """Compute per-site two-population components on GPU.
-
-    Returns (mpd1, mpd2, between) where:
-      mpd1 = within-pop1 mean pairwise difference per site
-      mpd2 = within-pop2 mean pairwise difference per site
-      between = between-pop mean pairwise difference per site
-
-    Per-allele (multiallelic-correct): the same-allele pair counts sum over
-    every allele column on a shared allele-index width K, so ``between``
-    equals the per-site Dxy (``1 - sum_a p1_a p2_a``) and mpd1/mpd2 the
-    per-site within-pop pi -- identical to the scalar ``divergence`` functions
-    (``_hudson_fst_from_counts`` / ``dxy``). Reduces to the biallelic
-    ancestral/derived form when there are two alleles. All quantities use
-    per-site valid counts (missing-data aware).
-    """
-    from .divergence import _aligned_pop_counts
-
-    ac1, ac2, n1, n2 = _aligned_pop_counts(hap1, hap2)
-    ac1 = ac1.astype(cp.float64)
-    ac2 = ac2.astype(cp.float64)
-    n1 = n1.astype(cp.float64)
-    n2 = n2.astype(cp.float64)
-
-    # Within-pop mean pairwise differences (same pairs summed over alleles)
-    n1_pairs = n1 * (n1 - 1) / 2
-    n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
-    mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
-
-    n2_pairs = n2 * (n2 - 1) / 2
-    n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
-    mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
-
-    # Between-pop mean pairwise differences (per-allele cross term)
-    n_between = n1 * n2
-    n_between_same = cp.sum(ac1 * ac2, axis=1)
-    between = cp.where(n_between > 0,
-                       (n_between - n_between_same) / n_between, 0.0)
-
-    return mpd1, mpd2, between
-
-
 def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
                               statistics, populations, missing_data,
                               span_normalize, chrom=None):
@@ -1074,7 +1032,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     # for the gamete statistics, not a pure fst_wc request.
     need_between = stats_set & {'fst', 'fst_hudson', 'dxy', 'da'}
     if need_between:
-        mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
+        mpd1, mpd2, between = divergence._twopop_site_components(hap1, hap2)
 
     if 'fst_wc' in stats_set:
         from .divergence import _wc_site_components
@@ -2893,14 +2851,14 @@ def _per_variant_fst_hudson_components(hap1, hap2, n1, n2):
     Returns (num, den) as CuPy arrays. Handles missing data (-1) by
     using per-site valid counts.
     """
-    mpd1, mpd2, between = _twopop_site_components(hap1, hap2)
+    mpd1, mpd2, between = divergence._twopop_site_components(hap1, hap2)
     within = (mpd1 + mpd2) / 2.0
     return between - within, between
 
 
 def _per_variant_dxy(hap1, hap2, n1, n2):
     """Per-variant mean pairwise difference between populations (GPU)."""
-    _, _, between = _twopop_site_components(hap1, hap2)
+    _, _, between = divergence._twopop_site_components(hap1, hap2)
     return between
 
 
