@@ -1783,11 +1783,20 @@ class HaplotypeMatrix:
         # both sites), not each site's own larger marginal set, or D's two
         # terms disagree on where their data comes from.
         sum_i = hap_clean.T @ valid_mask
-        sum_j = sum_i.T  # full index range, not a tile, so this is exact
 
-        p_i = cp.where(joint_n > 0, sum_i / joint_n, 0.0)
-        p_j = cp.where(joint_n > 0, sum_j / joint_n, 0.0)
-        p_AB = cp.where(joint_n > 0, joint_11 / joint_n, 0.0)
+        # cupy's divide has no `where=`, so a safe (zero-substituted)
+        # denominator is the only way to divide in place. The numerator is
+        # provably 0 wherever joint_n is 0 (no gamete has both sites valid,
+        # so every gamete contributing to sum_i/joint_11 at that pair has the
+        # other site invalid too), so this gives the correct 0, not 0/0 -> nan.
+        safe_n = cp.where(joint_n > 0, joint_n, 1.0)
+        sum_i /= safe_n  # in place: sum_i now holds p_i
+        joint_11 /= safe_n  # in place: joint_11 now holds p_AB
+        p_i, p_AB = sum_i, joint_11  # aliases, not copies
+        # joint_n is a self-product of the whole matrix against itself (not
+        # a tile), so p_j is exactly p_i's transpose -- a view, not a new
+        # array. Must be taken after p_i is finalized above.
+        p_j = p_i.T
 
         D = p_AB - p_i * p_j
         return D, p_i, p_j
