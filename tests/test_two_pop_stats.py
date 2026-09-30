@@ -136,6 +136,80 @@ class TestMissingData:
         assert np.isfinite(val_exclude)
 
 
+class TestMissingDataScaling:
+    """Distances are scaled to all sites, so missing calls do not make a
+    haplotype look close, and every distance statistic shares them."""
+
+    @staticmethod
+    def _hm(hap, n1):
+        n = hap.shape[0]
+        return HaplotypeMatrix(hap, np.arange(hap.shape[1]) * 100, 0,
+                               hap.shape[1] * 100,
+                               sample_sets={'p1': list(range(n1)),
+                                            'p2': list(range(n1, n))})
+
+    def test_dd_matches_distance_based_stats(self):
+        # The example from issue 267: missing calls on one pop1 haplotype.
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, size=(8, 20)).astype(np.int8)
+        hap[0, :10] = -1
+        hm = self._hm(hap, 4)
+        agg = divergence.distance_based_stats(hm, 'p1', 'p2')
+        assert divergence.dd(hm, 'p1', 'p2') == pytest.approx(
+            (agg['dd1'], agg['dd2']))
+        assert divergence.snn(hm, 'p1', 'p2') == pytest.approx(agg['snn'])
+        assert divergence.gmin(hm, 'p1', 'p2') == pytest.approx(agg['gmin'])
+        assert divergence.dxy_min(hm, 'p1', 'p2') == agg['dxy_min']
+        assert divergence.dd_rank(hm, 'p1', 'p2') == pytest.approx(
+            (agg['dd_rank1'], agg['dd_rank2']))
+
+    def test_missing_calls_do_not_make_a_haplotype_close(self):
+        # a and b differ at 4 of 40 sites, so (a, b) is the closest pair.
+        # c differs from b at every other site but calls only sites 0-5: a
+        # raw count of 3 would make (c, b) look closest, while its scaled
+        # distance is 3 * 40 / 6 = 20.
+        L = 40
+        a = np.zeros(L, dtype=np.int8)
+        b = a.copy()
+        b[[10, 20, 30, 35]] = 1
+        c = b.copy()
+        c[0::2] ^= 1
+        c[6:] = -1
+        e = np.ones(L, dtype=np.int8)
+        hm = self._hm(np.vstack([a, c, b, e]), 2)
+        assert divergence.dxy_min(hm, 'p1', 'p2') == 4.0
+        db, _, _ = divergence.pairwise_distance_matrix(hm, 'p1', 'p2')
+        assert float(db[1, 0]) == pytest.approx(3 * L / 6)
+
+    def test_complete_data_dd_equals_pi_form(self, two_pop_hm):
+        from pg_gpu import diversity
+        d1, d2 = divergence.dd(two_pop_hm, 'pop1', 'pop2')
+        dmin = divergence.dxy_min(two_pop_hm, 'pop1', 'pop2')
+        pi1 = diversity.pi(two_pop_hm, population='pop1', span_normalize=False)
+        pi2 = diversity.pi(two_pop_hm, population='pop2', span_normalize=False)
+        assert (d1, d2) == pytest.approx((dmin / pi1, dmin / pi2), rel=1e-12)
+
+    def test_pair_with_no_shared_site_is_skipped(self):
+        # Haplotype 0 calls only sites 0-4 and haplotype 2 only sites 5-9:
+        # no site in common, so their distance is undefined, not 0.
+        rng = np.random.default_rng(3)
+        hap = rng.integers(0, 2, size=(6, 10)).astype(np.int8)
+        hap[0, 5:] = -1
+        hap[2, :5] = -1
+        hm = self._hm(hap, 3)
+        _, dw1, _ = divergence.pairwise_distance_matrix(hm, 'p1', 'p2')
+        assert np.isnan(float(dw1[0, 2]))
+        agg = divergence.distance_based_stats(hm, 'p1', 'p2')
+        assert all(np.isfinite(v) for v in agg.values())
+
+    def test_haplotype_with_no_calls_is_left_out_of_snn(self):
+        rng = np.random.default_rng(4)
+        hap = rng.integers(0, 2, size=(6, 10)).astype(np.int8)
+        full = divergence.snn(self._hm(hap[1:], 2), 'p1', 'p2')
+        hap[0] = -1                               # no neighbor at all
+        assert divergence.snn(self._hm(hap, 3), 'p1', 'p2') == pytest.approx(full)
+
+
 class TestPrecomputedDistanceMatrices:
     """Test passing pre-computed distance matrices to avoid recomputation."""
 

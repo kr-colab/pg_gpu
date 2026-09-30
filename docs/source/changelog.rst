@@ -246,6 +246,16 @@ Bug fixes
   vector whose length is not ``n + 1``; it used to cut the vector to fit.
   ``FrequencySpectrum.project`` warns, with a count, when it leaves out
   sites that have fewer valid haplotypes than the target.
+* The two-population distance statistics (``snn``, ``dxy_min``,
+  ``gmin``, ``dd``, ``dd_rank`` and ``distance_based_stats``) used raw
+  difference counts, and a pair can only differ at the sites both
+  haplotypes call. So under missing data a haplotype with many missing
+  calls looked close to everything and could set ``dxy_min``. Each
+  pair's count is now scaled to all sites (``pairwise_distance_matrix``
+  returns the scaled values), and a pair with no site in common is
+  skipped. ``dd`` now takes pi from the same distances, so it matches
+  ``distance_based_stats``; before, the two disagreed under missing data.
+  Results on data with no missing call are unchanged.
 * ``pbs`` counted a population's own diversity at a site where another
   population in the pair had no data, which pulled that pair's FST down;
   a single such site could change the sign of PBS. PBS now uses, for all
