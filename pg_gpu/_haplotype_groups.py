@@ -2,7 +2,7 @@
 
 A missing call hides part of a haplotype, so the haplotype's identity is
 uncertain. The rule here estimates haplotype frequencies by maximum
-likelihood, with the assumption that calls are missing at random:
+likelihood, with the assumption that calls are missing completely at random:
 
 1. A complete haplotype has no missing call in the window. The complete
    haplotypes are grouped by exact identity. Each group is one distinct
