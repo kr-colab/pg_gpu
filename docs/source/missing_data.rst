@@ -98,6 +98,9 @@ Every public function accepts the ``missing_data`` parameter:
    * - Distance (pairwise_diffs, pca)
      - per-pair, over jointly non-missing sites
      - filter sites
+   * - Two-population distance stats (snn, dxy_min, gmin, dd, dd_rank)
+     - per-pair differences scaled to all sites
+     - filter sites
    * - LD (zns, omega)
      - per-site n
      - filter sites
