@@ -1853,7 +1853,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
 
         // Per-allele within-pop mean pairwise difference (same pairs summed over
         // alleles) and between-pop difference (per-allele cross term) -- mirrors
-        // divergence._hudson_fst_from_counts / dxy, multiallelic-correct.
+        // divergence._site_components_from_counts / dxy, multiallelic-correct.
         double same1 = 0.0, same2 = 0.0, between_same = 0.0;
         for (int a = 0; a < MAX_ALLELES; a++) {
             double c1 = (double)(2 * hom1[a] + het1[a] + half1[a]);
@@ -2851,9 +2851,8 @@ def _per_variant_fst_hudson_components(hap1, hap2, n1, n2):
     Returns (num, den) as CuPy arrays. Handles missing data (-1) by
     using per-site valid counts.
     """
-    mpd1, mpd2, between = divergence._twopop_site_components(hap1, hap2)
-    within = (mpd1 + mpd2) / 2.0
-    return between - within, between
+    ac1, ac2, nv1, nv2 = divergence._aligned_pop_counts(hap1, hap2)
+    return divergence._hudson_num_den(ac1, nv1, ac2, nv2)
 
 
 def _per_variant_dxy(hap1, hap2, n1, n2):
