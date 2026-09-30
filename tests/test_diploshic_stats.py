@@ -375,14 +375,22 @@ class TestDiversityNewStats:
         naive_count = len({h.tobytes() for h in clean_cpu})
         assert gpu_count == naive_count
 
-        # masked rows are still compatible with their originals, so wildcard
-        # merging can only collapse groups, never split them
+        # Masking calls in a few rows: the complete rows set the distinct
+        # haplotypes, and an incomplete row that matches none of them at its
+        # called sites adds one more.
         rng = np.random.default_rng(7)
         haps_missing = clean_cpu.copy()
-        haps_missing[rng.random(haps_missing.shape) < 0.02] = -1
+        rows = rng.choice(haps_missing.shape[0], size=20, replace=False)
+        sub = haps_missing[rows]
+        sub[rng.random(sub.shape) < 0.02] = -1
+        haps_missing[rows] = sub
         matrix_missing = HaplotypeMatrix(haps_missing, positions, int(positions[0]), int(positions[-1]))
-        missing_count = diversity.haplotype_count(matrix_missing)
-        assert 1 <= missing_count <= naive_count
+        complete = haps_missing[(haps_missing >= 0).all(axis=1)]
+        groups = np.unique(complete, axis=0)
+        unmatched = sum(
+            not any(np.all((r < 0) | (r == g)) for g in groups)
+            for r in haps_missing[(haps_missing < 0).any(axis=1)])
+        assert diversity.haplotype_count(matrix_missing) == len(groups) + unmatched
 
     def test_daf_histogram(self, hap_data):
         hist, edges = diversity.daf_histogram(hap_data, n_bins=20)

@@ -9,7 +9,7 @@ import numpy as np
 import cupy as cp
 import pandas as pd
 from typing import List, Dict, Union, Optional, Callable, Iterator, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import warnings
 from tqdm import tqdm
 
@@ -17,6 +17,7 @@ from .haplotype_matrix import HaplotypeMatrix
 from . import ld_statistics
 from . import divergence
 from . import diversity
+from . import selection
 from ._haplotype_hash import garud_h_windows
 
 # Column order of the Garud H family, as garud_h_windows returns it.
@@ -114,6 +115,8 @@ class WindowData:
     matrix: HaplotypeMatrix
     n_variants: int
     window_id: int
+    # Results that several statistics share, computed once per window.
+    cache: Dict = field(default_factory=dict)
 
 
 class StatisticsComputer:
@@ -162,6 +165,8 @@ class StatisticsComputer:
             'n_singletons': lambda w: diversity.singleton_count(w.matrix, missing_data=self.missing_data),
             'segregating_sites': lambda w: diversity.segregating_sites(w.matrix, missing_data=self.missing_data),
         }
+        for i, name in enumerate(_FUSED_GARUD_STATS):
+            self.SINGLE_POP_STATS[name] = lambda w, i=i: self._garud_h(w)[i]
 
         self.TWO_POP_STATS = {
             'dxy': lambda w, p1, p2: divergence.dxy(
@@ -216,17 +221,21 @@ class StatisticsComputer:
                     results[stat.__name__] = np.nan
             return results
 
-        # Single population statistics
+        # Single population statistics. Each population's window is built
+        # once, so statistics that share work (the Garud H family) can
+        # share it through the window's cache.
+        pop_windows = {}
+        if self.single_pop_stats and self.populations:
+            for pop in self.populations:
+                pop_matrix = self._get_population_matrix(window.matrix, pop)
+                pop_windows[pop] = replace(
+                    window, matrix=pop_matrix,
+                    n_variants=pop_matrix.num_variants, cache={})
         for stat in self.single_pop_stats:
             if self.populations:
                 # Compute for each population
                 for pop in self.populations:
-                    pop_matrix = self._get_population_matrix(window.matrix, pop)
-                    val = self.SINGLE_POP_STATS[stat](
-                        WindowData(window.chrom, window.start, window.end,
-                                 window.center, pop_matrix, pop_matrix.num_variants,
-                                 window.window_id)
-                    )
+                    val = self.SINGLE_POP_STATS[stat](pop_windows[pop])
                     key = f"{stat}_{pop}"
                     self._store_result(results, key, val)
             else:
@@ -256,6 +265,21 @@ class StatisticsComputer:
             results[stat.__name__] = stat(window, **kwargs)
 
         return results
+
+    def _garud_h(self, window):
+        """The Garud H family of a window, in ``_FUSED_GARUD_STATS`` order.
+
+        One call gives all five values, as the fused engine computes them,
+        and the window keeps them for the other four statistics.
+        """
+        if 'garud_h' not in window.cache:
+            matrix = window.matrix
+            if matrix.device == 'CPU':
+                matrix.transfer_to_gpu()
+            window.cache['garud_h'] = tuple(float(v[0]) for v in garud_h_windows(
+                matrix.haplotypes, [0], [matrix.num_variants],
+                missing_data=self.missing_data))
+        return window.cache['garud_h']
 
     @staticmethod
     def _store_result(results: Dict, key: str, val):
@@ -1316,7 +1340,10 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                  | fused_diploshic)
     requested = set(statistics)
 
-    can_fuse = (missing_data == 'include'
+    # Only the Garud statistics apply 'exclude' in the fused engine; a
+    # request with any other statistic under 'exclude' takes the per-window
+    # fallback.
+    can_fuse = ((missing_data == 'include' or requested <= fused_garud)
                 and requested <= fused_all
                 # A two-population statistic with anything other than exactly
                 # two populations must not reach the fused engine, which
@@ -2178,7 +2205,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     # Garud's H: exact per-window haplotype hashing, batched to GPU memory
     if any(s in statistics for s in _FUSED_GARUD_STATS):
-        _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results)
+        _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results,
+                               missing_data=missing_data)
 
     # Per-site stats binned into windows via scatter_add. A variant belongs
     # to window w iff ws[w] <= pos < we[w] -- the same right-open rule
@@ -2784,15 +2812,19 @@ def _windowed_mean(values, bin_idx, valid_mask, n_bins):
     return np.where(count_cpu > 0, sum_cpu / count_cpu, np.nan)
 
 
-def _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results):
+def _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results,
+                           missing_data='include'):
     """Windowed Garud's H and distinct-haplotype count into ``results``.
 
-    A window with no variants reports one haplotype.
+    A window with no variants reports one haplotype. A window with no
+    complete haplotype under 'include' is NaN, so every column, the
+    haplotype count too, is float64.
     """
-    values = garud_h_windows(matrix.haplotypes, win_start, win_stop)
+    values = garud_h_windows(matrix.haplotypes, win_start, win_stop,
+                             missing_data=missing_data)
     for name, column in zip(_FUSED_GARUD_STATS, values):
         if name in statistics:
-            results[name] = column.astype(int) if name == 'haplotype_count' else column
+            results[name] = column
 
 
 # ---------------------------------------------------------------------------

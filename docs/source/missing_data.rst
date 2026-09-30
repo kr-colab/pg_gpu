@@ -17,8 +17,8 @@ parameter with two options:
 **include** (default)
    Use all sites, computing statistics from observed data only. Each site
    uses its own sample size (``n_valid``). For haplotype identity
-   comparisons (e.g., Garud's H), missing values are treated as wildcards
-   compatible with any allele.
+   (e.g., Garud's H), haplotype frequencies come from EM; see
+   `Haplotype Identity and Missing Data`_.
 
 **exclude**
    Drop entire sites that have any missing data in any sample. Only
@@ -91,8 +91,9 @@ Every public function accepts the ``missing_data`` parameter:
    * - Selection scans (ihs, nsl, xpehh)
      - wildcard in shared-site length (SSL)
      - filter sites
-   * - Haplotype stats (garud_h, haplotype_diversity)
-     - wildcard match
+   * - Haplotype stats (garud_h, haplotype_count, haplotype_diversity,
+       mu_ld)
+     - EM frequencies anchored on complete haplotypes
      - filter sites
    * - Distance (pairwise_diffs, pca)
      - per-pair, over jointly non-missing sites
@@ -145,18 +146,41 @@ array accepts only ``'r2'``.
 Haplotype Identity and Missing Data
 ------------------------------------
 
-For statistics based on haplotype identity (Garud's H, haplotype
-diversity, haplotype count), missing values are treated as wildcards:
-two haplotypes match if they agree at all positions where both are
-non-missing.
+Statistics based on haplotype identity (Garud's H, haplotype count,
+haplotype diversity, the diplotype spectrum and ``mu_ld``) need to know
+which haplotypes are the same. A missing call hides part of a haplotype,
+so with ``missing_data='include'`` pg_gpu estimates the haplotype
+frequencies:
+
+1. The complete haplotypes (no missing call in the window) set the
+   distinct haplotypes.
+2. An incomplete haplotype is compatible with a complete one when the two
+   agree at every called site of the incomplete haplotype.
+3. EM (expectation-maximization) splits each incomplete haplotype across
+   its compatible complete haplotypes in proportion to their
+   frequencies. This gives the maximum-likelihood frequencies when calls
+   are missing completely at random. The result does not depend on row
+   order.
+4. An incomplete haplotype with no compatible complete haplotype counts
+   as a distinct haplotype of its own.
+5. A window with no complete haplotype returns NaN.
 
 .. code-block:: python
 
-   # Haplotypes [0, 1, 0, 1] and [0, -1, 0, 1] are considered identical
-   # because they match at positions 0, 2, 3 (position 1 is missing)
+   # Rows [0, 0], [0, 0], [0, 0], [0, 1] are complete. The row [0, -1]
+   # is compatible with both [0, 0] and [0, 1]; EM gives [0, 0] a
+   # frequency of 0.75 and [0, 1] a frequency of 0.25.
 
    from pg_gpu import selection
    h1, h12, h123, h2_h1 = selection.garud_h(h)
+
+The complete haplotypes carry the estimate, so check that they are not
+rare. With independent missing calls at rate ``m``, a haplotype is
+complete over ``L`` sites with probability ``(1 - m)^L``: at 1% missing
+over 400 sites, fewer than 2% of haplotypes are complete. For data with
+many missing calls, use ``missing_data='exclude'``, which drops every site
+with a missing call. Garud's H expects phased haplotypes, and phased
+haplotypes from imputation tools usually have no missing calls.
 
 HaplotypeMatrix and GenotypeMatrix Utilities
 --------------------------------------------
