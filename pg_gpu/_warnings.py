@@ -217,6 +217,16 @@ def check_paired_rows(rows, context, stacklevel=3):
             UnpairedRowsWarning, stacklevel=stacklevel)
 
 
+def check_paired_rows_for_populations(sample_sets, pop1, pop2, context):
+    """Warn if either of two populations' row lists cannot pair into individuals."""
+    for pop in (pop1, pop2):
+        rows = sample_sets.get(pop) if isinstance(pop, str) else list(pop)
+        if rows is None:
+            continue
+        label = pop if isinstance(pop, str) else "row list"
+        check_paired_rows(rows, f"{context}({label})")
+
+
 class BiallelicOnlyWarning(UserWarning):
     """Emitted when a biallelic-only statistic or loader drops multiallelic sites.
 

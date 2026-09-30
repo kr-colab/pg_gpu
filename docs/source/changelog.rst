@@ -59,6 +59,28 @@ Results that change even for two-allele data
 
 Read this section if you are comparing against older pg_gpu results.
 
+* Haplotype identity with missing calls has one rule on every path.
+  ``garud_h``, ``moving_garud_h``, the windowed Garud's H columns,
+  ``haplotype_count``, ``haplotype_diversity``,
+  ``diplotype_frequency_spectrum`` and ``mu_ld`` used to treat ``-1`` as
+  a wildcard with first-match grouping. That grouping depended on row
+  order and merged haplotypes that share no called site, so H1 went up.
+  The windowed engine instead treated ``-1`` as one more allele, so
+  almost every haplotype was distinct and H1 went down. Now the complete
+  haplotypes (no missing call) set the distinct haplotypes, and EM
+  splits each incomplete haplotype across the complete ones it matches
+  at its called sites. This gives the maximum-likelihood frequencies when
+  calls are missing completely at random, and does not depend on row
+  order. An incomplete haplotype that matches no complete one is a
+  distinct haplotype of its own. A window with no complete haplotype returns NaN.
+  Values change on any data with missing calls; data with no missing
+  calls is unchanged. See :doc:`missing_data`. The windowed
+  ``haplotype_count`` column is now float64, since a window can be NaN.
+* ``moving_garud_h`` with ``missing_data='exclude'`` dropped every site
+  with a missing call from the whole matrix before it tiled the windows,
+  so windows moved and the window count could shrink. Windows now stay
+  on the full variant grid and each drops only its own missing sites,
+  the same as ``windowed_analysis``.
 * Haplotype rows now follow one order everywhere: sample ``i`` owns rows
   ``2i`` and ``2i + 1``. ``from_ts`` already used this order, while
   ``from_vcf`` and ``from_zarr`` grouped all of the first gametes ahead of
@@ -182,7 +204,50 @@ Bug fixes
   each site's own frequency over its separate, larger marginal sample,
   biasing ``D`` and ``r2`` under structured missing data with
   ``missing_data='include'``. Both frequencies now come from the same
-  pairwise-complete sample.
+  pairwise-complete sample. The diploid dosage-correlation path
+  (``_r2_matrix_diploid``, reached by ``zns``/``omega`` on a
+  ``GenotypeMatrix`` with ``estimator='r2'``) had the same bug in its
+  continuous form -- mean/variance from each site's own marginal valid
+  set instead of the pair's jointly-valid individuals -- and is fixed
+  the same way.
+* ``pbs`` counted a population's own diversity at a site where another
+  population in the pair had no data, which pulled that pair's FST down;
+  a single such site could change the sign of PBS. PBS now uses, for all
+  three FSTs, only the sites where all three populations have data, so the
+  three branches describe the same loci. Sites where every population has
+  at least one call are unchanged.
+* ``garud_h`` on a ``GenotypeMatrix`` ignored ``missing_data``, and
+  ``windowed_analysis`` with a Garud's H statistic or ``haplotype_count``
+  under ``missing_data='exclude'`` raised ``Unknown statistic``. Both now
+  apply ``missing_data``.
+* ``fst_hudson``, ``fst_weir_cockerham``, ``fst_tskit``, and ``fst_nei``
+  returned ``0.0`` for an undefined ratio (no site with data in both
+  populations) while every windowed engine already used ``NaN`` for the
+  same case; they now return ``NaN`` too.
+* Several ``HaplotypeMatrix``/``GenotypeMatrix`` methods that subset or
+  convert a matrix by variant (``get_subset``, ``get_subset_from_range``,
+  ``restrict_to_biallelic``, ``restrict_to_segregating``,
+  ``exclude_missing_sites``, ``filter_variants_by_missing``,
+  ``from_haplotype_matrix``, ``to_haplotype_matrix``) dropped ``samples``
+  and/or ``fields`` on the result instead of carrying/slicing them as
+  ``filter`` already did. All now match ``filter``.
+* Windowed ``fst_wc`` could only be computed by the fused CUDA kernel
+  (``missing_data='include'``) or a slow per-window scalar loop
+  (``'exclude'``), since nothing exposed Weir-Cockerham's per-site
+  decomposition for the vectorized scatter engine to reuse. It now shares
+  that decomposition with the scalar function and runs through the same
+  fast scatter path as the other two-population statistics under both
+  modes.
+* ``da``, and the windowed scatter engine's ``fst``/``fst_hudson``, computed
+  their within-population terms independently of the other population
+  instead of restricting every term to sites where both populations have
+  data (as ``fst_hudson`` and the fused kernel already did), so they gave
+  the wrong answer whenever one population was entirely missing at a site.
+  All three now share one site set, matching the fused kernel.
+* ``fst_tskit`` summed its within-population term over every site with no
+  such restriction at all, so it could count a site's within-population
+  diversity toward Hw even where the other population had no data there
+  to compare against. It now shares the same site set as ``fst_hudson``.
 * Windowed Garud's H made three float64 copies of the haplotype matrix
   (109 GB each for 2,940 haplotypes across 4.7 million sites) and, for
   a Garud-only request, a transposed int8 copy on top. Each window is
@@ -204,6 +269,18 @@ Bug fixes
   share the exact haplotype hash of the windowed scan.
   ``moving_garud_h`` rejects windows outside the matrix instead of
   reading past it.
+* Windowed ``tajimas_d``, ``normalized_fay_wu_h``, ``zeng_e``, and
+  ``zeng_dh`` computed their null variance from the nominal haplotype
+  count instead of the harmonic mean of per-site valid counts the scalar
+  functions use, so values diverged from the scalar reference under
+  missing data. All four windowed engines now use the same per-window
+  effective sample size the scalar functions do.
+* The fused engine's ``tajimas_d`` built a temporary proportional to the
+  window-overlap depth times the variant count, large enough to run out
+  of memory on large, deeply overlapping window grids; it and the fused
+  ``theta_w`` now come from a small per-window accumulator computed
+  inside the kernel itself, and agree with the scalar reference under
+  missing data (previously only ``tajimas_d``'s variance term did).
 * ``HaplotypeMatrix.pairwise_r2`` and ``windowed_r_squared`` rejected
   ``estimator='auto'`` -- the default name for the LD estimator
   everywhere else -- with an "unknown estimator" error. They accept it

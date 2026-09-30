@@ -422,10 +422,69 @@ class TestEdgeCases:
             'pop2': list(range(20, 40))
         }
 
-        # FST should be 0 (no variation to differentiate)
+        # FST is a ratio, so NaN when there's no data to normalize against.
         fst_val = divergence.fst(matrix, 'pop1', 'pop2')
-        assert fst_val == 0.0
+        assert np.isnan(fst_val)
 
-        # Dxy should be 0
+        # Dxy is a sum, so 0 is well-defined.
         dxy_val = divergence.dxy(matrix, 'pop1', 'pop2')
         assert dxy_val == 0.0
+
+    def test_fst_tskit_masks_population_gap_sites(self):
+        """fst_tskit must restrict its within-population term to sites where
+        both populations have data, matching fst_hudson's convention --
+        not leak one population's own diversity at a site where the other
+        is entirely missing."""
+        n_variants = 40
+        rng = np.random.RandomState(2)
+        haplotypes = rng.randint(0, 2, size=(20, n_variants)).astype(np.int8)
+        positions = np.arange(n_variants) * 1000
+
+        matrix = HaplotypeMatrix(haplotypes.copy(), positions)
+        matrix.sample_sets = {
+            'pop1': list(range(10)),
+            'pop2': list(range(10, 20)),
+        }
+        # pop1 entirely missing at every other site.
+        matrix.haplotypes[0:10, 0:n_variants:2] = -1
+
+        gapped = divergence.fst_tskit(matrix, 'pop1', 'pop2')
+
+        # A site where pop1 is wholly missing must contribute nothing to
+        # either sum, so computing on the pre-filtered (both-populations-
+        # present) subset must give the identical value.
+        reference_matrix = matrix.exclude_missing_sites(
+            populations=['pop1', 'pop2'])
+        reference = divergence.fst_tskit(reference_matrix, 'pop1', 'pop2')
+
+        assert np.isclose(gapped, reference, rtol=1e-9, atol=1e-12)
+
+    def test_fst_nan_when_undefined(self):
+        """Every FST estimator returns NaN, not 0.0, when the ratio has no
+        denominator: no site with data in both populations."""
+        n_variants = 30
+        haplotypes = np.random.randint(0, 2, size=(20, n_variants))
+        positions = np.arange(n_variants) * 1000
+
+        matrix = HaplotypeMatrix(haplotypes, positions)
+        matrix.sample_sets = {
+            'pop1': list(range(10)),
+            'pop2': list(range(10, 20)),
+        }
+        # Every site missing in pop1 -- pop2 never has anything to pair with.
+        matrix.haplotypes[0:10, :] = -1
+
+        assert np.isnan(divergence.fst_hudson(matrix, 'pop1', 'pop2'))
+        assert np.isnan(divergence.fst_weir_cockerham(matrix, 'pop1', 'pop2'))
+        assert np.isnan(divergence.fst_tskit(matrix, 'pop1', 'pop2'))
+        assert np.isnan(divergence.fst_nei(matrix, 'pop1', 'pop2'))
+
+        # 'exclude' mode short-circuits to the same empty-matrix case.
+        assert np.isnan(divergence.fst_hudson(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))
+        assert np.isnan(divergence.fst_weir_cockerham(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))
+        assert np.isnan(divergence.fst_tskit(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))
+        assert np.isnan(divergence.fst_nei(
+            matrix, 'pop1', 'pop2', missing_data='exclude'))

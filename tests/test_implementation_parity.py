@@ -130,6 +130,40 @@ def missing_hm():
 
 
 @pytest.fixture(scope="module")
+def population_gap_hm():
+    """Biallelic matrix where one population is entirely missing at some sites.
+
+    ``missing_hm`` above deliberately protects one haplotype per population so
+    every site keeps at least one valid sample in each pop -- exactly the
+    condition that must be violated to exercise a site-set mismatch between a
+    joint-site-set term and an own-site-set term (da/fst/fst_hudson). Here,
+    every fourth site has pop2's entire haplotype set to missing while pop1
+    is untouched.
+    """
+    hm0 = simulate_hm(n_samples=24, seq_length=200_000, seed=11,
+                      mutation_model="binary")
+
+    hap = _asnumpy(hm0.haplotypes).astype(np.int8).copy()
+    pos = _asnumpy(hm0.positions)
+
+    nhap, nvar = hap.shape
+    half = nhap // 2
+    hap[half:, 0:nvar:4] = -1  # pop2 entirely missing at every 4th site
+
+    # The trigger condition this fixture exists for: some sites keep pop1
+    # fully valid while pop2 has none at all.
+    gap_sites = ~(hap[half:] >= 0).any(axis=0)
+    assert gap_sites.any()
+    assert (hap[:half, gap_sites] >= 0).all()
+
+    cs = hm0.chrom_start if hm0.chrom_start is not None else int(pos[0])
+    ce = hm0.chrom_end if hm0.chrom_end is not None else int(pos[-1])
+    hm = HaplotypeMatrix(hap, pos, cs, ce)
+    hm.transfer_to_gpu()
+    return _two_pop_split(hm)
+
+
+@pytest.fixture(scope="module")
 def multiallelic_hm():
     """Matrix with multiallelic sites and no missing data.
 
@@ -158,8 +192,6 @@ _WHEN_PARTIAL = frozenset(
     name for name, c in _CONDITIONS.items() if c.partial_sites)
 _WHEN_MULTIALLELIC = frozenset(
     name for name, c in _CONDITIONS.items() if c.multiallelic)
-_WHEN_EXCLUDE = frozenset(
-    name for name, c in _CONDITIONS.items() if c.missing_data == "exclude")
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +305,10 @@ _STATS = {
         False, "value",
         lambda hm, md: diversity.mu_sfs(hm, missing_data=md),
         None, None, "mu_sfs", None),
+    "fst": _Stat(
+        True, "value",
+        lambda hm, md: divergence.fst(hm, POP1, POP2, missing_data=md),
+        None, "fst", "fst", "fst"),
     "fst_hudson": _Stat(
         True, "value",
         lambda hm, md: divergence.fst_hudson(hm, POP1, POP2, missing_data=md),
@@ -288,7 +324,7 @@ _STATS = {
     "fst_wc": _Stat(
         True, "value",
         lambda hm, md: divergence.fst_weir_cockerham(hm, POP1, POP2, missing_data=md),
-        None, None, "fst_wc", "fst_wc"),
+        None, "fst_wc", "fst_wc", "fst_wc"),
     # The Achaz eta-family: the per-allele scalar path (via diversity_stats) is
     # the reference; the SFS dot-product (FrequencySpectrum.theta) is the one
     # path checked against it. Both are per-allele-correct, so they agree on
@@ -366,23 +402,10 @@ def _supported_paths(stat):
 # Known divergences and engine limitations -> xfail with a reason
 # ---------------------------------------------------------------------------
 
-_FUSED_MISSING = (
-    "the fused kernel's per-site sample-size handling under missing data still "
-    "diverges from the scalar for this estimator. #135"
-)
 _FS_VARIANCE = (
     "FrequencySpectrum computes the Achaz neutrality-test variance at a single "
     "modal sample size while summing the numerator over variable per-site "
     "sample sizes, diverging from the scalar under missing data. #135"
-)
-_SCATTER_VARIANCE = (
-    "the scatter neutrality-test variance uses full-sample harmonic numbers "
-    "rather than per-site valid counts, diverging from the scalar under "
-    "missing data. #135"
-)
-_DA_SCATTER_EXCLUDE = (
-    "under missing_data='exclude' the scatter da's within-population pi terms "
-    "use a different site set than the scalar (dxy agrees), so da diverges. #135"
 )
 _FS_MULTIALLELIC = (
     "on multiallelic sites the FrequencySpectrum builds a per-allele SFS whose "
@@ -397,30 +420,20 @@ _FS_MULTIALLELIC = (
 # skip is handled separately, so a fused rule with conditions=None never reaches
 # the (skipped) missing_exclude cell.
 _XFAILS = {
-    # fused kernel still mishandles missing data for these two estimators.
-    ("theta_w", "fused"): [(_FUSED_MISSING, _WHEN_PARTIAL)],
-    ("tajimas_d", "fused"): [(_FUSED_MISSING, _WHEN_PARTIAL)],
-
     # neutrality-test variance differs under variable per-site sample sizes,
     # and the FS path additionally diverges under multiallelic sites.
     ("tajimas_d", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
                           (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("tajimas_d", "scatter"): [(_SCATTER_VARIANCE, _WHEN_PARTIAL)],
     ("normalized_fay_wu_h", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
                                     (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("normalized_fay_wu_h", "scatter"): [(_SCATTER_VARIANCE, _WHEN_PARTIAL)],
     ("zeng_e", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
                        (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("zeng_e", "scatter"): [(_SCATTER_VARIANCE, _WHEN_PARTIAL)],
 
     # FS per-allele SFS diverges from the scalar per-allele counts (multiallelic).
     ("pi", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("theta_w", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("segregating_sites", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("fay_wu_h", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-
-    # scatter da within-pop pi term uses a different site set under exclude.
-    ("da", "scatter"): [(_DA_SCATTER_EXCLUDE, _WHEN_EXCLUDE)],
 }
 
 
@@ -495,3 +508,19 @@ def test_daf_hist_matches_scalar(request, condition):
     got_fused = np.array([np.asarray(out[f"daf_bin_{b}"])[0]
                           for b in range(N_DAF_BINS)])
     np.testing.assert_allclose(got_fused, ref, rtol=RTOL, atol=ATOL)
+
+
+@pytest.mark.parametrize("missing_data", ["include", "exclude"])
+@pytest.mark.parametrize("stat", ["da", "fst", "fst_hudson", "dxy", "fst_wc"])
+def test_population_gap_matches_scalar(population_gap_hm, stat, missing_data):
+    """da/fst/fst_hudson/dxy/fst_wc must agree across every path even when
+    one population is entirely missing at some sites, not just partially
+    missing (population_gap_hm; missing_hm never exercises this)."""
+    hm = population_gap_hm
+    reference = _path_scalar(hm, stat, missing_data)
+    for path in _supported_paths(stat):
+        if path == "fused" and missing_data == "exclude":
+            continue
+        value = _PATHS[path](hm, stat, missing_data)
+        assert np.isclose(value, reference, rtol=RTOL, atol=ATOL), (
+            f"{stat}/{path}/{missing_data}: got {value!r}, expected {reference!r}")

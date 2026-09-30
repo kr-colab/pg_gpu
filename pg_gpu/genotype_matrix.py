@@ -9,7 +9,7 @@ import numpy as np
 import cupy as cp
 from typing import Optional
 
-from .accessible import AccessibleMask, resolve_accessible_mask
+from .accessible import AccessibleMask, resolve_accessible_mask, slice_fields
 from .zarr_io import parse_region
 
 
@@ -380,10 +380,16 @@ class GenotypeMatrix:
                 ind_indices = sorted(set(i // 2 for i in indices))
                 new_sample_sets[name] = ind_indices
 
+        # biallelic is relative to hap_matrix's (possibly masked) view.
+        new_fields = slice_fields(hap_matrix.fields, biallelic,
+                                  hap_matrix._accessible_idx)
+
         return cls(geno, positions, hap_matrix.chrom_start,
                    hap_matrix.chrom_end, sample_sets=new_sample_sets,
                    n_total_sites=hap_matrix.n_total_sites,
-                   accessible_mask=hap_matrix.accessible_mask)
+                   accessible_mask=hap_matrix.accessible_mask,
+                   samples=hap_matrix.samples,
+                   fields=new_fields)
 
     def to_haplotype_matrix(self):
         """Convert back to HaplotypeMatrix (expand diploid to haploid).
@@ -415,10 +421,23 @@ class GenotypeMatrix:
         hap[0::2][missing] = -1
         hap[1::2][missing] = -1
 
+        # remap sample_sets: individual indices -> haplotype indices
+        new_sample_sets = None
+        if self._sample_sets is not None:
+            new_sample_sets = {
+                name: sorted(h for i in indices for h in (2 * i, 2 * i + 1))
+                for name, indices in self._sample_sets.items()
+            }
+
+        # No filtering here, so the keep set is the whole view.
         return HaplotypeMatrix(hap, self.positions, self.chrom_start,
                                self.chrom_end,
                                n_total_sites=self.n_total_sites,
-                               accessible_mask=self.accessible_mask)
+                               accessible_mask=self.accessible_mask,
+                               sample_sets=new_sample_sets,
+                               samples=self.samples,
+                               fields=slice_fields(self.fields, xp.arange(n_var),
+                                                   self._accessible_idx))
 
     @classmethod
     def from_vcf(cls, path, include_invariant=False, accessible_bed=None,
@@ -765,8 +784,7 @@ class GenotypeMatrix:
 
         new_geno = geno[:, keep_idx]
         new_pos = pos_src[keep_idx]
-        keep_idx_np = keep_idx.get() if hasattr(keep_idx, 'get') else keep_idx
-        new_fields = {tag: arr[keep_idx_np] for tag, arr in self.fields.items()}
+        new_fields = slice_fields(self.fields, keep_idx)
 
         return GenotypeMatrix(
             new_geno, new_pos,
@@ -898,10 +916,12 @@ class GenotypeMatrix:
         keep_idx = cp.where(keep)[0]
         new_geno = self.genotypes[:, keep_idx]
         new_pos = self.positions[keep_idx]
+        new_fields = slice_fields(self.fields, keep_idx, self._accessible_idx)
 
         return GenotypeMatrix(new_geno, new_pos,
                               self.chrom_start, self.chrom_end,
                               sample_sets=self._sample_sets,
                               n_total_sites=self.n_total_sites,
                               samples=self.samples,
-                              accessible_mask=self.accessible_mask)
+                              accessible_mask=self.accessible_mask,
+                              fields=new_fields)

@@ -4,6 +4,7 @@ Provides BED file parsing and an AccessibleMask class that wraps a dense
 boolean array with offset-aware, O(1) range queries via prefix sums.
 """
 
+import cupy as cp
 import numpy as np
 
 from .zarr_io import parse_region
@@ -248,6 +249,22 @@ def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):
         raise ValueError(
             "Could not determine mask range from BED and chromosome bounds")
     return bed_to_mask(mask_or_path, chrom=chrom, length=length, offset=offset)
+
+
+def slice_fields(fields, keep_idx, accessible_idx=None):
+    """Slice every field on the variant axis by keep_idx.
+
+    Fields are host numpy arrays regardless of matrix device, so the index
+    is moved to host first. keep_idx is relative to the masked view; pass
+    accessible_idx to translate it to the underlying array. Pass None when
+    keep_idx already indexes the underlying array, as filter() does.
+    """
+    if not fields:
+        return {}
+    keep_idx = cp.asnumpy(keep_idx)
+    if accessible_idx is not None:
+        keep_idx = cp.asnumpy(accessible_idx)[keep_idx]
+    return {tag: arr[keep_idx] for tag, arr in fields.items()}
 
 
 def resolve_streaming_accessible_mask(accessible_bed, source, region=None):

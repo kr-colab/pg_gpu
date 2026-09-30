@@ -946,13 +946,19 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     ----------
     haplotype_matrix : HaplotypeMatrix
     missing_data : str
-        'include' - treat missing as wildcard in pattern matching
+        'include' - a haplotype with missing calls in a half takes the most
+        probable complete pattern under the EM frequencies of
+        ``selection.garud_h``; one that matches no complete pattern is a
+        pattern of its own. NaN when a half has no complete haplotype.
         'exclude' - filter to sites with no missing data
 
     Returns
     -------
     float
     """
+    from ._haplotype_groups import complete_sites, window_labels
+    from ._haplotype_hash import hash_weights
+
     _reject_streaming(haplotype_matrix, "mu_ld")
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
@@ -960,41 +966,32 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     hap = haplotype_matrix.haplotypes
 
     if missing_data == 'exclude':
-        missing_per_var = cp.sum(hap < 0, axis=0)
-        hap = hap[:, missing_per_var == 0]
+        hap = complete_sites(hap)
 
     n_hap, n_var = hap.shape
 
-    if n_var < 2:
+    if n_var < 2 or n_hap == 0:
         return 0.0
 
     mid = n_var // 2
+    labels, n_distinct, has_complete = window_labels(
+        hap, cp.array([0, mid], dtype=cp.int64),
+        cp.array([mid, n_var], dtype=cp.int64), *hash_weights(n_var))
+    if not has_complete.all():
+        return float('nan')
+    left_labels, right_labels = labels
 
-    left = hap[:, :mid].get().astype(np.int8)
-    right = hap[:, mid:].get().astype(np.int8)
+    # Distinct (left, right) pattern pairs; a pattern is exclusive when it
+    # pairs with exactly one pattern from the other half. Labels run from 0
+    # to n_distinct - 1 with no gap, so every label has a pair.
+    n_right_labels = int(n_distinct[1])
+    pairs = cp.unique(left_labels * n_right_labels + right_labels)
+    per_left = cp.bincount(pairs // n_right_labels)
+    per_right = cp.bincount(pairs % n_right_labels)
 
-    from .diversity import _cluster_haplotypes_with_missing
-    left_labels = _cluster_haplotypes_with_missing(left)
-    right_labels = _cluster_haplotypes_with_missing(right)
-
-    # for each distinct left pattern, count how many distinct right patterns it pairs with
-    left_to_right = {}
-    right_to_left = {}
-    for i in range(n_hap):
-        ll, rl = left_labels[i], right_labels[i]
-        left_to_right.setdefault(ll, set()).add(rl)
-        right_to_left.setdefault(rl, set()).add(ll)
-
-    n_left = len(left_to_right)
-    n_right = len(right_to_left)
-
-    if n_left == 0 or n_right == 0:
-        return 0.0
-
-    n_excl_left = sum(1 for v in left_to_right.values() if len(v) == 1)
-    n_excl_right = sum(1 for v in right_to_left.values() if len(v) == 1)
-
-    return float((n_excl_left / n_left + n_excl_right / n_right) / 2.0)
+    frac_left = cp.count_nonzero(per_left == 1) / per_left.size
+    frac_right = cp.count_nonzero(per_right == 1) / per_right.size
+    return float(((frac_left + frac_right) / 2.0).get())
 
 
 def _resolve_r2_matrix(r2_matrix_or_matrix, missing_data='include'):

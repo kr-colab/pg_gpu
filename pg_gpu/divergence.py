@@ -84,6 +84,80 @@ def dxy_components(pop1_haps, pop2_haps):
     return total_diffs, total_comps, n_sites
 
 
+def _site_components_from_counts(ac1, nv1, ac2, nv2):
+    """Per-site two-population components from per-allele counts on a shared K.
+
+    Returns (mpd1, mpd2, between) where:
+      mpd1 = within-pop1 mean pairwise difference per site
+      mpd2 = within-pop2 mean pairwise difference per site
+      between = between-pop mean pairwise difference (Dxy) per site
+
+    A site contributes to any of the three only where both populations have
+    at least one valid (non-missing) gamete, the same rule as the fused
+    kernel's per-site skip. Within that joint set, mpd1/mpd2 are also zero
+    wherever that population alone doesn't have a pair (nv < 2); between
+    needs only one gamete from each side.
+
+    Per-allele (multiallelic-correct): the same-allele pair counts sum over
+    every allele column, so between equals the per-site Dxy
+    (``1 - sum_a p1_a p2_a``) and mpd1/mpd2 the per-site within-pop pi.
+    Reduces to the biallelic ancestral/derived form when there are two
+    alleles.
+
+    Parameters
+    ----------
+    ac1, ac2 : cupy.ndarray, shape (n_variants, K)
+        Per-allele counts on the SAME K (see _aligned_pop_counts).
+    nv1, nv2 : cupy.ndarray, shape (n_variants,)
+        Per-site valid haplotype counts.
+    """
+    ac1 = ac1.astype(cp.float64)
+    ac2 = ac2.astype(cp.float64)
+    n1 = nv1.astype(cp.float64)
+    n2 = nv2.astype(cp.float64)
+
+    joint = (n1 > 0) & (n2 > 0)
+
+    # Within-pop mean pairwise differences (same pairs summed over alleles),
+    # zero outside the joint site set even where the population alone has
+    # enough gametes for its own pair.
+    n1_pairs = n1 * (n1 - 1) / 2
+    n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
+    mpd1 = cp.where(joint & (n1_pairs > 0), (n1_pairs - n1_same) / n1_pairs, 0.0)
+
+    n2_pairs = n2 * (n2 - 1) / 2
+    n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
+    mpd2 = cp.where(joint & (n2_pairs > 0), (n2_pairs - n2_same) / n2_pairs, 0.0)
+
+    # Between-pop mean pairwise differences (per-allele cross term)
+    n_between = n1 * n2
+    n_between_same = cp.sum(ac1 * ac2, axis=1)
+    between = cp.where(joint, (n_between - n_between_same) / n_between, 0.0)
+
+    return mpd1, mpd2, between
+
+
+def _twopop_site_components(hap1, hap2):
+    """Per-site (mpd1, mpd2, between) from two populations' haplotypes.
+
+    See ``_site_components_from_counts``; the two populations are counted
+    on a shared allele-index width first.
+    """
+    ac1, ac2, n1, n2 = _aligned_pop_counts(hap1, hap2)
+    return _site_components_from_counts(ac1, n1, ac2, n2)
+
+
+def _hudson_num_den(ac1, nv1, ac2, nv2):
+    """Per-site Hudson FST numerator and denominator from counts on a shared K.
+
+    Hudson FST is ``sum(num) / sum(den)`` with ``num = between - within``
+    and ``den = between``, where within is the mean of the two
+    within-population terms; see ``_site_components_from_counts``.
+    """
+    mpd1, mpd2, between = _site_components_from_counts(ac1, nv1, ac2, nv2)
+    return between - (mpd1 + mpd2) / 2.0, between
+
+
 def fst(haplotype_matrix: HaplotypeMatrix,
         pop1: Union[str, list],
         pop2: Union[str, list],
@@ -151,7 +225,7 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     float
-        Hudson's FST estimate
+        Hudson's FST estimate, or NaN if no site has data in both populations
     """
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
@@ -161,7 +235,7 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
         if haplotype_matrix.num_variants == 0:
-            return 0.0
+            return float('nan')
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -172,12 +246,12 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     # FST = 1 - sum(within)/sum(between) (ratio-of-averages). den > 0 already
     # implies both pops have data and the site is polymorphic between them.
     ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
-    num, den = _hudson_fst_from_counts(ac1, nv1, ac2, nv2)
+    num, den = _hudson_num_den(ac1, nv1, ac2, nv2)
 
     valid_mask = den > 0
     if cp.any(valid_mask):
         return float((cp.sum(num[valid_mask]) / cp.sum(den[valid_mask])).get())
-    return 0.0
+    return float('nan')
 
 
 def fst_tskit(haplotype_matrix: HaplotypeMatrix,
@@ -213,7 +287,7 @@ def fst_tskit(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     float
-        tskit's FST estimate
+        tskit's FST estimate, or NaN if no site has data in both populations
     """
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
@@ -222,23 +296,24 @@ def fst_tskit(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
         if haplotype_matrix.num_variants == 0:
-            return 0.0
+            return float('nan')
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    # Reuse the per-allele Hudson pieces: den = Hb (between), den - num = Hw
-    # (within). tskit combines them as (Hb - Hw) / (Hb + Hw), summed over sites.
-    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
-    num, den = _hudson_fst_from_counts(ac1, nv1, ac2, nv2)
-    between_sum = float(cp.sum(den).get())
-    within_sum = float(cp.sum(den - num).get())
+    # Hb (between) and Hw (within), jointly gated so a site with no data in
+    # one population never contributes the other's own diversity as Hw.
+    # tskit combines them as (Hb - Hw) / (Hb + Hw), summed over sites.
+    mpd1, mpd2, between = _twopop_site_components(pop1_haps, pop2_haps)
+    within = (mpd1 + mpd2) / 2.0
+    between_sum = float(cp.sum(between).get())
+    within_sum = float(cp.sum(within).get())
     total = between_sum + within_sum
     if total > 0:
         return (between_sum - within_sum) / total
-    return 0.0
+    return float('nan')
 
 
 def _pop_wc_stats(pop_haps, k):
@@ -275,6 +350,85 @@ def _pop_wc_stats(pop_haps, k):
     return ac, het, n
 
 
+def _wc_site_components(pop1_haps, pop2_haps, k):
+    """Per-site Weir & Cockerham (1984) FST components, summed over alleles.
+
+    Same per-allele variance components (a, b, c) fst_weir_cockerham
+    computes, but returns the two per-site sums its final reduction needs
+    instead of collapsing straight to scalars, so a windowed engine can
+    scatter-add them per window instead of summing over the whole matrix.
+
+    Parameters
+    ----------
+    pop1_haps, pop2_haps : cupy.ndarray, shape (n_haplotypes, n_variants)
+        Haplotype data for each population. Consecutive rows are paired
+        into diploid individuals; callers must check pairing themselves
+        (see fst_weir_cockerham).
+    k : int
+        Number of distinct alleles (max allele index over both populations, plus one).
+
+    Returns
+    -------
+    a_site, abc_site : cupy.ndarray, float64, shape (n_variants,)
+        FST = sum(a_site) / sum(abc_site).
+    """
+    # WC is a per-allele one-vs-rest ANOVA. For each allele it splits the
+    # variance of the "carries this allele" gamete indicator into between-pop
+    # (a), between-individual-within-pop (b), and between-gamete-within-
+    # individual (c) components, and FST = sum_alleles a / sum_alleles (a+b+c).
+    # The c component IS the per-allele observed heterozygosity -- individuals
+    # with exactly ONE copy of the allele -- so het is counted PER ALLELE, not
+    # the site-level "any difference" H_obs in diversity.heterozygosity_observed.
+    # The two coincide only for biallelic sites; for 3+ alleles a 1/2 individual
+    # is het for alleles 1 and 2 but homozygous for allele 0. Multiallelic form
+    # matches scikit-allel's weir_cockerham_fst (a/b/c are (n_var, K); sum over
+    # alleles per site here, and over sites too by the caller).
+    ac1, het1, n1 = _pop_wc_stats(pop1_haps, k)
+    ac2, het2, n2 = _pop_wc_stats(pop2_haps, k)
+
+    r = 2.0
+    n_total = n1 + n2
+    n_bar = n_total / r
+
+    p1 = cp.zeros_like(ac1)
+    p2 = cp.zeros_like(ac2)
+    v1 = n1 > 0
+    v2 = n2 > 0
+    p1[v1] = ac1[v1] / (2.0 * n1[v1])[:, None]
+    p2[v2] = ac2[v2] / (2.0 * n2[v2])[:, None]
+
+    nc = cp.zeros_like(n_total)
+    p_bar = cp.zeros_like(ac1)
+    s_squared = cp.zeros_like(ac1)
+    h_bar = cp.zeros_like(ac1)
+    vt = n_total > 0
+    nt = n_total[vt]
+    n1t = n1[vt][:, None]
+    n2t = n2[vt][:, None]
+    nc[vt] = (nt - (n1[vt]**2 + n2[vt]**2) / nt) / (r - 1)
+    p_bar[vt] = (n1t * p1[vt] + n2t * p2[vt]) / nt[:, None]
+    s_squared[vt] = (n1t * (p1[vt] - p_bar[vt])**2
+                     + n2t * (p2[vt] - p_bar[vt])**2) / ((r - 1) * (nt / r)[:, None])
+    h_bar[vt] = (het1[vt] + het2[vt]) / nt[:, None]
+
+    # W-C variance components (Eqs 2, 3, 4 from Weir & Cockerham 1984), per
+    # allele, only where estimable (n_bar > 1). Sum over alleles AND sites.
+    a = cp.zeros_like(ac1)
+    b = cp.zeros_like(ac1)
+    c = cp.zeros_like(ac1)
+    valid = (n_bar > 1) & (nc > 0)
+    nb = n_bar[valid][:, None]
+    ncc = nc[valid][:, None]
+    pq = p_bar[valid] * (1 - p_bar[valid])
+    s2 = s_squared[valid]
+    hb = h_bar[valid]
+    a[valid] = (nb / ncc) * (s2 - (1.0 / (nb - 1)) * (pq - (r - 1) * s2 / r - hb / 4.0))
+    b[valid] = (nb / (nb - 1)) * (pq - (r - 1) * s2 / r - (2 * nb - 1) * hb / (4.0 * nb))
+    c[valid] = hb / 2.0
+
+    return a.sum(axis=1), (a + b + c).sum(axis=1)
+
+
 def fst_weir_cockerham(haplotype_matrix,
                        pop1: Union[str, list],
                        pop2: Union[str, list],
@@ -302,7 +456,8 @@ def fst_weir_cockerham(haplotype_matrix,
     Returns
     -------
     float
-        Weir & Cockerham's FST estimate
+        Weir & Cockerham's FST estimate, or NaN if no site has data in both
+        populations
     """
 
     if hasattr(haplotype_matrix, 'device') and haplotype_matrix.device == 'CPU':
@@ -312,7 +467,7 @@ def fst_weir_cockerham(haplotype_matrix,
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
         if haplotype_matrix.num_variants == 0:
-            return 0.0
+            return float('nan')
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -327,74 +482,14 @@ def fst_weir_cockerham(haplotype_matrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    # NOTE: WC is a per-allele one-vs-rest ANOVA. For each allele it splits the
-    # variance of the "carries this allele" gamete indicator into between-pop
-    # (a), between-individual-within-pop (b), and between-gamete-within-
-    # individual (c) components, and FST = sum_alleles a / sum_alleles (a+b+c).
-    # The c component IS the per-allele observed heterozygosity -- individuals
-    # with exactly ONE copy of the allele -- so het is counted PER ALLELE, not
-    # the site-level "any difference" H_obs in diversity.heterozygosity_observed.
-    # The two coincide only for biallelic sites; for 3+ alleles a 1/2 individual
-    # is het for alleles 1 and 2 but homozygous for allele 0. Multiallelic form
-    # matches scikit-allel's weir_cockerham_fst (a/b/c are (n_var, K); sum over
-    # alleles and sites).
     k = max(int(pop1_haps.max()) if pop1_haps.size else 0,
             int(pop2_haps.max()) if pop2_haps.size else 0, 0) + 1
-
-    ac1, het1, n1 = _pop_wc_stats(pop1_haps, k)
-    ac2, het2, n2 = _pop_wc_stats(pop2_haps, k)
-
-    r = 2.0
-    n_total = n1 + n2
-    n_bar = n_total / r
-
-    # Per-allele frequencies within each pop (diploid: 2 gametes per individual);
-    # only where the pop has complete individuals (freq 0 elsewhere, unused).
-    p1 = cp.zeros_like(ac1)
-    p2 = cp.zeros_like(ac2)
-    v1 = n1 > 0
-    v2 = n2 > 0
-    p1[v1] = ac1[v1] / (2.0 * n1[v1])[:, None]
-    p2[v2] = ac2[v2] / (2.0 * n2[v2])[:, None]
-
-    # Sample-size correction, pooled freq, allele-freq variance, per-allele het,
-    # computed only at sites with data (subset on the mask, as the biallelic
-    # code did -- avoids the div-by-zero guards).
-    nc = cp.zeros_like(n_total)
-    p_bar = cp.zeros_like(ac1)
-    s_squared = cp.zeros_like(ac1)
-    h_bar = cp.zeros_like(ac1)
-    vt = n_total > 0
-    nt = n_total[vt]
-    n1t = n1[vt][:, None]
-    n2t = n2[vt][:, None]
-    nc[vt] = (nt - (n1[vt]**2 + n2[vt]**2) / nt) / (r - 1)
-    p_bar[vt] = (n1t * p1[vt] + n2t * p2[vt]) / nt[:, None]
-    s_squared[vt] = (n1t * (p1[vt] - p_bar[vt])**2
-                     + n2t * (p2[vt] - p_bar[vt])**2) / ((r - 1) * (nt / r)[:, None])
-    h_bar[vt] = (het1[vt] + het2[vt]) / nt[:, None]       # per-allele obs het
-
-    # W-C variance components (Eqs 2, 3, 4 from Weir & Cockerham 1984), per
-    # allele, only where estimable (n_bar > 1). Sum over alleles AND sites.
-    a = cp.zeros_like(ac1)
-    b = cp.zeros_like(ac1)
-    c = cp.zeros_like(ac1)
-    valid = (n_bar > 1) & (nc > 0)
-    nb = n_bar[valid][:, None]
-    ncc = nc[valid][:, None]
-    pq = p_bar[valid] * (1 - p_bar[valid])
-    s2 = s_squared[valid]
-    hb = h_bar[valid]
-    a[valid] = (nb / ncc) * (s2 - (1.0 / (nb - 1)) * (pq - (r - 1) * s2 / r - hb / 4.0))
-    b[valid] = (nb / (nb - 1)) * (pq - (r - 1) * s2 / r - (2 * nb - 1) * hb / (4.0 * nb))
-    c[valid] = hb / 2.0
-
-    # Global FST = sum(a) / sum(a + b + c), summed over alleles AND sites.
-    sum_a = float(cp.sum(a).get())
-    sum_abc = float(cp.sum(a + b + c).get())
+    a_site, abc_site = _wc_site_components(pop1_haps, pop2_haps, k)
+    sum_a = float(cp.sum(a_site).get())
+    sum_abc = float(cp.sum(abc_site).get())
     if sum_abc > 0:
         return sum_a / sum_abc
-    return 0.0
+    return float('nan')
 
 
 def fst_nei(haplotype_matrix: HaplotypeMatrix,
@@ -422,7 +517,7 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     float
-        Nei's GST estimate
+        Nei's GST estimate, or NaN if no site has data in both populations
     """
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
@@ -432,7 +527,7 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
         if haplotype_matrix.num_variants == 0:
-            return 0.0
+            return float('nan')
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -466,13 +561,13 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     valid_mask = (ht > 0) & (n1 > 0) & (n2 > 0)
 
     if not cp.any(valid_mask):
-        return 0.0
+        return float('nan')
 
     # Ratio-of-averages: sum(HT-HS) / sum(HT)
     sum_ht = float(cp.sum(ht[valid_mask]).get())
     sum_hs = float(cp.sum(hs[valid_mask]).get())
     if sum_ht == 0:
-        return 0.0
+        return float('nan')
     return (sum_ht - sum_hs) / sum_ht
 
 
@@ -580,20 +675,27 @@ def da(haplotype_matrix: HaplotypeMatrix,
     float
         Net divergence (Da)
     """
-    # Get Dxy
-    dxy_value = dxy(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                   span_normalize=span_normalize)
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
 
-    # Get within-population diversities
-    pi1 = _diversity_pi(haplotype_matrix, population=pop1, missing_data=missing_data,
-              span_normalize=span_normalize)
-    pi2 = _diversity_pi(haplotype_matrix, population=pop2, missing_data=missing_data,
-              span_normalize=span_normalize)
+    if missing_data == 'exclude':
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2])
+        if haplotype_matrix.num_variants == 0:
+            return 0.0
 
-    # Calculate Da
-    da_value = dxy_value - (pi1 + pi2) / 2.0
+    pop1_idx = _get_population_indices(haplotype_matrix, pop1)
+    pop2_idx = _get_population_indices(haplotype_matrix, pop2)
+    pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
+    pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    return da_value
+    # dxy and the within-pop pi terms share one site set: a site counts
+    # toward any of the three only where both populations have data (see
+    # _twopop_site_components), matching fst_hudson's own convention.
+    mpd1, mpd2, between = _twopop_site_components(pop1_haps, pop2_haps)
+    da_raw = cp.sum(between) - (cp.sum(mpd1) + cp.sum(mpd2)) / 2.0
+
+    return _apply_span_normalize(da_raw, haplotype_matrix, span_normalize)
 
 
 def pi_within_population(haplotype_matrix: HaplotypeMatrix,
@@ -763,50 +865,6 @@ def _get_population_indices(haplotype_matrix: HaplotypeMatrix,
         return indices
 
 
-def _hudson_fst_from_counts(ac1, nv1, ac2, nv2):
-    """Per-variant Hudson FST num/den from per-allele counts on a shared K.
-
-    Classic Hudson estimator (== scikit-allel): FST = sum(num) / sum(den) with
-    per-site num = Hb - Hw, den = Hb, where Hw is the mean within-population
-    pairwise difference and Hb the between-population divergence. The
-    same-allele pair counts sum over every allele column, so this is
-    multiallelic-correct and reduces to the biallelic ancestral/derived form
-    (ac columns [ref, alt]) exactly.
-
-    Parameters
-    ----------
-    ac1, ac2 : cupy.ndarray, shape (n_variants, K)
-        Per-allele counts on the SAME K (see _aligned_pop_counts).
-    nv1, nv2 : cupy.ndarray, shape (n_variants,)
-        Per-site valid haplotype counts.
-
-    Returns
-    -------
-    num, den : cupy.ndarray, float64, shape (n_variants,)
-    """
-    nv1 = nv1.astype(cp.float64)
-    nv2 = nv2.astype(cp.float64)
-    ac1 = ac1.astype(cp.float64)
-    ac2 = ac2.astype(cp.float64)
-
-    n1_pairs = nv1 * (nv1 - 1) / 2
-    n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
-    mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
-
-    n2_pairs = nv2 * (nv2 - 1) / 2
-    n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
-    mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
-
-    within = (mpd1 + mpd2) / 2.0
-
-    n_between = nv1 * nv2
-    n_between_same = cp.sum(ac1 * ac2, axis=1)
-    between = cp.where(n_between > 0,
-                       (n_between - n_between_same) / n_between, 0.0)
-
-    return between - within, between
-
-
 def _windowed_fst(num, den, size, start=0, stop=None, step=None):
     """Compute windowed FST from per-variant numerator/denominator on GPU.
 
@@ -888,10 +946,17 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
     ac2, nv2 = allele_counts(h2, n_alleles=k)
     ac3, nv3 = allele_counts(h3, n_alleles=k)
 
-    # compute all three pairwise FST num/den from shared counts
-    num12, den12 = _hudson_fst_from_counts(ac1, nv1, ac2, nv2)
-    num13, den13 = _hudson_fst_from_counts(ac1, nv1, ac3, nv3)
-    num23, den23 = _hudson_fst_from_counts(ac2, nv2, ac3, nv3)
+    # PBS turns the three FSTs into the branch lengths of one tree, so all
+    # three use the same sites: those where every population has data. A
+    # site that only one pair can see would enter some branches and not
+    # others. A zero valid count removes a site from every pair, because a
+    # site counts only where both populations of the pair have data.
+    all_three = (nv1 > 0) & (nv2 > 0) & (nv3 > 0)
+    nv1, nv2, nv3 = (cp.where(all_three, nv, 0) for nv in (nv1, nv2, nv3))
+
+    num12, den12 = _hudson_num_den(ac1, nv1, ac2, nv2)
+    num13, den13 = _hudson_num_den(ac1, nv1, ac3, nv3)
+    num23, den23 = _hudson_num_den(ac2, nv2, ac3, nv3)
 
     fst12 = _windowed_fst(num12, den12, window_size, window_start,
                           window_stop, window_step)
