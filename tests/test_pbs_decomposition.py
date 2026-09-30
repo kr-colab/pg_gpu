@@ -18,6 +18,18 @@ def _allele_counts(hap):
     return np.column_stack([n - dac, dac])
 
 
+def _gapped(seed=4, n_var=60):
+    """Three populations; pop1 has no data at every other site."""
+    rng = np.random.RandomState(seed)
+    hap = rng.randint(0, 2, size=(30, n_var)).astype(np.int8)
+    hap[0:10, 0:n_var:2] = -1
+    return HaplotypeMatrix(
+        hap, np.arange(n_var) * 1000, 0, n_var * 1000,
+        sample_sets={'pop1': list(range(10)),
+                     'pop2': list(range(10, 20)),
+                     'pop3': list(range(20, 30))})
+
+
 # ---------------------------------------------------------------------------
 # PBS tests
 # ---------------------------------------------------------------------------
@@ -80,6 +92,39 @@ class TestPBS:
         valid = ~np.isnan(result_pg) & ~np.isnan(result_normed)
         if np.sum(valid) > 0:
             assert not np.allclose(result_pg[valid], result_normed[valid])
+
+    def test_pbs_uses_sites_with_all_three_populations(self):
+        # A site where one population has no data adds nothing to any
+        # branch, so the gapped matrix equals the same matrix restricted to
+        # the sites where all three populations have data.
+        matrix = _gapped()
+        restricted = matrix.exclude_missing_sites(
+            populations=['pop1', 'pop2', 'pop3'])
+        for normed in (False, True):
+            got = divergence.pbs(matrix, 'pop1', 'pop2', 'pop3',
+                                 window_size=matrix.num_variants, normed=normed)
+            ref = divergence.pbs(restricted, 'pop1', 'pop2', 'pop3',
+                                 window_size=restricted.num_variants,
+                                 normed=normed)
+            np.testing.assert_allclose(got, ref, rtol=1e-12)
+
+    @pytest.mark.parametrize("gap_pop", [0, 1, 2])
+    def test_pbs_ignores_a_site_one_population_lacks(self, three_pop_matrix, gap_pop):
+        # Adding a site where one population is wholly missing, and the
+        # other two have data, leaves PBS unchanged, whichever population
+        # it is.
+        matrix, _ = three_pop_matrix
+        hap = cp.asnumpy(matrix.haplotypes)
+        extra = np.random.RandomState(7).randint(0, 2, size=(30, 1)).astype(np.int8)
+        extra[gap_pop * 10:(gap_pop + 1) * 10] = -1
+        hap_gap = np.hstack([hap, extra])
+        n_var = hap_gap.shape[1]
+        gapped = HaplotypeMatrix(hap_gap, np.arange(n_var) * 1000, 0,
+                                 n_var * 1000, sample_sets=matrix.sample_sets)
+        ref = divergence.pbs(matrix, 'pop1', 'pop2', 'pop3',
+                             window_size=matrix.num_variants)
+        got = divergence.pbs(gapped, 'pop1', 'pop2', 'pop3', window_size=n_var)
+        np.testing.assert_allclose(got, ref, rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------

@@ -199,6 +199,12 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``pbs`` counted a population's own diversity at a site where another
+  population in the pair had no data, which pulled that pair's FST down;
+  a single such site could change the sign of PBS. PBS now uses, for all
+  three FSTs, only the sites where all three populations have data, so the
+  three branches describe the same loci. Sites where every population has
+  at least one call are unchanged.
 * ``garud_h`` on a ``GenotypeMatrix`` ignored ``missing_data``, and
   ``windowed_analysis`` with a Garud's H statistic or ``haplotype_count``
   under ``missing_data='exclude'`` raised ``Unknown statistic``. Both now
