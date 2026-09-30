@@ -1039,7 +1039,7 @@ def _r2_matrix_diploid(genotype_matrix):
     """Compute r-squared matrix from diploid genotypes (0/1/2) on GPU.
 
     Uses genotype correlation: treats 0/1/2 as continuous dosage values,
-    computes Pearson correlation, then squares.
+    computes a pairwise-complete Pearson correlation, then squares.
 
     Parameters
     ----------
@@ -1063,27 +1063,58 @@ def _r2_matrix_diploid(genotype_matrix):
     if not isinstance(geno, cp.ndarray):
         geno = cp.asarray(geno)
 
-    # mask missing data: compute per-site mean from valid data only
     valid_mask = (geno >= 0).astype(cp.float64)
     geno_clean = cp.where(geno >= 0, geno, 0).astype(cp.float64)
+
+    # A site's own dosage variance is a marginal (whole-sample) property,
+    # independent of which other site it is paired with: sites with none get
+    # an entirely NaN row/column, matching _drop_undefined_sites's "undefined
+    # entries arrive as whole rows/cols" contract. This must not use the
+    # pairwise-conditioned variance below, or a site could be NaN for some
+    # pairs and not others.
     n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
+    marginal_mean = cp.where(n_valid > 0, cp.sum(geno_clean, axis=0) / n_valid, 0.0)
+    site_defined = cp.sum(((geno_clean - marginal_mean[None, :]) * valid_mask) ** 2,
+                          axis=0) > 0
 
-    mean = cp.where(n_valid > 0, cp.sum(geno_clean, axis=0) / n_valid, 0.0)
+    # Pairwise-complete correlation: mean/variance conditioned on the gametes
+    # valid at both sites of a pair, not each site's own (possibly larger)
+    # marginal set -- same fix as HaplotypeMatrix._pairwise_ld_core, plus the
+    # sum-of-squares term continuous dosage needs for variance that binary
+    # haplotype data gets for free from the mean alone. Kept as raw
+    # (un-normalized) sums rather than dividing down to means/variances: the
+    # joint-valid count n cancels exactly in r2 = cov^2/(var_i*var_j) since
+    # cov/var_i/var_j are each scaled by the same n, so only one division
+    # per term is needed, not a second pass to re-normalize.
+    joint_n = valid_mask.T @ valid_mask
+    sum_i = geno_clean.T @ valid_mask
+    sum_j = sum_i.T  # free transpose: self-product of the whole matrix
+                     # against itself, not a tile -- same identity
+                     # _pairwise_ld_core relies on
+    joint_11 = geno_clean.T @ geno_clean
+    ss_i = (geno_clean ** 2).T @ valid_mask
 
-    # center, zeroing out missing entries
-    gn = (geno_clean - mean[None, :]) * valid_mask
+    # cupy's divide has no where= (verified: TypeError, "Wrong arguments"),
+    # so a safe (zero-substituted) denominator is the only way to divide in
+    # place. The numerator is provably 0 wherever joint_n is (no jointly
+    # valid gamete means no term in sum_i/joint_11/ss_i can be nonzero).
+    safe_n = cp.where(joint_n > 0, joint_n, 1.0)
+    joint_11 -= (sum_i * sum_j) / safe_n  # in place: joint_11 now holds cov
+    ss_i -= (sum_i * sum_i) / safe_n  # in place: ss_i now holds var_i
+    cov = joint_11
+    var_i = ss_i
+    var_j = var_i.T  # view, taken after var_i is finalized -- same
+                     # symmetry argument as var_j above
 
-    # variance per variant (using valid counts)
-    var = cp.sum(gn ** 2, axis=0)
-
-    # r_ij = cov_ij / sqrt(var_i * var_j), applied as a rank-1 in-place
-    # scale so peak memory stays near the one output matrix; the NaN scale
-    # at a zero-variance site spreads over its whole row and column.
-    r2 = gn.T @ gn  # (n_var, n_var)
-    inv = cp.where(var > 0, 1.0 / cp.sqrt(var), cp.nan)
-    r2 *= inv[:, None]
-    r2 *= inv[None, :]
-    r2 *= r2
+    # A specific pair can still land on zero pairwise variance even when
+    # both sites are globally defined (the gametes jointly valid for this
+    # one pair happen to be constant) -- 0.0 there, matching the sentinel
+    # _tile_r2_naive already uses for the same situation, reserving NaN for
+    # the whole-row/column case above.
+    valid_pair = (var_i > 0) & (var_j > 0)
+    safe_denom = cp.where(valid_pair, var_i * var_j, 1.0)
+    r2 = cp.where(valid_pair, (cov * cov) / safe_denom, 0.0)
+    r2 = cp.where(site_defined[:, None] & site_defined[None, :], r2, cp.nan)
     cp.fill_diagonal(r2, 0.0)
 
     return r2

@@ -14,7 +14,7 @@ import pytest
 
 from pg_gpu import GenotypeMatrix, HaplotypeMatrix
 from pg_gpu.ld_statistics import (
-    compute_ld_statistics, dd, dz, mu_ld, pi2, r, r_squared, zns,
+    compute_ld_statistics, dd, dz, mu_ld, omega, pi2, r, r_squared, zns,
     _get_pop_data, _r2_matrix_diploid, _resolve_r2_matrix,
     _zns_from_precomputed,
 )
@@ -229,6 +229,64 @@ def test_r2_matrix_diploid_zero_variance_site_is_nan():
     geno = np.array([[0, 1], [1, 1], [2, 1], [1, 1]], dtype=np.int8)
     r2 = cp.asnumpy(_r2_matrix_diploid(geno))
     assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
+
+
+def test_r2_matrix_diploid_pairwise_complete_under_missing_data():
+    """Same bug as pairwise_r2's, in its continuous-dosage form: mean/variance
+    must come from the pair's jointly-valid individuals, not each site's own
+    (possibly larger) marginal valid set.
+
+    Site 0 is missing on individuals 0-3, dosage (0,0,0,0,2,2,2,2,0,0,0,0) on
+    4-15. Site 1 is missing on individuals 12-15, dosage
+    (2,2,2,2,0,0,0,0,2,2,2,2) on 0-11. Their only shared valid individuals are
+    4-11, where the two columns are identical -- a perfect correlation, r2
+    exactly 1. Each site's own marginal mean (computed over its own full
+    valid set) differs from its mean restricted to the shared set, so using
+    marginal mean/variance for centering would not give r2 == 1 here.
+    """
+    geno = np.array([
+        [-1, 2], [-1, 2], [-1, 2], [-1, 2],
+        [0, 0], [0, 0], [0, 0], [0, 0],
+        [2, 2], [2, 2], [2, 2], [2, 2],
+        [0, -1], [0, -1], [0, -1], [0, -1],
+    ], dtype=np.int8)
+    r2 = cp.asnumpy(_r2_matrix_diploid(geno))
+    assert np.isclose(r2[0, 1], 1.0, rtol=1e-9, atol=1e-12)
+
+    gm = GenotypeMatrix(geno, np.array([1, 2], dtype=np.int64))
+    _agree(zns(gm, estimator="r2"), 1.0)
+    _agree(omega(gm, estimator="r2"), 0.0)  # fewer than 5 sites: omega's floor
+
+
+def test_r2_matrix_diploid_matches_pairwise_complete_correlation_multi_site():
+    """General oracle: with several sites each missing a distinct block of
+    individuals (so every pair overlaps on a different subset), r2 must equal
+    the direct Pearson correlation squared computed independently in numpy,
+    restricted to each pair's own jointly-valid individuals."""
+    rng = np.random.RandomState(1)
+    n_ind, n_var = 24, 5
+    geno = rng.randint(0, 3, size=(n_ind, n_var)).astype(np.int8)
+    block = n_ind // n_var
+    for v in range(n_var):
+        geno[v * block:(v + 1) * block, v] = -1
+    r2 = cp.asnumpy(_r2_matrix_diploid(geno))
+
+    geno_f = geno.astype(np.float64)
+    expected = np.zeros((n_var, n_var))
+    for i in range(n_var):
+        for j in range(i + 1, n_var):
+            valid = (geno[:, i] >= 0) & (geno[:, j] >= 0)
+            ai, aj = geno_f[valid, i], geno_f[valid, j]
+            assert ai.std() > 0 and aj.std() > 0, (i, j)
+            expected[i, j] = expected[j, i] = np.corrcoef(ai, aj)[0, 1] ** 2
+
+    for i in range(n_var):
+        for j in range(i + 1, n_var):
+            assert np.isclose(r2[i, j], expected[i, j], rtol=1e-9, atol=1e-9), (i, j)
+
+    gm = GenotypeMatrix(geno, (np.arange(n_var) + 1).astype(np.int64))
+    iu = np.triu_indices(n_var, k=1)
+    _agree(zns(gm, estimator="r2"), float(expected[iu].mean()))
 
 
 # ── _resolve_r2_matrix (passthrough + dispatch) ────────────────────────
