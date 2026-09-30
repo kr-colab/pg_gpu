@@ -231,6 +231,33 @@ def test_r2_matrix_diploid_zero_variance_site_is_nan():
     assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
 
 
+def test_r2_matrix_diploid_no_overlap_is_nan_not_zero():
+    # Column 0 valid only on individuals 0-1, column 1 only on 2-3: zero
+    # individuals jointly valid, so this pair's correlation cannot be
+    # estimated at all -- nan, not a measured zero (each column is still
+    # individually polymorphic, so this isn't the whole-site-NaN case above).
+    geno = np.array([[0, -1], [1, -1], [-1, 5], [-1, 9]], dtype=np.int8)
+    r2 = cp.asnumpy(_r2_matrix_diploid(geno))
+    assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
+
+
+def test_r2_matrix_diploid_locally_degenerate_pair_is_nan():
+    # Site 0 valid on individuals 0-3 as [0, 1, 1, 1] (polymorphic overall).
+    # Site 1 valid on individuals 1-4 as [5, 5, 5, 9] (polymorphic overall).
+    # Their shared individuals are 1-3, where site 0 reads [1, 1, 1] --
+    # constant in that specific jointly-valid subsample, even though neither
+    # site is globally monomorphic. The pair's correlation is 0/0, not 0.
+    geno = np.array([
+        [0, -1],
+        [1, 5],
+        [1, 5],
+        [1, 5],
+        [-1, 9],
+    ], dtype=np.int8)
+    r2 = cp.asnumpy(_r2_matrix_diploid(geno))
+    assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
+
+
 def test_r2_matrix_diploid_pairwise_complete_under_missing_data():
     """Same bug as pairwise_r2's, in its continuous-dosage form: mean/variance
     must come from the pair's jointly-valid individuals, not each site's own

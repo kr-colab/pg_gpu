@@ -1049,7 +1049,9 @@ def _r2_matrix_diploid(genotype_matrix):
     Returns
     -------
     r2 : cupy.ndarray, float64, shape (n_variants, n_variants)
-        NaN row and column at a site with no dosage variance; diagonal 0.
+        NaN wherever a pair's jointly-valid sample has no variance at one
+        site (a globally invariant site, or no individuals shared with the
+        other site); diagonal 0.
     """
     from .genotype_matrix import GenotypeMatrix
 
@@ -1065,13 +1067,6 @@ def _r2_matrix_diploid(genotype_matrix):
 
     valid_mask = (geno >= 0).astype(cp.float64)
     geno_clean = cp.where(geno >= 0, geno, 0).astype(cp.float64)
-
-    # Dosage variance is a marginal (whole-sample), not pairwise, property:
-    # an undefined site gets a whole NaN row/column, never a scattered one.
-    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-    marginal_mean = cp.where(n_valid > 0, cp.sum(geno_clean, axis=0) / n_valid, 0.0)
-    site_defined = cp.sum(((geno_clean - marginal_mean[None, :]) * valid_mask) ** 2,
-                          axis=0) > 0
 
     # Pairwise-complete correlation, as raw sums (r2 = cov^2/(var_i*var_j)
     # needs no re-normalizing, since n cancels once both are scaled by it).
@@ -1089,12 +1084,10 @@ def _r2_matrix_diploid(genotype_matrix):
     var_i = ss_i
     var_j = var_i.T
 
-    # A pair can still land on zero variance even when both sites are
-    # globally defined; 0.0 there, matching _tile_r2_naive's convention.
-    valid_pair = (var_i > 0) & (var_j > 0)
-    safe_denom = cp.where(valid_pair, var_i * var_j, 1.0)
-    r2 = cp.where(valid_pair, (cov * cov) / safe_denom, 0.0)
-    r2 = cp.where(site_defined[:, None] & site_defined[None, :], r2, cp.nan)
+    # A globally invariant site has zero variance in every pairwise-restricted
+    # subsample too, so this already NaNs a whole row/column, not just a pair.
+    denom = var_i * var_j
+    r2 = cp.where(denom > 0, (cov * cov) / denom, cp.nan)
     cp.fill_diagonal(r2, 0.0)
 
     return r2
