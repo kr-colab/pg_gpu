@@ -177,36 +177,41 @@ def check_sample_set_rows(label, rows, n_rows):
             f"gamete more than once")
 
 
+def paired_rows_problem(rows):
+    """Why a row list cannot pair into diploid individuals, or None.
+
+    Pairing takes consecutive entries, so the list must have even length
+    and each consecutive pair must come from one individual (``row // 2``
+    equal). Order inside a pair and the order of pairs are both free.
+    Malformed input returns None: it has no pairing to speak about, and the
+    validating chokepoints raise the proper error for it.
+    """
+    n = len(rows)
+    if n % 2:
+        return f"has {n} rows, so pairing drops the last one"
+    try:
+        arr = _rows_as_numpy(rows)
+    except (TypeError, ValueError):
+        return None
+    if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
+        return None
+    bad = np.nonzero(arr[0::2] // 2 != arr[1::2] // 2)[0]
+    if bad.size:
+        k = int(bad[0])
+        a, b = int(arr[2 * k]), int(arr[2 * k + 1])
+        return (f"pairs rows {a} and {b}, which belong to "
+                f"individuals {a // 2} and {b // 2}")
+    return None
+
+
 def check_paired_rows(rows, context, stacklevel=3):
     """Warn when a population row list cannot pair into diploid individuals.
 
-    The caller pairs consecutive entries, so the check mirrors that
-    exactly: even length, and each consecutive pair drawn from one
-    individual (``row // 2`` equal). Order inside a pair and the order of
-    pairs in the list are both free. ``stacklevel`` points the warning at
-    the caller's caller by default; call sites nested one deeper pass 4.
+    See ``paired_rows_problem`` for the rule. ``stacklevel`` points the
+    warning at the caller's caller by default; call sites nested one deeper
+    pass 4.
     """
-    n = len(rows)
-    problem = None
-    if n % 2:
-        problem = f"has {n} rows, so pairing drops the last one"
-    else:
-        try:
-            arr = _rows_as_numpy(rows)
-        except (TypeError, ValueError):
-            return
-        if arr.ndim != 1 or not np.issubdtype(arr.dtype, np.integer):
-            # Malformed input has no pairing to speak about; the
-            # validating chokepoints raise the proper error for it.
-            return
-        first = arr[0::2] // 2
-        second = arr[1::2] // 2
-        bad = np.nonzero(first != second)[0]
-        if bad.size:
-            k = int(bad[0])
-            a, b = int(arr[2 * k]), int(arr[2 * k + 1])
-            problem = (f"pairs rows {a} and {b}, which belong to "
-                       f"individuals {a // 2} and {b // 2}")
+    problem = paired_rows_problem(rows)
     if problem is not None:
         warnings.warn(
             f"{context}: the population row list {problem}. Statistics "

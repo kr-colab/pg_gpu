@@ -11,7 +11,7 @@ import numpy as np
 import cupy as cp
 from typing import Union, Optional, Tuple
 from .haplotype_matrix import HaplotypeMatrix
-from ._utils import get_population_matrix as _get_population_matrix
+from ._utils import population_rows
 from ._memutil import allele_counts
 from ._haplotype_groups import complete_sites, frequencies
 from ._haplotype_hash import garud_from_moments, garud_h_windows
@@ -153,7 +153,7 @@ def garud_h(matrix, population=None, missing_data='include'):
 
     haplotype_matrix = matrix
     if population is not None:
-        haplotype_matrix = _get_population_matrix(haplotype_matrix, population)
+        haplotype_matrix = population_rows(haplotype_matrix, population)
 
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
@@ -210,7 +210,7 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
         ``size`` or ``step`` is below 1.
     """
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -305,7 +305,7 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
     for a chromosome-wide result.
     """
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -376,8 +376,8 @@ def xpnsl(haplotype_matrix: HaplotypeMatrix,
             return np.full(haplotype_matrix.num_variants, np.nan)
         haplotype_matrix = haplotype_matrix.get_subset(valid)
 
-    m1 = _get_population_matrix(haplotype_matrix, pop1)
-    m2 = _get_population_matrix(haplotype_matrix, pop2)
+    m1 = population_rows(haplotype_matrix, pop1)
+    m2 = population_rows(haplotype_matrix, pop2)
 
     if m1.device == 'CPU':
         m1.transfer_to_gpu()
@@ -471,7 +471,7 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     scores; materialize the region eagerly for a chromosome-wide result.
     """
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -594,8 +594,8 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
         haplotype_matrix = haplotype_matrix.get_subset(valid)
         if pos is not None:
             pos = np.asarray(pos)[valid.get()]
-    m1 = _get_population_matrix(haplotype_matrix, pop1)
-    m2 = _get_population_matrix(haplotype_matrix, pop2)
+    m1 = population_rows(haplotype_matrix, pop1)
+    m2 = population_rows(haplotype_matrix, pop2)
 
     if m1.device == 'CPU':
         m1.transfer_to_gpu()
@@ -662,7 +662,7 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
         EHH values at each variant position from the first.
     """
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 

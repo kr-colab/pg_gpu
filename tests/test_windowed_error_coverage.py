@@ -7,8 +7,8 @@ import pytest
 
 from pg_gpu import HaplotypeMatrix
 from pg_gpu.windowed_analysis import (
-    StatisticsComputer, WindowIterator, WindowParams, windowed_analysis,
-    windowed_statistics_fused,
+    StatisticsComputer, WindowData, WindowIterator, WindowParams,
+    windowed_analysis, windowed_statistics_fused,
 )
 
 
@@ -35,9 +35,10 @@ def test_unknown_statistic_raises_through_public_api():
 # ── unknown population ─────────────────────────────────────────────────
 def test_unknown_population_raises():
     m = _matrix(sample_sets={"p1": [0, 1, 2, 3]})
-    sc = StatisticsComputer(["pi"])
+    sc = StatisticsComputer(["pi"], populations=["nope"])
+    window = WindowData("1", 0, 100, 50, m, m.num_variants, 0)
     with pytest.raises(ValueError, match="not found in sample_sets"):
-        sc._get_population_matrix(m, "nope")
+        sc.compute(window)
 
 
 # ── unknown window type ────────────────────────────────────────────────

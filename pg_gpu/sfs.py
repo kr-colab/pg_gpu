@@ -11,7 +11,7 @@ import numpy as np
 import cupy as cp
 from typing import Union, Optional
 from .haplotype_matrix import HaplotypeMatrix
-from ._utils import get_population_matrix as _get_population_matrix
+from ._utils import population_rows
 from .streaming_matrix import StreamingHaplotypeMatrix, _stream_sum
 
 
@@ -61,7 +61,7 @@ def sfs(haplotype_matrix: HaplotypeMatrix,
         )
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -122,7 +122,7 @@ def sfs_folded(haplotype_matrix: HaplotypeMatrix,
         )
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -190,7 +190,7 @@ def sfs_folded_scaled(haplotype_matrix: HaplotypeMatrix,
     # sfs_folded already handles streaming / population subsetting and is pinned
     # to tskit; scaling is a fixed transform on top of it (no tskit analogue).
     if population is not None:
-        n = _get_population_matrix(haplotype_matrix, population).num_haplotypes
+        n = population_rows(haplotype_matrix, population).num_haplotypes
     else:
         n = haplotype_matrix.num_haplotypes
     s = sfs_folded(haplotype_matrix, population, missing_data=missing_data)
@@ -221,8 +221,8 @@ def _joint_aligned_counts(haplotype_matrix, pop1, pop2):
     both), ``nv1``/``nv2`` are per-site valid counts, and ``n1``/``n2`` the
     population sizes.
     """
-    m1 = _get_population_matrix(haplotype_matrix, pop1)
-    m2 = _get_population_matrix(haplotype_matrix, pop2)
+    m1 = population_rows(haplotype_matrix, pop1)
+    m2 = population_rows(haplotype_matrix, pop2)
     if m1.device == 'CPU':
         m1.transfer_to_gpu()
     if m2.device == 'CPU':
