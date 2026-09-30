@@ -37,8 +37,6 @@ def get_population_matrix(matrix, population: Union[str, list],
     from .genotype_matrix import GenotypeMatrix
 
     if isinstance(population, str):
-        if matrix.sample_sets is None:
-            raise ValueError("No sample_sets defined in matrix")
         if population not in matrix.sample_sets:
             raise ValueError(
                 f"Population {population} not found in sample_sets")
@@ -68,7 +66,16 @@ def get_population_matrix(matrix, population: Union[str, list],
                     f"get_population_matrix: the population row list "
                     f"{problem}, so the subset has no sample names or "
                     f"per-genotype fields.", UnpairedRowsWarning, stacklevel=2)
-        extra = _population_metadata(matrix, individuals)
+        n_individuals = matrix.shape[0] if is_genotype else matrix.shape[0] // 2
+        extra, mismatched = _population_metadata(matrix, individuals,
+                                                 n_individuals)
+        if mismatched:
+            warnings.warn(
+                f"get_population_matrix: {', '.join(mismatched)} "
+                f"{'has' if len(mismatched) == 1 else 'have'} a sample axis "
+                f"that is not one entry per individual ({n_individuals}), so "
+                f"the subset drops {'it' if len(mismatched) == 1 else 'them'}.",
+                UserWarning, stacklevel=2)
     cls = GenotypeMatrix if is_genotype else HaplotypeMatrix
     data = matrix.genotypes if is_genotype else matrix.haplotypes
     return cls(
@@ -91,27 +98,37 @@ def population_rows(matrix, population: Union[str, list]):
     return get_population_matrix(matrix, population, metadata=False)
 
 
-def _population_metadata(matrix, individuals):
-    """``samples`` and ``fields`` of a population subset.
+def _population_metadata(matrix, individuals, n_individuals):
+    """``samples`` and ``fields`` of a population subset, and what was dropped.
 
     Per-variant fields keep every variant of the subset; per-genotype fields
     (2-D, ``(n_var, n_samples)``) and ``samples`` keep ``individuals``, or
-    are dropped when it is None. Fields sit on the unfiltered variant axis
-    while the subset holds only the accessible variants, so they are cut to
-    those too.
+    are dropped when it is None. Each of those must have one entry per
+    individual on its sample axis; one that does not is dropped and named
+    in the returned list, since picking by individual would mislabel it.
+    Fields sit on the unfiltered variant axis while the subset holds only
+    the accessible variants, so they are cut to those too.
     """
     acc = matrix._accessible_idx
     acc = None if acc is None else cp.asnumpy(acc)
     per_variant = {t: a for t, a in matrix.fields.items() if a.ndim != 2}
     fields = per_variant if acc is None else slice_fields(per_variant, acc)
     samples = None
+    mismatched = []
     if individuals is not None:
         for tag, arr in matrix.fields.items():
-            if arr.ndim == 2:
-                # One fancy index on both axes, so a masked matrix makes no
-                # full-width intermediate copy.
-                var_idx = np.arange(arr.shape[0]) if acc is None else acc
-                fields[tag] = arr[np.ix_(var_idx, individuals)]
+            if arr.ndim != 2:
+                continue
+            if arr.shape[1] != n_individuals:
+                mismatched.append(f"field {tag!r}")
+                continue
+            # One fancy index on both axes, so a masked matrix makes no
+            # full-width intermediate copy.
+            var_idx = np.arange(arr.shape[0]) if acc is None else acc
+            fields[tag] = arr[np.ix_(var_idx, individuals)]
         if matrix.samples is not None:
-            samples = [matrix.samples[i] for i in individuals]
-    return {'samples': samples, 'fields': fields}
+            if len(matrix.samples) == n_individuals:
+                samples = [matrix.samples[i] for i in individuals]
+            else:
+                mismatched.append("samples")
+    return {'samples': samples, 'fields': fields}, mismatched

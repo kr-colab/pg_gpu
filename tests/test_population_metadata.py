@@ -11,7 +11,7 @@ import pytest
 
 from pg_gpu import GenotypeMatrix, HaplotypeMatrix
 from pg_gpu._utils import get_population_matrix, population_rows
-from pg_gpu._warnings import UnpairedRowsWarning
+from pg_gpu._warnings import UnpairedRowsWarning, paired_rows_problem
 
 N_VAR = 6
 SAMPLES = ['a', 'b', 'c', 'd']
@@ -103,3 +103,32 @@ def test_subset_round_trips_through_zarr(tmp_path):
     sub.to_zarr(path, format="vcz", contig_name="1")
     back = HaplotypeMatrix.from_zarr(path, streaming="never")
     assert list(back.samples) == ['c', 'd']
+
+
+def test_names_not_one_per_individual_are_dropped_with_warning():
+    # One name per haplotype, not per individual: picking by individual
+    # would label rows 4 and 5 with 'h2', so the subset drops the names.
+    hap = np.zeros((8, N_VAR), dtype=np.int8)
+    m = HaplotypeMatrix(hap, np.arange(N_VAR) * 10 + 1, 1, N_VAR * 10,
+                        samples=[f"h{i}" for i in range(8)],
+                        fields={'DP': np.zeros((N_VAR, 8), dtype=np.int16),
+                                'MQ': _fields()['MQ']})
+    with pytest.warns(UserWarning, match="samples"):
+        sub = get_population_matrix(m, [4, 5])
+    assert sub.samples is None
+    assert 'DP' not in sub.fields and 'MQ' in sub.fields
+
+
+@pytest.mark.parametrize("rows, expected", [
+    ([0, 1, 3, 2], None),
+    ([1, 2], "individuals 0 and 1"),
+    ([0, 1, 2], "3 rows"),
+    ([[0], [1, 2]], None),       # malformed: left to the validating checks
+    (["a", "b"], None),
+])
+def test_paired_rows_problem(rows, expected):
+    problem = paired_rows_problem(rows)
+    if expected is None:
+        assert problem is None
+    else:
+        assert expected in problem
