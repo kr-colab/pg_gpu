@@ -136,11 +136,11 @@ def garud_h(matrix, population=None, missing_data='include'):
     With ``missing_data='include'``, the complete haplotypes (no missing
     call) set the distinct haplotypes. EM splits each incomplete haplotype
     across the complete haplotypes it matches at its called sites, which
-    gives the maximum-likelihood frequencies when calls are missing at
-    random. The result does not depend on row order. An incomplete
-    haplotype that matches no complete haplotype counts as a distinct
-    haplotype of its own. With no complete haplotype, all four values are
-    NaN.
+    gives the maximum-likelihood frequencies when calls are missing
+    completely at random. The result does not depend on row order. An
+    incomplete haplotype that matches no complete haplotype counts as a
+    distinct haplotype of its own. With no complete haplotype, all four
+    values are NaN.
 
     A haplotype is complete over L sites with probability (1 - m)^L at a
     missing rate m, so data with many missing calls gives few complete
@@ -192,8 +192,9 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
         'include' - EM haplotype frequencies in windows with missing
         calls, as in ``garud_h``; NaN for a window with no complete
         haplotype.
-        'exclude' - drop every site with a missing call, then tile the
-        windows over the remaining sites.
+        'exclude' - each window uses only its sites with no missing call.
+        Windows are tiled over all variants, so a window keeps its
+        position when some of its sites are dropped.
 
     Returns
     -------
@@ -217,10 +218,6 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     hap = matrix.haplotypes
-
-    if missing_data == 'exclude':
-        hap = complete_sites(hap)
-
     n_variants = hap.shape[1]
 
     if stop is None:
@@ -234,7 +231,8 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
             f"({n_variants}), size >= 1 and step >= 1; got start={start}, "
             f"stop={stop}, size={size}, step={step}")
     starts = np.arange(start, stop - size + 1, step, dtype=np.int64)
-    return garud_h_windows(hap, starts, starts + size)[:4]
+    return garud_h_windows(hap, starts, starts + size,
+                           missing_data=missing_data)[:4]
 
 
 def _garud_from_freqs(f):

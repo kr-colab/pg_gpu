@@ -968,7 +968,7 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     -------
     float
     """
-    from ._haplotype_groups import complete_sites, haplotype_groups
+    from ._haplotype_groups import complete_sites, window_labels
     from ._haplotype_hash import hash_weights
 
     _reject_streaming(haplotype_matrix, "mu_ld")
@@ -986,17 +986,17 @@ def mu_ld(haplotype_matrix, missing_data='include'):
         return 0.0
 
     mid = n_var // 2
-    w1, w2 = hash_weights(n_var)
-    left = haplotype_groups(hap, 0, mid, w1, w2, labels=True)
-    right = haplotype_groups(hap, mid, n_var, w1, w2, labels=True)
-    if left is None or right is None:
+    labels, n_distinct, has_complete = window_labels(
+        hap, cp.array([0, mid], dtype=cp.int64),
+        cp.array([mid, n_var], dtype=cp.int64), *hash_weights(n_var))
+    if not has_complete.all():
         return float('nan')
-    left_labels, right_labels = left[2], right[2]
+    left_labels, right_labels = labels
 
     # Distinct (left, right) pattern pairs; a pattern is exclusive when it
     # pairs with exactly one pattern from the other half. Labels run from 0
     # to n_distinct - 1 with no gap, so every label has a pair.
-    n_right_labels = right[1]
+    n_right_labels = int(n_distinct[1])
     pairs = cp.unique(left_labels * n_right_labels + right_labels)
     per_left = cp.bincount(pairs // n_right_labels)
     per_right = cp.bincount(pairs % n_right_labels)

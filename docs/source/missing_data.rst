@@ -159,7 +159,8 @@ frequencies:
 3. EM (expectation-maximization) splits each incomplete haplotype across
    its compatible complete haplotypes in proportion to their
    frequencies. This gives the maximum-likelihood frequencies when calls
-   are missing at random. The result does not depend on row order.
+   are missing completely at random. The result does not depend on row
+   order.
 4. An incomplete haplotype with no compatible complete haplotype counts
    as a distinct haplotype of its own.
 5. A window with no complete haplotype returns NaN.

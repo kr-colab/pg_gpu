@@ -70,11 +70,17 @@ Read this section if you are comparing against older pg_gpu results.
   haplotypes (no missing call) set the distinct haplotypes, and EM
   splits each incomplete haplotype across the complete ones it matches
   at its called sites. This gives the maximum-likelihood frequencies when
-  calls are missing at random, and does not depend on row order. An
-  incomplete haplotype that matches no complete one is a distinct
-  haplotype of its own. A window with no complete haplotype returns NaN.
+  calls are missing completely at random, and does not depend on row
+  order. An incomplete haplotype that matches no complete one is a
+  distinct haplotype of its own. A window with no complete haplotype returns NaN.
   Values change on any data with missing calls; data with no missing
-  calls is unchanged. See :doc:`missing_data`.
+  calls is unchanged. See :doc:`missing_data`. The windowed
+  ``haplotype_count`` column is now float64, since a window can be NaN.
+* ``moving_garud_h`` with ``missing_data='exclude'`` dropped every site
+  with a missing call from the whole matrix before it tiled the windows,
+  so windows moved and the window count could shrink. Windows now stay
+  on the full variant grid and each drops only its own missing sites,
+  the same as ``windowed_analysis``.
 * Haplotype rows now follow one order everywhere: sample ``i`` owns rows
   ``2i`` and ``2i + 1``. ``from_ts`` already used this order, while
   ``from_vcf`` and ``from_zarr`` grouped all of the first gametes ahead of

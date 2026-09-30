@@ -1535,7 +1535,9 @@ def diplotype_frequency_spectrum(genotype_matrix,
 
     if population is not None:
         genotype_matrix = _get_population_matrix(genotype_matrix, population)
-    geno = cp.asarray(genotype_matrix.genotypes)
+    if genotype_matrix.device == 'CPU':
+        genotype_matrix.transfer_to_gpu()
+    geno = genotype_matrix.genotypes
     if missing_data == 'exclude':
         geno = complete_sites(geno)
 

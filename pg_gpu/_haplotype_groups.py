@@ -348,7 +348,8 @@ def _group_windows(hap, starts, stops, w1, w2, n_seg):
     n_inc = int(inc_w.size)
     r = SimpleNamespace(
         goff=goff, n_complete=n_complete, order=order,
-        sorted_complete=sorted_complete, local_gid=local_gid, inc_row=inc_row)
+        sorted_complete=sorted_complete, local_gid=local_gid, inc_w=inc_w,
+        inc_row=inc_row)
     if n_inc == 0:
         r.counts = n_g
         r.n_single = cp.zeros(n_windows, dtype=cp.int64)
@@ -422,7 +423,64 @@ def window_batch_size(n_hap, n_seg):
                // n_seg)
 
 
-def haplotype_groups(hap, lo=0, hi=None, w1=None, w2=None, labels=False):
+def _row_labels(r, n_hap):
+    """One label per (window, row) from a ``_group_windows`` result.
+
+    In each window: the group of a complete row; the most probable group of
+    a compatible incomplete row (ties go to the first group in content
+    order); a unique label of its own for a singleton. The labels of a
+    window run from 0 to its distinct count - 1 with no gap.
+    """
+    n_windows = r.order.shape[0]
+    labels = cp.empty((n_windows, n_hap), dtype=cp.int64)
+    cw, cj = cp.nonzero(r.sorted_complete)
+    labels[cw, r.order[cw, cj]] = r.local_gid[cw, cj]
+    if r.n_compat.size == 0:
+        return labels
+    goff = r.goff
+    one = cp.nonzero(r.n_compat == 1)[0]
+    labels[r.inc_w[one], r.inc_row[one]] = r.first[one] - goff[r.inc_w[one]]
+    if r.amb.size:
+        # Most probable group per ambiguous row: the first group, in content
+        # order, whose frequency ties the row's largest one.
+        seg = cp.repeat(cp.arange(r.amb.size), cp.diff(r.csr_off))
+        score = r.p[r.csr_g]
+        best = cp.full(r.amb.size, -1.0)
+        cupyx.scatter_max(best, seg, score)
+        tie = score >= best[seg] * (1.0 - _LABEL_TIE_RTOL)
+        pick = cp.full(r.amb.size, goff[-1], dtype=cp.int64)
+        cupyx.scatter_min(pick, seg[tie], r.csr_g[tie])
+        amb_w = r.inc_w[r.amb]
+        labels[amb_w, r.inc_row[r.amb]] = pick - goff[amb_w]
+    # Singletons follow the groups of their window, in row order. The
+    # incomplete rows are sorted by window, so a singleton's rank in its
+    # window is its position minus the position of the window's first one.
+    single = cp.nonzero(r.n_compat == 0)[0]
+    sw = r.inc_w[single]
+    rank = cp.arange(single.size) - cp.searchsorted(sw, sw, side='left')
+    labels[sw, r.inc_row[single]] = goff[sw + 1] - goff[sw] + rank
+    return labels
+
+
+def window_labels(hap, starts, stops, w1, w2):
+    """Row labels for a batch of windows (see ``_row_labels``).
+
+    Returns
+    -------
+    labels : cupy.ndarray, int64, shape (n_windows, n_hap)
+    n_distinct : numpy.ndarray, int64, shape (n_windows,)
+    has_complete : numpy.ndarray, bool, shape (n_windows,)
+        False for a window with no complete haplotype, whose labels are
+        undefined.
+    """
+    hap = _as_kernel_input(hap)
+    r = _group_windows(hap, starts, stops, w1, w2, n_segments(starts, stops))
+    n_distinct = cp.diff(r.goff) + r.n_single
+    n_distinct, n_complete = cp.stack([n_distinct, r.n_complete]).get()
+    return _row_labels(r, hap.shape[0]), n_distinct, n_complete > 0
+
+
+def haplotype_groups(hap, lo=0, hi=None, w1=None, w2=None):
     """Distinct-haplotype counts over ``hap[:, lo:hi]`` with missing calls.
 
     See the module docstring for the rule.
@@ -436,23 +494,17 @@ def haplotype_groups(hap, lo=0, hi=None, w1=None, w2=None, labels=False):
         Right-open variant range. ``hi`` defaults to ``n_var``.
     w1, w2 : cupy.ndarray, optional
         Hash weights for ``n_var`` variants (see ``hash_weights``).
-    labels : bool
-        Also return one label per row.
 
     Returns
     -------
     None when the range holds no complete haplotype, else a tuple
-    ``(counts, n_distinct)`` or ``(counts, n_distinct, row_labels)``:
+    ``(counts, n_distinct)``:
 
     counts : cupy.ndarray, float64
         Expected count of each distinct haplotype (groups, then singletons).
         The counts sum to ``n_hap``.
     n_distinct : int
         Groups plus singletons.
-    row_labels : cupy.ndarray, int64, shape (n_hap,)
-        The group of a complete row; the most probable group of a compatible
-        incomplete row (ties go to the first group in content order); a
-        unique label of its own for a singleton.
     """
     hap = _as_kernel_input(hap)
     n_hap, n_var = hap.shape
@@ -468,29 +520,7 @@ def haplotype_groups(hap, lo=0, hi=None, w1=None, w2=None, labels=False):
     if n_complete == 0:
         return None
     counts = cp.concatenate([r.counts, cp.ones(n_single, dtype=cp.float64)])
-    if not labels:
-        return counts, n_groups + n_single
-
-    row_labels = cp.empty(n_hap, dtype=cp.int64)
-    sc = r.sorted_complete[0]
-    row_labels[r.order[0][sc]] = r.local_gid[0][sc]
-    if r.n_compat.size:
-        one = r.n_compat == 1
-        row_labels[r.inc_row[one]] = r.first[one]
-        if r.amb.size:
-            # Most probable group per ambiguous row: the first group, in
-            # content order, whose frequency ties the row's largest one.
-            seg = cp.repeat(cp.arange(r.amb.size), cp.diff(r.csr_off))
-            score = r.p[r.csr_g]
-            best = cp.full(r.amb.size, -1.0)
-            cupyx.scatter_max(best, seg, score)
-            tie = score >= best[seg] * (1.0 - _LABEL_TIE_RTOL)
-            pick = cp.full(r.amb.size, n_groups, dtype=cp.int64)
-            cupyx.scatter_min(pick, seg[tie], r.csr_g[tie])
-            row_labels[r.inc_row[r.amb]] = pick
-        single_rows = r.inc_row[r.n_compat == 0]
-        row_labels[single_rows] = n_groups + cp.arange(single_rows.size)
-    return counts, n_groups + n_single, row_labels
+    return counts, n_groups + n_single
 
 
 def frequencies(hap, lo=0, hi=None, w1=None, w2=None):

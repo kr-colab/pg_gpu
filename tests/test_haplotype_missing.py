@@ -5,6 +5,8 @@ haplotype across the complete ones it matches at its called sites; an
 incomplete haplotype that matches none is a singleton; a window with no
 complete haplotype is NaN.
 """
+import sys
+
 import cupy as cp
 import numpy as np
 import pytest
@@ -13,7 +15,8 @@ from pg_gpu import (
     GenotypeMatrix, HaplotypeMatrix, diversity, ld_statistics, selection,
     windowed_analysis,
 )
-from pg_gpu._haplotype_groups import frequencies, haplotype_groups
+from pg_gpu._haplotype_groups import frequencies, haplotype_groups, window_labels
+from pg_gpu._haplotype_hash import hash_weights
 from pg_gpu.windowed_analysis import (
     windowed_statistics_fused, windowed_statistics_fused_chunked,
 )
@@ -197,15 +200,47 @@ def test_windowed_engines_match_scalar(windowed_case, engine):
     np.testing.assert_allclose(got, ref, equal_nan=True)
 
 
-def test_windowed_haplotype_count_is_float_only_with_nan(windowed_case):
+def test_windowed_haplotype_count_is_always_float(windowed_case):
     hap, _ = windowed_case
     size = 100 * SPACING
-    df = windowed_analysis(_hm(hap), window_size=size, step_size=size,
-                           statistics=["haplotype_count"])
-    assert df["haplotype_count"].dtype.kind == "f"
-    df = windowed_analysis(_hm(hap[:, :200]), window_size=size, step_size=size,
-                           statistics=["haplotype_count"])
-    assert df["haplotype_count"].dtype.kind == "i"
+    for sub in (hap, hap[:, :200]):   # with and without a NaN window
+        df = windowed_analysis(_hm(sub), window_size=size, step_size=size,
+                               statistics=["haplotype_count"])
+        assert df["haplotype_count"].dtype == np.float64
+
+
+def test_moving_garud_h_exclude_matches_windowed_analysis():
+    # All missing calls sit in the second window. Both engines must keep
+    # three windows at the same positions and drop the missing sites
+    # inside the window only.
+    rng = np.random.default_rng(0)
+    hap = rng.integers(0, 2, size=(40, 30)).astype(np.int8)
+    for v in (12, 15, 18):
+        hap[rng.integers(0, 40, size=3), v] = -1
+    h = _hm(hap)
+    moving = np.array(selection.moving_garud_h(
+        h, size=10, step=10, missing_data="exclude")).T
+    df = windowed_analysis(h, window_size=10 * SPACING, step_size=10 * SPACING,
+                           statistics=GARUD, missing_data="exclude")
+    assert moving.shape[0] == 3
+    np.testing.assert_allclose(moving, df[GARUD].to_numpy(dtype=np.float64)[:3])
+
+
+def test_fallback_groups_once_per_window(windowed_case, monkeypatch):
+    # The package exports a function with the module's name, so take the
+    # module from sys.modules.
+    wa = sys.modules["pg_gpu.windowed_analysis"]
+    hap, win = windowed_case
+    calls = []
+    real = wa.garud_h_windows
+    monkeypatch.setattr(wa, "garud_h_windows",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    size = 100 * SPACING
+    # 'pi' with 'exclude' sends the request to the per-window fallback.
+    windowed_analysis(_hm(hap), window_size=size, step_size=size,
+                      statistics=GARUD + ["haplotype_count", "pi"],
+                      missing_data="exclude")
+    assert len(calls) == len(win)
 
 
 def test_windowed_exclude_matches_scalar(windowed_case):
@@ -325,3 +360,18 @@ def test_streaming_matches_scalar_with_missing(tmp_path):
     assert (hap < 0).any()
     np.testing.assert_allclose(stream[stats].to_numpy(dtype=np.float64),
                                np.array(ref, dtype=np.float64), equal_nan=True)
+
+
+def test_batched_labels_match_single_window_labels():
+    hap = cp.asarray(_founder_data(81, n_hap=60, n_var=40, n_founders=5, rate=0.03))
+    w1, w2 = hash_weights(40)
+    ranges = [(0, 13), (13, 25), (25, 40)]
+    labels, n_distinct, has_complete = window_labels(
+        hap, cp.array([lo for lo, _ in ranges]), cp.array([hi for _, hi in ranges]),
+        w1, w2)
+    for k, (lo, hi) in enumerate(ranges):
+        one, n, ok = window_labels(hap, cp.array([lo]), cp.array([hi]), w1, w2)
+        np.testing.assert_array_equal(labels[k].get(), one[0].get())
+        assert n_distinct[k] == n[0] and has_complete[k] == ok[0]
+        # Labels run from 0 to n_distinct - 1 with no gap.
+        assert set(labels[k].get().tolist()) == set(range(n[0]))
