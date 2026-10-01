@@ -199,6 +199,15 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``get_population_matrix`` returned a subset with no sample names and no
+  QC ``fields``. It now keeps both: per-variant fields keep every variant
+  of the subset, and per-genotype fields and ``samples`` keep the
+  population's individuals. On a ``HaplotypeMatrix`` that works only when
+  the population's rows pair into whole individuals (sample ``i`` at rows
+  ``2i`` and ``2i + 1``); otherwise the subset drops them and warns.
+  ``samples`` or a per-genotype field that does not hold one entry per
+  individual is also dropped with a warning, since picking by individual
+  would mislabel it. ``metadata=False`` skips the copy.
 * ``pbs`` counted a population's own diversity at a site where another
   population in the pair had no data, which pulled that pair's FST down;
   a single such site could change the sign of PBS. PBS now uses, for all

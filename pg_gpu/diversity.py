@@ -13,7 +13,7 @@ import cupy as cp
 from typing import Union, Optional, Dict, Callable
 from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
-from ._utils import get_population_matrix
+from ._utils import population_rows
 
 
 def _apply_span_normalize(value, matrix, span_normalize):
@@ -328,7 +328,7 @@ def _compute_neutrality_test(matrix, w1_name, w2_name):
 def _prepare_matrix(haplotype_matrix, population=None, missing_data='include'):
     """Extract population subset and apply exclude filtering."""
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
     if matrix.device == 'CPU':
@@ -586,7 +586,7 @@ class FrequencySpectrum:
     def __init__(self, haplotype_matrix, population=None,
                  missing_data='include', n_total_sites=None):
         if population is not None:
-            matrix = get_population_matrix(haplotype_matrix, population)
+            matrix = population_rows(haplotype_matrix, population)
         else:
             matrix = haplotype_matrix
 
@@ -956,7 +956,7 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
 
     # Get population subset if specified
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1007,7 +1007,7 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
 
     # Get population subset if specified
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1206,7 +1206,7 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
 def _haplotypes_for_grouping(haplotype_matrix, population, missing_data):
     """Population rows on the GPU; with 'exclude', only complete sites."""
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
     if matrix.device == 'CPU':
@@ -1218,7 +1218,6 @@ def _haplotypes_for_grouping(haplotype_matrix, population, missing_data):
     return haplotypes
 
 
-_get_population_matrix = get_population_matrix
 
 
 def theta_h(haplotype_matrix: HaplotypeMatrix,
@@ -1404,7 +1403,7 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     """
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1490,7 +1489,7 @@ def daf_histogram(matrix, n_bins: int = 20,
         return _daf_histogram_diploid(matrix, n_bins, population)
 
     if population is not None:
-        matrix = _get_population_matrix(matrix, population)
+        matrix = population_rows(matrix, population)
 
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
@@ -1534,7 +1533,7 @@ def diplotype_frequency_spectrum(genotype_matrix,
     from ._haplotype_groups import complete_sites, haplotype_groups
 
     if population is not None:
-        genotype_matrix = _get_population_matrix(genotype_matrix, population)
+        genotype_matrix = population_rows(genotype_matrix, population)
     if genotype_matrix.device == 'CPU':
         genotype_matrix.transfer_to_gpu()
     geno = genotype_matrix.genotypes
@@ -1577,7 +1576,7 @@ def _histogram_from_dafs(dafs, n_bins):
 def _daf_histogram_diploid(genotype_matrix, n_bins=20, population=None):
     """DAF histogram from diploid genotypes (internal)."""
     if population is not None:
-        genotype_matrix = _get_population_matrix(genotype_matrix, population)
+        genotype_matrix = population_rows(genotype_matrix, population)
     geno = genotype_matrix.genotypes
 
     if not isinstance(geno, cp.ndarray):
@@ -1656,7 +1655,7 @@ def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
     """
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1722,14 +1721,14 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
         from ._warnings import check_paired_rows
         if ploidy == 2:
             # .get: an unknown name skips the check and reaches
-            # _get_population_matrix below for its proper ValueError.
+            # population_rows below for its proper ValueError.
             rows = (haplotype_matrix.sample_sets.get(population)
                     if isinstance(population, str) else population)
             if rows is not None:
                 label = (population if isinstance(population, str)
                          else "row list")
                 check_paired_rows(rows, f"heterozygosity_observed({label})")
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1833,7 +1832,7 @@ def mu_var(haplotype_matrix: HaplotypeMatrix,
     float
     """
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1868,7 +1867,7 @@ def mu_sfs(haplotype_matrix: HaplotypeMatrix,
     """
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 

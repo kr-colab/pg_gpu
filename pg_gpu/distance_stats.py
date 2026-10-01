@@ -10,7 +10,7 @@ import numpy as np
 import cupy as cp
 from .haplotype_matrix import HaplotypeMatrix
 from .genotype_matrix import GenotypeMatrix
-from ._utils import get_population_matrix
+from ._utils import population_rows
 
 
 def _extract_upper_triangle(mat):
@@ -121,7 +121,7 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
     """
 
     if population is not None:
-        matrix = get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 

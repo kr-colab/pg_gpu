@@ -16,7 +16,7 @@ from cupy import cublas
 
 from .haplotype_matrix import HaplotypeMatrix
 from ._memutil import allele_counts, estimate_variant_chunk_size
-from ._utils import get_population_matrix as _get_population_matrix
+from ._utils import population_rows
 
 _GPU_MEM_BUDGET = 0.3
 
@@ -48,7 +48,7 @@ def _gpu_hap(haplotype_matrix, population=None, n_alleles=None):
     ``n_alleles`` hoists K when the caller already knows it, avoiding the
     per-call ``hap.max()`` host sync.
     """
-    matrix = (_get_population_matrix(haplotype_matrix, population)
+    matrix = (population_rows(haplotype_matrix, population)
               if population is not None else haplotype_matrix)
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
@@ -297,7 +297,7 @@ def _prepare_dosage(genotype_matrix, population=None, missing_data='include'):
         matrix.transfer_to_gpu()
 
     if population is not None:
-        matrix = _get_population_matrix(matrix, population)
+        matrix = population_rows(matrix, population)
     geno = matrix.genotypes
 
     n_ind, n_var = geno.shape
@@ -481,7 +481,7 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
             "or to_haplotype_matrix() first.")
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1107,7 +1107,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
         caller='local_pca')
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
     if matrix.device == 'CPU':
@@ -1219,7 +1219,7 @@ def _local_pca_with_jackknife(
         caller='_local_pca_with_jackknife')
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
     if matrix.device == 'CPU':
@@ -1863,7 +1863,7 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
         caller='local_pca_jackknife')
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
     if matrix.device == 'CPU':
