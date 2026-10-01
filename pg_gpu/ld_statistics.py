@@ -302,7 +302,12 @@ def _tile_counts(hi, vi, hj, vj):
 
 
 def _tile_r2_naive(hi, vi, hj, vj):
-    """Compute naive r² for a tile (the classical frequency-based estimator)."""
+    """Compute naive r² for a tile (the classical frequency-based estimator).
+
+    Returns r2 and a parallel validity mask: an undefined pair (denom <= 0)
+    gets 0.0 in r2, not NaN, so a caller that must exclude it from a mean
+    needs the mask, not isnan.
+    """
     # Built on the same pairwise-complete counts as _tile_sigma_d2, so p_i/p_j
     # come from the gametes valid at both sites rather than each site's own
     # (possibly larger) marginal valid set.
@@ -311,7 +316,9 @@ def _tile_r2_naive(hi, vi, hj, vj):
     p_i = cp.where(n > 0, (c1 + c2) / n, 0.0)
     p_j = cp.where(n > 0, (c1 + c3) / n, 0.0)
     denom = (p_i * (1 - p_i)) * (p_j * (1 - p_j))
-    return cp.where(denom > 0, (D ** 2) / denom, 0.0)
+    valid = denom > 0
+    r2 = cp.where(valid, (D ** 2) / denom, 0.0)
+    return r2, valid
 
 
 def _tile_sigma_d2(hi, vi, hj, vj):
@@ -596,16 +603,17 @@ def _zns_tiled(mat, missing_data='include', tile_size=512, use_projection=False)
                     total += 2.0 * float(cp.sum(tile).get())
                     n_pairs += 2 * int(cp.sum(valid).get())
             else:
-                r2_tile = _tile_r2_naive(hi, vi, hj, vj)
+                r2_tile, valid_tile = _tile_r2_naive(hi, vi, hj, vj)
                 if i0 == j0:
                     cp.fill_diagonal(r2_tile, 0.0)
+                    cp.fill_diagonal(valid_tile, False)
                     total += float(cp.sum(r2_tile).get())
+                    n_pairs += int(cp.sum(valid_tile).get())
                 else:
                     total += 2.0 * float(cp.sum(r2_tile).get())
+                    n_pairs += 2 * int(cp.sum(valid_tile).get())
 
-    if use_projection:
-        return total / n_pairs if n_pairs > 0 else 0.0
-    return total / (m * (m - 1))
+    return total / n_pairs if n_pairs > 0 else 0.0
 
 
 def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
@@ -678,16 +686,17 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
                     total += 2.0 * float(cp.sum(tile).get())
                     n_pairs += 2 * int(cp.sum(valid).get())
             else:
-                r2_tile = _tile_r2_naive(hi, vi, hj, vj)
+                r2_tile, valid_tile = _tile_r2_naive(hi, vi, hj, vj)
                 if i0 == j0:
                     cp.fill_diagonal(r2_tile, 0.0)
+                    cp.fill_diagonal(valid_tile, False)
                     total += float(cp.sum(r2_tile).get())
+                    n_pairs += int(cp.sum(valid_tile).get())
                 else:
                     total += 2.0 * float(cp.sum(r2_tile).get())
+                    n_pairs += 2 * int(cp.sum(valid_tile).get())
 
-    if use_projection:
-        return total / n_pairs if n_pairs > 0 else 0.0
-    return total / (m * (m - 1))
+    return total / n_pairs if n_pairs > 0 else 0.0
 
 
 def _drop_undefined_sites(r2_matrix):
@@ -697,8 +706,11 @@ def _drop_undefined_sites(r2_matrix):
     r^2 is undefined: ``pairwise_r2`` for monomorphic and multiallelic
     sites, ``_r2_matrix_diploid`` for sites with no dosage variance. So
     excluding undefined pairs is the same as dropping those sites.
-    No-op on a finite matrix. Assumes undefined entries arrive as whole
-    rows/cols (all this package produces); a scattered NaN would propagate.
+    No-op on a finite matrix. Only drops whole rows/cols; a single
+    undefined pair within an otherwise-defined site is left in place.
+    ``zns`` and ``omega`` separately count only their defined pairs, so
+    a scattered NaN doesn't bias them; other callers of this function
+    would need the same care.
     """
     finite = ~cp.isnan(r2_matrix)
     cp.fill_diagonal(finite, False)
@@ -778,8 +790,12 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     m = int(cp.any(finite, axis=1).sum())
     if m < 2:
         return 0.0
+    # Pair count from the finite mask itself, not m * (m - 1): a scattered
+    # undefined pair (both sites otherwise fine) doesn't drop a whole site
+    # from m, so the mean must exclude it from the denominator too.
+    n_pairs = int(finite.sum())
     total = cp.nansum(r2_matrix) - cp.nansum(cp.diag(r2_matrix))
-    return float((total / (m * (m - 1))).get())
+    return float((total / n_pairs).get())
 
 
 def _zns_biallelic(hm, missing_data='include', estimator='auto'):
@@ -899,31 +915,40 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
 
     # work with upper triangle only (i < j), matching diploSHIC
     r2 = cp.triu(r2_matrix, k=1)
+    undefined = cp.isnan(r2)
+    # A scattered undefined pair (both its sites otherwise fine) must not
+    # propagate through cumsum, and the pair counts below can't assume
+    # full density the way a closed-form formula would. defined is built
+    # from r2_matrix directly (not r2) so triu's own zeroed-out lower
+    # triangle/diagonal isn't miscounted as defined pairs.
+    r2 = cp.where(undefined, 0.0, r2)
+    defined = cp.triu((~cp.isnan(r2_matrix)).astype(cp.int64), k=1)
 
-    # 2D prefix sums on upper triangle
+    # 2D prefix sums on upper triangle, of both the r^2 values and which
+    # pairs are defined
     S = cp.cumsum(cp.cumsum(r2, axis=0), axis=1)
+    C = cp.cumsum(cp.cumsum(defined, axis=0), axis=1)
 
     # partition points l = 3..m-2 (matching diploSHIC)
     l_vals = cp.arange(3, m - 1)
 
     # left block: upper triangle pairs (i,j) with i < j < l
     left_sum = S[l_vals - 1, l_vals - 1]
+    left_count = C[l_vals - 1, l_vals - 1]
 
     # total upper triangle sum
     total_upper = S[m - 1, m - 1]
+    total_count = C[m - 1, m - 1]
 
     # cross block: pairs (i,j) with i < l and j >= l
     cross_sum = S[l_vals - 1, m - 1] - left_sum
+    cross_count = C[l_vals - 1, m - 1] - left_count
 
     # right block: pairs (i,j) with i >= l and j > i (upper triangle of right block)
     right_sum = total_upper - left_sum - cross_sum
 
-    # pair counts (upper triangle only)
-    n_left = l_vals * (l_vals - 1) // 2
-    n_right = (m - l_vals) * (m - l_vals - 1) // 2
-    n_cross = l_vals * (m - l_vals)
-
-    n_within = n_left + n_right
+    n_within = total_count - cross_count
+    n_cross = cross_count
     within_sum = left_sum + right_sum
 
     valid = (n_within > 0) & (n_cross > 0) & (cross_sum > 0)
@@ -1085,8 +1110,7 @@ def _r2_matrix_diploid(genotype_matrix):
     var_i = ss_i
     var_j = var_i.T
 
-    # Variances are non-negative, so this is denom <= 0 without an (m, m)
-    # denom array; a globally invariant site NaNs a whole row/column.
+    # Variances are non-negative, so this is denom <= 0 without an (m, m) denom array.
     undefined = (var_i <= 0) | (var_j <= 0)
     cov *= cov  # now holds cov^2
     cov /= var_i

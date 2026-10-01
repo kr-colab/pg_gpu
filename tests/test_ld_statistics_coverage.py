@@ -156,6 +156,36 @@ def test_pairwise_r2_matches_pairwise_complete_correlation_multi_site():
     _agree(zns(hm, estimator="r2"), float(expected[iu].mean()))
 
 
+def test_zns_tiled_excludes_undefined_pair_unlike_closed_form_count():
+    """Counterpart to the multi-site test above, which deliberately avoids a
+    degenerate pair: here sites 0 and 1 share no valid haplotype at all (an
+    undefined pair, not a measured zero), while every other pair is defined.
+    _zns_tiled must exclude it from both the sum and the pair count, not
+    divide by the closed-form m*(m-1) that assumes every pair is defined."""
+    hap = np.array([
+        [0, -1, 0, 1],
+        [1, -1, 1, 1],
+        [0, -1, 0, 0],
+        [1, -1, 1, 0],
+        [-1, 1, 0, 1],
+        [-1, 0, 1, 1],
+        [-1, 1, 0, 0],
+        [-1, 0, 1, 0],
+    ], dtype=np.int8)
+    pos = np.array([100, 200, 300, 400], dtype=np.int64)
+    hm = HaplotypeMatrix(hap, pos, 0, 1000)
+    hm.transfer_to_gpu()
+
+    r2 = cp.asnumpy(hm.pairwise_r2())
+    assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
+
+    finite = ~np.isnan(r2)
+    np.fill_diagonal(finite, False)
+    expected = (np.nansum(r2) - np.nansum(np.diag(r2))) / finite.sum()
+
+    _agree(zns(hm, estimator="r2"), float(expected))
+
+
 @pytest.mark.parametrize("use_projection", [False, True], ids=["naive", "proj"])
 def test_zns_from_precomputed_tiling_invariant(use_projection):
     # tile_size is an implementation detail: a small tile forces the
@@ -256,6 +286,33 @@ def test_r2_matrix_diploid_locally_degenerate_pair_is_nan():
     ], dtype=np.int8)
     r2 = cp.asnumpy(_r2_matrix_diploid(geno))
     assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
+
+
+def _hand_r2_matrix_one_scattered_undefined_pair():
+    """5x5 r2 matrix, every pair defined except (1, 3), to check that omega
+    and zns exclude a single undefined pair from their own sums and pair
+    counts rather than treating it as a dropped site (_drop_undefined_sites
+    only drops whole rows) or letting it propagate through a cumulative sum."""
+    upper = {
+        (0, 1): 0.1, (0, 2): 0.2, (0, 3): 0.3, (0, 4): 0.4,
+        (1, 2): 0.5, (1, 3): None, (1, 4): 0.6,
+        (2, 3): 0.7, (2, 4): 0.8,
+        (3, 4): 0.9,
+    }
+    r2 = np.zeros((5, 5))
+    for (i, j), v in upper.items():
+        r2[i, j] = r2[j, i] = np.nan if v is None else v
+    return r2
+
+
+def test_omega_excludes_single_undefined_pair_not_whole_sites():
+    r2 = _hand_r2_matrix_one_scattered_undefined_pair()
+    assert omega(cp.asarray(r2)) == pytest.approx(0.7589285714285713)
+
+
+def test_zns_excludes_single_undefined_pair_from_pair_count():
+    r2 = _hand_r2_matrix_one_scattered_undefined_pair()
+    assert zns(cp.asarray(r2)) == pytest.approx(0.5)
 
 
 def test_r2_matrix_diploid_pairwise_complete_under_missing_data():

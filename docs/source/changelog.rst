@@ -210,6 +210,14 @@ Bug fixes
   continuous form -- mean/variance from each site's own marginal valid
   set instead of the pair's jointly-valid individuals -- and is fixed
   the same way.
+* ``omega`` and ``zns`` mishandled a single pair left undefined by the
+  fix above (both sites otherwise fine, just no -- or locally
+  degenerate -- jointly-valid sample): the NaN propagated through
+  ``omega``'s prefix sum and collapsed results to ``0.0``, and both
+  statistics divided by a closed-form pair count that assumed every
+  pair was defined. Both now count only their actually-defined pairs,
+  in the full-matrix path and in ``zns``'s tiled naive-``r2`` path
+  (``_zns_tiled``/``_zns_from_precomputed``).
 * ``pbs`` counted a population's own diversity at a site where another
   population in the pair had no data, which pulled that pair's FST down;
   a single such site could change the sign of PBS. PBS now uses, for all
