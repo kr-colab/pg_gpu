@@ -1076,21 +1076,25 @@ def _r2_matrix_diploid(genotype_matrix):
     joint_11 = geno_clean.T @ geno_clean
     ss_i = (geno_clean ** 2).T @ valid_mask
 
-    # In-place divide; numerator is provably 0 wherever joint_n is 0.
-    safe_n = cp.where(joint_n > 0, joint_n, 1.0)
-    joint_11 -= (sum_i * sum_j) / safe_n  # now holds cov
-    ss_i -= (sum_i * sum_i) / safe_n  # now holds var_i
+    # Clamp joint_n in place before dividing: numerator is provably 0
+    # wherever joint_n is 0, so the clamped divide gives exact 0 there too.
+    cp.maximum(joint_n, 1.0, out=joint_n)
+    joint_11 -= (sum_i * sum_j) / joint_n  # now holds cov
+    ss_i -= (sum_i * sum_i) / joint_n  # now holds var_i
     cov = joint_11
     var_i = ss_i
     var_j = var_i.T
 
-    # A globally invariant site has zero variance in every pairwise-restricted
-    # subsample too, so this already NaNs a whole row/column, not just a pair.
-    denom = var_i * var_j
-    r2 = cp.where(denom > 0, (cov * cov) / denom, cp.nan)
-    cp.fill_diagonal(r2, 0.0)
+    # Variances are non-negative, so this is denom <= 0 without an (m, m)
+    # denom array; a globally invariant site NaNs a whole row/column.
+    undefined = (var_i <= 0) | (var_j <= 0)
+    cov *= cov  # now holds cov^2
+    cov /= var_i
+    cov /= var_j  # now holds r2 = cov^2 / (var_i * var_j)
+    cov[undefined] = cp.nan
+    cp.fill_diagonal(cov, 0.0)
 
-    return r2
+    return cov
 
 
 # Keep old names as aliases for backward compat
