@@ -1782,13 +1782,11 @@ class HaplotypeMatrix:
         # p_i/p_j use the pair's joint-valid sample, not each site's own marginal one.
         sum_i = hap_clean.T @ valid_mask
 
-        # In-place divide by joint_n (zeros included): numerator is provably 0
-        # wherever joint_n is, so this is always 0/0 -> nan, overwritten below.
-        zero = joint_n == 0
+        # Clamp joint_n in place before dividing: numerator is provably 0
+        # wherever joint_n is 0, so the clamped divide gives exact 0 there too.
+        cp.maximum(joint_n, 1.0, out=joint_n)
         sum_i /= joint_n
-        sum_i[zero] = 0.0
         joint_11 /= joint_n
-        joint_11[zero] = 0.0
         p_i, p_AB = sum_i, joint_11  # aliases, not copies
         p_j = p_i.T  # joint_n is symmetric, so this is exact, not a tile approximation
 
