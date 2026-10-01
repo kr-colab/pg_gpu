@@ -909,8 +909,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
 
     if 'zeng_dh' in stats_set:
         H = (raw['pi'] - raw['theta_h']).get() / spans
-        results['zeng_dh'] = np.where(
-            (tajd < 0) & (H < 0), tajd * H, 0.0)
+        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, H)
 
     # Windows with no accessible bases get NaN for every per-base rate.
     if zero_span.any():
@@ -2011,6 +2010,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         chrom, ws_cpu, we_cpu,
         n_variants=(win_stop - win_start).get())
 
+    window_bases = None
     if per_base:
         window_bases = _compute_window_bases(
             haplotype_matrix, results['start'],
@@ -2061,19 +2061,10 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         results['n_variants'] = var_count.astype(int)
 
         if 'pi' in statistics:
-            if per_base:
-                results['pi'] = np.where(window_bases > 0,
-                                         mpd_sum / window_bases, np.nan)
-            else:
-                results['pi'] = mpd_sum
+            results['pi'] = _rate(mpd_sum, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            if per_base:
-                results['theta_w'] = np.where(window_bases > 0,
-                                              watterson_num_w / window_bases,
-                                              np.nan)
-            else:
-                results['theta_w'] = watterson_num_w
+            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -2087,15 +2078,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            if per_base:
-                results['theta_h'] = np.where(window_bases > 0,
-                                              theta_h_sum / window_bases, np.nan)
-            else:
-                results['theta_h'] = theta_h_sum
+            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            # H = pi - theta_H (absolute, unnormalized)
-            results['fay_wu_h'] = mpd_sum - theta_h_sum
+            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
+                                        per_base)
 
         if 'max_daf' in statistics:
             results['max_daf'] = max_daf
@@ -2480,6 +2467,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         chrom, ws_cpu, we_cpu,
         n_variants=(win_stop - win_start).get())
 
+    window_bases = None
     if per_base:
         window_bases = _compute_window_bases(
             haplotype_matrix, results['start'],
@@ -2573,19 +2561,10 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         results['n_variants'] = var_count.astype(int)
 
         if 'pi' in statistics:
-            if per_base:
-                results['pi'] = np.where(window_bases > 0,
-                                         mpd_sum / window_bases, np.nan)
-            else:
-                results['pi'] = mpd_sum
+            results['pi'] = _rate(mpd_sum, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            if per_base:
-                results['theta_w'] = np.where(window_bases > 0,
-                                              watterson_num_w / window_bases,
-                                              np.nan)
-            else:
-                results['theta_w'] = watterson_num_w
+            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -2599,14 +2578,11 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            if per_base:
-                results['theta_h'] = np.where(window_bases > 0,
-                                              theta_h_sum / window_bases, np.nan)
-            else:
-                results['theta_h'] = theta_h_sum
+            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            results['fay_wu_h'] = mpd_sum - theta_h_sum
+            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
+                                        per_base)
 
         if 'max_daf' in statistics:
             results['max_daf'] = max_daf_arr
@@ -2782,6 +2758,16 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     return results
 
 
+def _rate(total, window_bases, per_base):
+    """A per-window total as a per-base rate when ``per_base``, else as is.
+
+    A window with no bases has no rate, so it is NaN.
+    """
+    if not per_base:
+        return total
+    return np.where(window_bases > 0, total / window_bases, np.nan)
+
+
 def _windowed_mean(values, bin_idx, valid_mask, n_bins):
     """Compute mean of values per window bin, returning NaN for empty bins."""
     val_sum = _scatter_sum(values[valid_mask], bin_idx[valid_mask], n_bins)
@@ -2922,6 +2908,7 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
         n_variants=variant_counts.get())
 
     # window sizes for per-base normalization
+    window_bases = None
     if per_base:
         window_bases = _compute_window_bases(
             haplotype_matrix, results['start'],
