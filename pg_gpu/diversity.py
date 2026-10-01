@@ -8,6 +8,7 @@ custom weight functions, and SFS projection.
 """
 
 import math
+import warnings
 import numpy as np
 import cupy as cp
 from typing import Union, Optional, Dict, Callable
@@ -615,6 +616,12 @@ class FrequencySpectrum:
         # from the scalar distinct-alleles-1 at reference-absent sites.
         # theta_h/theta_l and the eta-family are exact.
         self.sfs_by_n = {}
+        # Sample size for the neutrality-test variance: the harmonic mean of
+        # the per-site sample sizes over sites with n >= 2, as in
+        # _compute_thetas.
+        valid_n = n_valid[n_valid >= 2].astype(cp.float64)
+        self._n_eff = int(_harmonic_mean_n(
+            valid_n.size, float(cp.sum(1.0 / valid_n).get()) if valid_n.size else 0.0))
         if len(n_valid) == 0:
             self.n_max = 0
             self.n_segregating = 0
@@ -661,8 +668,12 @@ class FrequencySpectrum:
 
         total = 0.0
         for n, xi in self.sfs_by_n.items():
-            w = weights_fn(n)
-            total += np.sum(xi[:len(w)] * w[:len(xi)])
+            w = np.asarray(weights_fn(n))
+            if w.shape != (n + 1,):
+                raise ValueError(
+                    f"weights for sample size {n} must have length {n + 1} "
+                    f"(one per derived allele count 0..{n}); got shape {w.shape}")
+            total += np.sum(xi * w)
 
         if span_normalize is not False:
             if span is not None and span > 0:
@@ -685,8 +696,9 @@ class FrequencySpectrum:
         if S < 3:
             return float('nan')
 
-        n_eff = max(self.sfs_by_n.keys(),
-                    key=lambda n: np.sum(self.sfs_by_n[n]))
+        n_eff = self._n_eff
+        if n_eff < 3:
+            return float('nan')
 
         w1_name = w1 if isinstance(w1, str) else None
         w2_name = w2 if isinstance(w2, str) else None
@@ -722,12 +734,23 @@ class FrequencySpectrum:
     def project(self, target_n):
         """Project all SFS groups to a common sample size."""
         projected = np.zeros(target_n + 1)
+        dropped = 0
         for n, xi in self.sfs_by_n.items():
             if n < target_n:
+                # Projection only lowers a sample size; it cannot raise one.
+                dropped += int(np.sum(xi[1:n]))
                 continue
             projected += project_sfs(xi, n, target_n)
+        if dropped:
+            warnings.warn(
+                f"FrequencySpectrum.project({target_n}): {dropped} segregating "
+                f"derived alleles are at sites with fewer than {target_n} valid "
+                f"haplotypes and are left out of the projected spectrum.",
+                UserWarning, stacklevel=2)
         result = object.__new__(FrequencySpectrum)
         result.sfs_by_n = {target_n: projected}
+        # Every site of the projection has target_n haplotypes.
+        result._n_eff = target_n
         result.n_max = target_n
         result.n_segregating = int(np.sum(projected[1:target_n]))
         result.n_total_sites = self.n_total_sites
@@ -1101,10 +1124,11 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                     w1, w2 = test_specs[s]
                     S = ct['S']
                     n = ct['n_harmonic_mean']
-                    if S < 3 or n < 3:
-                        results[s] = float('nan')
-                    elif s == 'fay_wus_h':
+                    if s == 'fay_wus_h':
+                        # No variance term, so no minimum S or n.
                         results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
+                    elif S < 3 or n < 3:
+                        results[s] = float('nan')
                     else:
                         var = _achaz_variance(w1, w2, n, S)
                         num = ct['thetas'][w1] - ct['thetas'][w2]
@@ -1372,16 +1396,26 @@ def zeng_dh(haplotype_matrix: HaplotypeMatrix,
     -------
     float
         DH statistic. Positive when both D and H are negative
-        (consistent with a selective sweep).
+        (consistent with a selective sweep). NaN when either test is
+        undefined (too few segregating sites).
     """
     D = tajimas_d(haplotype_matrix, population, missing_data=missing_data)
     H = fay_wus_h(haplotype_matrix, population, missing_data=missing_data)
 
-    # DH is the product when both are negative (sweep signal)
-    if D < 0 and H < 0:
-        return float(D * H)
-    else:
-        return 0.0
+    return float(_zeng_dh_combine(D, H))
+
+
+def _zeng_dh_combine(D, H):
+    """Zeng's DH from Tajima's D and Fay & Wu's H, scalars or arrays.
+
+    The product when both are negative (sweep signal), else 0. An undefined
+    test (too few sites) is not "no sweep", so it gives NaN.
+    """
+    D = np.asarray(D, dtype=np.float64)
+    H = np.asarray(H, dtype=np.float64)
+    with np.errstate(invalid='ignore'):
+        dh = np.where((D < 0) & (H < 0), D * H, 0.0)
+    return np.where(np.isfinite(D) & np.isfinite(H), dh, np.nan)
 
 
 def max_daf(haplotype_matrix: HaplotypeMatrix,

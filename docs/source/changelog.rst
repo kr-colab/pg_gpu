@@ -199,6 +199,25 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``zeng_dh``, scalar and windowed, returned 0.0 ("no sweep") when
+  Tajima's D or Fay & Wu's H was undefined because of too few
+  segregating sites. It now returns NaN in that case.
+* ``diversity_stats`` returned NaN for ``fay_wus_h`` with fewer than three
+  segregating sites, a gate meant only for the variance-based tests. It
+  now matches ``fay_wus_h``.
+* Windowed ``fay_wu_h`` was a raw sum, not a per-base rate, when the
+  request went to the fused engine (for example together with a Garud's H
+  statistic), so the same column changed units with the rest of the
+  request. It is now per base on every engine, like ``pi`` and
+  ``theta_h``.
+* ``FrequencySpectrum.neutrality_test`` used the sample size with the
+  most sites for the Achaz variance. It now uses the harmonic mean of the
+  per-site sample sizes, as ``tajimas_d``, ``normalized_fay_wu_h`` and
+  ``zeng_e`` do, so it matches them under missing data.
+* ``FrequencySpectrum.theta`` raises ``ValueError`` for a custom weight
+  vector whose length is not ``n + 1``; it used to cut the vector to fit.
+  ``FrequencySpectrum.project`` warns, with a count, when it leaves out
+  sites that have fewer valid haplotypes than the target.
 * ``pbs`` counted a population's own diversity at a site where another
   population in the pair had no data, which pulled that pair's FST down;
   a single such site could change the sign of PBS. PBS now uses, for all
