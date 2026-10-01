@@ -1857,8 +1857,14 @@ class HaplotypeMatrix:
         bmask = self._biallelic_mask()
         _warn_biallelic_only(int((~bmask).sum()), context="pairwise_r2")
         D, p_i, p_j = self._pairwise_ld_core()
-        denom = (p_i * (1 - p_i)) * (p_j * (1 - p_j))
-        r2 = cp.where(denom > 0, (D ** 2) / denom, cp.nan)
+        p_i *= (1 - p_i)  # now var_i; p_j (a transpose view of p_i) becomes var_j for free
+        var_i, var_j = p_i, p_j
+        undefined = (var_i <= 0) | (var_j <= 0)
+        D *= D
+        D /= var_i
+        D /= var_j  # D now holds r2, in place
+        D[undefined] = cp.nan
+        r2 = D
         bad = ~bmask
         r2[bad, :] = cp.nan
         r2[:, bad] = cp.nan
