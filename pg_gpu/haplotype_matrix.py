@@ -1,3 +1,5 @@
+import copy
+
 import cupy as cp
 import numpy as np
 import allel
@@ -289,7 +291,9 @@ class HaplotypeMatrix:
         self.chrom_end = chrom_end
         self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
-        self.samples = samples  # diploid sample names from VCF
+        # Diploid sample names from VCF; copied so a derived matrix never
+        # shares the caller's list.
+        self.samples = copy.copy(samples)
         # Optional per-variant (n_var,) and per-genotype (n_var, n_samples)
         # VCF FORMAT/INFO arrays. Empty dict when no quality fields were
         # requested at load time. Shape disambiguates per-variant vs
@@ -1167,7 +1171,7 @@ class HaplotypeMatrix:
         result.chrom_start = self.chrom_start
         result.chrom_end = self.chrom_end
         result.n_total_sites = self.n_total_sites
-        result.samples = self.samples
+        result.samples = copy.copy(self.samples)
         result.fields = {tag: arr[:0] for tag, arr in self.fields.items()}
         result.accessible_mask = None
         return result

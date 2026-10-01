@@ -132,3 +132,25 @@ def test_paired_rows_problem(rows, expected):
         assert problem is None
     else:
         assert expected in problem
+
+
+def test_subset_fields_are_not_shared_with_the_parent():
+    # No accessible mask: the subset must still own its per-variant arrays.
+    m = _hm(sample_sets={'pop1': [0, 1, 2, 3]})
+    sub = get_population_matrix(m, 'pop1')
+    assert sub.fields['MQ'] is not m.fields['MQ']
+    sub.fields['MQ'][0] = 999.0
+    np.testing.assert_array_equal(m.fields['MQ'], _fields()['MQ'])
+
+
+@pytest.mark.parametrize("make_child", [
+    lambda m: get_population_matrix(m, [0, 1, 2, 3]),
+    lambda m: m.get_subset(np.arange(3)),
+    lambda m: m.get_subset(np.arange(0)),
+], ids=["population", "variant", "empty"])
+def test_child_samples_are_not_shared_with_the_parent(make_child):
+    m = _hm()
+    child = make_child(m)
+    assert child.samples is not m.samples
+    child.samples[0] = 'changed'
+    assert m.samples == SAMPLES

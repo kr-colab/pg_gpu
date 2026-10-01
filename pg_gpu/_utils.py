@@ -109,10 +109,14 @@ def _population_metadata(matrix, individuals, n_individuals):
     Fields sit on the unfiltered variant axis while the subset holds only
     the accessible variants, so they are cut to those too.
     """
+    # The subset's variants, as indices into the unfiltered variant axis.
+    # Fancy indexing copies, so the subset never shares an array with the
+    # parent.
     acc = matrix._accessible_idx
-    acc = None if acc is None else cp.asnumpy(acc)
-    per_variant = {t: a for t, a in matrix.fields.items() if a.ndim != 2}
-    fields = per_variant if acc is None else slice_fields(per_variant, acc)
+    var_idx = (np.arange(matrix.num_variants) if acc is None
+               else cp.asnumpy(acc))
+    fields = slice_fields({t: a for t, a in matrix.fields.items() if a.ndim != 2},
+                          var_idx)
     samples = None
     mismatched = []
     if individuals is not None:
@@ -124,7 +128,6 @@ def _population_metadata(matrix, individuals, n_individuals):
                 continue
             # One fancy index on both axes, so a masked matrix makes no
             # full-width intermediate copy.
-            var_idx = np.arange(arr.shape[0]) if acc is None else acc
             fields[tag] = arr[np.ix_(var_idx, individuals)]
         if matrix.samples is not None:
             if len(matrix.samples) == n_individuals:
