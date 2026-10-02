@@ -4,8 +4,7 @@ A statistic run with ``population='p1'`` restricts to that population's rows
 before computing, so it must equal the same statistic run on a matrix
 hand-built from only those rows (population=None). One two-population fixture
 drives the sweep; the hand-built subset is independent of the internal
-``get_population_matrix``, so the equivalence actually checks its row
-selection.
+``population_rows``, so the equivalence actually checks its row selection.
 """
 import cupy as cp
 import msprime
@@ -149,7 +148,7 @@ def test_diploid_population_not_found_raises(gm, fn):
 
 
 # ── list-argument form of population= on the diploid / dosage paths ──
-# These route through the shared get_population_matrix, so a row list must
+# These route through the shared population_rows, so a row list must
 # give the same result as the population name that selects those rows, and
 # an unusable list (out of range, empty) must raise rather than read garbage.
 def test_diplotype_frequency_spectrum_population_list(gm):

@@ -534,10 +534,10 @@ def _get_genotype_data(matrix, population=None):
     alt allele and drops sites carrying more than two.
     """
     from .genotype_matrix import GenotypeMatrix
-    from ._utils import get_population_matrix
+    from ._utils import population_rows
 
     if population is not None:
-        matrix = get_population_matrix(matrix, population)
+        matrix = population_rows(matrix, population)
 
     if hasattr(matrix, 'device') and matrix.device == 'CPU':
         matrix.transfer_to_gpu()

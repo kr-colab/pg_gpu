@@ -5,6 +5,8 @@ Stores genotype data as alt allele counts (0/1/2) per individual per variant.
 Provides conversion to/from HaplotypeMatrix.
 """
 
+import copy
+
 import numpy as np
 import cupy as cp
 from typing import Optional
@@ -90,7 +92,8 @@ class GenotypeMatrix:
         self.chrom_end = chrom_end
         self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
-        self.samples = samples
+        # Copied so a derived matrix never shares the caller's list.
+        self.samples = copy.copy(samples)
         # See HaplotypeMatrix.fields for the shape contract.
         self.fields = dict(fields) if fields else {}
 
@@ -778,7 +781,7 @@ class GenotypeMatrix:
             result._sample_sets = self._sample_sets
             result._device = self._device
             result.n_total_sites = None
-            result.samples = self.samples
+            result.samples = copy.copy(self.samples)
             result.fields = {tag: arr[:0] for tag, arr in self.fields.items()}
             return result
 

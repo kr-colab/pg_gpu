@@ -1337,14 +1337,14 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     e1007341. https://doi.org/10.1371/journal.pgen.1007341
     """
     from . import ld_statistics
-    from ._utils import get_population_matrix
+    from ._utils import population_rows
 
     # zns restricts to the biallelic sites of whatever matrix it is handed;
     # restricting once up front keeps all three terms on the same sites.
     biallelic = haplotype_matrix.restrict_to_biallelic(warn_context="zx")
-    z1 = ld_statistics._zns_biallelic(get_population_matrix(biallelic, pop1),
+    z1 = ld_statistics._zns_biallelic(population_rows(biallelic, pop1),
                                       missing_data)
-    z2 = ld_statistics._zns_biallelic(get_population_matrix(biallelic, pop2),
+    z2 = ld_statistics._zns_biallelic(population_rows(biallelic, pop2),
                                       missing_data)
     z_total = ld_statistics._zns_biallelic(biallelic, missing_data)
 
