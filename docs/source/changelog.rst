@@ -199,6 +199,25 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``pairwise_r2`` and the naive ``r2`` estimator behind ``zns``/``omega``
+  computed the joint 11-frequency over the pairwise-complete sample but
+  each site's own frequency over its separate, larger marginal sample,
+  biasing ``D`` and ``r2`` under structured missing data with
+  ``missing_data='include'``. Both frequencies now come from the same
+  pairwise-complete sample. The diploid dosage-correlation path
+  (``_r2_matrix_diploid``, reached by ``zns``/``omega`` on a
+  ``GenotypeMatrix`` with ``estimator='r2'``) had the same bug in its
+  continuous form -- mean/variance from each site's own marginal valid
+  set instead of the pair's jointly-valid individuals -- and is fixed
+  the same way.
+* ``omega`` and ``zns`` mishandled a single pair left undefined by the
+  fix above (both sites otherwise fine, just no -- or locally
+  degenerate -- jointly-valid sample): the NaN propagated through
+  ``omega``'s prefix sum and collapsed results to ``0.0``, and both
+  statistics divided by a closed-form pair count that assumed every
+  pair was defined. Both now count only their actually-defined pairs,
+  in the full-matrix path and in ``zns``'s tiled naive-``r2`` path
+  (``_zns_tiled``/``_zns_from_precomputed``).
 * ``get_population_matrix`` returned a subset with no sample names and no
   QC ``fields``. It now keeps both: per-variant fields keep every variant
   of the subset, and per-genotype fields and ``samples`` keep the
