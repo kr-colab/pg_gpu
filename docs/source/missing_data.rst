@@ -108,6 +108,16 @@ Every public function accepts the ``missing_data`` parameter:
      - group by n
      - filter sites
 
+The two-population distance statistics scale each pair's difference
+count to all sites. This removes the bias toward haplotypes with many
+missing calls, but a pair that shares only a few sites still gets a
+coarse, noisy distance. Because ``snn``, ``dxy_min``, ``gmin``, ``dd``
+and ``dd_rank`` use the closest pair, one such haplotype can set them by
+chance. Remove haplotypes with a low call rate before you compute these
+statistics. ``missing_data='exclude'`` does not prevent this, because a
+haplotype with very few calls also reduces the set of complete sites to
+those few sites.
+
 LD Estimator Choice
 -------------------
 

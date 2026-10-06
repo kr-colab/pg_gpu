@@ -1119,6 +1119,18 @@ def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
         ``differences * n_sites / sites_both_called``. With no missing call
         this is the plain Hamming distance. NaN for a pair with no site
         called by both haplotypes.
+
+    Notes
+    -----
+    The scaling removes the bias of a raw count, but not its noise. A
+    pair that shares few sites gets a coarse value: with one shared site
+    the distance is either 0 or ``n_sites``. The minimum-based statistics
+    (``snn``, ``dxy_min``, ``gmin``, ``dd``, ``dd_rank``) pick the most
+    extreme pair, so a haplotype with very few calls can set them by
+    chance. Remove haplotypes with a low call rate before you compute
+    these statistics. ``missing_data='exclude'`` does not prevent this:
+    a haplotype with very few calls also reduces the set of complete
+    sites to those few sites.
     """
     from .distance_stats import _pairwise_diffs_matrix_gpu
 
@@ -1193,8 +1205,10 @@ def dxy_min(haplotype_matrix: HaplotypeMatrix,
     """Minimum pairwise distance between two populations.
 
     The distance of the closest pair of haplotypes across the two
-    populations (see ``pairwise_distance_matrix`` for the distance). Used in Gmin (Geneva et al.) and dd
-    (Schrider et al.) statistics.
+    populations (see ``pairwise_distance_matrix`` for the distance). Used
+    in Gmin (Geneva et al.) and dd (Schrider et al.) statistics. Under
+    missing data, a pair that shares few sites can set the minimum by
+    chance; see the Notes of ``pairwise_distance_matrix``.
 
     Parameters
     ----------
@@ -1266,7 +1280,11 @@ def dd(haplotype_matrix: HaplotypeMatrix,
     relative to within-population diversity. pi is the mean distance
     between two members of the population, from the same distances as
     Dxy_min (see ``pairwise_distance_matrix``); with no missing call it
-    equals ``diversity.pi(..., span_normalize=False)``.
+    equals ``diversity.pi(..., span_normalize=False)``. Under missing data
+    the two can differ. ``diversity.pi`` counts a site with fewer than two
+    calls as a site with no diversity, while here each pair is scaled to
+    all sites. A haplotype that shares no site with any other member of
+    its population adds nothing to pi here.
 
     Parameters
     ----------
