@@ -1106,7 +1106,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             f"chunk width ({chunk_bp}); pass a different window_size or "
             f"re-open the store with a matching chunk_bp."
         )
-    
+
     if any(s in ("local_pca", "local_pca_jackknife") for s in statistics):
         raise NotImplementedError(
             "local_pca requires a chromosome-wide reference and is not "

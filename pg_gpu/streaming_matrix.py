@@ -448,7 +448,7 @@ class _StreamingMatrixBase:
     @property
     def chrom(self):
         return self._source.chrom
-    
+
     @property
     def chunk_bp(self):
         return self._chunk_bp
@@ -468,7 +468,7 @@ class _StreamingMatrixBase:
 
         Spans use the chunk grid absolute left and right edges. If a region
         is specified at construction, this will be the specified region bounds.
-        If no region specified, it defaults to the position of first/last variant. 
+        If no region specified, it defaults to the position of first/last variant.
 
         'auto' priority: accessible-mask count > n_total_sites > raw per-base span.
 

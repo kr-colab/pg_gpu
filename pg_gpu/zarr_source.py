@@ -162,7 +162,7 @@ class ZarrGenotypeSource:
     def region_start(self):
         """Lower edge of requested region"""
         return self._region_start
-    
+
     @property
     def region_stop(self):
         """Upper edge of requested region"""
@@ -177,7 +177,7 @@ class ZarrGenotypeSource:
     def mappable_hi(self):
         """Position of the last variant in the source."""
         return int(self.site_pos[-1]) if self.num_variants else 0
-    
+
     @property
     def grid_start(self):
         """Absolute inclusive lower edge the chunk grid tiles to"""
@@ -187,7 +187,7 @@ class ZarrGenotypeSource:
     def grid_end(self):
         """Absolute inclusive upper edge the chunk grid tiles to"""
         return self.region_stop if self.region_stop is not None else self.mappable_hi
-    
+
 
 
     def slice_region(self, left, right, right_inclusive=False):
