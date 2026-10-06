@@ -406,21 +406,19 @@ class _StreamingMatrixBase:
         Genomic span per chunk, in bp.
     prefetch : int
         Read-ahead depth handed to the fetcher.
-    align_bp : int, optional
         Chunk boundaries are snapped to multiples of this so a
         windowed kernel can guarantee windows never straddle a chunk
         boundary. Defaults to ``chunk_bp`` (single window per chunk).
     """
 
     def __init__(self, source, fetcher, chunk_bp, prefetch, *,
-                 align_bp=None, accessible_mask=None, n_total_sites=None):
+                 accessible_mask=None, n_total_sites=None):
         self._source = source
         self._fetcher = fetcher
         self._chunk_bp = int(chunk_bp)
         self._prefetch = int(prefetch)
-        self._align_bp = int(align_bp) if align_bp is not None else self._chunk_bp
         self._chunks = list(
-            source.iter_chunks(self._chunk_bp, self._align_bp)
+            source.iter_chunks(self._chunk_bp)
         )
         # Mirror the eager classes' idiom: store the explicit value
         # (or None) and let the property fall back to a default 'all'
@@ -450,53 +448,37 @@ class _StreamingMatrixBase:
     @property
     def chrom(self):
         return self._source.chrom
-
+    
     @property
-    def align_bp(self):
-        """Chunk-boundary alignment in bp.
-
-        Every chunk has a width that is a multiple of this, so a window
-        whose size also divides ``align_bp`` is guaranteed to fit inside
-        a single chunk. Streaming-aware kernels read this property to
-        validate that the caller's ``window_size`` divides it.
-        """
-        return self._align_bp
+    def chunk_bp(self):
+        return self._chunk_bp
 
     @property
     def chrom_start(self):
-        """Chunk-grid origin. Not the first variant position --
-        per-chunk windows are anchored to the chunk grid, so reporting
-        the variant-based origin would be misleading for callers
-        building a comparable eager matrix."""
-        return self._chunks[0][0] if self._chunks else 0
+        """Chunk-grid origin (inclusive)."""
+        return self._source.grid_start if self._chunks else 0
 
     @property
     def chrom_end(self):
-        """Chunk-grid right edge (exclusive). Not the last variant
-        position; per-chunk windows are uniform width within their
-        chunk, so the right edge here is the chunk grid's exclusive
-        upper bound rather than HaplotypeMatrix's last-inclusive
-        convention."""
-        return self._chunks[-1][1] if self._chunks else 0
+        """Chunk-grid right edge (inclusive)."""
+        return self._source.grid_end if self._chunks else 0
 
     def get_span(self, mode='auto'):
         """Genomic span for normalization, mirroring HaplotypeMatrix.get_span.
 
-        Spans use the *variant-position* bounds (``mappable_lo``/``mappable_hi``)
-        rather than the chunk-grid ``chrom_start``/``chrom_end``, so the value
-        matches an eager matrix built from the same store. ``mappable_hi`` is one
-        past the last variant, so the raw span is ``mappable_hi - mappable_lo``
-        and the accessible count is over the half-open ``[lo, hi)``.
+        Spans use the chunk grid absolute left and right edges. If a region
+        is specified at construction, this will be the specified region bounds.
+        If no region specified, it defaults to the position of first/last variant. 
 
         'auto' priority: accessible-mask count > n_total_sites > raw per-base span.
 
         ``per_variant``/``sites`` and ``callable`` are computed over the
         accessible-filtered variant set (as the eager path does through its
         mask-filtered variant view), so they agree with eager under a mask;
-        ``per_base``/``total`` is the raw variant span, mask-independent.
+        ``per_base``/``total`` is the raw region span, mask-independent.
         """
-        lo = self._source.mappable_lo
-        hi = self._source.mappable_hi          # one past the last variant
+        lo = self.chrom_start
+        hi = self.chrom_end + 1 # ``accessible_mask`` expects an exclusive upper bound
         if mode == 'auto':
             if self.accessible_mask is not None:
                 return self.accessible_mask.count_accessible(lo, hi)
@@ -550,23 +532,20 @@ class _StreamingMatrixBase:
             check_sample_set_rows(f"sample_sets[{key!r}]", rows, n_rows)
         self._sample_sets = value
 
-    def iter_gpu_chunks(self):
+    def iter_gpu_chunks(self, skip_empty = True):
         """Yield ``(left, right, eager_matrix)`` tuples covering the source.
 
         Each yielded eager matrix lives on the GPU and represents one
-        genomic chunk. Empty chunks (regions with no variants, e.g. an
+        genomic chunk. If skip_emtpy = True, Empty chunks (regions with no variants, e.g. an
         acrocentric arm) are skipped -- callers see only chunks with
-        at least one variant.
+        at least one variant; False skips chunks.
         """
         for ci, left, right, gt, pos, t_read in self._fetcher.iter_chunks(
                 self._chunks, self._prefetch):
-            if gt.shape[0] == 0:
+            if (gt.shape[0] == 0) & skip_empty:
                 continue
             m = self._build_chunk(
                 gt, pos,
-                # chrom_end is the chunk's exclusive right edge so the
-                # last window in each chunk does not get clipped to the
-                # last variant position the way an eager matrix would.
                 chrom_start=int(left), chrom_end=int(right),
                 sample_sets=self._sample_sets,
             )
@@ -590,9 +569,9 @@ class _StreamingMatrixBase:
         Parameters
         ----------
         region : tuple of int, optional
-            ``(left, right)`` bp interval to materialize. ``right`` is
-            exclusive. ``None`` materializes the full mappable range,
-            which on a biobank-scale store will OOM.
+            Closed ``[left, right]`` bp interval to materialize; both
+            bounds are inclusive. ``None`` materializes the full mappable
+            range, which on a biobank-scale store will OOM.
         sample_subset : sequence of int, optional
             Rows to keep, in this stream's own row space -- the same
             space ``sample_sets`` uses, so
@@ -621,7 +600,7 @@ class _StreamingMatrixBase:
             left, right = int(region[0]), int(region[1])
 
         if sample_subset is None:
-            gt, pos = self._source.slice_region(left, right)
+            gt, pos = self._source.slice_region(left, right, right_inclusive=True)
         else:
             # The subset names rows in this stream's own row space and
             # obeys the same rules as a sample_sets value; the store read
@@ -773,7 +752,7 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
         # re-validation -- np.unique per population per chunk adds up to
         # minutes over a biobank-scale walk.
         sets = kwargs.pop('sample_sets', None)
-        m = build_haplotype_matrix(gt, pos, **kwargs)
+        m = build_haplotype_matrix(gt, pos, allow_empty = True, **kwargs)
         if sets is not None:
             m._sample_sets = sets
         return m
@@ -847,7 +826,7 @@ class StreamingGenotypeMatrix(_StreamingMatrixBase):
         # Same skip as the haplotype stream: the sets were validated once
         # at construction, in this stream's own (individual) row space.
         sets = kwargs.pop('sample_sets', None)
-        m = build_genotype_matrix(gt, pos, **kwargs)
+        m = build_genotype_matrix(gt, pos, allow_empty = True, **kwargs)
         if sets is not None:
             m._sample_sets = sets
         if m._n_multiallelic_recoded and not self._biallelic_warned:
