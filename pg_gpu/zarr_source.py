@@ -128,6 +128,8 @@ class ZarrGenotypeSource:
         all_pos = np.array(self._store["variant_position"])
 
         chrom, start, stop = parse_region(region)
+        self._region_start = start
+        self._region_stop = stop - 1 if stop is not None else None
         contig_idx, self.chrom = _vcz_contig_index(
             self._store, all_contigs, contig_id if chrom is None else chrom)
         mask = (all_contigs == contig_idx) & _region_mask(all_pos, start, stop)
@@ -157,17 +159,53 @@ class ZarrGenotypeSource:
         self.pop_cols = self._resolve_pop_assignment(pop_assignment)
 
     @property
+    def region_start(self):
+        """Lower edge of requested region"""
+        return self._region_start
+    
+    @property
+    def region_stop(self):
+        """Upper edge of requested region"""
+        return self._region_stop
+
+    @property
     def mappable_lo(self):
         """Position of the first variant in the source (or 0 if empty)."""
         return int(self.site_pos[0]) if self.num_variants else 0
 
     @property
     def mappable_hi(self):
-        """One past the position of the last variant in the source."""
-        return int(self.site_pos[-1]) + 1 if self.num_variants else 0
+        """Position of the last variant in the source."""
+        return int(self.site_pos[-1]) if self.num_variants else 0
+    
+    @property
+    def grid_start(self):
+        """Absolute inclusive lower edge the chunk grid tiles to"""
+        return self.region_start if self.region_start is not None else self.mappable_lo
 
-    def slice_region(self, left, right):
-        """Read every haplotype for variants in ``[left, right)``.
+    @property
+    def grid_end(self):
+        """Absolute inclusive upper edge the chunk grid tiles to"""
+        return self.region_stop if self.region_stop is not None else self.mappable_hi
+    
+
+
+    def slice_region(self, left, right, right_inclusive=False):
+        """Read every haplotype for variants in the ``[left, right)`` interval.
+
+        ``right`` is exclusive by default; pass ``right_inclusive=True``
+        to read the closed ``[left, right]`` (``materialize`` does, since
+        its region bounds are inclusive). The grid's absolute upper edge
+        (``right == grid_end``) is read inclusively regardless, so the
+        final chunk keeps its last variant.
+
+        Parameters
+        ----------
+        left, right : int
+            Genomic bp bounds. ``right`` is exclusive unless
+            ``right_inclusive`` is set or it is the grid's upper edge.
+        right_inclusive : bool
+            Treat ``right`` as inclusive (closed interval).
 
         Returns
         -------
@@ -176,7 +214,7 @@ class ZarrGenotypeSource:
         pos : ndarray, shape (n_var,), dtype int64
             Variant positions.
         """
-        lo, hi = self._site_index_range(left, right)
+        lo, hi = self._site_index_range(left, right, right_inclusive=right_inclusive)
         if hi <= lo:
             return (np.empty((0, self.num_diploids, 2), np.int8),
                     np.empty(0, np.int64))
@@ -234,12 +272,16 @@ class ZarrGenotypeSource:
         scattered subsets (every dip its own run) fall back to
         ``slice_subsample(to_gpu=True)``.
 
+        ``right`` is inclusive, matching ``slice_subsample`` and its sole
+        caller ``materialize``.
+
         Returns
         -------
         gm : cupy.ndarray, shape (n_var, len(hap_cols)), dtype int8
         pos : ndarray, shape (n_var,), dtype int64
         """
-        lo, hi = self._site_index_range(left, right)
+        # materialize is the only caller; its region bounds are inclusive.
+        lo, hi = self._site_index_range(left, right, right_inclusive=True)
         hap_cols = np.asarray(hap_cols, dtype=np.int64)
         if hi <= lo:
             return (cp.empty((0, len(hap_cols)), cp.int8),
@@ -287,7 +329,10 @@ class ZarrGenotypeSource:
         return gm_gpu, pos
 
     def slice_subsample(self, left, right, hap_cols, *, to_gpu=False):
-        """Read variants in ``[left, right)`` restricted to ``hap_cols``.
+        """Read variants in the closed ``[left, right]`` restricted to ``hap_cols``.
+
+        ``right`` is inclusive (``materialize`` is the only caller and its
+        region bounds are inclusive).
 
         ``hap_cols`` is an iterable of haplotype-axis indices in
         ``[0, 2 * num_diploids)``. Uses zarr's ``oindex`` for the
@@ -312,7 +357,10 @@ class ZarrGenotypeSource:
         pos : ndarray, shape (n_var,), dtype int64
             Variant positions.
         """
-        lo, hi = self._site_index_range(left, right)
+        # materialize is the only caller (directly, and via the
+        # slice_subsample_gpu fallback), and its region bounds are
+        # inclusive; revisit if a half-open subset reader is ever added.
+        lo, hi = self._site_index_range(left, right, right_inclusive=True)
         hap_cols = np.asarray(hap_cols, dtype=np.int64)
         if hi <= lo:
             empty = (cp.empty((0, len(hap_cols)), cp.int8) if to_gpu
@@ -349,32 +397,36 @@ class ZarrGenotypeSource:
             return gm_gpu, pos
         return cp.asnumpy(gm_gpu), pos
 
-    def iter_chunks(self, chunk_bp, align_bp=None, start=None):
+    def iter_chunks(self, chunk_bp):
         """Yield ``(left, right)`` genomic intervals tiling the source.
 
-        Intervals are sized as multiples of ``align_bp`` (defaults to
-        ``chunk_bp``) so a caller running window-based stats can
-        guarantee windows never straddle a chunk boundary. Empty
-        regions at the start of the contig (e.g. acrocentric arm) are
-        yielded as well -- the caller can detect and skip them via the
+        Empty regions at the start of the contig (e.g. acrocentric arm) are
+        yielded; the caller can detect and skip them via the
         cheap ``gt.shape[0] == 0`` check.
         """
-        if align_bp is None:
-            align_bp = chunk_bp
-        windows_per_chunk = max(1, chunk_bp // align_bp)
-        step = windows_per_chunk * align_bp
-        end = self.mappable_hi
-        s = 0 if start is None else int(start)
+        start = self.grid_start
+        end = self.grid_end
+        s = start
         if end == 0:
             return
         while s < end:
-            yield s, min(s + step, end)
-            s += step
+            yield s, min(s + chunk_bp, end)
+            s += chunk_bp
 
-    def _site_index_range(self, left, right):
-        """Half-open ``[lo, hi)`` row range covering positions in [left, right)."""
+    def _site_index_range(self, left, right, right_inclusive=False):
+        """Row range covering the variant positions in ``[left, right)``.
+
+        ``right`` is exclusive (half-open ``[left, right)``) unless
+        ``right_inclusive`` is set, or ``right`` equals ``grid_end`` --
+        the chunk grid's absolute upper edge, always read inclusively so
+        the final chunk keeps its last variant. In either inclusive case
+        the range covers the closed interval ``[left, right]``.
+        """
         lo = int(np.searchsorted(self.site_pos, left, side="left"))
-        hi = int(np.searchsorted(self.site_pos, right, side="left"))
+        side = 'left'
+        if right_inclusive or right == self.grid_end:
+            side = 'right'
+        hi = int(np.searchsorted(self.site_pos, right, side=side))
         return lo, hi
 
     def _resolve_pop_assignment(self, pop_assignment):
