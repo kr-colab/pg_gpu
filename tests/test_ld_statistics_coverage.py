@@ -14,7 +14,7 @@ import pytest
 
 from pg_gpu import GenotypeMatrix, HaplotypeMatrix
 from pg_gpu.ld_statistics import (
-    compute_ld_statistics, dd, dz, mu_ld, pi2, r, r_squared, zns,
+    compute_ld_statistics, dd, dz, mu_ld, omega, pi2, r, r_squared, zns,
     _get_pop_data, _r2_matrix_diploid, _resolve_r2_matrix,
     _zns_from_precomputed,
 )
@@ -84,6 +84,106 @@ def test_zns_naive_matches_direct_pairwise_correlation():
     r2s = [np.corrcoef(Xf[:, i], Xf[:, j])[0, 1] ** 2
            for i in range(m) for j in range(i + 1, m)]
     _agree(zns(hm, estimator="r2"), float(np.mean(r2s)))
+
+
+def test_pairwise_r2_pairwise_complete_under_missing_data():
+    """r2 under missing_data='include' must use one sample set -- the pair's
+    jointly-valid haplotypes -- for both the joint 11-frequency and each
+    site's own frequency, not a site's separate (larger) marginal valid set.
+
+    Site 0 is missing on haplotypes 0-3, present (0,0,0,0,1,1,1,1,0,0,0,0) on
+    4-15. Site 1 is missing on haplotypes 12-15, present
+    (1,1,1,1,0,0,0,0,1,1,1,1) on 0-11. Their only shared valid haplotypes are
+    4-11, where the two columns are identical -- a perfect correlation, r2
+    exactly 1. Each site's own marginal frequency (1/3 and 2/3, computed over
+    its own full valid set) differs from its frequency restricted to that
+    shared set (1/2 for both); using the marginal frequencies for D and the
+    r2 denominator gives 25/16 -- not just wrong, but impossible for a real
+    r2, which cannot exceed 1.
+    """
+    hap = np.array([
+        [-1, 1], [-1, 1], [-1, 1], [-1, 1],
+        [0, 0], [0, 0], [0, 0], [0, 0],
+        [1, 1], [1, 1], [1, 1], [1, 1],
+        [0, -1], [0, -1], [0, -1], [0, -1],
+    ], dtype=np.int8)
+    pos = np.array([100, 200], dtype=np.int64)
+    hm = HaplotypeMatrix(hap, pos, 0, 1000)
+    hm.transfer_to_gpu()
+
+    r2 = cp.asnumpy(hm.pairwise_r2())
+    assert np.isclose(r2[0, 1], 1.0, rtol=1e-9, atol=1e-12)
+
+    # A 2-site matrix has exactly one pair, so ZnS (the tiled naive path) is
+    # that pair's r2 -- checks the tiled and dense paths agree.
+    _agree(zns(hm, estimator="r2"), 1.0)
+
+
+def test_pairwise_r2_matches_pairwise_complete_correlation_multi_site():
+    """General oracle: with several sites each missing a distinct block of
+    haplotypes (so every pair overlaps on a different subset), r2 under
+    missing_data='include' must equal the direct Pearson correlation squared
+    computed independently in numpy, restricted to each pair's own jointly-
+    valid haplotypes."""
+    rng = np.random.RandomState(0)
+    n_hap, n_var = 24, 5
+    hap = rng.randint(0, 2, size=(n_hap, n_var)).astype(np.int8)
+    block = n_hap // n_var
+    for v in range(n_var):
+        hap[v * block:(v + 1) * block, v] = -1
+    pos = ((np.arange(n_var) + 1) * 100).astype(np.int64)
+    hm = HaplotypeMatrix(hap, pos, 0, 1000)
+    hm.transfer_to_gpu()
+
+    r2 = cp.asnumpy(hm.pairwise_r2())
+    hap_f = hap.astype(np.float64)
+    expected = np.zeros((n_var, n_var))
+    for i in range(n_var):
+        for j in range(i + 1, n_var):
+            valid = (hap[:, i] >= 0) & (hap[:, j] >= 0)
+            ai, aj = hap_f[valid, i], hap_f[valid, j]
+            # The fix should not be exercised on a degenerate (zero-variance)
+            # pair -- assert the construction avoids that rather than
+            # silently skip it.
+            assert ai.std() > 0 and aj.std() > 0, (i, j)
+            expected[i, j] = expected[j, i] = np.corrcoef(ai, aj)[0, 1] ** 2
+
+    for i in range(n_var):
+        for j in range(i + 1, n_var):
+            assert np.isclose(r2[i, j], expected[i, j], rtol=1e-9, atol=1e-9), (i, j)
+
+    iu = np.triu_indices(n_var, k=1)
+    _agree(zns(hm, estimator="r2"), float(expected[iu].mean()))
+
+
+def test_zns_tiled_excludes_undefined_pair_unlike_closed_form_count():
+    """Counterpart to the multi-site test above, which deliberately avoids a
+    degenerate pair: here sites 0 and 1 share no valid haplotype at all (an
+    undefined pair, not a measured zero), while every other pair is defined.
+    _zns_tiled must exclude it from both the sum and the pair count, not
+    divide by the closed-form m*(m-1) that assumes every pair is defined."""
+    hap = np.array([
+        [0, -1, 0, 1],
+        [1, -1, 1, 1],
+        [0, -1, 0, 0],
+        [1, -1, 1, 0],
+        [-1, 1, 0, 1],
+        [-1, 0, 1, 1],
+        [-1, 1, 0, 0],
+        [-1, 0, 1, 0],
+    ], dtype=np.int8)
+    pos = np.array([100, 200, 300, 400], dtype=np.int64)
+    hm = HaplotypeMatrix(hap, pos, 0, 1000)
+    hm.transfer_to_gpu()
+
+    r2 = cp.asnumpy(hm.pairwise_r2())
+    assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
+
+    finite = ~np.isnan(r2)
+    np.fill_diagonal(finite, False)
+    expected = (np.nansum(r2) - np.nansum(np.diag(r2))) / finite.sum()
+
+    _agree(zns(hm, estimator="r2"), float(expected))
 
 
 @pytest.mark.parametrize("use_projection", [False, True], ids=["naive", "proj"])
@@ -159,6 +259,118 @@ def test_r2_matrix_diploid_zero_variance_site_is_nan():
     geno = np.array([[0, 1], [1, 1], [2, 1], [1, 1]], dtype=np.int8)
     r2 = cp.asnumpy(_r2_matrix_diploid(geno))
     assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
+
+
+def test_r2_matrix_diploid_no_overlap_is_nan_not_zero():
+    # Column 0 valid only on individuals 0-1, column 1 only on 2-3: zero
+    # individuals jointly valid, so this pair's correlation cannot be
+    # estimated at all -- nan, not a measured zero (each column is still
+    # individually polymorphic, so this isn't the whole-site-NaN case above).
+    geno = np.array([[0, -1], [1, -1], [-1, 5], [-1, 9]], dtype=np.int8)
+    r2 = cp.asnumpy(_r2_matrix_diploid(geno))
+    assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
+
+
+def test_r2_matrix_diploid_locally_degenerate_pair_is_nan():
+    # Site 0 valid on individuals 0-3 as [0, 1, 1, 1] (polymorphic overall).
+    # Site 1 valid on individuals 1-4 as [5, 5, 5, 9] (polymorphic overall).
+    # Their shared individuals are 1-3, where site 0 reads [1, 1, 1] --
+    # constant in that specific jointly-valid subsample, even though neither
+    # site is globally monomorphic. The pair's correlation is 0/0, not 0.
+    geno = np.array([
+        [0, -1],
+        [1, 5],
+        [1, 5],
+        [1, 5],
+        [-1, 9],
+    ], dtype=np.int8)
+    r2 = cp.asnumpy(_r2_matrix_diploid(geno))
+    assert np.isnan(r2[0, 1]) and np.isnan(r2[1, 0])
+
+
+def _hand_r2_matrix_one_scattered_undefined_pair():
+    """5x5 r2 matrix, every pair defined except (1, 3), to check that omega
+    and zns exclude a single undefined pair from their own sums and pair
+    counts rather than treating it as a dropped site (_drop_undefined_sites
+    only drops whole rows) or letting it propagate through a cumulative sum."""
+    upper = {
+        (0, 1): 0.1, (0, 2): 0.2, (0, 3): 0.3, (0, 4): 0.4,
+        (1, 2): 0.5, (1, 3): None, (1, 4): 0.6,
+        (2, 3): 0.7, (2, 4): 0.8,
+        (3, 4): 0.9,
+    }
+    r2 = np.zeros((5, 5))
+    for (i, j), v in upper.items():
+        r2[i, j] = r2[j, i] = np.nan if v is None else v
+    return r2
+
+
+def test_omega_excludes_single_undefined_pair_not_whole_sites():
+    r2 = _hand_r2_matrix_one_scattered_undefined_pair()
+    assert omega(cp.asarray(r2)) == pytest.approx(0.7589285714285713)
+
+
+def test_zns_excludes_single_undefined_pair_from_pair_count():
+    r2 = _hand_r2_matrix_one_scattered_undefined_pair()
+    assert zns(cp.asarray(r2)) == pytest.approx(0.5)
+
+
+def test_r2_matrix_diploid_pairwise_complete_under_missing_data():
+    """Same bug as pairwise_r2's, in its continuous-dosage form: mean/variance
+    must come from the pair's jointly-valid individuals, not each site's own
+    (possibly larger) marginal valid set.
+
+    Site 0 is missing on individuals 0-3, dosage (0,0,0,0,2,2,2,2,0,0,0,0) on
+    4-15. Site 1 is missing on individuals 12-15, dosage
+    (2,2,2,2,0,0,0,0,2,2,2,2) on 0-11. Their only shared valid individuals are
+    4-11, where the two columns are identical -- a perfect correlation, r2
+    exactly 1. Each site's own marginal mean (computed over its own full
+    valid set) differs from its mean restricted to the shared set, so using
+    marginal mean/variance for centering would not give r2 == 1 here.
+    """
+    geno = np.array([
+        [-1, 2], [-1, 2], [-1, 2], [-1, 2],
+        [0, 0], [0, 0], [0, 0], [0, 0],
+        [2, 2], [2, 2], [2, 2], [2, 2],
+        [0, -1], [0, -1], [0, -1], [0, -1],
+    ], dtype=np.int8)
+    r2 = cp.asnumpy(_r2_matrix_diploid(geno))
+    assert np.isclose(r2[0, 1], 1.0, rtol=1e-9, atol=1e-12)
+
+    gm = GenotypeMatrix(geno, np.array([1, 2], dtype=np.int64))
+    _agree(zns(gm, estimator="r2"), 1.0)
+    _agree(omega(gm, estimator="r2"), 0.0)  # fewer than 5 sites: omega's floor
+
+
+def test_r2_matrix_diploid_matches_pairwise_complete_correlation_multi_site():
+    """General oracle: with several sites each missing a distinct block of
+    individuals (so every pair overlaps on a different subset), r2 must equal
+    the direct Pearson correlation squared computed independently in numpy,
+    restricted to each pair's own jointly-valid individuals."""
+    rng = np.random.RandomState(1)
+    n_ind, n_var = 24, 5
+    geno = rng.randint(0, 3, size=(n_ind, n_var)).astype(np.int8)
+    block = n_ind // n_var
+    for v in range(n_var):
+        geno[v * block:(v + 1) * block, v] = -1
+    r2 = cp.asnumpy(_r2_matrix_diploid(geno))
+
+    geno_f = geno.astype(np.float64)
+    expected = np.zeros((n_var, n_var))
+    for i in range(n_var):
+        for j in range(i + 1, n_var):
+            valid = (geno[:, i] >= 0) & (geno[:, j] >= 0)
+            ai, aj = geno_f[valid, i], geno_f[valid, j]
+            assert ai.std() > 0 and aj.std() > 0, (i, j)
+            expected[i, j] = expected[j, i] = np.corrcoef(ai, aj)[0, 1] ** 2
+
+    for i in range(n_var):
+        for j in range(i + 1, n_var):
+            assert np.isclose(r2[i, j], expected[i, j], rtol=1e-9, atol=1e-9), (i, j)
+
+    gm = GenotypeMatrix(geno, (np.arange(n_var) + 1).astype(np.int64))
+    iu = np.triu_indices(n_var, k=1)
+    _agree(zns(gm, estimator="r2"), float(expected[iu].mean()))
 
 
 # ── _resolve_r2_matrix (passthrough + dispatch) ────────────────────────

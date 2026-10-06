@@ -301,14 +301,24 @@ def _tile_counts(hi, vi, hj, vj):
     return c1, c2, c3, c4, n
 
 
-def _tile_r2_naive(hi, vi, hj, vj, pi, pqi, pj, pqj):
-    """Compute naive r² for a tile (frequency-based, biased)."""
-    joint_n = vi.T @ vj
-    joint_11 = hi.T @ hj
-    p_AB = cp.where(joint_n > 0, joint_11 / joint_n, 0.0)
-    D = p_AB - cp.outer(pi, pj)
-    denom = cp.outer(pqi, pqj)
-    return cp.where(denom > 0, (D ** 2) / denom, 0.0)
+def _tile_r2_naive(hi, vi, hj, vj):
+    """Compute naive r² for a tile (the classical frequency-based estimator).
+
+    Returns r2 and a parallel validity mask: an undefined pair (denom <= 0)
+    gets 0.0 in r2, not NaN, so a caller that must exclude it from a mean
+    needs the mask, not isnan.
+    """
+    # Built on the same pairwise-complete counts as _tile_sigma_d2, so p_i/p_j
+    # come from the gametes valid at both sites rather than each site's own
+    # (possibly larger) marginal valid set.
+    c1, c2, c3, c4, n = _tile_counts(hi, vi, hj, vj)
+    D = cp.where(n > 0, (c1 * c4 - c2 * c3) / (n * n), 0.0)
+    p_i = cp.where(n > 0, (c1 + c2) / n, 0.0)
+    p_j = cp.where(n > 0, (c1 + c3) / n, 0.0)
+    denom = (p_i * (1 - p_i)) * (p_j * (1 - p_j))
+    valid = denom > 0
+    r2 = cp.where(valid, (D ** 2) / denom, 0.0)
+    return r2, valid
 
 
 def _tile_sigma_d2(hi, vi, hj, vj):
@@ -572,12 +582,6 @@ def _zns_tiled(mat, missing_data='include', tile_size=512, use_projection=False)
     total = 0.0
     n_pairs = 0
 
-    if not use_projection:
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        p = cp.where(n_valid > 0,
-                     cp.sum(hap_clean, axis=0) / n_valid, 0.0)
-        pq = p * (1 - p)
-
     for i0 in range(0, m, B):
         i1 = min(i0 + B, m)
         hi = hap_clean[:, i0:i1]
@@ -599,18 +603,17 @@ def _zns_tiled(mat, missing_data='include', tile_size=512, use_projection=False)
                     total += 2.0 * float(cp.sum(tile).get())
                     n_pairs += 2 * int(cp.sum(valid).get())
             else:
-                r2_tile = _tile_r2_naive(
-                    hi, vi, hj, vj,
-                    p[i0:i1], pq[i0:i1], p[j0:j1], pq[j0:j1])
+                r2_tile, valid_tile = _tile_r2_naive(hi, vi, hj, vj)
                 if i0 == j0:
                     cp.fill_diagonal(r2_tile, 0.0)
+                    cp.fill_diagonal(valid_tile, False)
                     total += float(cp.sum(r2_tile).get())
+                    n_pairs += int(cp.sum(valid_tile).get())
                 else:
                     total += 2.0 * float(cp.sum(r2_tile).get())
+                    n_pairs += 2 * int(cp.sum(valid_tile).get())
 
-    if use_projection:
-        return total / n_pairs if n_pairs > 0 else 0.0
-    return total / (m * (m - 1))
+    return total / n_pairs if n_pairs > 0 else 0.0
 
 
 def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
@@ -658,11 +661,6 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
     hc = hc[:, seg_idx]
     vm = vm[:, seg_idx]
 
-    if not use_projection:
-        n_valid = n_valid[seg_idx]
-        p = cp.where(n_valid > 0, cp.sum(hc, axis=0) / n_valid, 0.0)
-        pq = p * (1 - p)
-
     B = tile_size
     total = 0.0
     n_pairs = 0
@@ -688,18 +686,17 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
                     total += 2.0 * float(cp.sum(tile).get())
                     n_pairs += 2 * int(cp.sum(valid).get())
             else:
-                r2_tile = _tile_r2_naive(
-                    hi, vi, hj, vj,
-                    p[i0:i1], pq[i0:i1], p[j0:j1], pq[j0:j1])
+                r2_tile, valid_tile = _tile_r2_naive(hi, vi, hj, vj)
                 if i0 == j0:
                     cp.fill_diagonal(r2_tile, 0.0)
+                    cp.fill_diagonal(valid_tile, False)
                     total += float(cp.sum(r2_tile).get())
+                    n_pairs += int(cp.sum(valid_tile).get())
                 else:
                     total += 2.0 * float(cp.sum(r2_tile).get())
+                    n_pairs += 2 * int(cp.sum(valid_tile).get())
 
-    if use_projection:
-        return total / n_pairs if n_pairs > 0 else 0.0
-    return total / (m * (m - 1))
+    return total / n_pairs if n_pairs > 0 else 0.0
 
 
 def _drop_undefined_sites(r2_matrix):
@@ -709,8 +706,11 @@ def _drop_undefined_sites(r2_matrix):
     r^2 is undefined: ``pairwise_r2`` for monomorphic and multiallelic
     sites, ``_r2_matrix_diploid`` for sites with no dosage variance. So
     excluding undefined pairs is the same as dropping those sites.
-    No-op on a finite matrix. Assumes undefined entries arrive as whole
-    rows/cols (all this package produces); a scattered NaN would propagate.
+    No-op on a finite matrix. Only drops whole rows/cols; a single
+    undefined pair within an otherwise-defined site is left in place.
+    ``zns`` and ``omega`` separately count only their defined pairs, so
+    a scattered NaN doesn't bias them; other callers of this function
+    would need the same care.
     """
     finite = ~cp.isnan(r2_matrix)
     cp.fill_diagonal(finite, False)
@@ -790,8 +790,12 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     m = int(cp.any(finite, axis=1).sum())
     if m < 2:
         return 0.0
+    # Pair count from the finite mask itself, not m * (m - 1): a scattered
+    # undefined pair (both sites otherwise fine) doesn't drop a whole site
+    # from m, so the mean must exclude it from the denominator too.
+    n_pairs = int(finite.sum())
     total = cp.nansum(r2_matrix) - cp.nansum(cp.diag(r2_matrix))
-    return float((total / (m * (m - 1))).get())
+    return float((total / n_pairs).get())
 
 
 def _zns_biallelic(hm, missing_data='include', estimator='auto'):
@@ -911,31 +915,40 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
 
     # work with upper triangle only (i < j), matching diploSHIC
     r2 = cp.triu(r2_matrix, k=1)
+    undefined = cp.isnan(r2)
+    # A scattered undefined pair (both its sites otherwise fine) must not
+    # propagate through cumsum, and the pair counts below can't assume
+    # full density the way a closed-form formula would. defined is built
+    # from r2_matrix directly (not r2) so triu's own zeroed-out lower
+    # triangle/diagonal isn't miscounted as defined pairs.
+    r2 = cp.where(undefined, 0.0, r2)
+    defined = cp.triu((~cp.isnan(r2_matrix)).astype(cp.int64), k=1)
 
-    # 2D prefix sums on upper triangle
+    # 2D prefix sums on upper triangle, of both the r^2 values and which
+    # pairs are defined
     S = cp.cumsum(cp.cumsum(r2, axis=0), axis=1)
+    C = cp.cumsum(cp.cumsum(defined, axis=0), axis=1)
 
     # partition points l = 3..m-2 (matching diploSHIC)
     l_vals = cp.arange(3, m - 1)
 
     # left block: upper triangle pairs (i,j) with i < j < l
     left_sum = S[l_vals - 1, l_vals - 1]
+    left_count = C[l_vals - 1, l_vals - 1]
 
     # total upper triangle sum
     total_upper = S[m - 1, m - 1]
+    total_count = C[m - 1, m - 1]
 
     # cross block: pairs (i,j) with i < l and j >= l
     cross_sum = S[l_vals - 1, m - 1] - left_sum
+    cross_count = C[l_vals - 1, m - 1] - left_count
 
     # right block: pairs (i,j) with i >= l and j > i (upper triangle of right block)
     right_sum = total_upper - left_sum - cross_sum
 
-    # pair counts (upper triangle only)
-    n_left = l_vals * (l_vals - 1) // 2
-    n_right = (m - l_vals) * (m - l_vals - 1) // 2
-    n_cross = l_vals * (m - l_vals)
-
-    n_within = n_left + n_right
+    n_within = total_count - cross_count
+    n_cross = cross_count
     within_sum = left_sum + right_sum
 
     valid = (n_within > 0) & (n_cross > 0) & (cross_sum > 0)
@@ -958,13 +971,19 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     ----------
     haplotype_matrix : HaplotypeMatrix
     missing_data : str
-        'include' - treat missing as wildcard in pattern matching
+        'include' - a haplotype with missing calls in a half takes the most
+        probable complete pattern under the EM frequencies of
+        ``selection.garud_h``; one that matches no complete pattern is a
+        pattern of its own. NaN when a half has no complete haplotype.
         'exclude' - filter to sites with no missing data
 
     Returns
     -------
     float
     """
+    from ._haplotype_groups import complete_sites, window_labels
+    from ._haplotype_hash import hash_weights
+
     _reject_streaming(haplotype_matrix, "mu_ld")
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
@@ -972,41 +991,32 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     hap = haplotype_matrix.haplotypes
 
     if missing_data == 'exclude':
-        missing_per_var = cp.sum(hap < 0, axis=0)
-        hap = hap[:, missing_per_var == 0]
+        hap = complete_sites(hap)
 
     n_hap, n_var = hap.shape
 
-    if n_var < 2:
+    if n_var < 2 or n_hap == 0:
         return 0.0
 
     mid = n_var // 2
+    labels, n_distinct, has_complete = window_labels(
+        hap, cp.array([0, mid], dtype=cp.int64),
+        cp.array([mid, n_var], dtype=cp.int64), *hash_weights(n_var))
+    if not has_complete.all():
+        return float('nan')
+    left_labels, right_labels = labels
 
-    left = hap[:, :mid].get().astype(np.int8)
-    right = hap[:, mid:].get().astype(np.int8)
+    # Distinct (left, right) pattern pairs; a pattern is exclusive when it
+    # pairs with exactly one pattern from the other half. Labels run from 0
+    # to n_distinct - 1 with no gap, so every label has a pair.
+    n_right_labels = int(n_distinct[1])
+    pairs = cp.unique(left_labels * n_right_labels + right_labels)
+    per_left = cp.bincount(pairs // n_right_labels)
+    per_right = cp.bincount(pairs % n_right_labels)
 
-    from .diversity import _cluster_haplotypes_with_missing
-    left_labels = _cluster_haplotypes_with_missing(left)
-    right_labels = _cluster_haplotypes_with_missing(right)
-
-    # for each distinct left pattern, count how many distinct right patterns it pairs with
-    left_to_right = {}
-    right_to_left = {}
-    for i in range(n_hap):
-        ll, rl = left_labels[i], right_labels[i]
-        left_to_right.setdefault(ll, set()).add(rl)
-        right_to_left.setdefault(rl, set()).add(ll)
-
-    n_left = len(left_to_right)
-    n_right = len(right_to_left)
-
-    if n_left == 0 or n_right == 0:
-        return 0.0
-
-    n_excl_left = sum(1 for v in left_to_right.values() if len(v) == 1)
-    n_excl_right = sum(1 for v in right_to_left.values() if len(v) == 1)
-
-    return float((n_excl_left / n_left + n_excl_right / n_right) / 2.0)
+    frac_left = cp.count_nonzero(per_left == 1) / per_left.size
+    frac_right = cp.count_nonzero(per_right == 1) / per_right.size
+    return float(((frac_left + frac_right) / 2.0).get())
 
 
 def _resolve_r2_matrix(r2_matrix_or_matrix, missing_data='include'):
@@ -1054,7 +1064,7 @@ def _r2_matrix_diploid(genotype_matrix):
     """Compute r-squared matrix from diploid genotypes (0/1/2) on GPU.
 
     Uses genotype correlation: treats 0/1/2 as continuous dosage values,
-    computes Pearson correlation, then squares.
+    computes a pairwise-complete Pearson correlation, then squares.
 
     Parameters
     ----------
@@ -1064,7 +1074,9 @@ def _r2_matrix_diploid(genotype_matrix):
     Returns
     -------
     r2 : cupy.ndarray, float64, shape (n_variants, n_variants)
-        NaN row and column at a site with no dosage variance; diagonal 0.
+        NaN wherever a pair's jointly-valid sample has no variance at one
+        site (a globally invariant site, or no individuals shared with the
+        other site); diagonal 0.
     """
     from .genotype_matrix import GenotypeMatrix
 
@@ -1078,30 +1090,35 @@ def _r2_matrix_diploid(genotype_matrix):
     if not isinstance(geno, cp.ndarray):
         geno = cp.asarray(geno)
 
-    # mask missing data: compute per-site mean from valid data only
     valid_mask = (geno >= 0).astype(cp.float64)
     geno_clean = cp.where(geno >= 0, geno, 0).astype(cp.float64)
-    n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
 
-    mean = cp.where(n_valid > 0, cp.sum(geno_clean, axis=0) / n_valid, 0.0)
+    # Pairwise-complete correlation, as raw sums (r2 = cov^2/(var_i*var_j)
+    # needs no re-normalizing, since n cancels once both are scaled by it).
+    joint_n = valid_mask.T @ valid_mask
+    sum_i = geno_clean.T @ valid_mask
+    sum_j = sum_i.T  # free transpose, as in _pairwise_ld_core
+    joint_11 = geno_clean.T @ geno_clean
+    ss_i = (geno_clean ** 2).T @ valid_mask
 
-    # center, zeroing out missing entries
-    gn = (geno_clean - mean[None, :]) * valid_mask
+    # Clamp joint_n in place before dividing: numerator is provably 0
+    # wherever joint_n is 0, so the clamped divide gives exact 0 there too.
+    cp.maximum(joint_n, 1.0, out=joint_n)
+    joint_11 -= (sum_i * sum_j) / joint_n  # now holds cov
+    ss_i -= (sum_i * sum_i) / joint_n  # now holds var_i
+    cov = joint_11
+    var_i = ss_i
+    var_j = var_i.T
 
-    # variance per variant (using valid counts)
-    var = cp.sum(gn ** 2, axis=0)
+    # Variances are non-negative, so this is denom <= 0 without an (m, m) denom array.
+    undefined = (var_i <= 0) | (var_j <= 0)
+    cov *= cov  # now holds cov^2
+    cov /= var_i
+    cov /= var_j  # now holds r2 = cov^2 / (var_i * var_j)
+    cov[undefined] = cp.nan
+    cp.fill_diagonal(cov, 0.0)
 
-    # r_ij = cov_ij / sqrt(var_i * var_j), applied as a rank-1 in-place
-    # scale so peak memory stays near the one output matrix; the NaN scale
-    # at a zero-variance site spreads over its whole row and column.
-    r2 = gn.T @ gn  # (n_var, n_var)
-    inv = cp.where(var > 0, 1.0 / cp.sqrt(var), cp.nan)
-    r2 *= inv[:, None]
-    r2 *= inv[None, :]
-    r2 *= r2
-    cp.fill_diagonal(r2, 0.0)
-
-    return r2
+    return cov
 
 
 # Keep old names as aliases for backward compat

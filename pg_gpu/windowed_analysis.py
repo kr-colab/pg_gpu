@@ -9,7 +9,7 @@ import numpy as np
 import cupy as cp
 import pandas as pd
 from typing import List, Dict, Union, Optional, Callable, Iterator, Tuple, Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import warnings
 from tqdm import tqdm
 
@@ -17,6 +17,8 @@ from .haplotype_matrix import HaplotypeMatrix
 from . import ld_statistics
 from . import divergence
 from . import diversity
+from . import selection
+from ._utils import population_rows
 from ._haplotype_hash import garud_h_windows
 
 # Column order of the Garud H family, as garud_h_windows returns it.
@@ -114,6 +116,8 @@ class WindowData:
     matrix: HaplotypeMatrix
     n_variants: int
     window_id: int
+    # Results that several statistics share, computed once per window.
+    cache: Dict = field(default_factory=dict)
 
 
 class StatisticsComputer:
@@ -162,6 +166,8 @@ class StatisticsComputer:
             'n_singletons': lambda w: diversity.singleton_count(w.matrix, missing_data=self.missing_data),
             'segregating_sites': lambda w: diversity.segregating_sites(w.matrix, missing_data=self.missing_data),
         }
+        for i, name in enumerate(_FUSED_GARUD_STATS):
+            self.SINGLE_POP_STATS[name] = lambda w, i=i: self._garud_h(w)[i]
 
         self.TWO_POP_STATS = {
             'dxy': lambda w, p1, p2: divergence.dxy(
@@ -216,17 +222,21 @@ class StatisticsComputer:
                     results[stat.__name__] = np.nan
             return results
 
-        # Single population statistics
+        # Single population statistics. Each population's window is built
+        # once, so statistics that share work (the Garud H family) can
+        # share it through the window's cache.
+        pop_windows = {}
+        if self.single_pop_stats and self.populations:
+            for pop in self.populations:
+                pop_matrix = population_rows(window.matrix, pop)
+                pop_windows[pop] = replace(
+                    window, matrix=pop_matrix,
+                    n_variants=pop_matrix.num_variants, cache={})
         for stat in self.single_pop_stats:
             if self.populations:
                 # Compute for each population
                 for pop in self.populations:
-                    pop_matrix = self._get_population_matrix(window.matrix, pop)
-                    val = self.SINGLE_POP_STATS[stat](
-                        WindowData(window.chrom, window.start, window.end,
-                                 window.center, pop_matrix, pop_matrix.num_variants,
-                                 window.window_id)
-                    )
+                    val = self.SINGLE_POP_STATS[stat](pop_windows[pop])
                     key = f"{stat}_{pop}"
                     self._store_result(results, key, val)
             else:
@@ -257,28 +267,25 @@ class StatisticsComputer:
 
         return results
 
+    def _garud_h(self, window):
+        """The Garud H family of a window, in ``_FUSED_GARUD_STATS`` order.
+
+        One call gives all five values, as the fused engine computes them,
+        and the window keeps them for the other four statistics.
+        """
+        if 'garud_h' not in window.cache:
+            matrix = window.matrix
+            if matrix.device == 'CPU':
+                matrix.transfer_to_gpu()
+            window.cache['garud_h'] = tuple(float(v[0]) for v in garud_h_windows(
+                matrix.haplotypes, [0], [matrix.num_variants],
+                missing_data=self.missing_data))
+        return window.cache['garud_h']
+
     @staticmethod
     def _store_result(results: Dict, key: str, val):
         """Store a scalar result into the results dict."""
         results[key] = val
-
-    def _get_population_matrix(self, matrix: HaplotypeMatrix,
-                             pop: str) -> HaplotypeMatrix:
-        """Extract population-specific haplotype matrix."""
-        if pop not in matrix.sample_sets:
-            raise ValueError(f"Population {pop} not found in sample_sets")
-
-        pop_indices = matrix.sample_sets[pop]
-        pop_haplotypes = matrix.haplotypes[pop_indices, :]
-
-        return HaplotypeMatrix(
-            pop_haplotypes,
-            matrix.positions,
-            matrix.chrom_start,
-            matrix.chrom_end,
-            sample_sets={'all': list(range(len(pop_indices)))},
-            n_total_sites=matrix.n_total_sites,
-        )
 
 
 class WindowIterator:
@@ -721,7 +728,6 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     multiallelic sites are handled per-allele. Handles variable sample sizes
     per site.
     """
-    from ._utils import get_population_matrix
     from cupyx import scatter_add
 
     if haplotype_matrix.device == 'CPU':
@@ -729,7 +735,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
 
     pop = populations[0] if populations else None
     if pop is not None:
-        matrix = get_population_matrix(haplotype_matrix, pop)
+        matrix = population_rows(haplotype_matrix, pop)
     else:
         matrix = haplotype_matrix
 
@@ -906,8 +912,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
 
     if 'zeng_dh' in stats_set:
         H = (raw['pi'] - raw['theta_h']).get() / spans
-        results['zeng_dh'] = np.where(
-            (tajd < 0) & (H < 0), tajd * H, 0.0)
+        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, H)
 
     # Windows with no accessible bases get NaN for every per-base rate.
     if zero_span.any():
@@ -927,7 +932,6 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     Same pattern as _windowed_thetas_scatter but for fst, fst_wc, dxy, da.
     Uses per-site valid counts for correct missing data handling.
     """
-    from ._utils import get_population_matrix
     from cupyx import scatter_add
 
     if haplotype_matrix.device == 'CPU':
@@ -945,8 +949,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             haplotype_matrix.sample_sets, pop1_name, pop2_name,
             "windowed fst_wc")
 
-    mat1 = get_population_matrix(haplotype_matrix, pop1_name)
-    mat2 = get_population_matrix(haplotype_matrix, pop2_name)
+    mat1 = population_rows(haplotype_matrix, pop1_name)
+    mat2 = population_rows(haplotype_matrix, pop2_name)
 
     # Anchor the window grid before any missing-data filtering, so this
     # engine tiles the same grid as every other statistic in the request.
@@ -962,8 +966,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         # tolerates the zero-variant parent.
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1_name, pop2_name])
-        mat1 = get_population_matrix(haplotype_matrix, pop1_name)
-        mat2 = get_population_matrix(haplotype_matrix, pop2_name)
+        mat1 = population_rows(haplotype_matrix, pop1_name)
+        mat2 = population_rows(haplotype_matrix, pop2_name)
         pos_cpu = cp.asnumpy(haplotype_matrix.positions)
 
     hap1 = mat1.haplotypes
@@ -1325,7 +1329,10 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                  | fused_diploshic)
     requested = set(statistics)
 
-    can_fuse = (missing_data == 'include'
+    # Only the Garud statistics apply 'exclude' in the fused engine; a
+    # request with any other statistic under 'exclude' takes the per-window
+    # fallback.
+    can_fuse = ((missing_data == 'include' or requested <= fused_garud)
                 and requested <= fused_all
                 # A two-population statistic with anything other than exactly
                 # two populations must not reach the fused engine, which
@@ -1835,7 +1842,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
 
         // Per-allele within-pop mean pairwise difference (same pairs summed over
         // alleles) and between-pop difference (per-allele cross term) -- mirrors
-        // divergence._hudson_fst_from_counts / dxy, multiallelic-correct.
+        // divergence._site_components_from_counts / dxy, multiallelic-correct.
         double same1 = 0.0, same2 = 0.0, between_same = 0.0;
         for (int a = 0; a < MAX_ALLELES; a++) {
             double c1 = (double)(2 * hom1[a] + het1[a] + half1[a]);
@@ -1952,13 +1959,12 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         six columns are always ``chrom, start, end, center, n_variants,
         window_id``, followed by one column per requested statistic.
     """
-    from ._utils import get_population_matrix
 
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
     if population is not None:
-        matrix = get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -2013,6 +2019,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         chrom, ws_cpu, we_cpu,
         n_variants=(win_stop - win_start).get())
 
+    window_bases = None
     if per_base:
         window_bases = _compute_window_bases(
             haplotype_matrix, results['start'],
@@ -2063,19 +2070,10 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         results['n_variants'] = var_count.astype(int)
 
         if 'pi' in statistics:
-            if per_base:
-                results['pi'] = np.where(window_bases > 0,
-                                         mpd_sum / window_bases, np.nan)
-            else:
-                results['pi'] = mpd_sum
+            results['pi'] = _rate(mpd_sum, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            if per_base:
-                results['theta_w'] = np.where(window_bases > 0,
-                                              watterson_num_w / window_bases,
-                                              np.nan)
-            else:
-                results['theta_w'] = watterson_num_w
+            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -2089,15 +2087,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            if per_base:
-                results['theta_h'] = np.where(window_bases > 0,
-                                              theta_h_sum / window_bases, np.nan)
-            else:
-                results['theta_h'] = theta_h_sum
+            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            # H = pi - theta_H (absolute, unnormalized)
-            results['fay_wu_h'] = mpd_sum - theta_h_sum
+            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
+                                        per_base)
 
         if 'max_daf' in statistics:
             results['max_daf'] = max_daf
@@ -2117,8 +2111,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 haplotype_matrix.sample_sets, pop1, pop2, "windowed fst_wc")
 
         # Use the original (unsubsetted) matrix for population lookup
-        m1 = get_population_matrix(haplotype_matrix, pop1)
-        m2 = get_population_matrix(haplotype_matrix, pop2)
+        m1 = population_rows(haplotype_matrix, pop1)
+        m2 = population_rows(haplotype_matrix, pop2)
         if m1.device == 'CPU':
             m1.transfer_to_gpu()
         if m2.device == 'CPU':
@@ -2187,7 +2181,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     # Garud's H: exact per-window haplotype hashing, batched to GPU memory
     if any(s in statistics for s in _FUSED_GARUD_STATS):
-        _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results)
+        _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results,
+                               missing_data=missing_data)
 
     # Per-site stats binned into windows via scatter_add. A variant belongs
     # to window w iff ws[w] <= pos < we[w] -- the same right-open rule
@@ -2427,14 +2422,13 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     chunks (all kernel outputs are additive sums, except max_daf which uses
     element-wise max).
     """
-    from ._utils import get_population_matrix
     from ._memutil import estimate_fused_chunk_size, free_gpu_pool
 
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
     if population is not None:
-        matrix = get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -2482,6 +2476,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         chrom, ws_cpu, we_cpu,
         n_variants=(win_stop - win_start).get())
 
+    window_bases = None
     if per_base:
         window_bases = _compute_window_bases(
             haplotype_matrix, results['start'],
@@ -2575,19 +2570,10 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         results['n_variants'] = var_count.astype(int)
 
         if 'pi' in statistics:
-            if per_base:
-                results['pi'] = np.where(window_bases > 0,
-                                         mpd_sum / window_bases, np.nan)
-            else:
-                results['pi'] = mpd_sum
+            results['pi'] = _rate(mpd_sum, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            if per_base:
-                results['theta_w'] = np.where(window_bases > 0,
-                                              watterson_num_w / window_bases,
-                                              np.nan)
-            else:
-                results['theta_w'] = watterson_num_w
+            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -2601,14 +2587,11 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            if per_base:
-                results['theta_h'] = np.where(window_bases > 0,
-                                              theta_h_sum / window_bases, np.nan)
-            else:
-                results['theta_h'] = theta_h_sum
+            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            results['fay_wu_h'] = mpd_sum - theta_h_sum
+            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
+                                        per_base)
 
         if 'max_daf' in statistics:
             results['max_daf'] = max_daf_arr
@@ -2629,12 +2612,12 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         need_wc = 'fst_wc' in statistics
 
         # A population is a sample_sets name or a row list, the same as the
-        # single-shot engine accepts via get_population_matrix.
+        # single-shot engine accepts via population_rows.
         def pop_rows_of(pop):
             if isinstance(pop, str):
                 rows = haplotype_matrix.sample_sets.get(pop)
                 if rows is None:
-                    # Match get_population_matrix's error for unknown names,
+                    # Match population_rows's error for unknown names,
                     # so the chunked and single-shot engines agree.
                     raise ValueError(
                         f"Population {pop} not found in sample_sets")
@@ -2784,6 +2767,16 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     return results
 
 
+def _rate(total, window_bases, per_base):
+    """A per-window total as a per-base rate when ``per_base``, else as is.
+
+    A window with no bases has no rate, so it is NaN.
+    """
+    if not per_base:
+        return total
+    return np.where(window_bases > 0, total / window_bases, np.nan)
+
+
 def _windowed_mean(values, bin_idx, valid_mask, n_bins):
     """Compute mean of values per window bin, returning NaN for empty bins."""
     val_sum = _scatter_sum(values[valid_mask], bin_idx[valid_mask], n_bins)
@@ -2793,15 +2786,19 @@ def _windowed_mean(values, bin_idx, valid_mask, n_bins):
     return np.where(count_cpu > 0, sum_cpu / count_cpu, np.nan)
 
 
-def _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results):
+def _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results,
+                           missing_data='include'):
     """Windowed Garud's H and distinct-haplotype count into ``results``.
 
-    A window with no variants reports one haplotype.
+    A window with no variants reports one haplotype. A window with no
+    complete haplotype under 'include' is NaN, so every column, the
+    haplotype count too, is float64.
     """
-    values = garud_h_windows(matrix.haplotypes, win_start, win_stop)
+    values = garud_h_windows(matrix.haplotypes, win_start, win_stop,
+                             missing_data=missing_data)
     for name, column in zip(_FUSED_GARUD_STATS, values):
         if name in statistics:
-            results[name] = column.astype(int) if name == 'haplotype_count' else column
+            results[name] = column
 
 
 # ---------------------------------------------------------------------------
@@ -2828,9 +2825,8 @@ def _per_variant_fst_hudson_components(hap1, hap2, n1, n2):
     Returns (num, den) as CuPy arrays. Handles missing data (-1) by
     using per-site valid counts.
     """
-    mpd1, mpd2, between = divergence._twopop_site_components(hap1, hap2)
-    within = (mpd1 + mpd2) / 2.0
-    return between - within, between
+    ac1, ac2, nv1, nv2 = divergence._aligned_pop_counts(hap1, hap2)
+    return divergence._hudson_num_den(ac1, nv1, ac2, nv2)
 
 
 def _per_variant_dxy(hap1, hap2, n1, n2):
@@ -2883,14 +2879,13 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
         six columns are ``chrom, start, end, center, n_variants, window_id``,
         followed by one column per requested statistic.
     """
-    from ._utils import get_population_matrix
 
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
     # get population subset for single-pop stats
     if population is not None:
-        matrix = get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -2922,6 +2917,7 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
         n_variants=variant_counts.get())
 
     # window sizes for per-base normalization
+    window_bases = None
     if per_base:
         window_bases = _compute_window_bases(
             haplotype_matrix, results['start'],
@@ -3036,8 +3032,8 @@ def windowed_statistics(haplotype_matrix: HaplotypeMatrix,
             raise ValueError("pop1 and pop2 required for fst/dxy")
 
         # Use the original (unsubsetted) matrix for population lookup
-        m1 = get_population_matrix(haplotype_matrix, pop1)
-        m2 = get_population_matrix(haplotype_matrix, pop2)
+        m1 = population_rows(haplotype_matrix, pop1)
+        m2 = population_rows(haplotype_matrix, pop2)
         if m1.device == 'CPU':
             m1.transfer_to_gpu()
         if m2.device == 'CPU':

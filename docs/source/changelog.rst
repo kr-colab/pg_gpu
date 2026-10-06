@@ -59,6 +59,28 @@ Results that change even for two-allele data
 
 Read this section if you are comparing against older pg_gpu results.
 
+* Haplotype identity with missing calls has one rule on every path.
+  ``garud_h``, ``moving_garud_h``, the windowed Garud's H columns,
+  ``haplotype_count``, ``haplotype_diversity``,
+  ``diplotype_frequency_spectrum`` and ``mu_ld`` used to treat ``-1`` as
+  a wildcard with first-match grouping. That grouping depended on row
+  order and merged haplotypes that share no called site, so H1 went up.
+  The windowed engine instead treated ``-1`` as one more allele, so
+  almost every haplotype was distinct and H1 went down. Now the complete
+  haplotypes (no missing call) set the distinct haplotypes, and EM
+  splits each incomplete haplotype across the complete ones it matches
+  at its called sites. This gives the maximum-likelihood frequencies when
+  calls are missing completely at random, and does not depend on row
+  order. An incomplete haplotype that matches no complete one is a
+  distinct haplotype of its own. A window with no complete haplotype returns NaN.
+  Values change on any data with missing calls; data with no missing
+  calls is unchanged. See :doc:`missing_data`. The windowed
+  ``haplotype_count`` column is now float64, since a window can be NaN.
+* ``moving_garud_h`` with ``missing_data='exclude'`` dropped every site
+  with a missing call from the whole matrix before it tiled the windows,
+  so windows moved and the window count could shrink. Windows now stay
+  on the full variant grid and each drops only its own missing sites,
+  the same as ``windowed_analysis``.
 * Haplotype rows now follow one order everywhere: sample ``i`` owns rows
   ``2i`` and ``2i + 1``. ``from_ts`` already used this order, while
   ``from_vcf`` and ``from_zarr`` grouped all of the first gametes ahead of
@@ -177,6 +199,63 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``pairwise_r2`` and the naive ``r2`` estimator behind ``zns``/``omega``
+  computed the joint 11-frequency over the pairwise-complete sample but
+  each site's own frequency over its separate, larger marginal sample,
+  biasing ``D`` and ``r2`` under structured missing data with
+  ``missing_data='include'``. Both frequencies now come from the same
+  pairwise-complete sample. The diploid dosage-correlation path
+  (``_r2_matrix_diploid``, reached by ``zns``/``omega`` on a
+  ``GenotypeMatrix`` with ``estimator='r2'``) had the same bug in its
+  continuous form -- mean/variance from each site's own marginal valid
+  set instead of the pair's jointly-valid individuals -- and is fixed
+  the same way.
+* ``omega`` and ``zns`` mishandled a single pair left undefined by the
+  fix above (both sites otherwise fine, just no -- or locally
+  degenerate -- jointly-valid sample): the NaN propagated through
+  ``omega``'s prefix sum and collapsed results to ``0.0``, and both
+  statistics divided by a closed-form pair count that assumed every
+  pair was defined. Both now count only their actually-defined pairs,
+  in the full-matrix path and in ``zns``'s tiled naive-``r2`` path
+  (``_zns_tiled``/``_zns_from_precomputed``).
+* ``get_population_matrix`` returned a subset with no sample names and no
+  QC ``fields``. It now keeps both: per-variant fields keep every variant
+  of the subset, and per-genotype fields and ``samples`` keep the
+  population's individuals. On a ``HaplotypeMatrix`` that works only when
+  the population's rows pair into whole individuals (sample ``i`` at rows
+  ``2i`` and ``2i + 1``); otherwise the subset drops them and warns.
+  ``samples`` or a per-genotype field that does not hold one entry per
+  individual is also dropped with a warning, since picking by individual
+  would mislabel it. ``metadata=False`` skips the copy.
+* ``zeng_dh``, scalar and windowed, returned 0.0 ("no sweep") when
+  Tajima's D or Fay & Wu's H was undefined because of too few
+  segregating sites. It now returns NaN in that case.
+* ``diversity_stats`` returned NaN for ``fay_wus_h`` with fewer than three
+  segregating sites, a gate meant only for the variance-based tests. It
+  now matches ``fay_wus_h``.
+* Windowed ``fay_wu_h`` was a raw sum, not a per-base rate, when the
+  request went to the fused engine (for example together with a Garud's H
+  statistic), so the same column changed units with the rest of the
+  request. It is now per base on every engine, like ``pi`` and
+  ``theta_h``.
+* ``FrequencySpectrum.neutrality_test`` used the sample size with the
+  most sites for the Achaz variance. It now uses the harmonic mean of the
+  per-site sample sizes, as ``tajimas_d``, ``normalized_fay_wu_h`` and
+  ``zeng_e`` do, so it matches them under missing data.
+* ``FrequencySpectrum.theta`` raises ``ValueError`` for a custom weight
+  vector whose length is not ``n + 1``; it used to cut the vector to fit.
+  ``FrequencySpectrum.project`` warns, with a count, when it leaves out
+  sites that have fewer valid haplotypes than the target.
+* ``pbs`` counted a population's own diversity at a site where another
+  population in the pair had no data, which pulled that pair's FST down;
+  a single such site could change the sign of PBS. PBS now uses, for all
+  three FSTs, only the sites where all three populations have data, so the
+  three branches describe the same loci. Sites where every population has
+  at least one call are unchanged.
+* ``garud_h`` on a ``GenotypeMatrix`` ignored ``missing_data``, and
+  ``windowed_analysis`` with a Garud's H statistic or ``haplotype_count``
+  under ``missing_data='exclude'`` raised ``Unknown statistic``. Both now
+  apply ``missing_data``.
 * ``fst_hudson``, ``fst_weir_cockerham``, ``fst_tskit``, and ``fst_nei``
   returned ``0.0`` for an undefined ratio (no site with data in both
   populations) while every windowed engine already used ``NaN`` for the

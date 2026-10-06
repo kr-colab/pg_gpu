@@ -84,8 +84,8 @@ def dxy_components(pop1_haps, pop2_haps):
     return total_diffs, total_comps, n_sites
 
 
-def _twopop_site_components(hap1, hap2):
-    """Compute per-site two-population components on GPU.
+def _site_components_from_counts(ac1, nv1, ac2, nv2):
+    """Per-site two-population components from per-allele counts on a shared K.
 
     Returns (mpd1, mpd2, between) where:
       mpd1 = within-pop1 mean pairwise difference per site
@@ -93,22 +93,28 @@ def _twopop_site_components(hap1, hap2):
       between = between-pop mean pairwise difference (Dxy) per site
 
     A site contributes to any of the three only where both populations have
-    at least one valid (non-missing) gamete -- the same joint condition
-    fst_hudson's own num/den masking and the fused kernel's per-site skip
-    already use. Within that joint set, mpd1/mpd2 are additionally zero
+    at least one valid (non-missing) gamete, the same rule as the fused
+    kernel's per-site skip. Within that joint set, mpd1/mpd2 are also zero
     wherever that population alone doesn't have a pair (nv < 2); between
-    needs only one gamete from each side. Per-allele (multiallelic-correct):
-    the same-allele pair counts sum over every allele column on a shared
-    allele-index width K, so between equals the per-site Dxy
+    needs only one gamete from each side.
+
+    Per-allele (multiallelic-correct): the same-allele pair counts sum over
+    every allele column, so between equals the per-site Dxy
     (``1 - sum_a p1_a p2_a``) and mpd1/mpd2 the per-site within-pop pi.
     Reduces to the biallelic ancestral/derived form when there are two
     alleles.
+
+    Parameters
+    ----------
+    ac1, ac2 : cupy.ndarray, shape (n_variants, K)
+        Per-allele counts on the SAME K (see _aligned_pop_counts).
+    nv1, nv2 : cupy.ndarray, shape (n_variants,)
+        Per-site valid haplotype counts.
     """
-    ac1, ac2, n1, n2 = _aligned_pop_counts(hap1, hap2)
     ac1 = ac1.astype(cp.float64)
     ac2 = ac2.astype(cp.float64)
-    n1 = n1.astype(cp.float64)
-    n2 = n2.astype(cp.float64)
+    n1 = nv1.astype(cp.float64)
+    n2 = nv2.astype(cp.float64)
 
     joint = (n1 > 0) & (n2 > 0)
 
@@ -126,10 +132,30 @@ def _twopop_site_components(hap1, hap2):
     # Between-pop mean pairwise differences (per-allele cross term)
     n_between = n1 * n2
     n_between_same = cp.sum(ac1 * ac2, axis=1)
-    between = cp.where(n_between > 0,
-                       (n_between - n_between_same) / n_between, 0.0)
+    between = cp.where(joint, (n_between - n_between_same) / n_between, 0.0)
 
     return mpd1, mpd2, between
+
+
+def _twopop_site_components(hap1, hap2):
+    """Per-site (mpd1, mpd2, between) from two populations' haplotypes.
+
+    See ``_site_components_from_counts``; the two populations are counted
+    on a shared allele-index width first.
+    """
+    ac1, ac2, n1, n2 = _aligned_pop_counts(hap1, hap2)
+    return _site_components_from_counts(ac1, n1, ac2, n2)
+
+
+def _hudson_num_den(ac1, nv1, ac2, nv2):
+    """Per-site Hudson FST numerator and denominator from counts on a shared K.
+
+    Hudson FST is ``sum(num) / sum(den)`` with ``num = between - within``
+    and ``den = between``, where within is the mean of the two
+    within-population terms; see ``_site_components_from_counts``.
+    """
+    mpd1, mpd2, between = _site_components_from_counts(ac1, nv1, ac2, nv2)
+    return between - (mpd1 + mpd2) / 2.0, between
 
 
 def fst(haplotype_matrix: HaplotypeMatrix,
@@ -219,10 +245,8 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     # Per-allele Hudson: within = mean within-pop pairwise diff, between = dxy,
     # FST = 1 - sum(within)/sum(between) (ratio-of-averages). den > 0 already
     # implies both pops have data and the site is polymorphic between them.
-    mpd1, mpd2, between = _twopop_site_components(pop1_haps, pop2_haps)
-    within = (mpd1 + mpd2) / 2.0
-    num = between - within
-    den = between
+    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
+    num, den = _hudson_num_den(ac1, nv1, ac2, nv2)
 
     valid_mask = den > 0
     if cp.any(valid_mask):
@@ -841,50 +865,6 @@ def _get_population_indices(haplotype_matrix: HaplotypeMatrix,
         return indices
 
 
-def _hudson_fst_from_counts(ac1, nv1, ac2, nv2):
-    """Per-variant Hudson FST num/den from per-allele counts on a shared K.
-
-    Classic Hudson estimator (== scikit-allel): FST = sum(num) / sum(den) with
-    per-site num = Hb - Hw, den = Hb, where Hw is the mean within-population
-    pairwise difference and Hb the between-population divergence. The
-    same-allele pair counts sum over every allele column, so this is
-    multiallelic-correct and reduces to the biallelic ancestral/derived form
-    (ac columns [ref, alt]) exactly.
-
-    Parameters
-    ----------
-    ac1, ac2 : cupy.ndarray, shape (n_variants, K)
-        Per-allele counts on the SAME K (see _aligned_pop_counts).
-    nv1, nv2 : cupy.ndarray, shape (n_variants,)
-        Per-site valid haplotype counts.
-
-    Returns
-    -------
-    num, den : cupy.ndarray, float64, shape (n_variants,)
-    """
-    nv1 = nv1.astype(cp.float64)
-    nv2 = nv2.astype(cp.float64)
-    ac1 = ac1.astype(cp.float64)
-    ac2 = ac2.astype(cp.float64)
-
-    n1_pairs = nv1 * (nv1 - 1) / 2
-    n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
-    mpd1 = cp.where(n1_pairs > 0, (n1_pairs - n1_same) / n1_pairs, 0.0)
-
-    n2_pairs = nv2 * (nv2 - 1) / 2
-    n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
-    mpd2 = cp.where(n2_pairs > 0, (n2_pairs - n2_same) / n2_pairs, 0.0)
-
-    within = (mpd1 + mpd2) / 2.0
-
-    n_between = nv1 * nv2
-    n_between_same = cp.sum(ac1 * ac2, axis=1)
-    between = cp.where(n_between > 0,
-                       (n_between - n_between_same) / n_between, 0.0)
-
-    return between - within, between
-
-
 def _windowed_fst(num, den, size, start=0, stop=None, step=None):
     """Compute windowed FST from per-variant numerator/denominator on GPU.
 
@@ -966,10 +946,17 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
     ac2, nv2 = allele_counts(h2, n_alleles=k)
     ac3, nv3 = allele_counts(h3, n_alleles=k)
 
-    # compute all three pairwise FST num/den from shared counts
-    num12, den12 = _hudson_fst_from_counts(ac1, nv1, ac2, nv2)
-    num13, den13 = _hudson_fst_from_counts(ac1, nv1, ac3, nv3)
-    num23, den23 = _hudson_fst_from_counts(ac2, nv2, ac3, nv3)
+    # PBS turns the three FSTs into the branch lengths of one tree, so all
+    # three use the same sites: those where every population has data. A
+    # site that only one pair can see would enter some branches and not
+    # others. A zero valid count removes a site from every pair, because a
+    # site counts only where both populations of the pair have data.
+    all_three = (nv1 > 0) & (nv2 > 0) & (nv3 > 0)
+    nv1, nv2, nv3 = (cp.where(all_three, nv, 0) for nv in (nv1, nv2, nv3))
+
+    num12, den12 = _hudson_num_den(ac1, nv1, ac2, nv2)
+    num13, den13 = _hudson_num_den(ac1, nv1, ac3, nv3)
+    num23, den23 = _hudson_num_den(ac2, nv2, ac3, nv3)
 
     fst12 = _windowed_fst(num12, den12, window_size, window_start,
                           window_stop, window_step)
@@ -1350,14 +1337,14 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     e1007341. https://doi.org/10.1371/journal.pgen.1007341
     """
     from . import ld_statistics
-    from ._utils import get_population_matrix
+    from ._utils import population_rows
 
     # zns restricts to the biallelic sites of whatever matrix it is handed;
     # restricting once up front keeps all three terms on the same sites.
     biallelic = haplotype_matrix.restrict_to_biallelic(warn_context="zx")
-    z1 = ld_statistics._zns_biallelic(get_population_matrix(biallelic, pop1),
+    z1 = ld_statistics._zns_biallelic(population_rows(biallelic, pop1),
                                       missing_data)
-    z2 = ld_statistics._zns_biallelic(get_population_matrix(biallelic, pop2),
+    z2 = ld_statistics._zns_biallelic(population_rows(biallelic, pop2),
                                       missing_data)
     z_total = ld_statistics._zns_biallelic(biallelic, missing_data)
 

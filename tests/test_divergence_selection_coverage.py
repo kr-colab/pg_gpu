@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from pg_gpu import GenotypeMatrix, HaplotypeMatrix, divergence, selection
+from pg_gpu._haplotype_groups import frequencies
 
 
 def _two_pop_hm(seed=7, n_per_pop=8, seq_length=500_000):
@@ -110,41 +111,43 @@ def test_compute_gaps_accepts_cupy_positions():
     np.testing.assert_allclose(got, ref)
 
 
-# ── selection: missing-aware haplotype fallback ────────────────────────
-# With missing calls the grouping falls back to wildcard matching. Structured
-# data keeps the answer deterministic: identical rows collapse to one group,
-# and a -1 inside a group still matches only that group.
-def test_distinct_haplotype_frequencies_missing_all_identical():
+def _frequencies(hap):
+    return frequencies(cp.asarray(hap)).get()
+
+
+# ── selection: missing-aware haplotype frequencies ─────────────────────
+# Identical rows collapse to one group, and a -1 inside a group still
+# matches only that group.
+def test_haplotype_frequencies_all_identical():
     hap = cp.zeros((6, 5), dtype=cp.int8)
     hap[0, 0] = -1
     hap[3, 4] = -1
-    freqs = selection._distinct_haplotype_frequencies_missing(hap)
+    freqs = _frequencies(hap)
     np.testing.assert_allclose(freqs, [1.0])
 
 
-def test_distinct_haplotype_frequencies_missing_two_groups():
+def test_haplotype_frequencies_two_groups():
     a = np.zeros((3, 6), dtype=np.int8)
     b = np.ones((3, 6), dtype=np.int8)
     hap = np.vstack([a, b])
     hap[0, 0] = -1   # wildcard, still matches only the all-0 group
     hap[4, 2] = -1   # wildcard, still matches only the all-1 group
-    freqs = selection._distinct_haplotype_frequencies_missing(cp.asarray(hap))
+    freqs = _frequencies(cp.asarray(hap))
     np.testing.assert_allclose(sorted(freqs), [0.5, 0.5])
 
 
-def test_distinct_haplotype_frequencies_missing_numpy_input():
-    # A host array with missing takes the numpy has_missing / CPU branch.
+def test_haplotype_frequencies_numpy_input():
+    # A host array is uploaded first.
     hap = np.zeros((4, 5), dtype=np.int8)
     hap[1, 2] = -1
-    freqs = selection._distinct_haplotype_frequencies_missing(hap)
+    freqs = _frequencies(hap)
     np.testing.assert_allclose(freqs, [1.0])
 
 
-def test_distinct_haplotype_frequencies_missing_no_missing_passthrough():
-    # No missing, host input -> uploaded and delegated to the exact-grouping
-    # implementation.
+def test_haplotype_frequencies_no_missing_passthrough():
+    # No missing call: exact grouping.
     hap = np.zeros((4, 5), dtype=np.int8)
-    freqs = selection._distinct_haplotype_frequencies_missing(hap)
+    freqs = _frequencies(hap)
     np.testing.assert_allclose(freqs, [1.0])
 
 

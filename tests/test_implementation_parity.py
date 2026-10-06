@@ -177,19 +177,14 @@ def multiallelic_hm():
 
 
 # Data conditions, each declaring the data shape that drives path divergences.
-# ``partial_sites`` is True when the condition retains sites of variable
-# per-site sample size (the driver of the fs/scatter/fused divergences under
-# missing data); ``multiallelic`` is True when sites carry allele codes >= 2.
-_Condition = namedtuple("_Condition",
-                        ["fixture", "missing_data", "partial_sites", "multiallelic"])
+# ``multiallelic`` is True when sites carry allele codes >= 2.
+_Condition = namedtuple("_Condition", ["fixture", "missing_data", "multiallelic"])
 _CONDITIONS = {
-    "clean": _Condition("clean_hm", "include", False, False),
-    "missing_include": _Condition("missing_hm", "include", True, False),
-    "missing_exclude": _Condition("missing_hm", "exclude", False, False),
-    "multiallelic": _Condition("multiallelic_hm", "include", False, True),
+    "clean": _Condition("clean_hm", "include", False),
+    "missing_include": _Condition("missing_hm", "include", False),
+    "missing_exclude": _Condition("missing_hm", "exclude", False),
+    "multiallelic": _Condition("multiallelic_hm", "include", True),
 }
-_WHEN_PARTIAL = frozenset(
-    name for name, c in _CONDITIONS.items() if c.partial_sites)
 _WHEN_MULTIALLELIC = frozenset(
     name for name, c in _CONDITIONS.items() if c.multiallelic)
 
@@ -402,11 +397,6 @@ def _supported_paths(stat):
 # Known divergences and engine limitations -> xfail with a reason
 # ---------------------------------------------------------------------------
 
-_FS_VARIANCE = (
-    "FrequencySpectrum computes the Achaz neutrality-test variance at a single "
-    "modal sample size while summing the numerator over variable per-site "
-    "sample sizes, diverging from the scalar under missing data. #135"
-)
 _FS_MULTIALLELIC = (
     "on multiallelic sites the FrequencySpectrum builds a per-allele SFS whose "
     "segregating-class count and pi differ from the scalar's per-allele counts, "
@@ -420,16 +410,10 @@ _FS_MULTIALLELIC = (
 # skip is handled separately, so a fused rule with conditions=None never reaches
 # the (skipped) missing_exclude cell.
 _XFAILS = {
-    # neutrality-test variance differs under variable per-site sample sizes,
-    # and the FS path additionally diverges under multiallelic sites.
-    ("tajimas_d", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
-                          (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("normalized_fay_wu_h", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
-                                    (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-    ("zeng_e", "fs"): [(_FS_VARIANCE, _WHEN_PARTIAL),
-                       (_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
-
     # FS per-allele SFS diverges from the scalar per-allele counts (multiallelic).
+    ("tajimas_d", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("normalized_fay_wu_h", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("zeng_e", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("pi", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("theta_w", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("segregating_sites", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],

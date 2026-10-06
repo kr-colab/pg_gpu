@@ -8,13 +8,13 @@ custom weight functions, and SFS projection.
 """
 
 import math
+import warnings
 import numpy as np
 import cupy as cp
 from typing import Union, Optional, Dict, Callable
 from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
-from ._utils import get_population_matrix
-from ._haplotype_hash import row_hashes
+from ._utils import population_rows
 
 
 def _apply_span_normalize(value, matrix, span_normalize):
@@ -329,7 +329,7 @@ def _compute_neutrality_test(matrix, w1_name, w2_name):
 def _prepare_matrix(haplotype_matrix, population=None, missing_data='include'):
     """Extract population subset and apply exclude filtering."""
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
     if matrix.device == 'CPU':
@@ -587,7 +587,7 @@ class FrequencySpectrum:
     def __init__(self, haplotype_matrix, population=None,
                  missing_data='include', n_total_sites=None):
         if population is not None:
-            matrix = get_population_matrix(haplotype_matrix, population)
+            matrix = population_rows(haplotype_matrix, population)
         else:
             matrix = haplotype_matrix
 
@@ -616,6 +616,12 @@ class FrequencySpectrum:
         # from the scalar distinct-alleles-1 at reference-absent sites.
         # theta_h/theta_l and the eta-family are exact.
         self.sfs_by_n = {}
+        # Sample size for the neutrality-test variance: the harmonic mean of
+        # the per-site sample sizes over sites with n >= 2, as in
+        # _compute_thetas.
+        valid_n = n_valid[n_valid >= 2].astype(cp.float64)
+        self._n_eff = int(_harmonic_mean_n(
+            valid_n.size, float(cp.sum(1.0 / valid_n).get()) if valid_n.size else 0.0))
         if len(n_valid) == 0:
             self.n_max = 0
             self.n_segregating = 0
@@ -662,8 +668,12 @@ class FrequencySpectrum:
 
         total = 0.0
         for n, xi in self.sfs_by_n.items():
-            w = weights_fn(n)
-            total += np.sum(xi[:len(w)] * w[:len(xi)])
+            w = np.asarray(weights_fn(n))
+            if w.shape != (n + 1,):
+                raise ValueError(
+                    f"weights for sample size {n} must have length {n + 1} "
+                    f"(one per derived allele count 0..{n}); got shape {w.shape}")
+            total += np.sum(xi * w)
 
         if span_normalize is not False:
             if span is not None and span > 0:
@@ -686,8 +696,9 @@ class FrequencySpectrum:
         if S < 3:
             return float('nan')
 
-        n_eff = max(self.sfs_by_n.keys(),
-                    key=lambda n: np.sum(self.sfs_by_n[n]))
+        n_eff = self._n_eff
+        if n_eff < 3:
+            return float('nan')
 
         w1_name = w1 if isinstance(w1, str) else None
         w2_name = w2 if isinstance(w2, str) else None
@@ -723,12 +734,23 @@ class FrequencySpectrum:
     def project(self, target_n):
         """Project all SFS groups to a common sample size."""
         projected = np.zeros(target_n + 1)
+        dropped = 0
         for n, xi in self.sfs_by_n.items():
             if n < target_n:
+                # Projection only lowers a sample size; it cannot raise one.
+                dropped += int(np.sum(xi[1:n]))
                 continue
             projected += project_sfs(xi, n, target_n)
+        if dropped:
+            warnings.warn(
+                f"FrequencySpectrum.project({target_n}): {dropped} segregating "
+                f"derived alleles are at sites with fewer than {target_n} valid "
+                f"haplotypes and are left out of the projected spectrum.",
+                UserWarning, stacklevel=2)
         result = object.__new__(FrequencySpectrum)
         result.sfs_by_n = {target_n: projected}
+        # Every site of the projection has target_n haplotypes.
+        result._n_eff = target_n
         result.n_max = target_n
         result.n_segregating = int(np.sum(projected[1:target_n]))
         result.n_total_sites = self.n_total_sites
@@ -957,7 +979,7 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
 
     # Get population subset if specified
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1008,7 +1030,7 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
 
     # Get population subset if specified
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1102,10 +1124,11 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                     w1, w2 = test_specs[s]
                     S = ct['S']
                     n = ct['n_harmonic_mean']
-                    if S < 3 or n < 3:
-                        results[s] = float('nan')
-                    elif s == 'fay_wus_h':
+                    if s == 'fay_wus_h':
+                        # No variance term, so no minimum S or n.
                         results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
+                    elif S < 3 or n < 3:
+                        results[s] = float('nan')
                     else:
                         var = _achaz_variance(w1, w2, n, S)
                         num = ct['thetas'][w1] - ct['thetas'][w2]
@@ -1170,8 +1193,8 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
     """
     Calculate haplotype diversity for a population.
 
-    Haplotype diversity is defined as 1 - sum(p_i^2) where p_i is the
-    frequency of the i-th unique haplotype in the population.
+    Haplotype diversity is defined as n / (n - 1) * (1 - sum(p_i^2)), where
+    p_i is the frequency of the i-th distinct haplotype among n haplotypes.
 
     Parameters
     ----------
@@ -1180,129 +1203,45 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     missing_data : str
-        'include' - exclude haplotypes with any missing data
-        'exclude' - filter to sites with no missing data
+        'include' - estimate haplotype frequencies from haplotypes with
+        missing calls by EM, as in ``selection.garud_h``. NaN when no
+        haplotype is complete.
+        'exclude' - use only sites with no missing call.
 
     Returns
     -------
     float
         Haplotype diversity value
     """
+    from ._haplotype_groups import frequencies
 
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    haplotypes = matrix.haplotypes  # (n_hap, n_var)
-
-    if missing_data == 'exclude':
-        missing_per_var = cp.sum(haplotypes < 0, axis=0)
-        complete = cp.where(missing_per_var == 0)[0]
-        haplotypes = haplotypes[:, complete]
-
+    haplotypes = _haplotypes_for_grouping(haplotype_matrix, population,
+                                          missing_data)
     n_haplotypes = haplotypes.shape[0]
     if n_haplotypes <= 1:
         return 0.0
 
-    has_missing = bool(cp.any(haplotypes < 0).get())
+    f = frequencies(haplotypes)
+    if f.size == 0:
+        return float('nan')
+    return float((1.0 - cp.sum(f * f)) * n_haplotypes / (n_haplotypes - 1))
 
-    if has_missing:
-        # Fallback: wildcard matching requires CPU pairwise comparison
-        haplotypes_cpu = haplotypes.get() if hasattr(haplotypes, 'get') else haplotypes
-        cluster_id = _cluster_haplotypes_with_missing(haplotypes_cpu)
-        from collections import Counter
-        counts = Counter(cluster_id)
-        frequencies = np.array(list(counts.values())) / n_haplotypes
+
+def _haplotypes_for_grouping(haplotype_matrix, population, missing_data):
+    """Population rows on the GPU; with 'exclude', only complete sites."""
+    if population is not None:
+        matrix = population_rows(haplotype_matrix, population)
     else:
-        _, counts_gpu = _count_unique_haplotypes_gpu(haplotypes)
-        frequencies = (counts_gpu.astype(cp.float64) / n_haplotypes).get()
-
-    diversity = (1.0 - np.sum(frequencies ** 2)) * n_haplotypes / (n_haplotypes - 1)
-    return float(diversity)
-
-
-def _count_unique_haplotypes_gpu(haplotypes):
-    """Count unique haplotypes on GPU via exact row hashing.
-
-    Caller must guarantee the input contains no missing data (-1).
-
-    Returns
-    -------
-    n_unique : int
-    counts : cupy.ndarray of group sizes (unsorted)
-    """
-    n_haplotypes = haplotypes.shape[0]
-    hash1, hash2 = row_hashes(haplotypes)
-    order = cp.lexsort(cp.stack([hash2, hash1]))
-    s1 = hash1[order]
-    s2 = hash2[order]
-    # Identical rows hash bit-identically, so any change in either hash
-    # starts a new group.
-    diff = (s1[1:] != s1[:-1]) | (s2[1:] != s2[:-1])
-    boundaries = cp.concatenate([cp.ones(1, dtype=cp.bool_), diff])
-    boundary_idx = cp.where(boundaries)[0]
-    tail = cp.full(1, n_haplotypes, dtype=boundary_idx.dtype)
-    counts_gpu = cp.diff(cp.concatenate([boundary_idx, tail]))
-    return int(boundary_idx.shape[0]), counts_gpu
+        matrix = haplotype_matrix
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    haplotypes = matrix.haplotypes
+    if missing_data == 'exclude':
+        from ._haplotype_groups import complete_sites
+        haplotypes = complete_sites(haplotypes)
+    return haplotypes
 
 
-def _cluster_haplotypes_with_missing(haps):
-    """Cluster haplotypes treating -1 as compatible with any allele.
-
-    Two haplotypes are in the same cluster if they match at all positions
-    where both are non-missing. Uses greedy assignment: each haplotype
-    joins the first compatible cluster.
-
-    Parameters
-    ----------
-    haps : ndarray, shape (n_haplotypes, n_variants)
-
-    Returns
-    -------
-    labels : list of int, length n_haplotypes
-    """
-    n = haps.shape[0]
-    has_any_missing = np.any(haps < 0)
-
-    if not has_any_missing:
-        # fast path: no missing data, use string hashing
-        hap_strings = [''.join(map(str, h)) for h in haps]
-        label_map = {}
-        labels = []
-        next_id = 0
-        for s in hap_strings:
-            if s not in label_map:
-                label_map[s] = next_id
-                next_id += 1
-            labels.append(label_map[s])
-        return labels
-
-    # slow path: pairwise comparison with wildcard matching
-    # representative haplotype per cluster (index into haps)
-    cluster_reps = [0]
-    labels = [0]
-
-    for i in range(1, n):
-        matched = False
-        for c_idx, rep in enumerate(cluster_reps):
-            # check if haps[i] matches haps[rep] at jointly non-missing sites
-            both_valid = (haps[i] >= 0) & (haps[rep] >= 0)
-            if np.all(haps[i][both_valid] == haps[rep][both_valid]):
-                labels.append(c_idx)
-                matched = True
-                break
-        if not matched:
-            cluster_reps.append(i)
-            labels.append(len(cluster_reps) - 1)
-
-    return labels
-
-
-_get_population_matrix = get_population_matrix
 
 
 def theta_h(haplotype_matrix: HaplotypeMatrix,
@@ -1456,16 +1395,26 @@ def zeng_dh(haplotype_matrix: HaplotypeMatrix,
     -------
     float
         DH statistic. Positive when both D and H are negative
-        (consistent with a selective sweep).
+        (consistent with a selective sweep). NaN when either test is
+        undefined (too few segregating sites).
     """
     D = tajimas_d(haplotype_matrix, population, missing_data=missing_data)
     H = fay_wus_h(haplotype_matrix, population, missing_data=missing_data)
 
-    # DH is the product when both are negative (sweep signal)
-    if D < 0 and H < 0:
-        return float(D * H)
-    else:
-        return 0.0
+    return float(_zeng_dh_combine(D, H))
+
+
+def _zeng_dh_combine(D, H):
+    """Zeng's DH from Tajima's D and Fay & Wu's H, scalars or arrays.
+
+    The product when both are negative (sweep signal), else 0. An undefined
+    test (too few sites) is not "no sweep", so it gives NaN.
+    """
+    D = np.asarray(D, dtype=np.float64)
+    H = np.asarray(H, dtype=np.float64)
+    with np.errstate(invalid='ignore'):
+        dh = np.where((D < 0) & (H < 0), D * H, 0.0)
+    return np.where(np.isfinite(D) & np.isfinite(H), dh, np.nan)
 
 
 def max_daf(haplotype_matrix: HaplotypeMatrix,
@@ -1488,7 +1437,7 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     """
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1514,7 +1463,7 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
 
 def haplotype_count(haplotype_matrix: HaplotypeMatrix,
                     population: Optional[Union[str, list]] = None,
-                    missing_data: str = 'include') -> int:
+                    missing_data: str = 'include'):
     """Count distinct haplotypes.
 
     Parameters
@@ -1522,42 +1471,25 @@ def haplotype_count(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     missing_data : str
-        'include' - exclude haplotypes with any missing
-        'exclude' - filter to sites with no missing data
+        'include' - the complete haplotypes (no missing call) set the
+        distinct haplotypes; an incomplete haplotype that matches none of
+        them at its called sites adds one more (see ``selection.garud_h``).
+        'exclude' - use only sites with no missing call.
 
     Returns
     -------
-    int
+    int, or float NaN when ``'include'`` finds no complete haplotype
     """
+    from ._haplotype_groups import haplotype_groups
 
-    if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    haplotypes = matrix.haplotypes
-    excluded = missing_data == 'exclude'
-
-    if excluded:
-        haplotypes = haplotypes[:, cp.sum(haplotypes < 0, axis=0) == 0]
-
+    haplotypes = _haplotypes_for_grouping(haplotype_matrix, population,
+                                          missing_data)
     if haplotypes.shape[0] <= 1:
         return haplotypes.shape[0]
-
-    # 'exclude' already removed every site with a -1, so the remainder is clean
-    has_missing = False if excluded else bool(cp.any(haplotypes < 0).get())
-
-    if has_missing:
-        # Wildcard matching requires CPU pairwise comparison
-        hap_cpu = haplotypes.get().astype(np.int8)
-        labels = _cluster_haplotypes_with_missing(hap_cpu)
-        return len(set(labels))
-
-    n_unique, _ = _count_unique_haplotypes_gpu(haplotypes)
-    return n_unique
+    res = haplotype_groups(haplotypes)
+    if res is None:
+        return float('nan')
+    return res[1]
 
 
 def daf_histogram(matrix, n_bins: int = 20,
@@ -1591,7 +1523,7 @@ def daf_histogram(matrix, n_bins: int = 20,
         return _daf_histogram_diploid(matrix, n_bins, population)
 
     if population is not None:
-        matrix = _get_population_matrix(matrix, population)
+        matrix = population_rows(matrix, population)
 
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
@@ -1612,38 +1544,41 @@ def daf_histogram(matrix, n_bins: int = 20,
 
 
 def diplotype_frequency_spectrum(genotype_matrix,
-                                 population: Optional[Union[str, list]] = None):
+                                 population: Optional[Union[str, list]] = None,
+                                 missing_data: str = 'include'):
     """Count distinct multi-locus genotype patterns (diplotypes).
 
     Parameters
     ----------
     genotype_matrix : GenotypeMatrix
     population : str or list, optional
+    missing_data : str
+        'include' - EM frequencies from diplotypes with missing calls, with
+        the same rule as haplotypes in ``selection.garud_h``.
+        'exclude' - use only sites with no missing call.
 
     Returns
     -------
     freqs : ndarray, float64, sorted descending
-        Diplotype frequencies.
+        Diplotype frequencies. Empty when no diplotype is complete.
     n_diplotypes : int
-        Number of distinct diplotypes.
+        Number of distinct diplotypes, or NaN when no diplotype is complete.
     """
+    from ._haplotype_groups import complete_sites, haplotype_groups
+
     if population is not None:
-        genotype_matrix = _get_population_matrix(genotype_matrix, population)
+        genotype_matrix = population_rows(genotype_matrix, population)
+    if genotype_matrix.device == 'CPU':
+        genotype_matrix.transfer_to_gpu()
     geno = genotype_matrix.genotypes
+    if missing_data == 'exclude':
+        geno = complete_sites(geno)
 
-    if isinstance(geno, cp.ndarray):
-        geno = geno.get()
-
-    geno = np.asarray(geno, dtype=np.int8)
-    n_ind = geno.shape[0]
-
-    # treat missing (-1) as wildcard for diplotype identity
-    labels = _cluster_haplotypes_with_missing(geno)
-    from collections import Counter
-    counts = Counter(labels)
-    freqs = np.array(sorted(counts.values(), reverse=True)) / n_ind
-
-    return freqs, len(counts)
+    res = haplotype_groups(geno)
+    if res is None:
+        return np.empty(0, dtype=np.float64), float('nan')
+    counts, n_distinct = res
+    return (cp.sort(counts)[::-1] / geno.shape[0]).get(), n_distinct
 
 
 def _daf_bin_index(dafs, n_bins):
@@ -1675,7 +1610,7 @@ def _histogram_from_dafs(dafs, n_bins):
 def _daf_histogram_diploid(genotype_matrix, n_bins=20, population=None):
     """DAF histogram from diploid genotypes (internal)."""
     if population is not None:
-        genotype_matrix = _get_population_matrix(genotype_matrix, population)
+        genotype_matrix = population_rows(genotype_matrix, population)
     geno = genotype_matrix.genotypes
 
     if not isinstance(geno, cp.ndarray):
@@ -1754,7 +1689,7 @@ def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
     """
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1820,14 +1755,14 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
         from ._warnings import check_paired_rows
         if ploidy == 2:
             # .get: an unknown name skips the check and reaches
-            # _get_population_matrix below for its proper ValueError.
+            # population_rows below for its proper ValueError.
             rows = (haplotype_matrix.sample_sets.get(population)
                     if isinstance(population, str) else population)
             if rows is not None:
                 label = (population if isinstance(population, str)
                          else "row list")
                 check_paired_rows(rows, f"heterozygosity_observed({label})")
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1931,7 +1866,7 @@ def mu_var(haplotype_matrix: HaplotypeMatrix,
     float
     """
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 
@@ -1966,7 +1901,7 @@ def mu_sfs(haplotype_matrix: HaplotypeMatrix,
     """
 
     if population is not None:
-        matrix = _get_population_matrix(haplotype_matrix, population)
+        matrix = population_rows(haplotype_matrix, population)
     else:
         matrix = haplotype_matrix
 

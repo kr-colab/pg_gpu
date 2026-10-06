@@ -198,15 +198,20 @@ def window_hashes(hap, w1, w2, win_start, win_stop):
     return out1, out2
 
 
-def sort_window_hashes(h1, h2):
-    """Each window's hash pairs sorted by (h1, h2), as sorted copies.
+def sort_order(h1, h2):
+    """Per-row permutation that sorts each window's hash pairs by (h1, h2).
 
     Two stable per-row argsorts (by h2, then by h1) give the lexicographic
     order within every window, in global memory.
     """
     o2 = cp.argsort(h2, axis=1)
     o1 = cp.argsort(cp.take_along_axis(h1, o2, axis=1), axis=1)
-    order = cp.take_along_axis(o2, o1, axis=1)
+    return cp.take_along_axis(o2, o1, axis=1)
+
+
+def sort_window_hashes(h1, h2):
+    """Each window's hash pairs sorted by (h1, h2), as sorted copies."""
+    order = sort_order(h1, h2)
     return cp.take_along_axis(h1, order, axis=1), cp.take_along_axis(h2, order, axis=1)
 
 
@@ -225,7 +230,47 @@ def garud_walk(s1, s2):
     return (*garud_from_moments(*moments[:4]), moments[4])
 
 
-def garud_h_windows(hap, win_start, win_stop):
+def n_segments(win_start, win_stop):
+    """Segments that ``segmented_hashes`` splits the longest window into."""
+    longest = int(cp.max(win_stop - win_start).get()) if win_start.size else 0
+    return max(1, (longest + _ROW_SEGMENT - 1) // _ROW_SEGMENT)
+
+
+def segmented_hashes(hap, w1, w2, win_start, win_stop, n_seg):
+    """(n_windows, n_hap) hashes, each window summed over fixed segments.
+
+    Splitting a long window into segments gives the GPU many threads per
+    haplotype. Every row of a window uses the same segments and the same
+    reduction, so identical rows stay bit-identical; an empty segment
+    hashes to zero. ``n_seg`` must cover the longest window (see
+    ``n_segments``).
+    """
+    n_windows = int(win_start.size)
+    n_hap = hap.shape[0]
+    offs = cp.arange(n_seg, dtype=cp.int64) * _ROW_SEGMENT
+    seg_lo = cp.minimum(win_start[:, None] + offs, win_stop[:, None])
+    seg_hi = cp.minimum(seg_lo + _ROW_SEGMENT, win_stop[:, None])
+    h1, h2 = window_hashes(hap, w1, w2, seg_lo.ravel(), seg_hi.ravel())
+    shape = (n_windows, n_seg, n_hap)
+    return h1.reshape(shape).sum(axis=1), h2.reshape(shape).sum(axis=1)
+
+
+def row_hashes(hap):
+    """Whole-row hashes for counting the distinct haplotypes of a matrix.
+
+    Returns
+    -------
+    hash1, hash2 : cupy.ndarray, float64, shape (n_hap,)
+    """
+    n_var = hap.shape[1]
+    start = cp.zeros(1, dtype=cp.int64)
+    stop = cp.full(1, n_var, dtype=cp.int64)
+    h1, h2 = segmented_hashes(hap, *hash_weights(n_var), start, stop,
+                              n_segments(start, stop))
+    return h1[0], h2[0]
+
+
+def garud_h_windows(hap, win_start, win_stop, missing_data='include'):
     """Garud's H1, H12, H123, H2/H1 and distinct-haplotype count per window.
 
     Parameters
@@ -233,6 +278,11 @@ def garud_h_windows(hap, win_start, win_stop):
     hap : cupy.ndarray, shape (n_hap, n_var), signed integer
     win_start, win_stop : array_like of int
         Right-open variant index range of each window.
+    missing_data : {'include', 'exclude'}
+        'include' - a window with missing calls gets EM haplotype
+        frequencies (see ``_haplotype_groups``); a window with no complete
+        haplotype gives NaN.
+        'exclude' - each window uses only its sites with no missing call.
 
     Returns
     -------
@@ -243,6 +293,10 @@ def garud_h_windows(hap, win_start, win_stop):
     Windows are processed in batches sized to free GPU memory. Each window's
     result depends only on its own variants, so batching never changes a value.
     """
+    from ._haplotype_groups import (
+        column_has_missing, window_batch_size, window_moments,
+    )
+
     hap = _as_kernel_input(hap)
     n_hap, n_var = hap.shape
     win_start = cp.asarray(win_start, dtype=cp.int64)
@@ -252,32 +306,45 @@ def garud_h_windows(hap, win_start, win_stop):
     if n_windows == 0:
         return tuple(out)
     w1, w2 = hash_weights(n_var)
+
+    col_missing = column_has_missing(hap)
+    if missing_data == 'exclude':
+        # A zero weight drops a site from the hash exactly: fma(x, 0, a)
+        # returns a bit for bit, so the hash is the hash over the complete
+        # sites alone.
+        hw1 = cp.where(col_missing, 0.0, w1)
+        hw2 = cp.where(col_missing, 0.0, w2)
+        has_missing = cp.zeros(n_windows, dtype=cp.bool_)
+    else:
+        hw1, hw2 = w1, w2
+        n_miss = cp.concatenate([cp.zeros(1, dtype=cp.int64),
+                                 cp.cumsum(col_missing, dtype=cp.int64)])
+        has_missing = n_miss[win_stop] > n_miss[win_start]
+    clean = cp.nonzero(~has_missing)[0]
+    missing = cp.nonzero(has_missing)[0]
+    clean_idx, missing_idx = clean.get(), missing.get()
+
+    # Windows with no missing call: exact hash, sort and run walk.
+    c_start, c_stop = win_start[clean], win_stop[clean]
     batch = _memutil.estimate_garud_window_batch(n_hap)
-    for b0 in range(0, n_windows, batch):
-        b1 = min(b0 + batch, n_windows)
-        h1, h2 = window_hashes(hap, w1, w2, win_start[b0:b1], win_stop[b0:b1])
+    for b0 in range(0, clean_idx.size, batch):
+        b1 = min(b0 + batch, clean_idx.size)
+        h1, h2 = window_hashes(hap, hw1, hw2, c_start[b0:b1], c_stop[b0:b1])
         s1, s2 = sort_window_hashes(h1, h2)
         del h1, h2
         stats = garud_walk(s1, s2)
         del s1, s2
-        out[:, b0:b1] = cp.stack(stats).get()
+        out[:, clean_idx[b0:b1]] = cp.stack(stats).get()
+
+    # Windows with missing calls: EM frequencies.
+    if missing_idx.size:
+        m_start, m_stop = win_start[missing], win_stop[missing]
+        n_seg = n_segments(m_start, m_stop)
+        batch = window_batch_size(n_hap, n_seg)
+        for b0 in range(0, missing_idx.size, batch):
+            b1 = min(b0 + batch, missing_idx.size)
+            sum_f2, top0, top1, top2, n_distinct = window_moments(
+                hap, m_start[b0:b1], m_stop[b0:b1], w1, w2, n_seg)
+            stats = garud_from_moments(sum_f2, top0, top1, top2)
+            out[:, missing_idx[b0:b1]] = cp.stack([*stats, n_distinct]).get()
     return tuple(out)
-
-
-def row_hashes(hap):
-    """Whole-row hashes for counting the distinct haplotypes of a matrix.
-
-    Rows are summed in fixed segments so the GPU has many threads per
-    haplotype; every row uses the same segments in the same order, so
-    identical rows stay bit-identical. A row shorter than one segment hashes
-    exactly like a single window over the whole row.
-
-    Returns
-    -------
-    hash1, hash2 : cupy.ndarray, float64, shape (n_hap,)
-    """
-    n_var = hap.shape[1]
-    starts = cp.arange(0, n_var, _ROW_SEGMENT, dtype=cp.int64)
-    stops = cp.minimum(starts + _ROW_SEGMENT, n_var)
-    h1, h2 = window_hashes(hap, *hash_weights(n_var), starts, stops)
-    return h1.sum(axis=0), h2.sum(axis=0)

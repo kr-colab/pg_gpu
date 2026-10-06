@@ -1,3 +1,5 @@
+import copy
+
 import cupy as cp
 import numpy as np
 import allel
@@ -295,7 +297,9 @@ class HaplotypeMatrix:
         self.chrom_end = chrom_end
         self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
-        self.samples = samples  # diploid sample names from VCF
+        # Diploid sample names from VCF; copied so a derived matrix never
+        # shares the caller's list.
+        self.samples = copy.copy(samples)
         # Optional per-variant (n_var,) and per-genotype (n_var, n_samples)
         # VCF FORMAT/INFO arrays. Empty dict when no quality fields were
         # requested at load time. Shape disambiguates per-variant vs
@@ -1175,7 +1179,7 @@ class HaplotypeMatrix:
         result.chrom_start = self.chrom_start
         result.chrom_end = self.chrom_end
         result.n_total_sites = self.n_total_sites
-        result.samples = self.samples
+        result.samples = copy.copy(self.samples)
         result.fields = {tag: arr[:0] for tag, arr in self.fields.items()}
         result.accessible_mask = None
         return result
@@ -1756,8 +1760,8 @@ class HaplotypeMatrix:
     def _pairwise_ld_core(self, hap_clean=None, valid_mask=None):
         """Shared computation for pairwise LD methods.
 
-        Computes allele frequencies, joint frequencies, and D matrix from
-        haplotype data, handling missing values.
+        Computes pairwise-complete allele frequencies, joint frequencies, and
+        D matrix from haplotype data, handling missing values.
 
         Parameters
         ----------
@@ -1771,9 +1775,11 @@ class HaplotypeMatrix:
         Returns
         -------
         D : cupy.ndarray, shape (m, m)
-            Pairwise D = p_AB - p_A*p_B.
-        p : cupy.ndarray, shape (m,)
-            Per-site allele frequencies.
+            Pairwise D = p_AB - p_i*p_j.
+        p_i, p_j : cupy.ndarray, shape (m, m)
+            Allele frequency at site i (resp. j) restricted to the gametes
+            valid at both sites of the pair (m, m), not a per-site (m,)
+            vector.
         """
         if self.device == 'CPU':
             self.transfer_to_gpu()
@@ -1783,15 +1789,21 @@ class HaplotypeMatrix:
             valid_mask = (ind >= 0).astype(cp.float64)
             hap_clean = cp.where(ind >= 0, ind, 0).astype(cp.float64)
 
-        n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-        p = cp.where(n_valid > 0, cp.sum(hap_clean, axis=0) / n_valid, 0.0)
-
         joint_n = valid_mask.T @ valid_mask
         joint_11 = hap_clean.T @ hap_clean
-        p_AB = cp.where(joint_n > 0, joint_11 / joint_n, 0.0)
+        # p_i/p_j use the pair's joint-valid sample, not each site's own marginal one.
+        sum_i = hap_clean.T @ valid_mask
 
-        D = p_AB - cp.outer(p, p)
-        return D, p
+        # Clamp joint_n in place before dividing: numerator is provably 0
+        # wherever joint_n is 0, so the clamped divide gives exact 0 there too.
+        cp.maximum(joint_n, 1.0, out=joint_n)
+        sum_i /= joint_n
+        joint_11 /= joint_n
+        p_i, p_AB = sum_i, joint_11  # aliases, not copies
+        p_j = p_i.T  # joint_n is symmetric, so this is exact, not a tile approximation
+
+        D = p_AB - p_i * p_j
+        return D, p_i, p_j
 
     def pairwise_LD_v(self) -> cp.ndarray:
         """Pairwise linkage disequilibrium (D statistic) via matrix multiply.
@@ -1802,7 +1814,7 @@ class HaplotypeMatrix:
         from ._warnings import _warn_biallelic_only
         bmask = self._biallelic_mask()
         _warn_biallelic_only(int((~bmask).sum()), context="pairwise_LD_v")
-        D, _ = self._pairwise_ld_core()
+        D, _, _ = self._pairwise_ld_core()
         bad = ~bmask
         D[bad, :] = cp.nan
         D[:, bad] = cp.nan
@@ -1856,9 +1868,15 @@ class HaplotypeMatrix:
         from ._warnings import _warn_biallelic_only
         bmask = self._biallelic_mask()
         _warn_biallelic_only(int((~bmask).sum()), context="pairwise_r2")
-        D, p = self._pairwise_ld_core()
-        denom_squared = cp.outer(p * (1 - p), p * (1 - p))
-        r2 = cp.where(denom_squared > 0, (D ** 2) / denom_squared, cp.nan)
+        D, p_i, p_j = self._pairwise_ld_core()
+        p_i *= (1 - p_i)  # now var_i; p_j (a transpose view of p_i) becomes var_j for free
+        var_i, var_j = p_i, p_j
+        undefined = (var_i <= 0) | (var_j <= 0)
+        D *= D
+        D /= var_i
+        D /= var_j  # D now holds r2, in place
+        D[undefined] = cp.nan
+        r2 = D
         bad = ~bmask
         r2[bad, :] = cp.nan
         r2[:, bad] = cp.nan
@@ -1913,11 +1931,11 @@ class HaplotypeMatrix:
             active_idx = np.where(active)[0] + w_start
             active_idx_gpu = cp.asarray(active_idx)
 
-            D, p_w = self._pairwise_ld_core(
+            D, p_i, p_j = self._pairwise_ld_core(
                 hap_clean[:, active_idx_gpu],
                 valid_mask[:, active_idx_gpu],
             )
-            denom = cp.outer(p_w * (1 - p_w), p_w * (1 - p_w))
+            denom = (p_i * (1 - p_i)) * (p_j * (1 - p_j))
             r2_mat = cp.where(denom > 0, (D ** 2) / denom, 0.0)
             cp.fill_diagonal(r2_mat, 0.0)
 

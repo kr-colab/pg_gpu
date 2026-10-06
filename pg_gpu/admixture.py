@@ -9,7 +9,7 @@ import numpy as np
 import cupy as cp
 from typing import Union, Optional, Tuple
 from .haplotype_matrix import HaplotypeMatrix
-from ._utils import get_population_matrix as _get_population_matrix
+from ._utils import population_rows
 from .resampling import block_jackknife, _moving_nansum, _moving_nanmean
 
 
@@ -23,7 +23,7 @@ def _aligned_allele_counts(haplotype_matrix, pops):
     divergence). This is the counting substrate for the tskit f-statistics.
     """
     from ._memutil import allele_counts
-    mats = [_get_population_matrix(haplotype_matrix, p) for p in pops]
+    mats = [population_rows(haplotype_matrix, p) for p in pops]
     for m in mats:
         if m.device == 'CPU':
             m.transfer_to_gpu()
