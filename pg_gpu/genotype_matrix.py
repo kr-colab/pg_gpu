@@ -65,11 +65,16 @@ class GenotypeMatrix:
 
     def __init__(self, genotypes, positions, chrom_start=None, chrom_end=None,
                  sample_sets=None, n_total_sites=None, samples=None,
-                 accessible_mask=None, fields=None):
-        if genotypes.size == 0:
-            raise ValueError("genotypes cannot be empty")
-        if positions.size == 0:
-            raise ValueError("positions cannot be empty")
+                 accessible_mask=None, fields=None, allow_empty=False):
+        # ``allow_empty`` mirrors HaplotypeMatrix: the streaming chunk builder
+        # yields zero-variant chunks over empty regions (e.g. an acrocentric
+        # arm) so windowed analysis can emit their windows. Eager callers keep
+        # the non-empty invariant every eager kernel relies on.
+        if not allow_empty:
+            if genotypes.size == 0:
+                raise ValueError("genotypes cannot be empty")
+            if positions.size == 0:
+                raise ValueError("positions cannot be empty")
 
         if isinstance(genotypes, cp.ndarray):
             self._device = 'GPU'
@@ -627,12 +632,15 @@ class GenotypeMatrix:
                                source=f"zarr store '{path}'")
 
         n_total_sites = gt.shape[0] if include_invariant else None
-        chrom = parse_region(region)[0]
+
+        chrom, start, stop = parse_region(region)
+        start = start if start is not None else int(positions[0])
+        stop = stop - 1 if stop is not None else int(positions[-1])
 
         gm = build_genotype_matrix(
             gt, positions,
-            chrom_start=int(positions[0]),
-            chrom_end=int(positions[-1]),
+            chrom_start=start,
+            chrom_end=stop,
             n_total_sites=n_total_sites,
             samples=list(samples) if samples else None,
         )
@@ -681,10 +689,7 @@ class GenotypeMatrix:
             source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
 
-        # Resolve the accessible BED once over the source's variant-position
-        # bounds so every chunk is filtered to accessible variants, matching
-        # the eager path's mask-filtered .genotypes view (grm/ibs read that
-        # view, so streaming and eager see the same variant set).
+        # Resolve the accessible BED once over the source's bounds
         from .accessible import resolve_streaming_accessible_mask
         accessible_mask = resolve_streaming_accessible_mask(
             accessible_bed, source, region)
