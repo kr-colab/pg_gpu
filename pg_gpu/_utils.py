@@ -40,6 +40,12 @@ def get_population_matrix(matrix, population: Union[str, list]):
         check_sample_set_rows("population row list", pop_indices,
                               matrix.shape[0])
 
+    # A streaming empty chunk (zero variants over an empty region) must
+    # survive population subsetting so windowed stats can still emit its
+    # windows. The emptiness is inherited from the parent, not newly
+    # introduced here, so both classes carry the same allowance.
+    allow_empty = matrix.num_variants == 0
+
     subset_sets = {'all': list(range(len(pop_indices)))}
     if isinstance(matrix, GenotypeMatrix):
         return GenotypeMatrix(
@@ -49,6 +55,7 @@ def get_population_matrix(matrix, population: Union[str, list]):
             matrix.chrom_end,
             sample_sets=subset_sets,
             n_total_sites=matrix.n_total_sites,
+            allow_empty=allow_empty,
         )
     return HaplotypeMatrix(
         matrix.haplotypes[pop_indices, :],
@@ -57,4 +64,5 @@ def get_population_matrix(matrix, population: Union[str, list]):
         matrix.chrom_end,
         sample_sets=subset_sets,
         n_total_sites=matrix.n_total_sites,
+        allow_empty=allow_empty,
     )
