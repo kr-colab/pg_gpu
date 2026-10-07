@@ -2097,12 +2097,17 @@ class HaplotypeMatrix:
         pairs of a 0/1 array (negative = missing).
 
         Each count comes from a matmul that contracts the sample axis, so there
-        is no per-pair loop. Peak memory is the float64 copy of ``X``
-        (8 bytes per element, two copies with missing data) plus O(m^2) for the
-        pair matrices. The matmuls run in
-        float64: an int8 matmul returns int8 and wraps once a pair has more
-        than 127 carriers, while float64 is exact to 2**53 and is also faster
-        than integer matmul on the GPU.
+        is no per-pair loop. The matmuls run in floating point: an int8 matmul
+        returns int8 and wraps once a pair has more than 127 carriers, and
+        integer matmul is also slower on the GPU. Every count is an integer no
+        larger than n, and float32 holds every integer up to 2**24 exactly, so
+        float32 is exact for n <= 2**24; above that the tally uses float64.
+        TF32 matmul (``CUPY_TF32=1``) keeps this exact, because 0/1 inputs
+        survive TF32 rounding unchanged and cuBLAS accumulates in FP32.
+
+        Peak memory is the float copy of ``X`` (4 bytes per element, 8 above
+        2**24 haplotypes; two copies with missing data) plus O(m^2) for the
+        pair matrices.
 
         With no missing data ``n11 = H.T @ H`` is the only matmul and its
         diagonal gives each site's carrier count. With missing data, only
@@ -2121,12 +2126,13 @@ class HaplotypeMatrix:
         if out is None:
             out = cp.empty((idx_i.size, 4), dtype=cp.int32)
 
-        H = (X == 1).astype(cp.float64)
+        dt = cp.float32 if X.shape[0] <= 2**24 else cp.float64
+        H = (X == 1).astype(dt)
         HH = H.T @ H
         n11 = HH[idx_i, idx_j]
         if missing:
             del HH
-            V = (X >= 0).astype(cp.float64)
+            V = (X >= 0).astype(dt)
             S = H.T @ V
             del H
             n_valid = (V.T @ V)[idx_i, idx_j]

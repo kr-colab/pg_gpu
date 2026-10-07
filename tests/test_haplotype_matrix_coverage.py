@@ -198,6 +198,21 @@ def test_tally_multiallelic_site_warns_and_lumps():
     np.testing.assert_array_equal(_host(counts), _ref_tally(lumped)[0])
 
 
+@pytest.mark.parametrize("n,missing", [(2**24, False), (2**24 + 1, False), (2**24 + 2, True)])
+def test_tally_exact_at_float32_limit(n, missing):
+    # float32 holds integers exactly only up to 2**24, so 2**24 + 1 carriers
+    # pins the switch to float64. One missing call at variant 0 pins the
+    # missing-data path above the limit too.
+    X = cp.ones((n, 3), dtype=cp.int8)
+    if missing:
+        X[0, 0] = -1
+    counts, n_valid = HaplotypeMatrix._tally_pairs_impl(X)
+    n_ok = n - 1 if missing else n
+    np.testing.assert_array_equal(_host(counts), [[n_ok, 0, 0, 0], [n_ok, 0, 0, 0], [n, 0, 0, 0]])
+    if missing:
+        np.testing.assert_array_equal(_host(n_valid), [n_ok, n_ok, n])
+
+
 # ── D. Missing-data introspection ──────────────────────────────────────
 def test_missing_introspection_gpu():
     hm = _hm(X_MISS, POS5, gpu=True)
