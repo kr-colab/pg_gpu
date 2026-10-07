@@ -82,6 +82,19 @@ def test_tally_two_pops_with_missing():
         np.testing.assert_array_equal(_host(a), _host(b))
 
 
+def test_tally_tuple_row_lists():
+    # Tuple row lists are valid sample sets; they must select rows, not index
+    # one axis per element.
+    hm = _hm(X_MISS, POS5, gpu=True, sample_sets={"p1": (0, 1, 2, 3), "p2": (4, 5, 6, 7)})
+    counts, n_valid = hm.tally_gpu_haplotypes(pop="p1")
+    ref_c, ref_v = _ref_tally(X_MISS[:4])
+    np.testing.assert_array_equal(_host(counts), ref_c)
+    np.testing.assert_array_equal(_host(n_valid), ref_v)
+    counts2, _, _ = hm.tally_gpu_haplotypes_two_pops("p1", "p2")
+    np.testing.assert_array_equal(_host(counts2)[:, :4], ref_c)
+    np.testing.assert_array_equal(_host(counts2)[:, 4:], _ref_tally(X_MISS[4:])[0])
+
+
 def test_tally_two_pops_all_missing_pop_pair():
     # Pop1 is entirely missing at variant 0, so any pair (0, j) has n_valid1==0
     # and pop1's counts are zero, while pop2 is tallied normally.

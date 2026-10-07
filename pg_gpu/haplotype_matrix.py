@@ -2060,6 +2060,9 @@ class HaplotypeMatrix:
         return self._biallelic_indicator()
 
     def _pop_indices(self, *pops):
+        """Validated row lists for ``pops``. A row list may be a tuple, so
+        callers index with ``X[rows, :]``: ``X[rows]`` would read a tuple as
+        one index per axis."""
         if self._sample_sets is None:
             raise ValueError("sample_sets must be defined to use this function")
         missing = [p for p in pops if p not in self._sample_sets]
@@ -2086,15 +2089,17 @@ class HaplotypeMatrix:
                           or None if no missing data is present
         """
         rows = slice(None) if pop is None else self._pop_indices(pop)[0]
-        return self._tally_pairs_impl(self._tally_indicator("tally_gpu_haplotypes")[rows])
+        return self._tally_pairs_impl(self._tally_indicator("tally_gpu_haplotypes")[rows, :])
 
     @staticmethod
     def _tally_pairs_impl(X, missing=None, out=None):
         """Pairwise ``[n11, n10, n01, n00]`` tallies over all upper-triangle
         pairs of a 0/1 array (negative = missing).
 
-        Each count comes from a matmul that contracts the sample axis, so peak
-        memory is O(m^2) and there is no per-pair loop. The matmuls run in
+        Each count comes from a matmul that contracts the sample axis, so there
+        is no per-pair loop. Peak memory is the float64 copy of ``X``
+        (8 bytes per element, two copies with missing data) plus O(m^2) for the
+        pair matrices. The matmuls run in
         float64: an int8 matmul returns int8 and wraps once a pair has more
         than 127 carriers, while float64 is exact to 2**53 and is also faster
         than integer matmul on the GPU.
@@ -2175,7 +2180,7 @@ class HaplotypeMatrix:
         """
         idx1, idx2 = self._pop_indices(pop1, pop2)
         ind = self._tally_indicator("tally_gpu_haplotypes_two_pops_with_missing")
-        return self._tally_two_pops_impl(ind[idx1], ind[idx2], missing=True)
+        return self._tally_two_pops_impl(ind[idx1, :], ind[idx2, :], missing=True)
 
     def tally_gpu_haplotypes_two_pops(self, pop1: str, pop2: str):
         """
@@ -2191,7 +2196,7 @@ class HaplotypeMatrix:
         """
         idx1, idx2 = self._pop_indices(pop1, pop2)
         ind = self._tally_indicator("tally_gpu_haplotypes_two_pops")
-        return self._tally_two_pops_impl(ind[idx1], ind[idx2])
+        return self._tally_two_pops_impl(ind[idx1, :], ind[idx2, :])
 
     # TODO: this is not correct
     def compute_ld_statistics_gpu_single_pop(

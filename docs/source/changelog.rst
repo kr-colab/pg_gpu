@@ -208,7 +208,9 @@ Bug fixes
   recode each site to a 0/1 indicator first, as ``windowed_r_squared``
   does. Counts are ``int32`` on every path.
   ``tally_gpu_haplotypes_two_pops_with_missing`` no longer loops over
-  pairs in Python.
+  pairs in Python. ``tally_gpu_haplotypes_two_pops`` now looks for
+  missing calls only in the two populations, so missing data in a third
+  population no longer turns ``n_valid1`` and ``n_valid2`` into arrays.
 * ``pairwise_r2`` and the naive ``r2`` estimator behind ``zns``/``omega``
   computed the joint 11-frequency over the pairwise-complete sample but
   each site's own frequency over its separate, larger marginal sample,
