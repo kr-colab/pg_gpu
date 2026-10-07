@@ -5,6 +5,7 @@ This module provides efficient computation of population divergence metrics
 including FST, Dxy, and related statistics using GPU acceleration.
 """
 
+import math
 import warnings
 
 import numpy as np
@@ -990,23 +991,66 @@ def _snn_one_pop(within, between):
     """Score one population block for Hudson's Snn on GPU.
 
     For each haplotype, checks whether its nearest neighbor is within-pop
-    (score 1), between-pop (score 0), or tied (fractional score).
+    (score 1), between-pop (score 0), or tied (fractional score). An
+    undefined distance (NaN: no site called by both haplotypes) is no
+    neighbor, and a haplotype with no neighbor at all is left out.
+
+    Returns
+    -------
+    score : float
+        Sum of the scores.
+    n_scored : int
+        Haplotypes with at least one neighbor.
     """
-    w = within.copy()
+    w = cp.nan_to_num(within, nan=cp.inf)
     cp.fill_diagonal(w, cp.inf)
+    b = cp.nan_to_num(between, nan=cp.inf)
     min_within = cp.min(w, axis=1)
-    min_between = cp.min(between, axis=1)
+    min_between = cp.min(b, axis=1)
+    scored = cp.isfinite(min_within) | cp.isfinite(min_between)
 
     score = (min_within < min_between).astype(cp.float64)
 
-    tied = min_within == min_between
+    tied = scored & (min_within == min_between)
     if cp.any(tied):
         n_within_ties = cp.sum(w == min_within[:, None], axis=1)
-        n_between_ties = cp.sum(between == min_between[:, None], axis=1)
+        n_between_ties = cp.sum(b == min_between[:, None], axis=1)
         tie_score = n_within_ties / (n_within_ties + n_between_ties)
         score = cp.where(tied, tie_score, score)
 
-    return float(cp.sum(score).get())
+    score = cp.where(scored, score, 0.0)
+    return float(cp.sum(score).get()), int(cp.count_nonzero(scored).get())
+
+
+def _finite(values):
+    """The defined (non-NaN) entries of ``values``, flattened."""
+    values = values.ravel()
+    return values[~cp.isnan(values)]
+
+
+def _within_pairs(dist_within):
+    """Defined distances between distinct members of one population."""
+    n = dist_within.shape[0]
+    return _finite(dist_within[cp.triu_indices(n, k=1)])
+
+
+def _min_or_nan(values):
+    return float(cp.min(values).get()) if values.size else float('nan')
+
+
+def _mean_or_nan(values):
+    return float(cp.mean(values).get()) if values.size else float('nan')
+
+
+def _rank_below(within, min_dxy):
+    """Fraction of ``within`` distances at or below ``min_dxy``."""
+    if within.size == 0 or math.isnan(min_dxy):
+        return float('nan')
+    return float(cp.mean((within <= min_dxy).astype(cp.float64)).get())
+
+
+def _ratio(num, den):
+    return num / den if den > 0 else float('nan')
 
 
 def _resolve_distance_matrices(haplotype_matrix, pop1, pop2,
@@ -1071,6 +1115,22 @@ def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     dist_between : cupy.ndarray, float64, shape (n1, n2)
     dist_within1 : cupy.ndarray, float64, shape (n1, n1)
     dist_within2 : cupy.ndarray, float64, shape (n2, n2)
+        The number of sites at which a pair differs, scaled to all sites:
+        ``differences * n_sites / sites_both_called``. With no missing call
+        this is the plain Hamming distance. NaN for a pair with no site
+        called by both haplotypes.
+
+    Notes
+    -----
+    The scaling removes the bias of a raw count, but not its noise. A
+    pair that shares few sites gets a coarse value: with one shared site
+    the distance is either 0 or ``n_sites``. The minimum-based statistics
+    (``snn``, ``dxy_min``, ``gmin``, ``dd``, ``dd_rank``) pick the most
+    extreme pair, so a haplotype with very few calls can set them by
+    chance. Remove haplotypes with a low call rate before you compute
+    these statistics. ``missing_data='exclude'`` does not prevent this:
+    a haplotype with very few calls also reduces the set of complete
+    sites to those few sites.
     """
     from .distance_stats import _pairwise_diffs_matrix_gpu
 
@@ -1086,10 +1146,16 @@ def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     hap = haplotype_matrix.haplotypes
     hap_sub = hap[all_idx, :]
 
-    # Raw Hamming distances (not normalized) — appropriate for ratio/rank stats
-    diffs = _pairwise_diffs_matrix_gpu(hap_sub, missing_data='include')
+    # A pair can only differ at the sites both haplotypes call, so a raw
+    # count makes a haplotype with missing calls look close to everything.
+    # Scaling each count to the full site count puts every pair on one
+    # footing; with no missing call the scale is 1 and the count is exact.
+    diffs, joint = _pairwise_diffs_matrix_gpu(hap_sub, missing_data='include',
+                                              return_joint_valid=True)
+    n_sites = hap_sub.shape[1]
+    dist = cp.where(joint > 0, diffs * n_sites / cp.maximum(joint, 1.0), cp.nan)
 
-    return diffs[:n1, n1:], diffs[:n1, :n1], diffs[n1:, n1:]
+    return dist[:n1, n1:], dist[:n1, :n1], dist[n1:, n1:]
 
 
 def snn(haplotype_matrix: HaplotypeMatrix,
@@ -1126,12 +1192,9 @@ def snn(haplotype_matrix: HaplotypeMatrix,
     """
     dist_between, dist_within1, dist_within2 = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
-    n1, n2 = dist_between.shape
-
-    count = _snn_one_pop(dist_within1, dist_between)
-    count += _snn_one_pop(dist_within2, dist_between.T)
-
-    return count / (n1 + n2)
+    score1, n_scored1 = _snn_one_pop(dist_within1, dist_between)
+    score2, n_scored2 = _snn_one_pop(dist_within2, dist_between.T)
+    return _ratio(score1 + score2, n_scored1 + n_scored2)
 
 
 def dxy_min(haplotype_matrix: HaplotypeMatrix,
@@ -1141,9 +1204,11 @@ def dxy_min(haplotype_matrix: HaplotypeMatrix,
             distance_matrices=None) -> float:
     """Minimum pairwise distance between two populations.
 
-    The Hamming distance of the closest pair of haplotypes across
-    the two populations. Used in Gmin (Geneva et al.) and dd
-    (Schrider et al.) statistics.
+    The distance of the closest pair of haplotypes across the two
+    populations (see ``pairwise_distance_matrix`` for the distance). Used
+    in Gmin (Geneva et al.) and dd (Schrider et al.) statistics. Under
+    missing data, a pair that shares few sites can set the minimum by
+    chance; see the Notes of ``pairwise_distance_matrix``.
 
     Parameters
     ----------
@@ -1165,7 +1230,7 @@ def dxy_min(haplotype_matrix: HaplotypeMatrix,
     """
     dist_between, _, _ = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
-    return float(cp.min(dist_between).get())
+    return _min_or_nan(_finite(dist_between))
 
 
 def gmin(haplotype_matrix: HaplotypeMatrix,
@@ -1199,11 +1264,8 @@ def gmin(haplotype_matrix: HaplotypeMatrix,
     """
     dist_between, _, _ = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
-    mean_dxy = float(cp.mean(dist_between).get())
-    min_dxy = float(cp.min(dist_between).get())
-    if mean_dxy == 0:
-        return float('nan')
-    return min_dxy / mean_dxy
+    between = _finite(dist_between)
+    return _ratio(_min_or_nan(between), _mean_or_nan(between))
 
 
 def dd(haplotype_matrix: HaplotypeMatrix,
@@ -1215,7 +1277,14 @@ def dd(haplotype_matrix: HaplotypeMatrix,
 
     dd1 = Dxy_min / pi1, dd2 = Dxy_min / pi2. Low values indicate
     that the closest between-population pair is unusually similar
-    relative to within-population diversity.
+    relative to within-population diversity. pi is the mean distance
+    between two members of the population, from the same distances as
+    Dxy_min (see ``pairwise_distance_matrix``); with no missing call it
+    equals ``diversity.pi(..., span_normalize=False)``. Under missing data
+    the two can differ. ``diversity.pi`` counts a site with fewer than two
+    calls as a site with no diversity, while here each pair is scaled to
+    all sites. A haplotype that shares no site with any other member of
+    its population adds nothing to pi here.
 
     Parameters
     ----------
@@ -1239,20 +1308,11 @@ def dd(haplotype_matrix: HaplotypeMatrix,
     of Drosophila simulans and D. sechellia. PLoS Genetics, 14(4),
     e1007341. https://doi.org/10.1371/journal.pgen.1007341
     """
-    from . import diversity
-
-    dist_between, _, _ = _resolve_distance_matrices(
+    dist_between, dist_within1, dist_within2 = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
-    min_dxy = float(cp.min(dist_between).get())
-
-    pi1 = diversity.pi(haplotype_matrix, population=pop1,
-                       span_normalize=False, missing_data=missing_data)
-    pi2 = diversity.pi(haplotype_matrix, population=pop2,
-                       span_normalize=False, missing_data=missing_data)
-
-    dd1 = min_dxy / pi1 if pi1 > 0 else float('nan')
-    dd2 = min_dxy / pi2 if pi2 > 0 else float('nan')
-    return dd1, dd2
+    min_dxy = _min_or_nan(_finite(dist_between))
+    return (_ratio(min_dxy, _mean_or_nan(_within_pairs(dist_within1))),
+            _ratio(min_dxy, _mean_or_nan(_within_pairs(dist_within2))))
 
 
 def dd_rank(haplotype_matrix: HaplotypeMatrix,
@@ -1291,17 +1351,9 @@ def dd_rank(haplotype_matrix: HaplotypeMatrix,
     """
     dist_between, dist_within1, dist_within2 = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
-    min_dxy = cp.min(dist_between)
-
-    # Extract upper triangle of within-pop distances (exclude diagonal)
-    idx1 = cp.triu_indices(dist_within1.shape[0], k=1)
-    within1 = dist_within1[idx1]
-    idx2 = cp.triu_indices(dist_within2.shape[0], k=1)
-    within2 = dist_within2[idx2]
-
-    rank1 = float(cp.mean((within1 <= min_dxy).astype(cp.float64)).get()) if len(within1) > 0 else float('nan')
-    rank2 = float(cp.mean((within2 <= min_dxy).astype(cp.float64)).get()) if len(within2) > 0 else float('nan')
-    return rank1, rank2
+    min_dxy = _min_or_nan(_finite(dist_between))
+    return (_rank_below(_within_pairs(dist_within1), min_dxy),
+            _rank_below(_within_pairs(dist_within2), min_dxy))
 
 
 def zx(haplotype_matrix: HaplotypeMatrix,
@@ -1359,8 +1411,9 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
                           missing_data: str = 'include') -> Dict[str, float]:
     """Compute all distance-based two-population statistics at once.
 
-    Shares the pairwise distance matrix computation across Snn, Gmin,
-    dd, and dd_rank, avoiding redundant GPU work.
+    Computes the pairwise distance matrices once and passes them to
+    ``snn``, ``dxy_min``, ``gmin``, ``dd`` and ``dd_rank``, so each value
+    equals the standalone function's.
 
     Parameters
     ----------
@@ -1373,33 +1426,16 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
     dict
         Keys: snn, dxy_min, gmin, dd1, dd2, dd_rank1, dd_rank2.
     """
-    dist_between, dist_within1, dist_within2 = pairwise_distance_matrix(
-        haplotype_matrix, pop1, pop2, missing_data)
-    n1, n2 = dist_between.shape
-
-    min_dxy_gpu = cp.min(dist_between)
-    min_dxy = float(min_dxy_gpu.get())
-    mean_dxy = float(cp.mean(dist_between).get())
-
-    snn_val = (_snn_one_pop(dist_within1, dist_between)
-               + _snn_one_pop(dist_within2, dist_between.T)) / (n1 + n2)
-
-    idx1 = cp.triu_indices(n1, k=1)
-    within1 = dist_within1[idx1]
-    idx2 = cp.triu_indices(n2, k=1)
-    within2 = dist_within2[idx2]
-    rank1 = float(cp.mean((within1 <= min_dxy_gpu).astype(cp.float64)).get()) if len(within1) > 0 else float('nan')
-    rank2 = float(cp.mean((within2 <= min_dxy_gpu).astype(cp.float64)).get()) if len(within2) > 0 else float('nan')
-
-    pi1 = float(cp.mean(within1).get()) if len(within1) > 0 else 0.0
-    pi2 = float(cp.mean(within2).get()) if len(within2) > 0 else 0.0
-
+    dm = pairwise_distance_matrix(haplotype_matrix, pop1, pop2, missing_data)
+    args = (haplotype_matrix, pop1, pop2, missing_data, dm)
+    dd1, dd2 = dd(*args)
+    rank1, rank2 = dd_rank(*args)
     return {
-        'snn': snn_val,
-        'dxy_min': min_dxy,
-        'gmin': min_dxy / mean_dxy if mean_dxy > 0 else float('nan'),
-        'dd1': min_dxy / pi1 if pi1 > 0 else float('nan'),
-        'dd2': min_dxy / pi2 if pi2 > 0 else float('nan'),
+        'snn': snn(*args),
+        'dxy_min': dxy_min(*args),
+        'gmin': gmin(*args),
+        'dd1': dd1,
+        'dd2': dd2,
         'dd_rank1': rank1,
         'dd_rank2': rank2,
     }
