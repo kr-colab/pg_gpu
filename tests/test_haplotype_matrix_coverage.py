@@ -77,12 +77,14 @@ def test_tally_two_pops_with_missing():
     np.testing.assert_array_equal(_host(counts)[:, 4:], c2)
     np.testing.assert_array_equal(_host(v1), rv1)
     np.testing.assert_array_equal(_host(v2), rv2)
+    forced = hm.tally_gpu_haplotypes_two_pops_with_missing("p1", "p2")
+    for a, b in zip(forced, (counts, v1, v2)):
+        np.testing.assert_array_equal(_host(a), _host(b))
 
 
 def test_tally_two_pops_all_missing_pop_pair():
     # Pop1 is entirely missing at variant 0, so any pair (0, j) has n_valid1==0
-    # and pop1's counts stay zero (the `if n_valid1 > 0` guard's false branch)
-    # while pop2 is tallied normally.
+    # and pop1's counts are zero, while pop2 is tallied normally.
     X = np.array([
         [-1, 0, 1],   # p1
         [-1, 1, 0],   # p1
@@ -115,6 +117,72 @@ def test_tally_pop_validation_raises():
         hm2.tally_gpu_haplotypes(pop="nope")
     with pytest.raises(KeyError):
         hm2.tally_gpu_haplotypes_two_pops("p1", "nope")
+
+
+# Complete 0/1 data, 300 haplotypes x 6 variants, where many pairs share far
+# more than 127 carriers: an int8 sample-contracting matmul wraps there.
+# Column 0 is fixed for the alt allele.
+X_MANY = (np.random.default_rng(0).random((300, 6)) < 0.8).astype(np.int8)
+X_MANY[:, 0] = 1
+POS6 = np.arange(1, 7, dtype=np.int64) * 100
+
+
+def test_tally_complete_data_many_carriers():
+    X = X_MANY
+    hm = _hm(X, POS6, gpu=True, sample_sets={"p1": list(range(200)), "p2": list(range(200, 300))})
+    counts, n_valid = hm.tally_gpu_haplotypes()
+    assert n_valid is None
+    np.testing.assert_array_equal(_host(counts), _ref_tally(X)[0])
+    counts2, v1, v2 = hm.tally_gpu_haplotypes_two_pops("p1", "p2")
+    assert v1 is None and v2 is None
+    np.testing.assert_array_equal(_host(counts2)[:, :4], _ref_tally(X[:200])[0])
+    np.testing.assert_array_equal(_host(counts2)[:, 4:], _ref_tally(X[200:])[0])
+
+
+def test_tally_complete_and_missing_paths_agree():
+    # One all-missing haplotype sends the tally down the missing-aware path but
+    # leaves every pair's counts unchanged, so both paths must agree exactly.
+    X = X_MANY
+    Xm = np.vstack([X, np.full((1, X.shape[1]), -1, np.int8)])
+    c_fast, _ = _hm(X, POS6, gpu=True).tally_gpu_haplotypes()
+    c_miss, n_valid = _hm(Xm, POS6, gpu=True).tally_gpu_haplotypes()
+    np.testing.assert_array_equal(_host(c_fast), _host(c_miss))
+    assert c_fast.dtype == c_miss.dtype
+    np.testing.assert_array_equal(_host(n_valid), X.shape[0])
+
+
+@pytest.mark.parametrize("X01", [X_MISS, np.where(X_MISS < 0, 0, X_MISS).astype(np.int8)],
+                         ids=["missing", "complete"])
+@pytest.mark.parametrize("ref_code,alt_code", [(0, 2), (1, 2)])
+def test_tally_allele_coding_invariant(X01, ref_code, alt_code):
+    # {0,2} and reference-absent {1,2} codings must tally like {0,1}.
+    Xc = np.where(X01 == 1, alt_code, np.where(X01 == 0, ref_code, -1)).astype(np.int8)
+    sample_sets = {"p1": [0, 1, 2, 3], "p2": [4, 5, 6, 7]}
+    hm = _hm(Xc, POS5, gpu=True, sample_sets=sample_sets)
+    ref_c, _ = _ref_tally(X01)
+    np.testing.assert_array_equal(_host(hm.tally_gpu_haplotypes()[0]), ref_c)
+    counts, _, _ = hm.tally_gpu_haplotypes_two_pops("p1", "p2")
+    np.testing.assert_array_equal(_host(counts)[:, :4], _ref_tally(X01[:4])[0])
+    np.testing.assert_array_equal(_host(counts)[:, 4:], _ref_tally(X01[4:])[0])
+
+
+def test_tally_all_missing_site():
+    X = X_MISS.copy()
+    X[:, 2] = -1
+    counts, n_valid = _hm(X, POS5, gpu=True).tally_gpu_haplotypes()
+    ref_c, ref_v = _ref_tally(X)
+    np.testing.assert_array_equal(_host(counts), ref_c)
+    np.testing.assert_array_equal(_host(n_valid), ref_v)
+
+
+def test_tally_multiallelic_site_warns_and_lumps():
+    # Column 1 has three alleles: the highest (2) counts as 1, both others as 0.
+    X = np.array([[0, 0], [1, 1], [1, 2], [0, 2]], dtype=np.int8)
+    hm = _hm(X, np.array([100, 200], dtype=np.int64), gpu=True)
+    with pytest.warns(BiallelicOnlyWarning, match="tally_gpu_haplotypes"):
+        counts, _ = hm.tally_gpu_haplotypes()
+    lumped = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.int8)
+    np.testing.assert_array_equal(_host(counts), _ref_tally(lumped)[0])
 
 
 # ── D. Missing-data introspection ──────────────────────────────────────
