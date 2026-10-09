@@ -199,3 +199,28 @@ def test_population_indices_accepts_row_list(hm):
     # A row-list argument takes the else branch (validated rows, not a name).
     _agree(divergence.dxy(hm, hm.sample_sets["p1"], hm.sample_sets["p2"]),
            divergence.dxy(hm, "p1", "p2"))
+
+
+def test_get_population_matrix_allows_empty_parent_haplotype():
+    # A zero-variant parent (a streaming empty chunk) must survive population
+    # subsetting instead of tripping the non-empty guard, so two-pop windowed
+    # stats can still emit that chunk's windows. sample_sets index the
+    # haplotype row axis.
+    from pg_gpu._utils import get_population_matrix
+    hap = np.empty((4, 0), dtype=np.int8)
+    pos = np.empty(0, dtype=np.int64)
+    m = HaplotypeMatrix(hap, pos, sample_sets={"p1": [0, 1]}, allow_empty=True)
+    sub = get_population_matrix(m, "p1")
+    assert sub.num_variants == 0
+    assert sub.num_haplotypes == 2
+
+
+def test_get_population_matrix_allows_empty_parent_genotype():
+    # The genotype branch inherits the same empty allowance as the haplotype
+    # branch (rows are individuals here).
+    from pg_gpu._utils import get_population_matrix
+    geno = np.empty((3, 0), dtype=np.int8)
+    pos = np.empty(0, dtype=np.int64)
+    m = GenotypeMatrix(geno, pos, sample_sets={"p1": [0, 1]}, allow_empty=True)
+    sub = get_population_matrix(m, "p1")
+    assert sub.num_variants == 0

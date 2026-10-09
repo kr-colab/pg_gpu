@@ -32,7 +32,8 @@ import cupy as cp
 def build_haplotype_matrix(gt, pos, *,
                            chrom_start=None, chrom_end=None,
                            sample_sets=None, n_total_sites=None,
-                           samples=None, accessible_mask=None):
+                           samples=None, accessible_mask=None,
+                           allow_empty = False):
     """Build a HaplotypeMatrix from a raw VCZ-style genotype block.
 
     Parameters
@@ -82,13 +83,15 @@ def build_haplotype_matrix(gt, pos, *,
         chrom_start=chrom_start, chrom_end=chrom_end,
         sample_sets=sample_sets, n_total_sites=n_total_sites,
         samples=samples, accessible_mask=accessible_mask,
+        allow_empty=allow_empty
     )
 
 
 def build_genotype_matrix(gt, pos, *,
                           chrom_start=None, chrom_end=None,
                           sample_sets=None, n_total_sites=None,
-                          samples=None, accessible_mask=None):
+                          samples=None, accessible_mask=None,
+                          allow_empty = False):
     """Build a GenotypeMatrix from a raw VCZ-style genotype block.
 
     Parameters
@@ -160,6 +163,7 @@ def build_genotype_matrix(gt, pos, *,
         chrom_start=chrom_start, chrom_end=chrom_end,
         sample_sets=sample_sets, n_total_sites=n_total_sites,
         samples=samples, accessible_mask=accessible_mask,
+        allow_empty=allow_empty,
     )
     gm._n_multiallelic_recoded = n_multiallelic
     return gm
