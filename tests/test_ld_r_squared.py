@@ -164,6 +164,27 @@ class TestWindowedRSquared:
         assert np.all(result[valid] >= 0)
         assert np.all(result[valid] <= 1)
 
+    def test_windowed_r_squared_many_carriers(self):
+        # Complete data with more than 127 carriers per pair: pins the
+        # no-missing tally path against a numpy r^2 reference.
+        rng = np.random.default_rng(1)
+        n, m = 400, 40
+        hap = (rng.random((n, m)) < rng.uniform(0.3, 0.9, m)).astype(np.int8)
+        pos = np.arange(m, dtype=np.int64) * 100 + 1
+        matrix = HaplotypeMatrix(hap, pos, 0, m * 100 + 1)
+
+        bp_bins = [0, 150, 1000, 4000]
+        result, counts = matrix.windowed_r_squared(bp_bins, percentile=50)
+
+        p = hap.mean(axis=0)
+        D = (hap.T.astype(np.float64) @ hap) / n - np.outer(p, p)
+        r2 = D ** 2 / np.outer(p * (1 - p), p * (1 - p))
+        ii, jj = np.triu_indices(m, k=1)
+        dist, vals = pos[jj] - pos[ii], r2[ii, jj]
+        expected = [np.median(vals[(dist >= lo) & (dist < hi)])
+                    for lo, hi in zip(bp_bins[:-1], bp_bins[1:])]
+        np.testing.assert_allclose(result, expected, rtol=1e-10)
+
 
 class TestDPrime:
     """Test Lewontin's D' statistic."""

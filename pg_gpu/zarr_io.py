@@ -237,23 +237,23 @@ def read_genotypes_vcz(store, region=None):
         same indices to keep their slices aligned with the genotype
         matrix.
     """
-    contig_arr = np.array(store['variant_contig'])
+    contig_arr = np.asarray(store['variant_contig'])
     chrom, start, stop = parse_region(region)
     # On a whole-store read this call is the multi-contig guard: a store
     # spanning several contigs needs a region to name one.
     contig_idx, _ = _vcz_contig_index(store, contig_arr, chrom)
     if region is not None:
-        pos_arr = np.array(store['variant_position'])
+        pos_arr = np.asarray(store['variant_position'])
         mask = (contig_arr == contig_idx) & _region_mask(pos_arr, start, stop)
         indices = np.where(mask)[0]
         if len(indices) == 0:
             raise ValueError(f"No variants in region {region}")
-        gt = np.array(store['call_genotype'][indices])
+        gt = np.asarray(store['call_genotype'][indices])
         positions = pos_arr[indices]
         variant_indices = indices
     else:
-        gt = np.array(store['call_genotype'])
-        positions = np.array(store['variant_position'])
+        gt = np.asarray(store['call_genotype'])
+        positions = np.asarray(store['variant_position'])
         variant_indices = None
 
     samples = list(np.array(store['sample_id'])) if 'sample_id' in store else None
@@ -331,8 +331,8 @@ def _pull_qc_fields(group, fields, variant_indices, *, var_key, call_key,
         else:
             missing.append(tag)
             continue
-        out[tag] = (np.array(arr[variant_indices])
-                    if variant_indices is not None else np.array(arr))
+        out[tag] = (np.asarray(arr[variant_indices])
+                    if variant_indices is not None else np.asarray(arr))
     if missing:
         warnings.warn(
             f"{layout_label} quality fields not found and dropped: {missing}",
@@ -361,8 +361,8 @@ def read_genotypes_allel(store, region=None):
         read). Auxiliary callers (e.g. QC field readers) reuse the same
         indices to stay aligned with the genotype matrix.
     """
-    positions = np.array(store['variants/POS'])
-    gt = np.array(store['calldata/GT'])
+    positions = np.asarray(store['variants/POS'])
+    gt = np.asarray(store['calldata/GT'])
     samples = list(np.array(store['samples'])) if 'samples' in store else None
     variant_indices = None
 
@@ -404,8 +404,8 @@ def read_genotypes_allel_grouped(store, region):
             f"'chrom:start-end'. Available groups: {available}"
         )
     grp = _allel_group(store, chrom)
-    positions = np.array(grp['variants/POS'])
-    gt = np.array(grp['calldata/GT'])
+    positions = np.asarray(grp['variants/POS'])
+    gt = np.asarray(grp['calldata/GT'])
     samples = list(np.array(grp['samples'])) if 'samples' in grp else None
 
     mask = _region_mask(positions, start, stop)
