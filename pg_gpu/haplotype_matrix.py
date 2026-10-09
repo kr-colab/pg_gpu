@@ -2045,95 +2045,133 @@ class HaplotypeMatrix:
         return result, pair_counts
 
 
+    def _tally_indicator(self, context):
+        """0/1/-1 alt-indicator for the public tally methods.
+
+        Sites are kept, not dropped, so pair indices line up with the input
+        variants. At a site with three or more alleles the highest allele
+        counts as 1 and every other allele as 0; a ``BiallelicOnlyWarning``
+        reports how many such sites were tallied this way.
+        """
+        from ._warnings import _warn_biallelic_only
+        # Two frames above this helper: the public method, then its caller.
+        _warn_biallelic_only(int((~self._biallelic_mask()).sum()), context=context,
+                             stacklevel=4, action="tallied as highest allele vs. the rest")
+        return self._biallelic_indicator()
+
+    def _pop_indices(self, *pops):
+        """Validated row lists for ``pops``. A row list may be a tuple, so
+        callers index with ``X[rows, :]``: ``X[rows]`` would read a tuple as
+        one index per axis."""
+        if self._sample_sets is None:
+            raise ValueError("sample_sets must be defined to use this function")
+        missing = [p for p in pops if p not in self._sample_sets]
+        if missing:
+            raise KeyError(f"Population key(s) {missing} must exist in sample_sets")
+        return [self._sample_sets[p] for p in pops]
+
     def tally_gpu_haplotypes(self, pop=None):
         """
         GPU implementation of computing pairwise haplotype tallies.
         Automatically detects and handles missing data if present.
+
+        Alleles are recoded to a 0/1 indicator first, so {0,1}, {0,2} and
+        {1,2} codings give the same counts. At a site with three or more
+        alleles the highest allele counts as 1 and all others as 0.
 
         Parameters:
             pop (str, optional): Population key from sample_sets to use. If None, uses all samples.
 
         Returns:
             tuple: (counts, n_valid) where:
-                - counts: Array of shape (#pairs, 4) containing [n11, n10, n01, n00] for each variant pair
-                - n_valid: Array of shape (#pairs,) containing the number of valid haplotypes for each pair
+                - counts: int32 array of shape (#pairs, 4) containing [n11, n10, n01, n00] for each variant pair
+                - n_valid: int32 array of shape (#pairs,) containing the number of valid haplotypes for each pair
                           or None if no missing data is present
         """
-        # Ensure data is on the GPU
-        if self.device == 'CPU':
-            self.transfer_to_gpu()
+        rows = slice(None) if pop is None else self._pop_indices(pop)[0]
+        return self._tally_pairs_impl(self._tally_indicator("tally_gpu_haplotypes")[rows, :])
 
-        # Get the appropriate subset of haplotypes
-        if pop is not None:
-            if self._sample_sets is None:
-                raise ValueError("sample_sets must be defined to use pop parameter")
-            if pop not in self._sample_sets:
-                raise KeyError(f"Population key {pop} must exist in sample_sets")
-            X = self.haplotypes[self._sample_sets[pop], :]
-        else:
-            X = self.haplotypes
-
-        return self._tally_pairs_impl(X)
-
-    def _tally_pairs_impl(self, X):
+    @staticmethod
+    def _tally_pairs_impl(X, missing=None, out=None):
         """Pairwise ``[n11, n10, n01, n00]`` tallies over all upper-triangle
-        pairs of a 0/1 array (``-1`` missing). Contracts the sample axis via
-        ``X.T @ X`` when no data is missing (peak memory O(m^2)); falls back to
-        the per-pair reduction otherwise.
+        pairs of a 0/1 array (negative = missing).
+
+        Each count comes from a matmul that contracts the sample axis, so there
+        is no per-pair loop. The matmuls run in floating point: an int8 matmul
+        returns int8 and wraps once a pair has more than 127 carriers, and
+        integer matmul is also slower on the GPU. Every count is an integer no
+        larger than n, and float32 holds every integer up to 2**24 exactly, so
+        float32 is exact for n <= 2**24; above that the tally uses float64.
+        TF32 matmul (``CUPY_TF32=1``) keeps this exact, because 0/1 inputs
+        survive TF32 rounding unchanged and cuBLAS accumulates in FP32.
+
+        Peak memory is the float copy of ``X`` (4 bytes per element, 8 above
+        2**24 haplotypes; two copies with missing data) plus O(m^2) for the
+        pair matrices.
+
+        With no missing data ``n11 = H.T @ H`` is the only matmul and its
+        diagonal gives each site's carrier count. With missing data, only
+        haplotypes valid at both sites count: ``S = H.T @ V`` gives carriers
+        at ``i`` that are valid at ``j``, so ``n10 = S[i, j] - n11`` and
+        ``n01 = S[j, i] - n11``, and ``n_valid = V.T @ V``.
+
+        ``missing`` forces the path (None detects it from ``X``); ``out`` is
+        an optional ``(#pairs, 4)`` int32 view to fill. Returns
+        ``(counts, n_valid)``, with ``n_valid`` None on the complete path.
         """
-        has_missing = cp.any(X == -1)
-        if has_missing:
-            return self._tally_gpu_haplotypes_with_missing_impl(X)
-
+        if missing is None:
+            missing = bool(cp.any(X < 0))
         m = X.shape[1]
-        ones_per_variant = cp.sum(X, axis=0)
-        n11_mat = X.T @ X
         idx_i, idx_j = cp.triu_indices(m, k=1)
-        n11_pairs = n11_mat[idx_i, idx_j]
-        n10_pairs = ones_per_variant[idx_i] - n11_pairs
-        n01_pairs = ones_per_variant[idx_j] - n11_pairs
-        n00_pairs = X.shape[0] - (n11_pairs + n10_pairs + n01_pairs)
-        counts = cp.stack([n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1)
-        return counts, None
+        if out is None:
+            out = cp.empty((idx_i.size, 4), dtype=cp.int32)
 
-    def _tally_gpu_haplotypes_with_missing_impl(self, X):
-        """Missing-aware pairwise ``[n11, n10, n01, n00]`` tallies and n_valid.
+        dt = cp.float32 if X.shape[0] <= 2**24 else cp.float64
+        H = (X == 1).astype(dt)
+        HH = H.T @ H
+        n11 = HH[idx_i, idx_j]
+        if missing:
+            del HH
+            V = (X >= 0).astype(dt)
+            S = H.T @ V
+            del H
+            n_valid = (V.T @ V)[idx_i, idx_j]
+            del V
+            n10 = S[idx_i, idx_j] - n11
+            n01 = S[idx_j, idx_i] - n11
+            del S
+        else:
+            del H
+            ones = HH.diagonal()
+            n10 = ones[idx_i] - n11
+            n01 = ones[idx_j] - n11
+            del HH, ones
+            n_valid = X.shape[0]
+        out[:, 0] = n11
+        out[:, 1] = n10
+        out[:, 2] = n01
+        out[:, 3] = n_valid - (n11 + n10 + n01)
+        return out, (n_valid.astype(cp.int32) if missing else None)
 
-        Only haplotypes non-missing (``!= -1``) at both loci are counted. Each
-        count is a sample-contracting matmul of 0/1 indicator planes: e.g.
-        ``n11 = (X==1).T @ (X==1)``, so peak memory is O(m^2) and there is no
-        per-pair loop. ``n01`` is the transpose of the ``n10`` matrix.
-        """
-        m = X.shape[1]
-        A1 = (X == 1).astype(cp.float64)
-        A0 = (X == 0).astype(cp.float64)
-        Vd = (X != -1).astype(cp.float64)
-
-        M11 = A1.T @ A1
-        M10 = A1.T @ A0
-        M00 = A0.T @ A0
-        MV = Vd.T @ Vd
-        del A1, A0, Vd
-
-        idx_i, idx_j = cp.triu_indices(m, k=1)
-        n11_pairs = M11[idx_i, idx_j]
-        n10_pairs = M10[idx_i, idx_j]
-        n01_pairs = M10[idx_j, idx_i]          # (X==0)_i & (X==1)_j
-        n00_pairs = M00[idx_i, idx_j]
-        n_valid = MV[idx_i, idx_j]
-        del M11, M10, M00, MV
-
-        counts = cp.stack(
-            [n11_pairs, n10_pairs, n01_pairs, n00_pairs], axis=1
-        ).astype(cp.int32)
-        return counts, n_valid.astype(cp.int32)
+    @staticmethod
+    def _tally_two_pops_impl(X1, X2, missing=None):
+        """``(#pairs, 8)`` tallies for two populations' 0/1 arrays. One
+        missing-data decision covers both, so n_valid is both arrays or both None."""
+        if missing is None:
+            missing = bool(cp.any(X1 < 0) | cp.any(X2 < 0))
+        m = X1.shape[1]
+        out = cp.empty((m * (m - 1) // 2, 8), dtype=cp.int32)
+        _, v1 = HaplotypeMatrix._tally_pairs_impl(X1, missing, out[:, :4])
+        _, v2 = HaplotypeMatrix._tally_pairs_impl(X2, missing, out[:, 4:])
+        return out, v1, v2
 
     def tally_gpu_haplotypes_two_pops_with_missing(self, pop1: str, pop2: str):
         """
         GPU implementation of computing pairwise haplotype tallies for two populations with missing data support.
 
-        For each variant pair, only counts haplotypes where both variants are non-missing in both populations.
-        Missing data is encoded as -1 in the haplotype matrix.
+        For each variant pair and population, only haplotypes non-missing at both variants are counted.
+        Missing data is encoded as -1 in the haplotype matrix. Alleles are recoded as in
+        :meth:`tally_gpu_haplotypes`.
 
         Parameters:
             pop1 (str): First population key from sample_sets
@@ -2141,147 +2179,30 @@ class HaplotypeMatrix:
 
         Returns:
             tuple: (counts, n_valid1, n_valid2) where:
-                - counts: Array of shape (#pairs, 8) containing counts for both populations
+                - counts: int32 array of shape (#pairs, 8) containing counts for both populations
                   [n11_1, n10_1, n01_1, n00_1, n11_2, n10_2, n01_2, n00_2]
-                - n_valid1: Array of shape (#pairs,) with valid haplotypes for pop1
-                - n_valid2: Array of shape (#pairs,) with valid haplotypes for pop2
+                - n_valid1: int32 array of shape (#pairs,) with valid haplotypes for pop1
+                - n_valid2: int32 array of shape (#pairs,) with valid haplotypes for pop2
         """
-        import cupy as cp
-
-        if self.device == 'CPU':
-            self.transfer_to_gpu()
-
-        # Check populations
-        if self._sample_sets is None:
-            raise ValueError("sample_sets must be defined to use this function")
-        if pop1 not in self._sample_sets or pop2 not in self._sample_sets:
-            raise KeyError(f"Population keys {pop1} and {pop2} must exist in sample_sets")
-
-        # Get indices for each population
-        idx1 = self._sample_sets[pop1]
-        idx2 = self._sample_sets[pop2]
-
-        # Extract submatrices for each population
-        X1 = self.haplotypes[idx1, :]
-        X2 = self.haplotypes[idx2, :]
-        m = self.num_variants
-
-        # Create missing masks for each population
-        missing_mask1 = (X1 == -1)
-        missing_mask2 = (X2 == -1)
-
-        # Get indices for upper triangle
-        idx_i, idx_j = cp.triu_indices(m, k=1)
-        n_pairs = len(idx_i)
-
-        # Initialize arrays for results
-        counts = cp.zeros((n_pairs, 8), dtype=cp.int32)
-        n_valid1 = cp.zeros(n_pairs, dtype=cp.int32)
-        n_valid2 = cp.zeros(n_pairs, dtype=cp.int32)
-
-        # Process pairs (this could be optimized with custom kernels)
-        for pair_idx in range(n_pairs):
-            i = idx_i[pair_idx]
-            j = idx_j[pair_idx]
-
-            # Create valid masks for each population
-            valid_mask1 = ~(missing_mask1[:, i] | missing_mask1[:, j])
-            valid_mask2 = ~(missing_mask2[:, i] | missing_mask2[:, j])
-            n_valid1[pair_idx] = cp.sum(valid_mask1)
-            n_valid2[pair_idx] = cp.sum(valid_mask2)
-
-            # Population 1 counts
-            if n_valid1[pair_idx] > 0:
-                valid_haps1_i = X1[valid_mask1, i]
-                valid_haps1_j = X1[valid_mask1, j]
-                counts[pair_idx, 0] = cp.sum((valid_haps1_i == 1) & (valid_haps1_j == 1))  # n11
-                counts[pair_idx, 1] = cp.sum((valid_haps1_i == 1) & (valid_haps1_j == 0))  # n10
-                counts[pair_idx, 2] = cp.sum((valid_haps1_i == 0) & (valid_haps1_j == 1))  # n01
-                counts[pair_idx, 3] = cp.sum((valid_haps1_i == 0) & (valid_haps1_j == 0))  # n00
-
-            # Population 2 counts
-            if n_valid2[pair_idx] > 0:
-                valid_haps2_i = X2[valid_mask2, i]
-                valid_haps2_j = X2[valid_mask2, j]
-                counts[pair_idx, 4] = cp.sum((valid_haps2_i == 1) & (valid_haps2_j == 1))  # n11
-                counts[pair_idx, 5] = cp.sum((valid_haps2_i == 1) & (valid_haps2_j == 0))  # n10
-                counts[pair_idx, 6] = cp.sum((valid_haps2_i == 0) & (valid_haps2_j == 1))  # n01
-                counts[pair_idx, 7] = cp.sum((valid_haps2_i == 0) & (valid_haps2_j == 0))  # n00
-
-        return counts, n_valid1, n_valid2
+        idx1, idx2 = self._pop_indices(pop1, pop2)
+        ind = self._tally_indicator("tally_gpu_haplotypes_two_pops_with_missing")
+        return self._tally_two_pops_impl(ind[idx1, :], ind[idx2, :], missing=True)
 
     def tally_gpu_haplotypes_two_pops(self, pop1: str, pop2: str):
         """
         GPU version of tallying haplotype counts between all pairs of variants for two populations.
-        Automatically detects and handles missing data if present.
+        Automatically detects and handles missing data if present. Alleles are recoded as in
+        :meth:`tally_gpu_haplotypes`.
 
         Returns:
             tuple: (counts, n_valid1, n_valid2) where:
-                - counts: Array of shape (#pairs, 8) containing counts for both populations
+                - counts: int32 array of shape (#pairs, 8) containing counts for both populations
                 - n_valid1: Array of shape (#pairs,) with valid haplotypes for pop1 (or None if no missing data)
                 - n_valid2: Array of shape (#pairs,) with valid haplotypes for pop2 (or None if no missing data)
         """
-        import cupy as cp
-
-        if self.device == 'CPU':
-            self.transfer_to_gpu()
-
-        # Check populations
-        if self._sample_sets is None:
-            raise ValueError("sample_sets must be defined to use this function")
-        if pop1 not in self._sample_sets or pop2 not in self._sample_sets:
-            raise KeyError(f"Population keys {pop1} and {pop2} must exist in sample_sets")
-
-        # Get indices for each population
-        idx1 = self._sample_sets[pop1]
-        idx2 = self._sample_sets[pop2]
-
-        # Extract submatrices for each population
-        X1 = self.haplotypes[idx1, :]
-        X2 = self.haplotypes[idx2, :]
-
-        # Check if there's any missing data
-        has_missing = cp.any(self.haplotypes == -1)
-
-        if has_missing:
-            # Use the missing data implementation
-            return self.tally_gpu_haplotypes_two_pops_with_missing(pop1, pop2)
-        else:
-            # Use the faster non-missing implementation
-            n1 = len(idx1)
-            n2 = len(idx2)
-            m = self.num_variants
-
-            # Count ones per variant for each population
-            ones_per_variant1 = cp.sum(X1, axis=0)
-            ones_per_variant2 = cp.sum(X2, axis=0)
-
-            # Compute n11 matrices for each population
-            n11_mat1 = X1.T @ X1
-            n11_mat2 = X2.T @ X2
-
-            # Get indices for upper triangle only
-            idx_i, idx_j = cp.triu_indices(m, k=1)
-
-            # Compute counts for population 1
-            n11_pairs1 = n11_mat1[idx_i, idx_j]
-            n10_pairs1 = ones_per_variant1[idx_i] - n11_pairs1
-            n01_pairs1 = ones_per_variant1[idx_j] - n11_pairs1
-            n00_pairs1 = n1 - (n11_pairs1 + n10_pairs1 + n01_pairs1)
-
-            # Compute counts for population 2
-            n11_pairs2 = n11_mat2[idx_i, idx_j]
-            n10_pairs2 = ones_per_variant2[idx_i] - n11_pairs2
-            n01_pairs2 = ones_per_variant2[idx_j] - n11_pairs2
-            n00_pairs2 = n2 - (n11_pairs2 + n10_pairs2 + n01_pairs2)
-
-            # Stack all results
-            counts = cp.stack([
-                n11_pairs1, n10_pairs1, n01_pairs1, n00_pairs1,
-                n11_pairs2, n10_pairs2, n01_pairs2, n00_pairs2
-            ], axis=1)
-
-            return counts, None, None
+        idx1, idx2 = self._pop_indices(pop1, pop2)
+        ind = self._tally_indicator("tally_gpu_haplotypes_two_pops")
+        return self._tally_two_pops_impl(ind[idx1, :], ind[idx2, :])
 
     # TODO: this is not correct
     def compute_ld_statistics_gpu_single_pop(

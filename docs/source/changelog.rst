@@ -199,6 +199,19 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``tally_gpu_haplotypes`` and ``tally_gpu_haplotypes_two_pops`` gave
+  wrong counts on complete data when more than 127 haplotypes carried
+  the alternate allele at both sites of a pair. The pair count used an
+  ``int8`` matrix product, which wraps above 127. The tally now uses
+  ``float32``, which is exact up to 2^24 haplotypes, also with
+  ``CUPY_TF32=1``, and ``float64`` above that. Both methods also counted
+  raw allele codes, so ``{0,2}`` and ``{1,2}`` codings gave wrong
+  counts. They now recode each site to a 0/1 indicator first, as
+  ``windowed_r_squared`` does. Counts are ``int32`` on every path.
+  ``tally_gpu_haplotypes_two_pops_with_missing`` no longer loops over
+  pairs in Python. ``tally_gpu_haplotypes_two_pops`` now looks for
+  missing calls only in the two populations, so missing data in a third
+  population no longer turns ``n_valid1`` and ``n_valid2`` into arrays.
 * ``pairwise_r2`` and the naive ``r2`` estimator behind ``zns``/``omega``
   computed the joint 11-frequency over the pairwise-complete sample but
   each site's own frequency over its separate, larger marginal sample,
@@ -409,6 +422,9 @@ New warnings
   ``from_haplotype_matrix``, and the LD statistics that restrict to
   two-allele sites (``zns``, ``omega``, ``pairwise_r2``,
   ``pairwise_LD_v``, ``locate_unlinked``, ``windowed_r_squared``).
+  The ``tally_gpu_haplotypes*`` methods keep multiallelic sites, count
+  the highest allele against all others, and warn with the number of
+  such sites.
 * ``UnpairedRowsWarning`` -- a statistic that pairs rows into
   individuals got a population list that does not keep each sample's
   two rows together. The row-validation entry above says when it
