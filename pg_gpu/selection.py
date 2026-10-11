@@ -195,6 +195,9 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
         'exclude' - each window uses only its sites with no missing call.
         Windows are tiled over all variants, so a window keeps its
         position when some of its sites are dropped.
+        Under 'include', a ``FewCompleteHaplotypesWarning`` reports when
+        many windows have few haplotypes with no missing call, where H1
+        and H12 come out too low.
 
     Returns
     -------
@@ -231,8 +234,12 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
             f"({n_variants}), size >= 1 and step >= 1; got start={start}, "
             f"stop={stop}, size={size}, step={step}")
     starts = np.arange(start, stop - size + 1, step, dtype=np.int64)
-    return garud_h_windows(hap, starts, starts + size,
-                           missing_data=missing_data)[:4]
+    *values, n_complete = garud_h_windows(hap, starts, starts + size,
+                                          missing_data=missing_data)
+    from ._warnings import _warn_few_complete_haplotypes
+    _warn_few_complete_haplotypes(n_complete, hap.shape[0],
+                                  context="moving_garud_h")
+    return tuple(values[:4])
 
 
 def _garud_from_freqs(f):

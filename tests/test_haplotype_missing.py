@@ -161,6 +161,12 @@ def _scalar_per_window(hap, win, missing_data='include'):
     return np.array(out, dtype=np.float64)
 
 
+# windowed_case's all-missing window is deliberate, so a quarter of the
+# windows are thin and FewCompleteHaplotypesWarning is expected.
+THIN_WINDOW_EXPECTED = pytest.mark.filterwarnings(
+    "ignore::pg_gpu.FewCompleteHaplotypesWarning")
+
+
 @pytest.fixture(scope="module")
 def windowed_case():
     hap = _founder_data(21, n_hap=40, n_var=400, rate=0.003)
@@ -170,6 +176,7 @@ def windowed_case():
     return hap, win
 
 
+@THIN_WINDOW_EXPECTED
 def test_moving_garud_h_matches_scalar(windowed_case):
     hap, win = windowed_case
     ref = _scalar_per_window(hap, win)[:, :4]
@@ -178,6 +185,7 @@ def test_moving_garud_h_matches_scalar(windowed_case):
     assert np.isnan(got[2]).all() and not np.isnan(got[[0, 1, 3]]).any()
 
 
+@THIN_WINDOW_EXPECTED
 @pytest.mark.parametrize("engine", ["windowed_analysis", "fused", "chunked"])
 def test_windowed_engines_match_scalar(windowed_case, engine):
     hap, win = windowed_case
@@ -200,6 +208,7 @@ def test_windowed_engines_match_scalar(windowed_case, engine):
     np.testing.assert_allclose(got, ref, equal_nan=True)
 
 
+@THIN_WINDOW_EXPECTED
 def test_windowed_haplotype_count_is_always_float(windowed_case):
     hap, _ = windowed_case
     size = 100 * SPACING

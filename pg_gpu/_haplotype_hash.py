@@ -271,7 +271,8 @@ def row_hashes(hap):
 
 
 def garud_h_windows(hap, win_start, win_stop, missing_data='include'):
-    """Garud's H1, H12, H123, H2/H1 and distinct-haplotype count per window.
+    """Garud's H1, H12, H123, H2/H1, distinct-haplotype count and
+    complete-haplotype count per window.
 
     Parameters
     ----------
@@ -289,6 +290,9 @@ def garud_h_windows(hap, win_start, win_stop, missing_data='include'):
     h1, h12, h123, h2h1, n_distinct : numpy.ndarray, float64, shape (n_windows,)
         A window with no variants has one distinct haplotype: H1 = H12 =
         H123 = 1 and H2/H1 = 0.
+    n_complete : numpy.ndarray, int64, shape (n_windows,)
+        Haplotypes with no missing call in each window. Under 'exclude', and
+        in a window with no missing call, that is every haplotype.
 
     Windows are processed in batches sized to free GPU memory. Each window's
     result depends only on its own variants, so batching never changes a value.
@@ -303,8 +307,9 @@ def garud_h_windows(hap, win_start, win_stop, missing_data='include'):
     win_stop = cp.asarray(win_stop, dtype=cp.int64)
     n_windows = int(win_start.shape[0])
     out = np.empty((5, n_windows), dtype=np.float64)
+    n_complete = np.full(n_windows, n_hap, dtype=np.int64)
     if n_windows == 0:
-        return tuple(out)
+        return (*out, n_complete)
     w1, w2 = hash_weights(n_var)
 
     col_missing = column_has_missing(hap)
@@ -343,8 +348,9 @@ def garud_h_windows(hap, win_start, win_stop, missing_data='include'):
         batch = window_batch_size(n_hap, n_seg)
         for b0 in range(0, missing_idx.size, batch):
             b1 = min(b0 + batch, missing_idx.size)
-            sum_f2, top0, top1, top2, n_distinct = window_moments(
+            sum_f2, top0, top1, top2, n_distinct, n_comp = window_moments(
                 hap, m_start[b0:b1], m_stop[b0:b1], w1, w2, n_seg)
             stats = garud_from_moments(sum_f2, top0, top1, top2)
             out[:, missing_idx[b0:b1]] = cp.stack([*stats, n_distinct]).get()
-    return tuple(out)
+            n_complete[missing_idx[b0:b1]] = n_comp.get()
+    return (*out, n_complete)
