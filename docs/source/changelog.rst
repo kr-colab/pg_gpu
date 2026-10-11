@@ -199,6 +199,20 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``windowed_analysis`` with ``missing_data='exclude'`` raised
+  ``Unknown statistic`` for ``zns``, ``omega``, ``mu_ld``, ``mu_var``,
+  ``mu_sfs``, ``daf_hist``, the ``snp_dist_*`` and ``dist_*``
+  statistics, and ``mean_nsl``. It also raised for ``theta_h``,
+  ``singletons``, ``fay_wu_h`` and ``max_daf`` when they were requested
+  with a Garud statistic, or with two populations and no two-population
+  statistic. These requests now use the fused engine, which keeps only
+  the sites with no missing call in the rows the request reads. Called
+  directly, ``windowed_statistics_fused`` and
+  ``windowed_statistics_fused_chunked`` ignored ``'exclude'`` for every
+  statistic except the Garud family and ``omega``; they now apply it to
+  every statistic, and ``n_variants`` counts the complete sites. A
+  Garud-only request is unchanged: its ``n_variants`` still counts every
+  site.
 * ``tally_gpu_haplotypes`` and ``tally_gpu_haplotypes_two_pops`` gave
   wrong counts on complete data when more than 127 haplotypes carried
   the alternate allele at both sites of a pair. The pair count used an

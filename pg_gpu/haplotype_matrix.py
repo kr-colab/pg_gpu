@@ -1537,6 +1537,8 @@ class HaplotypeMatrix:
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
+        from ._haplotype_groups import column_has_missing
+
         hap = self.haplotypes
         if populations is not None:
             idx = []
@@ -1545,9 +1547,9 @@ class HaplotypeMatrix:
                     idx.extend(self.sample_sets[pop])
                 else:
                     idx.extend(list(pop))
-            has_missing = cp.any(hap[idx] < 0, axis=0)
-        else:
-            has_missing = cp.any(hap < 0, axis=0)
+            hap = hap[idx]
+        # One pass and one byte per site, with no matrix-sized boolean.
+        has_missing = column_has_missing(hap)
 
         valid = cp.where(~has_missing)[0]
         if len(valid) == hap.shape[1]:
