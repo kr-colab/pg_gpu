@@ -25,6 +25,9 @@ from ._haplotype_hash import garud_h_windows
 _FUSED_GARUD_STATS = ('garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
                       'haplotype_count')
 
+# Statistics that read the rows of two populations.
+_TWO_POP_STATS = frozenset({'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'})
+
 # Kwargs that the 'local_pca' / 'local_pca_jackknife' dispatch consumes but
 # scalar-stat paths don't accept. Filtered out before the recursive call.
 _LOCAL_PCA_ONLY_KWARGS = frozenset(
@@ -286,6 +289,13 @@ class StatisticsComputer:
     def _store_result(results: Dict, key: str, val):
         """Store a scalar result into the results dict."""
         results[key] = val
+
+
+def _fallback_stats():
+    """Names of the statistics the per-window fallback can compute."""
+    computer = StatisticsComputer([])
+    return frozenset(computer.SINGLE_POP_STATS) | frozenset(
+        computer.TWO_POP_STATS) | frozenset(computer.LD_STATS)
 
 
 class WindowIterator:
@@ -1262,7 +1272,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     scatter_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
                       'theta_h', 'theta_l', 'fay_wu_h', 'singletons',
                       'normalized_fay_wu_h', 'zeng_e', 'zeng_dh', 'max_daf'}
-    scatter_twopop = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
+    scatter_twopop = _TWO_POP_STATS
     requested = set(statistics)
 
     if missing_data in ('include', 'exclude'):
@@ -1309,7 +1319,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     # Fused CUDA kernel path for more complex stat combinations.
     fused_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
                     'singletons', 'theta_h', 'fay_wu_h', 'max_daf'}
-    fused_two = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
+    fused_two = _TWO_POP_STATS
     fused_garud = set(_FUSED_GARUD_STATS)
     fused_selection = {'mean_nsl'}
     fused_diploshic = {'snp_dist_mean', 'snp_dist_var', 'snp_dist_min',
@@ -1320,10 +1330,13 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                  | fused_diploshic)
     requested = set(statistics)
 
-    # Only the Garud statistics apply 'exclude' in the fused engine; a
-    # request with any other statistic under 'exclude' takes the per-window
-    # fallback.
-    can_fuse = ((missing_data == 'include' or requested <= fused_garud)
+    # Under 'exclude' the fused engine serves Garud-only requests and any
+    # request with a statistic only it computes (the per-window fallback
+    # does not know them); every other 'exclude' request keeps the
+    # per-window fallback.
+    fused_only = fused_all - _fallback_stats()
+    can_fuse = ((missing_data == 'include' or requested <= fused_garud
+                 or bool(requested & fused_only))
                 and requested <= fused_all
                 # A two-population statistic with anything other than exactly
                 # two populations must not reach the fused engine, which
@@ -1904,6 +1917,38 @@ def _compute_window_ranges(positions, bp_bins):
     return win_start.astype(cp.int64), win_stop.astype(cp.int64)
 
 
+def _apply_exclude(haplotype_matrix, missing_data, statistics, population,
+                   pop1, pop2):
+    """The matrix and missing-data mode a fused engine computes on.
+
+    Under 'exclude' the matrix is restricted to sites with no missing call,
+    and the mode becomes 'include' because every row the engine reads is
+    then complete; a later step must not filter again over other rows.
+
+    A site's completeness does not depend on the window, so filtering once
+    equals dropping each window's incomplete sites; the caller's window grid
+    comes from the bin edges and does not move. Completeness is judged over
+    the rows the request reads: both populations when a two-population
+    statistic is requested, so single-population statistics in the same
+    request see only sites complete in both; else the single population;
+    else every row.
+
+    A Garud-only request is returned unchanged, still under 'exclude':
+    ``garud_h_windows`` drops incomplete columns itself, with no copy.
+    Otherwise the filter copies the complete sites, so under 'exclude' an
+    engine holds one extra copy of the matrix next to the caller's.
+    """
+    if missing_data != 'exclude' or set(statistics) <= set(_FUSED_GARUD_STATS):
+        return haplotype_matrix, missing_data
+    if _TWO_POP_STATS & set(statistics):
+        pops = [pop1, pop2]
+    elif population is not None:
+        pops = [population]
+    else:
+        pops = None
+    return haplotype_matrix.exclude_missing_sites(populations=pops), 'include'
+
+
 def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                               bp_bins,
                               statistics=('pi', 'theta_w', 'tajimas_d',
@@ -1940,6 +1985,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         Normalize by window size in base pairs.
     is_accessible : array_like, optional
         Accessibility mask for per-base normalization.
+    missing_data : {'include', 'exclude'}
+        'include' uses every site with the calls it has. 'exclude' keeps
+        only sites with no missing call in the rows the request reads (see
+        ``_apply_exclude``), so ``n_variants`` counts those sites; a
+        Garud-only request keeps every site in ``n_variants``.
     chrom : str or int, optional
         Chromosome label emitted in the ``chrom`` output column.
 
@@ -1953,6 +2003,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
+
+    haplotype_matrix, missing_data = _apply_exclude(
+        haplotype_matrix, missing_data, statistics, population, pop1, pop2)
 
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
@@ -1976,8 +2029,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # two-population statistics are requested the kernel reads pop1 and pop2
     # rows of the original matrix, which the single-population subset need
     # not cover, so the reduction runs over the original.
-    two_pop_requested = any(s in ('fst', 'fst_hudson', 'fst_wc', 'dxy', 'da')
-                            for s in statistics)
+    two_pop_requested = bool(_TWO_POP_STATS & set(statistics))
     hap_raw, positions, cap_keep = _filter_fused_allele_cap_raw(
         hap_raw, positions,
         cap_source=haplotype_matrix.haplotypes if two_pop_requested else None)
@@ -2088,8 +2140,6 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             results['max_daf'] = max_daf
 
     # two-pop stats via fused kernel
-    two_pop_stats = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
-    two_pop_requested = any(s in statistics for s in two_pop_stats)
     if two_pop_requested:
         if pop1 is None or pop2 is None:
             raise ValueError("pop1 and pop2 required for fst/dxy/da")
@@ -2418,6 +2468,9 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
+    haplotype_matrix, missing_data = _apply_exclude(
+        haplotype_matrix, missing_data, statistics, population, pop1, pop2)
+
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
     else:
@@ -2438,8 +2491,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     # sites. When two-population statistics are requested the kernels read
     # pop1 and pop2 rows of the original matrix, which the single-population
     # subset need not cover, so the cap reduction runs over the original.
-    two_pop_stats = {'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'}
-    two_pop_requested = any(s in statistics for s in two_pop_stats)
+    two_pop_requested = bool(_TWO_POP_STATS & set(statistics))
     hap_raw, positions, cap_keep_idx = _filter_fused_allele_cap_raw(
         hap_raw, positions,
         cap_source=haplotype_matrix.haplotypes if two_pop_requested else None)
