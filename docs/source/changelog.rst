@@ -425,6 +425,14 @@ New warnings
   The ``tally_gpu_haplotypes*`` methods keep multiallelic sites, count
   the highest allele against all others, and warn with the number of
   such sites.
+* ``FewCompleteHaplotypesWarning`` -- 10% or more of the windows in a
+  ``windowed_analysis`` or ``moving_garud_h`` call have few haplotypes
+  with no missing call (fewer than 25, or fewer than half the sample
+  when it is under 50). Garud's H and ``haplotype_count`` come out too
+  low there. ``windowed_analysis`` now returns ``n_complete_haplotypes``
+  with any Garud statistic or ``haplotype_count``, and
+  ``min_complete_haplotypes`` sets thinner windows to NaN. See
+  :doc:`missing_data`.
 * ``UnpairedRowsWarning`` -- a statistic that pairs rows into
   individuals got a population list that does not keep each sample's
   two rows together. The row-validation entry above says when it
