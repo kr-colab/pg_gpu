@@ -261,6 +261,24 @@ def test_windowed_exclude_matches_scalar(windowed_case):
         mixed[stats].to_numpy(dtype=np.float64)[:len(win)], ref)
 
 
+@pytest.mark.parametrize("missing_data", ["include", "exclude"])
+def test_windowed_garud_does_not_hash_missing_as_an_allele(missing_data):
+    # The row with a missing call matches only the all-0 haplotype, so the
+    # frequencies are 3/4 and 1/4: H1 = 0.625, H12 = H123 = 1, H2/H1 = 0.1.
+    # Hashing -1 as an allele would make it a third haplotype instead.
+    hap = np.array([[0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, 0],
+                    [0, 0, 0, 0, -1],
+                    [1, 1, 1, 1, 1]], dtype=np.int8)
+    h = HaplotypeMatrix(hap, np.array([10, 20, 30, 40, 50]), 0, 100)
+    expected = [0.625, 1.0, 1.0, 0.1]
+    df = windowed_analysis(h, window_size=100, step_size=100,
+                           statistics=GARUD, missing_data=missing_data)
+    np.testing.assert_allclose(df[GARUD].to_numpy(dtype=np.float64)[0], expected)
+    np.testing.assert_allclose(
+        selection.garud_h(h, missing_data=missing_data), expected)
+
+
 # ---------------------------------------------------------------------------
 # GenotypeMatrix
 # ---------------------------------------------------------------------------
