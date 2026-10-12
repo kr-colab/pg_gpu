@@ -199,6 +199,11 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``windowed_analysis`` raised ``TypeError`` when a population was given
+  as a list of rows and the request took the per-window fallback (for
+  example ``['pi', 'garud_h1']`` with ``missing_data='exclude'``). The
+  fallback now accepts row lists and names their columns as it names
+  the columns of a named population.
 * ``tally_gpu_haplotypes`` and ``tally_gpu_haplotypes_two_pops`` gave
   wrong counts on complete data when more than 127 haplotypes carried
   the alternate allele at both sites of a pair. The pair count used an
