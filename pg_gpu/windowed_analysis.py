@@ -234,19 +234,21 @@ class StatisticsComputer:
 
         # Single population statistics. Each population's window is built
         # once, so statistics that share work (the Garud H family) can
-        # share it through the window's cache.
-        pop_windows = {}
+        # share it through the window's cache. The windows sit in a list in
+        # the order of self.populations, because a population given as a
+        # list of rows cannot be a dict key.
+        pop_windows = []
         if self.single_pop_stats and self.populations:
             for pop in self.populations:
                 pop_matrix = population_rows(window.matrix, pop)
-                pop_windows[pop] = replace(
+                pop_windows.append(replace(
                     window, matrix=pop_matrix,
-                    n_variants=self._n_sites(pop_matrix), cache={})
+                    n_variants=self._n_sites(pop_matrix), cache={}))
         for stat in self.single_pop_stats:
             if self.populations:
                 # Compute for each population
-                for pop in self.populations:
-                    val = self.SINGLE_POP_STATS[stat](pop_windows[pop])
+                for pop, pop_window in zip(self.populations, pop_windows):
+                    val = self.SINGLE_POP_STATS[stat](pop_window)
                     key = f"{stat}_{pop}"
                     self._store_result(results, key, val)
             else:
@@ -255,7 +257,7 @@ class StatisticsComputer:
         # The complete haplotypes that anchor each Garud estimate, named
         # like the Garud columns.
         if any(s in _FUSED_GARUD_STATS for s in self.single_pop_stats):
-            targets = ({f"_{p}": pop_windows[p] for p in self.populations}
+            targets = ({f"_{p}": w for p, w in zip(self.populations, pop_windows)}
                        or {"": window})
             for suffix, w in targets.items():
                 results[f"n_complete_haplotypes{suffix}"] = self._garud_h(w)[-1]

@@ -170,3 +170,18 @@ def test_moving_garud_h_warns_on_thin_windows():
     few = _few_complete(record)
     assert len(few) == 1
     assert few[0].filename == __file__
+
+
+def test_fallback_accepts_populations_given_as_rows():
+    # The per-window fallback ('pi' with a Garud statistic under 'exclude')
+    # gives row-list populations the values it gives the same rows by name.
+    hap = _hap(60, 0.01)
+    r1, r2 = list(range(30)), list(range(30, 60))
+    stats = ["garud_h1", "pi"]
+    rows, _ = _run(_hm(hap), window_size=WIN, statistics=stats, populations=[r1, r2],
+                   missing_data="exclude")
+    named, _ = _run(_hm(hap, {"a": r1, "b": r2}), window_size=WIN, statistics=stats,
+                    populations=["a", "b"], missing_data="exclude")
+    for stat in stats + ["n_complete_haplotypes"]:
+        for rows_pop, name in ((r1, "a"), (r2, "b")):
+            np.testing.assert_array_equal(rows[f"{stat}_{rows_pop}"], named[f"{stat}_{name}"])
