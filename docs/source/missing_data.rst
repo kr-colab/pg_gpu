@@ -187,13 +187,72 @@ frequencies:
    from pg_gpu import selection
    h1, h12, h123, h2_h1 = selection.garud_h(h)
 
-The complete haplotypes carry the estimate, so check that they are not
-rare. With independent missing calls at rate ``m``, a haplotype is
-complete over ``L`` sites with probability ``(1 - m)^L``: at 1% missing
-over 400 sites, fewer than 2% of haplotypes are complete. For data with
-many missing calls, use ``missing_data='exclude'``, which drops every site
-with a missing call. Garud's H expects phased haplotypes, and phased
-haplotypes from imputation tools usually have no missing calls.
+Windows with few complete haplotypes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The complete haplotypes carry the estimate. When a true haplotype has no
+complete copy in a window, rule 4 counts each of its incomplete copies as
+a distinct haplotype, so H1 and H12 come out too low. In a selection scan,
+windows with more missing calls then look less swept.
+
+In simulations with 200 haplotypes and 400-site windows, the H12 error
+against the same window with no missing calls was:
+
+=====================  ========================  ==========================
+Complete haplotypes    Sweep (true H12 0.117)    Neutral (true H12 0.012)
+=====================  ========================  ==========================
+1-9                    -0.032                    -0.006
+10-24                  -0.007                    -0.005
+25-49                  -0.002                    -0.003
+100 or more            0.000                     0.000
+=====================  ========================  ==========================
+
+Missing calls in real data cluster at a few bad sites, and these sites
+cause most of the thin windows. Remove them before a haplotype scan:
+
+.. code-block:: python
+
+   # Drop sites where more than 10% of haplotypes have a missing call.
+   h_clean = h.filter_variants_by_missing(max_missing_freq=0.1)
+
+In the simulations, this filter removed 0.3% of sites, left at least 146
+complete haplotypes in every window, and removed the bias.
+
+``windowed_analysis`` helps you check the result:
+
+* A request with a Garud statistic or ``haplotype_count`` also returns
+  ``n_complete_haplotypes``, the number of haplotypes with no missing call
+  in each window.
+* A ``FewCompleteHaplotypesWarning`` reports when 10% or more of the
+  windows are thin. A window is thin when it has fewer than 25 complete
+  haplotypes, or fewer than half the haplotypes when the sample has fewer
+  than 50. ``selection.moving_garud_h`` gives the same warning.
+* ``min_complete_haplotypes`` sets the Garud statistics and
+  ``haplotype_count`` to NaN in every window below that count. Only
+  ``windowed_analysis`` applies it and the warning; the lower-level
+  ``windowed_statistics_fused`` returns the column and leaves the check to
+  you:
+
+.. code-block:: python
+
+   df = windowed_analysis(h_clean, window_size=50_000,
+                          statistics=['garud_h12'],
+                          min_complete_haplotypes=25)
+
+``mu_ld`` takes its haplotype groups from the complete haplotypes of each
+half-window in the same way, so a half with few complete haplotypes biases
+it too. The column and the warning cover only Garud's H and
+``haplotype_count``.
+
+Missing calls spread evenly at a high rate have no good fix. With
+independent missing calls at rate ``m``, a haplotype is complete over
+``L`` sites with probability ``(1 - m)^L``: at 1% missing over 400 sites,
+fewer than 2% of haplotypes are complete, and the site filter removes
+nothing. ``missing_data='exclude'`` drops every site with a missing call,
+which at that rate with 200 haplotypes is about 87% of sites. Smaller
+windows keep more complete haplotypes but change the statistic. Garud's H
+expects phased haplotypes, and phased haplotypes from imputation tools
+usually have no missing calls.
 
 HaplotypeMatrix and GenotypeMatrix Utilities
 --------------------------------------------

@@ -113,7 +113,7 @@ def test_walk_matches_reference_past_shared_memory_limits():
 def test_garud_h_windows_no_windows():
     hap = cp.zeros((4, 10), dtype=cp.int8)
     out = garud_h_windows(hap, [], [])
-    assert len(out) == 5
+    assert len(out) == 6
     assert all(o.shape == (0,) for o in out)
 
 

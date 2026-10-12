@@ -224,24 +224,33 @@ class StatisticsComputer:
 
         # Single population statistics. Each population's window is built
         # once, so statistics that share work (the Garud H family) can
-        # share it through the window's cache.
-        pop_windows = {}
+        # share it through the window's cache. The windows sit in a list in
+        # the order of self.populations, because a population given as a
+        # list of rows cannot be a dict key.
+        pop_windows = []
         if self.single_pop_stats and self.populations:
             for pop in self.populations:
                 pop_matrix = population_rows(window.matrix, pop)
-                pop_windows[pop] = replace(
+                pop_windows.append(replace(
                     window, matrix=pop_matrix,
-                    n_variants=pop_matrix.num_variants, cache={})
+                    n_variants=pop_matrix.num_variants, cache={}))
         for stat in self.single_pop_stats:
             if self.populations:
                 # Compute for each population
-                for pop in self.populations:
-                    val = self.SINGLE_POP_STATS[stat](pop_windows[pop])
+                for pop, pop_window in zip(self.populations, pop_windows):
+                    val = self.SINGLE_POP_STATS[stat](pop_window)
                     key = f"{stat}_{pop}"
                     self._store_result(results, key, val)
             else:
                 val = self.SINGLE_POP_STATS[stat](window)
                 self._store_result(results, stat, val)
+        # The complete haplotypes that anchor each Garud estimate, named
+        # like the Garud columns.
+        if any(s in _FUSED_GARUD_STATS for s in self.single_pop_stats):
+            targets = ({f"_{p}": w for p, w in zip(self.populations, pop_windows)}
+                       or {"": window})
+            for suffix, w in targets.items():
+                results[f"n_complete_haplotypes{suffix}"] = self._garud_h(w)[-1]
 
         # Two population statistics
         if len(self.populations) >= 2:
@@ -268,18 +277,21 @@ class StatisticsComputer:
         return results
 
     def _garud_h(self, window):
-        """The Garud H family of a window, in ``_FUSED_GARUD_STATS`` order.
+        """The Garud H family of a window, in ``_FUSED_GARUD_STATS`` order,
+        followed by the number of haplotypes with no missing call.
 
-        One call gives all five values, as the fused engine computes them,
-        and the window keeps them for the other four statistics.
+        One call gives all six values, as the fused engine computes them,
+        and the window keeps them for the other statistics.
         """
         if 'garud_h' not in window.cache:
             matrix = window.matrix
             if matrix.device == 'CPU':
                 matrix.transfer_to_gpu()
-            window.cache['garud_h'] = tuple(float(v[0]) for v in garud_h_windows(
+            *values, n_complete = garud_h_windows(
                 matrix.haplotypes, [0], [matrix.num_variants],
-                missing_data=self.missing_data))
+                missing_data=self.missing_data)
+            window.cache['garud_h'] = (*(float(v[0]) for v in values),
+                                       int(n_complete[0]))
         return window.cache['garud_h']
 
     @staticmethod
@@ -1125,7 +1137,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
     for left, right, chunk_hm in streaming_hm.iter_gpu_chunks():
         if shared_mask is not None:
             chunk_hm.accessible_mask = shared_mask
-        df = windowed_analysis(
+        df = _windowed_analysis(
             chunk_hm,
             window_size=window_size, step_size=step_size,
             statistics=statistics, populations=populations,
@@ -1159,6 +1171,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      span_normalize=True,
                      accessible_bed: str = None,
                      chrom: str = None,
+                     min_complete_haplotypes: Optional[int] = None,
                      **kwargs) -> pd.DataFrame:
     """
     Convenience function for windowed analysis.
@@ -1184,14 +1197,77 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     accessible_bed : str, optional
         Path to a BED file defining accessible/callable regions.
         If provided and the matrix has no mask, loads the mask.
+    min_complete_haplotypes : int, optional
+        With a Garud statistic or ``haplotype_count``, set those statistics
+        to NaN in every window with fewer than this many haplotypes with no
+        missing call (the ``n_complete_haplotypes`` column). When it is not
+        given, a ``FewCompleteHaplotypesWarning`` reports when many windows
+        have few complete haplotypes, where H1 and H12 come out too low.
     **kwargs
         Additional arguments passed to WindowedAnalyzer
 
     Returns
     -------
     pd.DataFrame
-        Windowed statistics results
+        Windowed statistics results. A request with a Garud statistic or
+        ``haplotype_count`` also gets ``n_complete_haplotypes``, the number
+        of haplotypes with no missing call in each window (suffixed by
+        population where the Garud columns are).
     """
+    result = _windowed_analysis(
+        haplotype_matrix, window_size=window_size, step_size=step_size,
+        statistics=statistics, populations=populations,
+        missing_data=missing_data, span_normalize=span_normalize,
+        accessible_bed=accessible_bed, chrom=chrom, **kwargs)
+    # A local-PCA request returns a LocalPCAResult; its scalar columns sit
+    # in .windows.
+    frame = getattr(result, 'windows', result)
+    _check_complete_haplotypes(frame, haplotype_matrix, populations,
+                               min_complete_haplotypes)
+    return result
+
+
+def _check_complete_haplotypes(df, matrix, populations, min_complete):
+    """Apply ``min_complete_haplotypes``, or warn when many windows are thin.
+
+    Each ``n_complete_haplotypes`` column covers the Garud columns with the
+    same population suffix. A bare column belongs to ``populations[0]``, or
+    to every row when no population is given.
+    """
+    from ._warnings import _warn_few_complete_haplotypes
+    prefix = 'n_complete_haplotypes'
+    # The engines name a population's columns f"{stat}_{pop}", so map each
+    # suffix back to the population itself, which may be a list of rows.
+    pop_of = {f"_{p}": p for p in populations or []}
+    pop_of[""] = populations[0] if populations else None
+    for col in [c for c in df.columns if c.startswith(prefix)]:
+        suffix = col[len(prefix):]
+        n_complete = df[col].to_numpy(dtype=np.float64)
+        if min_complete is not None:
+            stats = df.columns.intersection([s + suffix for s in _FUSED_GARUD_STATS])
+            df.loc[n_complete < min_complete, stats] = np.nan
+            continue
+        pop = pop_of[suffix]
+        n_rows = (len(divergence._get_population_indices(matrix, pop))
+                  if pop is not None else matrix.num_haplotypes)
+        # One frame each for the helper and this function, so the warning
+        # points at the caller of windowed_analysis.
+        _warn_few_complete_haplotypes(n_complete, n_rows,
+                                      context="windowed_analysis",
+                                      stacklevel=4)
+
+
+def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
+                      window_size: int = 50000,
+                      step_size: Optional[int] = None,
+                      statistics: List[str] = ['pi'],
+                      populations: Optional[List[str]] = None,
+                      missing_data: str = 'include',
+                      span_normalize=True,
+                      accessible_bed: str = None,
+                      chrom: str = None,
+                      **kwargs) -> pd.DataFrame:
+    """The body of ``windowed_analysis``, without its final checks."""
     from .streaming_matrix import StreamingHaplotypeMatrix
     if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
         return _stream_windowed_analysis(
@@ -1236,7 +1312,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         other_stats = [s for s in statistics
                        if s not in ('local_pca', 'local_pca_jackknife')]
         if other_stats:
-            scalar_df = windowed_analysis(
+            scalar_df = _windowed_analysis(
                 haplotype_matrix,
                 window_size=window_size,
                 step_size=step_size,
@@ -1932,6 +2008,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     statistics : tuple of str
         Statistics to compute. Single-pop: 'pi', 'theta_w', 'tajimas_d',
         'segregating_sites', 'singletons'. Two-pop: 'fst', 'dxy'.
+        Haplotype: the Garud statistics and 'haplotype_count'.
     population : str or list, optional
         Population for single-pop statistics.
     pop1, pop2 : str or list, optional
@@ -1948,7 +2025,12 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     dict
         Maps column names to numpy arrays of shape (n_windows,). The first
         six columns are always ``chrom, start, end, center, n_variants,
-        window_id``, followed by one column per requested statistic.
+        window_id``, followed by one column per requested statistic. A
+        haplotype statistic adds ``n_complete_haplotypes``, the number of
+        haplotypes with no missing call in each window. Unlike
+        ``windowed_analysis``, this function neither warns about windows
+        with few complete haplotypes nor applies a cutoff; check that
+        column yourself.
     """
 
     if haplotype_matrix.device == 'CPU':
@@ -2783,13 +2865,15 @@ def _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results,
 
     A window with no variants reports one haplotype. A window with no
     complete haplotype under 'include' is NaN, so every column, the
-    haplotype count too, is float64.
+    haplotype count too, is float64. ``n_complete_haplotypes`` holds the
+    number of haplotypes with no missing call in each window.
     """
-    values = garud_h_windows(matrix.haplotypes, win_start, win_stop,
-                             missing_data=missing_data)
+    *values, n_complete = garud_h_windows(matrix.haplotypes, win_start,
+                                          win_stop, missing_data=missing_data)
     for name, column in zip(_FUSED_GARUD_STATS, values):
         if name in statistics:
             results[name] = column
+    results['n_complete_haplotypes'] = n_complete
 
 
 # ---------------------------------------------------------------------------

@@ -273,6 +273,60 @@ def _warn_biallelic_only(n_dropped, *, context, stacklevel=3, action="dropped"):
     )
 
 
+class FewCompleteHaplotypesWarning(UserWarning):
+    """Emitted when many windows have few haplotypes with no missing call.
+
+    Haplotype-identity statistics (Garud's H, ``haplotype_count``) take their
+    groups from the complete haplotypes of each window. An incomplete
+    haplotype whose true group has no complete copy counts as a distinct
+    haplotype, so with few complete haplotypes H1 and H12 come out too low.
+    Filter high-missingness sites first with
+    ``HaplotypeMatrix.filter_variants_by_missing``. Silence with::
+
+        import warnings
+        from pg_gpu import FewCompleteHaplotypesWarning
+        warnings.filterwarnings("ignore", category=FewCompleteHaplotypesWarning)
+    """
+
+
+# A window is thin when it has fewer than this many complete haplotypes, or
+# fewer than half the haplotypes when the sample is smaller than twice this.
+# Below about 25 the downward bias of H12 grows several-fold in simulation.
+THIN_WINDOW_COMPLETE = 25
+# Warn when at least this fraction of windows is thin.
+THIN_WINDOW_FRACTION = 0.10
+
+
+def _warn_few_complete_haplotypes(n_complete, n_rows, *, context, stacklevel=3):
+    """Emit ``FewCompleteHaplotypesWarning`` when many windows are thin.
+
+    ``n_complete`` holds the complete-haplotype count of each window and
+    ``n_rows`` the number of haplotypes the statistic read.
+    """
+    n_complete = np.asarray(n_complete, dtype=np.float64)
+    if n_complete.size == 0:
+        return
+    bound = min(THIN_WINDOW_COMPLETE, n_rows // 2)
+    n_thin = int((n_complete < bound).sum())
+    if n_thin < THIN_WINDOW_FRACTION * n_complete.size:
+        return
+    warnings.warn(
+        f"{context}: {n_thin} of {n_complete.size} windows "
+        f"({n_thin / n_complete.size:.0%}) have fewer than {bound} of "
+        f"{n_rows} haplotypes with no missing call. Garud's H and "
+        "haplotype_count come out too low in such windows. Filter "
+        "high-missingness sites first with "
+        "HaplotypeMatrix.filter_variants_by_missing, or pass "
+        "min_complete_haplotypes to windowed_analysis to set those windows "
+        "to NaN. To silence:\n"
+        "    import warnings\n"
+        "    from pg_gpu import FewCompleteHaplotypesWarning\n"
+        "    warnings.filterwarnings('ignore', "
+        "category=FewCompleteHaplotypesWarning)",
+        FewCompleteHaplotypesWarning, stacklevel=stacklevel,
+    )
+
+
 # ── VCF size heuristic ──────────────────────────────────────────────────────
 #
 # VCF text parsing is single-threaded in htslib and the whole genotype matrix
