@@ -128,6 +128,8 @@ class ZarrGenotypeSource:
         all_pos = np.array(self._store["variant_position"])
 
         chrom, start, stop = parse_region(region)
+        self._region_start = start
+        self._region_stop = stop - 1 if stop is not None else None
         contig_idx, self.chrom = _vcz_contig_index(
             self._store, all_contigs, contig_id if chrom is None else chrom)
         mask = (all_contigs == contig_idx) & _region_mask(all_pos, start, stop)
@@ -157,17 +159,49 @@ class ZarrGenotypeSource:
         self.pop_cols = self._resolve_pop_assignment(pop_assignment)
 
     @property
+    def region_start(self):
+        """Lower edge of requested region"""
+        return self._region_start
+
+    @property
+    def region_stop(self):
+        """Upper edge of requested region"""
+        return self._region_stop
+
+    @property
     def mappable_lo(self):
         """Position of the first variant in the source (or 0 if empty)."""
         return int(self.site_pos[0]) if self.num_variants else 0
 
     @property
     def mappable_hi(self):
-        """One past the position of the last variant in the source."""
-        return int(self.site_pos[-1]) + 1 if self.num_variants else 0
+        """Position of the last variant in the source."""
+        return int(self.site_pos[-1]) if self.num_variants else 0
+
+    @property
+    def grid_start(self):
+        """Absolute inclusive lower edge the chunk grid tiles to"""
+        return self.region_start if self.region_start is not None else self.mappable_lo
+
+    @property
+    def grid_end(self):
+        """Absolute inclusive upper edge the chunk grid tiles to"""
+        return self.region_stop if self.region_stop is not None else self.mappable_hi
+
+
 
     def slice_region(self, left, right):
-        """Read every haplotype for variants in ``[left, right)``.
+        """Read every haplotype for variants in the closed ``[left, right]`` interval.
+
+        Both bounds are inclusive, matching ``iter_chunks``' inclusive chunk
+        edges and ``materialize``'s inclusive region bounds. Adjacent chunk
+        edges do not overlap (one chunk's ``right`` is one bp below the next
+        chunk's ``left``), so a variant lands in exactly one chunk.
+
+        Parameters
+        ----------
+        left, right : int
+            Inclusive genomic bp bounds.
 
         Returns
         -------
@@ -234,6 +268,9 @@ class ZarrGenotypeSource:
         scattered subsets (every dip its own run) fall back to
         ``slice_subsample(to_gpu=True)``.
 
+        ``right`` is inclusive, matching ``slice_subsample`` and its sole
+        caller ``materialize``.
+
         Returns
         -------
         gm : cupy.ndarray, shape (n_var, len(hap_cols)), dtype int8
@@ -287,7 +324,10 @@ class ZarrGenotypeSource:
         return gm_gpu, pos
 
     def slice_subsample(self, left, right, hap_cols, *, to_gpu=False):
-        """Read variants in ``[left, right)`` restricted to ``hap_cols``.
+        """Read variants in the closed ``[left, right]`` restricted to ``hap_cols``.
+
+        ``right`` is inclusive (``materialize`` is the only caller and its
+        region bounds are inclusive).
 
         ``hap_cols`` is an iterable of haplotype-axis indices in
         ``[0, 2 * num_diploids)``. Uses zarr's ``oindex`` for the
@@ -349,32 +389,27 @@ class ZarrGenotypeSource:
             return gm_gpu, pos
         return cp.asnumpy(gm_gpu), pos
 
-    def iter_chunks(self, chunk_bp, align_bp=None, start=None):
-        """Yield ``(left, right)`` genomic intervals tiling the source.
+    def iter_chunks(self, chunk_bp):
+        """Yield closed ``[left, right]`` genomic intervals tiling the source.
 
-        Intervals are sized as multiples of ``align_bp`` (defaults to
-        ``chunk_bp``) so a caller running window-based stats can
-        guarantee windows never straddle a chunk boundary. Empty
-        regions at the start of the contig (e.g. acrocentric arm) are
-        yielded as well -- the caller can detect and skip them via the
-        cheap ``gt.shape[0] == 0`` check.
+        Right edges are inclusive and non-overlapping (``right`` of one chunk is one bp below the next ``left``); the final chunk's ``right`` is ``grid_end``.
         """
-        if align_bp is None:
-            align_bp = chunk_bp
-        windows_per_chunk = max(1, chunk_bp // align_bp)
-        step = windows_per_chunk * align_bp
-        end = self.mappable_hi
-        s = 0 if start is None else int(start)
+        start = self.grid_start
+        end = self.grid_end
+        s = start
         if end == 0:
             return
-        while s < end:
-            yield s, min(s + step, end)
-            s += step
+        while s <= end:
+            yield s, min(s + chunk_bp - 1, end)
+            s += chunk_bp
 
     def _site_index_range(self, left, right):
-        """Half-open ``[lo, hi)`` row range covering positions in [left, right)."""
+        """Return ``(lo, hi)`` selecting every variant in the closed genomic
+        interval ``[left, right]`` -- both bounds inclusive. The pair is a
+        slice range (``site_pos[lo:hi]``), so ``side="right"`` maps the
+        inclusive ``right`` bound onto the exclusive slice end ``hi``."""
         lo = int(np.searchsorted(self.site_pos, left, side="left"))
-        hi = int(np.searchsorted(self.site_pos, right, side="left"))
+        hi = int(np.searchsorted(self.site_pos, right, side="right"))
         return lo, hi
 
     def _resolve_pop_assignment(self, pop_assignment):

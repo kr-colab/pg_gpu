@@ -904,9 +904,25 @@ class TestBedParseAndResolveEdges:
 
     def test_streaming_mask_uses_source_chrom_and_bounds(self, tmp_path):
         # No region given: the chromosome comes from the source and the mask
-        # spans the source's mappable range.
+        # spans the source's grid bounds (which fall back to the mappable
+        # range when no region is set).
         bed = tmp_path / "acc.bed"
         bed.write_text("1\t0\t1000\n")
-        source = SimpleNamespace(mappable_lo=100, mappable_hi=1000, chrom="1")
+        source = SimpleNamespace(grid_start=100, grid_end=1000, chrom="1")
         assert isinstance(resolve_streaming_accessible_mask(str(bed), source),
                           AccessibleMask)
+
+    def test_streaming_mask_spans_region_grid_bounds(self, tmp_path):
+        # With a region the mask spans the source's grid bounds (the requested
+        # region, which can extend past the BED), and the region's contig
+        # overrides source.chrom -- here the BED only has 'chrX' intervals, so
+        # resolution would raise if source.chrom ('other') were used instead.
+        bed = tmp_path / "acc.bed"
+        bed.write_text("chrX\t100\t200\n")  # 1-based positions 101..200
+        source = SimpleNamespace(grid_start=50, grid_end=5000, chrom="other")
+        mask = resolve_streaming_accessible_mask(str(bed), source,
+                                                 region="chrX:50-5000")
+        assert isinstance(mask, AccessibleMask)
+        # Widened to the union of the BED extent and the grid bounds.
+        assert mask.offset == 50                      # min(bed_min=101, grid_start=50)
+        assert mask.offset + len(mask) - 1 == 5000    # max(bed_max=200, grid_end=5000)

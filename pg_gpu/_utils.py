@@ -48,7 +48,7 @@ def get_population_matrix(matrix, population: Union[str, list],
         # reach CuPy's unchecked fancy indexing.
         check_sample_set_rows("population row list", pop_indices,
                               matrix.shape[0])
-
+    allow_empty = matrix.num_variants == 0
     is_genotype = isinstance(matrix, GenotypeMatrix)
     extra = {}
     if metadata:
@@ -85,6 +85,7 @@ def get_population_matrix(matrix, population: Union[str, list],
         matrix.chrom_end,
         sample_sets={'all': list(range(len(pop_indices)))},
         n_total_sites=matrix.n_total_sites,
+        allow_empty=allow_empty,
         **extra,
     )
 

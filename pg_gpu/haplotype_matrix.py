@@ -262,11 +262,17 @@ class HaplotypeMatrix:
                  samples: list = None,
                  accessible_mask=None,
                  fields: dict = None,
+                 allow_empty: bool = False,
                 ):
-        if genotypes.size == 0:
-            raise ValueError("genotypes cannot be empty")
-        if positions.size == 0:
-            raise ValueError("positions cannot be empty")
+        # ``allow_empty`` is set only by the streaming chunk builder, which
+        # yields zero-variant chunks over empty regions (e.g. an acrocentric
+        # arm) so windowed analysis can emit their windows. Eager callers keep
+        # the non-empty invariant every eager kernel relies on.
+        if not allow_empty:
+            if genotypes.size == 0:
+                raise ValueError("genotypes cannot be empty")
+            if positions.size == 0:
+                raise ValueError("positions cannot be empty")
         if not isinstance(genotypes, (np.ndarray, cp.ndarray)):
             raise ValueError("genotypes must be a numpy or cupy array")
         if not isinstance(positions, (np.ndarray, cp.ndarray)):
@@ -781,10 +787,13 @@ class HaplotypeMatrix:
         check_diploid_encoding(gt, sample_names=sample_names,
                                source=f"zarr store '{path}'")
 
+        chrom, start, stop = parse_region(region)
+        start = start if start is not None else int(positions[0])
+        stop = stop - 1 if stop is not None else int(positions[-1])
         hm = build_haplotype_matrix(
             gt, positions,
-            chrom_start=int(positions[0]),
-            chrom_end=int(positions[-1]),
+            chrom_start=start,
+            chrom_end=stop,
             samples=list(sample_names) if sample_names is not None else None,
         )
 
@@ -799,7 +808,6 @@ class HaplotypeMatrix:
                 region=region,
             )
 
-        chrom = parse_region(region)[0]
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
 

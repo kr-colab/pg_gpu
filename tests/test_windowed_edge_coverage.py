@@ -131,22 +131,29 @@ def test_two_pop_exclude_missing_drops_missing_sites():
     assert np.isfinite(dxy(m, "exclude"))             # n_total_sites normalized
 
 
-def test_exclude_missing_all_sites_returns_empty():
-    # Every call missing -> exclude drops all sites -> empty DataFrame.
+def test_exclude_missing_all_sites_yields_empty_windows():
+    # Every call missing -> exclude drops all sites, but the window grid is
+    # still anchored, so each window is emitted with n_variants=0 and pi=0
+    # (a per-base rate over zero variants), rather than vanishing.
     hap = np.full((8, 6), -1, dtype=np.int8)
     pos = (np.arange(1, 7) * 100).astype(np.int64)
     m = HaplotypeMatrix(hap, pos)
-    assert windowed_analysis(m, window_size=300, statistics=["pi"],
-                             missing_data="exclude").empty
+    df = windowed_analysis(m, window_size=300, statistics=["pi"],
+                           missing_data="exclude")
+    assert not df.empty
+    assert (df["n_variants"] == 0).all()
+    assert (df["pi"] == 0).all()
 
 
-def test_two_pop_exclude_missing_all_sites_returns_empty():
+def test_two_pop_exclude_missing_all_sites_yields_empty_windows():
     hap = np.full((8, 6), -1, dtype=np.int8)
     pos = (np.arange(1, 7) * 100).astype(np.int64)
     m = HaplotypeMatrix(hap, pos, sample_sets=_TWO_POP)
     df = windowed_analysis(m, window_size=300, statistics=["dxy"],
                            populations=["p1", "p2"], missing_data="exclude")
-    assert df.empty
+    assert not df.empty
+    assert (df["n_variants"] == 0).all()
+    assert (df["dxy"] == 0).all()
 
 
 # ── scatter path: the less-common single-pop stat outputs ──────────────

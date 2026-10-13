@@ -268,21 +268,24 @@ def slice_fields(fields, keep_idx, accessible_idx=None):
 
 
 def resolve_streaming_accessible_mask(accessible_bed, source, region=None):
-    """Resolve an accessible BED over a streaming source's variant bounds.
+    """Resolve an accessible BED over a streaming source's grid bounds.
 
     Both streaming loaders (haplotype and genotype) resolve the same mask
     once over the source's position span and hand it to the streaming
     matrix, so per-chunk variant filtering -- and, for span-normalized
     reductions, the accessible-base denominator -- matches the eager path.
-    ``mappable_hi`` is one past the last variant, so the inclusive last
-    position is ``mappable_hi - 1``.
+    The mask is resolved over the source's inclusive chunk-grid bounds,
+    ``grid_start``/``grid_end``: the requested region when one was given
+    (so the full region is covered even past the first/last variant), else
+    the variant span ``mappable_lo``/``mappable_hi``. Both bounds are
+    inclusive, as ``resolve_accessible_mask`` expects.
 
     Parameters
     ----------
     accessible_bed : str, path-like, numpy.ndarray, AccessibleMask, or None
         Passthrough to ``resolve_accessible_mask``. ``None`` returns ``None``.
     source : ZarrGenotypeSource
-        Streaming source; supplies ``mappable_lo``/``mappable_hi``/``chrom``.
+        Streaming source; supplies ``grid_start``/``grid_end``/``chrom``.
     region : str, optional
         ``"chrom:start-end"`` region string (both ends inclusive, as in
         samtools); its contig overrides
@@ -296,4 +299,4 @@ def resolve_streaming_accessible_mask(accessible_bed, source, region=None):
         return None
     chrom = parse_region(region)[0] or source.chrom
     return resolve_accessible_mask(
-        accessible_bed, source.mappable_lo, source.mappable_hi - 1, chrom)
+        accessible_bed, source.grid_start, source.grid_end, chrom)

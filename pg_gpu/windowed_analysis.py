@@ -749,9 +749,12 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         return pd.DataFrame()
 
     if missing_data == 'exclude':
+        # Keep the already-anchored window grid even when exclusion removes
+        # every site: the scatter machinery renders empty windows as 0/NaN
+        # rows (the same way the include path does), so an eager all-missing
+        # region and a streaming empty chunk both yield dense windows rather
+        # than vanishing from the output.
         matrix = matrix.exclude_missing_sites()
-        if matrix.num_variants == 0:
-            return pd.DataFrame()
         pos_cpu = cp.asnumpy(matrix.positions)
 
     from .diversity import _prepare_allele_counts, _ac_contribution
@@ -957,10 +960,12 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         return pd.DataFrame()
 
     if missing_data == 'exclude':
+        # Keep the anchored grid even when exclusion empties the matrix, so
+        # empty windows render as 0/NaN rows instead of vanishing (mirrors
+        # the single-pop engine and the include path). get_population_matrix
+        # tolerates the zero-variant parent.
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1_name, pop2_name])
-        if haplotype_matrix.num_variants == 0:
-            return pd.DataFrame()
         mat1 = population_rows(haplotype_matrix, pop1_name)
         mat2 = population_rows(haplotype_matrix, pop2_name)
         pos_cpu = cp.asnumpy(haplotype_matrix.positions)
@@ -1070,10 +1075,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
     """Run windowed_analysis chunk-by-chunk over a StreamingHaplotypeMatrix.
 
     The per-chunk DataFrames are concatenated row-wise. Each chunk's windows
-    are computed in isolation and the chunk boundaries are aligned so a
-    window never straddles two chunks; the StreamingHaplotypeMatrix
-    constructor picked an ``align_bp`` for this reason, so the only
-    contract we have to enforce here is ``window_size`` divides it.
+    are computed in isolation and ``window_size`` must divide it ``chunk_bp``.
 
     Sliding windows (``step_size`` != ``window_size``) and the local-PCA
     dispatch both need cross-chunk state and are not yet supported on the
@@ -1095,13 +1097,20 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             "supply non-overlapping windows or materialize the region "
             "eagerly first."
         )
-    align_bp = streaming_hm.align_bp
-    if window_size > align_bp or align_bp % window_size != 0:
+    chunk_bp = streaming_hm.chunk_bp
+    if window_size > chunk_bp:
         raise ValueError(
             f"window_size={window_size} must divide the streaming matrix's "
-            f"chunk alignment ({align_bp}); pass a smaller window_size or "
+            f"chunk width ({chunk_bp}); pass a smaller window_size"
+        )
+
+    if chunk_bp % window_size != 0:
+        raise ValueError(
+            f"window_size={window_size} must divide the streaming matrix's "
+            f"chunk width ({chunk_bp}); pass a different window_size or "
             f"re-open the store with a matching chunk_bp."
         )
+
     if any(s in ("local_pca", "local_pca_jackknife") for s in statistics):
         raise NotImplementedError(
             "local_pca requires a chromosome-wide reference and is not "
@@ -1122,7 +1131,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
         )
 
     parts = []
-    for left, right, chunk_hm in streaming_hm.iter_gpu_chunks():
+    for left, right, chunk_hm in streaming_hm.iter_gpu_chunks(skip_empty = False):
         if shared_mask is not None:
             chunk_hm.accessible_mask = shared_mask
         df = windowed_analysis(
