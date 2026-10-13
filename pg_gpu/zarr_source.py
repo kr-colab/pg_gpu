@@ -392,7 +392,7 @@ class ZarrGenotypeSource:
     def iter_chunks(self, chunk_bp):
         """Yield closed ``[left, right]`` genomic intervals tiling the source.
 
-        Right edges are inclusive and non-overlapping (``right`` of one chunk is one bp below the next ``left``); the final chunk's ``right`` is ``grid_end``. 
+        Right edges are inclusive and non-overlapping (``right`` of one chunk is one bp below the next ``left``); the final chunk's ``right`` is ``grid_end``.
         """
         start = self.grid_start
         end = self.grid_end

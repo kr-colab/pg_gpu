@@ -98,14 +98,36 @@ Read this section if you are comparing against older pg_gpu results.
   1,000,000, and ``'X:500-500'`` names one position. The zarr loaders,
   ``ZarrGenotypeSource``, and ``allel_zarr_to_vcz`` used to stop one
   base short, so a variant on the window edge went missing;
-  ``from_vcf`` reads through tabix and was already inclusive. The
-  ``materialize(region=(left, right))`` tuple and windowed analysis
-  are unchanged: those intervals stay half-open, and
-  ``pg_gpu.zarr_io.parse_region`` turns a region string into that
-  half-open form. Every loader also takes the other samtools forms now:
-  ``'X'`` selects a whole chromosome from a multi-contig store,
-  ``'X:1000'`` runs from a position to the chromosome end, and
-  thousands separators (``'X:1,000-2,000'``) are allowed.
+  ``from_vcf`` reads through tabix and was already inclusive.
+  ``materialize(region=(left, right))`` is now a closed interval too --
+  it keeps a variant sitting exactly on ``right``, matching the loader
+  convention. Windowed-analysis windows remain half-open, and
+  ``pg_gpu.zarr_io.parse_region`` still turns a region string into that
+  half-open ``(start, stop)`` form. Every loader also takes the other
+  samtools forms now: ``'X'`` selects a whole chromosome from a
+  multi-contig store, ``'X:1000'`` runs from a position to the chromosome
+  end, and thousands separators (``'X:1,000-2,000'``) are allowed.
+
+* ``from_zarr`` now reports ``chrom_start`` / ``chrom_end`` as the
+  requested region, matching ``from_vcf``: ``region='X:1-1000000'`` gives
+  ``chrom_start=1`` and ``chrom_end=1000000`` for both ``HaplotypeMatrix``
+  and ``GenotypeMatrix``, on the eager and streaming paths. With no
+  ``region`` the bounds stay the first and last variant position (also as
+  ``from_vcf`` does). The loaders used to set the bounds to the first and
+  last variant even when a region was given, so a span-normalized
+  statistic over a region used a denominator that stopped at the variant
+  hull; it now covers the whole requested region. A streaming
+  ``accessible_bed`` mask is likewise resolved over the full region rather
+  than the variant span, so its accessible-base denominator changes to
+  match.
+* ``windowed_analysis`` on a streaming matrix now returns a row for every
+  window in the requested region, including windows with no variants
+  (reported with ``n_variants=0``), instead of dropping empty chunks. The
+  streaming result now matches the eager path row-for-row over the same
+  region. One caveat: a non-empty window whose sites are all missing under
+  ``missing_data='exclude'`` is currently reported the same way as a
+  genuinely empty window; distinguishing the two (e.g. zeros vs. NaN) is a
+  possible follow-up.
 * Row lists are validated at assignment and at resolution: assigning
   ``sample_sets`` and passing a row list as a population argument both
   raise ``ValueError`` for out-of-range or duplicated rows instead of
@@ -434,7 +456,10 @@ New warnings
 
 Removed
 ~~~~~~~
-
+* The ``align_bp`` argument on the streaming windowed path (unused; it
+  defaulted to ``chunk_bp``). The streaming windowed path now requires
+  ``window_size`` to be no larger than ``chunk_bp`` and to divide it
+  evenly, raising a clear error otherwise.
 * The deprecated LD wrappers ``ld_statistics.DD``, ``DD_two_pops``,
   ``Dz_two_pops``, and ``pi2_two_pops``. Use ``dd`` / ``dz`` / ``pi2``
   with the ``populations=`` argument.
