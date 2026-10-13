@@ -96,6 +96,35 @@ class TestMaterializeAndEmptyChunks:
         assert any(m.num_variants == 0 for _, _, m in allc)
 
 
+class TestChunkEdgesAndSpan:
+    """Chunks tile the grid with inclusive, non-overlapping edges, and the
+    final chunk is ragged (span 1 when the region span is an exact multiple of
+    chunk_bp). get_span(mode='total') must report the true closed-interval bp
+    span -- the old overlapping right edges inflated interior spans by 1 bp and
+    double-covered the boundary position."""
+
+    def test_chunk_bounds_and_span_tile_the_grid(self, vcz_store):
+        path, _ = vcz_store
+        # region [10000, 30000] at chunk_bp=5000: the span (20000) is an exact
+        # multiple of chunk_bp, so the final chunk is the ragged [30000, 30000]
+        # (span 1), not a fat chunk_bp + 1 tail.
+        expected_edges = [(10_000, 14_999), (15_000, 19_999), (20_000, 24_999),
+                          (25_000, 29_999), (30_000, 30_000)]
+        expected_spans = [5_000, 5_000, 5_000, 5_000, 1]
+
+        stream = HaplotypeMatrix.from_zarr(
+            path, region="1:10000-30000", streaming="always", chunk_bp=5_000)
+        chunks = list(stream.iter_gpu_chunks(skip_empty=False))
+
+        edges = [(left, right) for left, right, _ in chunks]
+        spans = [m.get_span(mode='total') for _, _, m in chunks]
+        assert edges == expected_edges
+        assert spans == expected_spans
+        # Inclusive, non-overlapping: each right is one bp below the next left.
+        for (_, r0), (l1, _) in zip(edges, edges[1:]):
+            assert r0 + 1 == l1
+
+
 class TestStreamingFromZarr:
 
     def test_genetic_relatedness_rejects_genotype_stream(self, vcz_store):

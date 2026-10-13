@@ -600,7 +600,7 @@ class _StreamingMatrixBase:
             left, right = int(region[0]), int(region[1])
 
         if sample_subset is None:
-            gt, pos = self._source.slice_region(left, right, right_inclusive=True)
+            gt, pos = self._source.slice_region(left, right)
         else:
             # The subset names rows in this stream's own row space and
             # obeys the same rules as a sample_sets value; the store read

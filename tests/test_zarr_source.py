@@ -200,24 +200,23 @@ class TestSliceRegion:
         assert gt.shape[0] == 0
         assert pos.shape[0] == 0
 
-    def test_right_inclusive_keeps_boundary_variant(self, vcz_store):
+    def test_right_edge_is_inclusive(self, vcz_store):
         path, _ = vcz_store
         src = ZarrGenotypeSource(path)
-        # An interior variant position -- not the grid edge, which is always
-        # read inclusively regardless of the flag.
+        # slice_region's right bound is inclusive: a read ending exactly on an
+        # interior variant keeps it, and backing off by one bp drops it.
         p = int(src.site_pos[len(src.site_pos) // 2])
-        _, pos_excl = src.slice_region(0, p)                        # [0, p)
-        _, pos_incl = src.slice_region(0, p, right_inclusive=True)  # [0, p]
-        assert p not in pos_excl.tolist()
+        _, pos_incl = src.slice_region(0, p)      # [0, p]
+        _, pos_excl = src.slice_region(0, p - 1)  # [0, p-1]
         assert p in pos_incl.tolist()
+        assert p not in pos_excl.tolist()
         n_at_p = int(np.sum(src.site_pos == p))
         assert pos_incl.shape[0] == pos_excl.shape[0] + n_at_p
 
-    def test_grid_end_variant_read_inclusively_by_default(self, vcz_store):
+    def test_grid_end_variant_read_inclusively(self, vcz_store):
         path, _ = vcz_store
         src = ZarrGenotypeSource(path)
-        # right == grid_end is inclusive even with the default half-open flag,
-        # so the final variant survives.
+        # right == grid_end keeps the final variant.
         _, pos = src.slice_region(0, src.grid_end)
         assert int(src.site_pos[-1]) in pos.tolist()
         assert pos.shape[0] == src.num_variants
@@ -282,12 +281,14 @@ class TestIterChunks:
         path, _ = vcz_store
         src = ZarrGenotypeSource(path)
         chunks = list(src.iter_chunks(chunk_bp=10_000))
-        # Each chunk is at most chunk_bp wide, and chunks tile the grid
-        # contiguously with no gaps or overlaps.
+        # Edges are inclusive, so each chunk spans at most chunk_bp bases
+        # (right - left + 1 <= chunk_bp), and chunks tile the grid contiguously
+        # with no gaps or overlaps: one chunk's right is one bp below the next
+        # chunk's left.
         for left, right in chunks:
-            assert right - left <= 10_000
+            assert right - left + 1 <= 10_000
         for (_, r0), (l1, _) in zip(chunks, chunks[1:]):
-            assert r0 == l1
+            assert r0 + 1 == l1
         # Cover the whole mappable range. With no region the grid is anchored
         # at the variant hull (grid_start == mappable_lo), matching the eager
         # loaders, and the final chunk reaches the inclusive grid_end.
@@ -298,8 +299,9 @@ class TestIterChunks:
         path, _ = vcz_store
         src = ZarrGenotypeSource(path)
         chunks = list(src.iter_chunks(chunk_bp=10_000))
+        # Inclusive right edge: grid_start + chunk_bp - 1, clamped to grid_end.
         assert chunks[0] == (src.grid_start,
-                             min(src.grid_start + 10_000, src.grid_end))
+                             min(src.grid_start + 10_000 - 1, src.grid_end))
 
     def test_region_anchored_grid_spans_requested_bounds(self, vcz_store):
         # With a region wider than the variants, the grid tiles the requested
@@ -314,7 +316,7 @@ class TestIterChunks:
         assert chunks[0][0] == src.grid_start == lo
         assert chunks[-1][1] == src.grid_end == hi
         for (_, r0), (l1, _) in zip(chunks, chunks[1:]):
-            assert r0 == l1
+            assert r0 + 1 == l1
 
 
 class TestPopAssignmentResolution:
