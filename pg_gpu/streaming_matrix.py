@@ -406,9 +406,6 @@ class _StreamingMatrixBase:
         Genomic span per chunk, in bp.
     prefetch : int
         Read-ahead depth handed to the fetcher.
-        Chunk boundaries are snapped to multiples of this so a
-        windowed kernel can guarantee windows never straddle a chunk
-        boundary. Defaults to ``chunk_bp`` (single window per chunk).
     """
 
     def __init__(self, source, fetcher, chunk_bp, prefetch, *,
@@ -536,9 +533,9 @@ class _StreamingMatrixBase:
         """Yield ``(left, right, eager_matrix)`` tuples covering the source.
 
         Each yielded eager matrix lives on the GPU and represents one
-        genomic chunk. If skip_emtpy = True, Empty chunks (regions with no variants, e.g. an
+        genomic chunk. If skip_empty = True, Empty chunks (regions with no variants, e.g. an
         acrocentric arm) are skipped -- callers see only chunks with
-        at least one variant; False skips chunks.
+        at least one variant; False doesn't skips chunks.
         """
         for ci, left, right, gt, pos, t_read in self._fetcher.iter_chunks(
                 self._chunks, self._prefetch):
