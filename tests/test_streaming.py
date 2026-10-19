@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import cupy as cp
 
-from pg_gpu import HaplotypeMatrix
+from pg_gpu import GenotypeMatrix, HaplotypeMatrix
 from pg_gpu.streaming_matrix import (
     ChunkFetcher, HostChunkFetcher, StreamingHaplotypeMatrix,
 )
@@ -31,6 +31,98 @@ def _stream_concat(streaming_hm):
         haps_parts.append(cp.asnumpy(chunk_hm.haplotypes))
         pos_parts.append(cp.asnumpy(chunk_hm.positions))
     return np.concatenate(haps_parts, axis=1), np.concatenate(pos_parts)
+
+
+class TestFromZarrBounds:
+    """Issue #231: from_zarr sets chrom_start/chrom_end to the requested
+    region (or the first/last variant when region is None), identically
+    across the eager and streaming loaders and both matrix classes -- the
+    same convention as HaplotypeMatrix.from_vcf."""
+
+    @pytest.mark.parametrize("cls", [HaplotypeMatrix, GenotypeMatrix])
+    def test_region_bounds_match_request(self, vcz_store, cls):
+        path, _ = vcz_store
+        eager = cls.from_zarr(path, region="1:10000-30000",
+                              streaming="never")
+        stream = cls.from_zarr(path, region="1:10000-30000",
+                               streaming="always", chunk_bp=5_000)
+        for m in (eager, stream):
+            assert m.chrom_start == 10_000
+            assert m.chrom_end == 30_000
+
+    @pytest.mark.parametrize("cls", [HaplotypeMatrix, GenotypeMatrix])
+    def test_no_region_uses_variant_hull(self, vcz_store, cls):
+        path, hm = vcz_store
+        pos = np.asarray(hm.positions)
+        first, last = int(pos[0]), int(pos[-1])
+        eager = cls.from_zarr(path, streaming="never")
+        stream = cls.from_zarr(path, streaming="always", chunk_bp=5_000)
+        for m in (eager, stream):
+            assert m.chrom_start == first
+            assert m.chrom_end == last
+
+
+class TestMaterializeAndEmptyChunks:
+    """materialize's closed-interval region and iter_gpu_chunks' skip_empty
+    flag (the empty-chunk emission that feeds windowed analyses)."""
+
+    def test_materialize_closed_interval_keeps_right_edge(self, vcz_store):
+        path, _ = vcz_store
+        stream = HaplotypeMatrix.from_zarr(path, streaming="always",
+                                           chunk_bp=5_000)
+        full = cp.asnumpy(stream.materialize().positions)
+        # A real variant position as the inclusive right edge: a closed
+        # interval keeps it, a half-open one would drop it.
+        right = int(full[len(full) // 2])
+        sub = cp.asnumpy(
+            stream.materialize(region=(int(full[0]), right)).positions)
+        assert right in sub.tolist()
+        assert sub.max() == right
+
+    def test_skip_empty_toggles_trailing_empty_chunks(self, vcz_store):
+        path, hm = vcz_store
+        pos = np.asarray(hm.positions)
+        # Region extends well past the last variant, so the trailing chunks
+        # tile empty genomic space (no variants).
+        region = f"1:{int(pos[0])}-{int(pos[-1]) + 20_000}"
+        stream = HaplotypeMatrix.from_zarr(path, region=region,
+                                           streaming="always", chunk_bp=5_000)
+        kept = list(stream.iter_gpu_chunks(skip_empty=True))
+        allc = list(stream.iter_gpu_chunks(skip_empty=False))
+        # Default skips empties: every yielded chunk has variants.
+        assert all(m.num_variants > 0 for _, _, m in kept)
+        # skip_empty=False additionally yields the empty trailing chunks.
+        assert len(allc) > len(kept)
+        assert any(m.num_variants == 0 for _, _, m in allc)
+
+
+class TestChunkEdgesAndSpan:
+    """Chunks tile the grid with inclusive, non-overlapping edges, and the
+    final chunk is ragged (span 1 when the region span is an exact multiple of
+    chunk_bp). get_span(mode='total') must report the true closed-interval bp
+    span -- the old overlapping right edges inflated interior spans by 1 bp and
+    double-covered the boundary position."""
+
+    def test_chunk_bounds_and_span_tile_the_grid(self, vcz_store):
+        path, _ = vcz_store
+        # region [10000, 30000] at chunk_bp=5000: the span (20000) is an exact
+        # multiple of chunk_bp, so the final chunk is the ragged [30000, 30000]
+        # (span 1), not a fat chunk_bp + 1 tail.
+        expected_edges = [(10_000, 14_999), (15_000, 19_999), (20_000, 24_999),
+                          (25_000, 29_999), (30_000, 30_000)]
+        expected_spans = [5_000, 5_000, 5_000, 5_000, 1]
+
+        stream = HaplotypeMatrix.from_zarr(
+            path, region="1:10000-30000", streaming="always", chunk_bp=5_000)
+        chunks = list(stream.iter_gpu_chunks(skip_empty=False))
+
+        edges = [(left, right) for left, right, _ in chunks]
+        spans = [m.get_span(mode='total') for _, _, m in chunks]
+        assert edges == expected_edges
+        assert spans == expected_spans
+        # Inclusive, non-overlapping: each right is one bp below the next left.
+        for (_, r0), (l1, _) in zip(edges, edges[1:]):
+            assert r0 + 1 == l1
 
 
 class TestStreamingFromZarr:
@@ -262,8 +354,8 @@ class TestProducerThreadErrorPropagation:
                 if self._calls == 2:
                     raise RuntimeError("synthetic producer error")
                 return self.inner.slice_region(left, right)
-            def iter_chunks(self, chunk_bp, align_bp=None):
-                return self.inner.iter_chunks(chunk_bp, align_bp)
+            def iter_chunks(self, chunk_bp):
+                return self.inner.iter_chunks(chunk_bp)
             @property
             def num_variants(self): return self.inner.num_variants
             @property
@@ -362,10 +454,10 @@ class TestMaterialize:
                                             chunk_bp=5_000)
         sub = stream.materialize(region=(10_000, 30_000))
         assert isinstance(sub, HaplotypeMatrix)
-        # all positions inside the requested half-open interval
+        # all positions inside the requested closed interval [10000, 30000]
         pos = cp.asnumpy(sub.positions)
         assert pos.min() >= 10_000
-        assert pos.max() < 30_000
+        assert pos.max() <= 30_000
         assert sub.chrom_start == 10_000
         assert sub.chrom_end == 30_000
 

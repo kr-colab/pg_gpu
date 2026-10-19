@@ -63,23 +63,6 @@ def _assert_frames_equivalent(a, b):
             assert (a[col] == b[col]).all(), f"column {col!r} disagrees"
 
 
-def _aligned_pair(vcz_store, **stream_kwargs):
-    """Return (eager, streaming) pair with their window grids aligned.
-
-    Eager from_zarr uses ``chrom_start = positions[0]`` (the first variant
-    position) by default, while the streaming path uses the chunk-grid
-    origin. Both are legitimate placements; for an apples-to-apples
-    equivalence check we force the eager matrix onto the streaming grid.
-    """
-    eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
-                                      **stream_kwargs.get("from_zarr_kwargs", {}))
-    stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
-                                       **stream_kwargs)
-    eager.chrom_start = stream.chrom_start
-    eager.chrom_end = stream.chrom_end
-    return eager, stream
-
-
 # (chunk_bp, window_size) combos that exercise the streaming dispatch:
 # * one window per chunk (chunk == window)
 # * a couple of windows per chunk (the typical case)
@@ -100,7 +83,9 @@ class TestWindowedAnalysisDispatch:
 
     @pytest.mark.parametrize("chunk_bp,window_size", CHUNK_WINDOW_COMBOS)
     def test_pi_equivalent(self, vcz_store, chunk_bp, window_size):
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=chunk_bp)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=chunk_bp)
         df_e = windowed_analysis(eager, window_size=window_size,
                                   statistics=["pi"])
         df_s = windowed_analysis(stream, window_size=window_size,
@@ -109,7 +94,9 @@ class TestWindowedAnalysisDispatch:
 
     @pytest.mark.parametrize("chunk_bp,window_size", CHUNK_WINDOW_COMBOS)
     def test_multiple_stats_equivalent(self, vcz_store, chunk_bp, window_size):
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=chunk_bp)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=chunk_bp)
         stats = ["pi", "theta_w", "tajimas_d", "segregating_sites"]
         df_e = windowed_analysis(eager, window_size=window_size,
                                   statistics=stats)
@@ -124,7 +111,9 @@ class TestWindowedAnalysisDispatch:
         # wrong. It is correct here only because the streaming grid aligns windows
         # to chunk boundaries (a window never straddles two chunks), so each
         # window is computed whole within one chunk. This pins that.
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=chunk_bp)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=chunk_bp)
         stats = ["daf_hist", "mu_sfs"]
         df_e = windowed_analysis(eager, window_size=window_size, statistics=stats)
         df_s = windowed_analysis(stream, window_size=window_size, statistics=stats)
@@ -134,7 +123,9 @@ class TestWindowedAnalysisDispatch:
         # daf_hist / mu_sfs over missing data, include mode: per-site n_valid is
         # chunk-invariant (a site's non-missing count does not depend on other
         # sites), so streaming must match eager.
-        eager, stream = _aligned_pair(vcz_store_missing, chunk_bp=25_000)
+        eager = HaplotypeMatrix.from_zarr(vcz_store_missing, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store_missing, streaming="always",
+                                           chunk_bp=25_000)
         stats = ["daf_hist", "mu_sfs"]
         df_e = windowed_analysis(eager, window_size=5_000, statistics=stats,
                                  missing_data="include")
@@ -149,7 +140,9 @@ class TestWindowedAnalysisDispatch:
                                             window_size):
         # zns and omega run through the per-window fallback, not the fused
         # engine, so the streaming dispatch needs its own equivalence pin.
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=chunk_bp)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=chunk_bp)
         df_e = windowed_analysis(eager, window_size=window_size,
                                  statistics=[stat])
         df_s = windowed_analysis(stream, window_size=window_size,
@@ -220,14 +213,18 @@ class TestSingleStatParametrized:
 
     @pytest.mark.parametrize("stat", SINGLE_POP_STATS)
     def test_each_stat_equivalent(self, vcz_store, stat):
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000)
         df_e = windowed_analysis(eager, window_size=5_000, statistics=[stat])
         df_s = windowed_analysis(stream, window_size=5_000, statistics=[stat])
         _assert_frames_equivalent(df_e, df_s)
 
     @pytest.mark.parametrize("missing_data", ["include", "exclude"])
     def test_missing_data_modes(self, vcz_store, missing_data):
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000)
         df_e = windowed_analysis(eager, window_size=5_000, statistics=["pi"],
                                  missing_data=missing_data)
         df_s = windowed_analysis(stream, window_size=5_000, statistics=["pi"],
@@ -235,7 +232,9 @@ class TestSingleStatParametrized:
         _assert_frames_equivalent(df_e, df_s)
 
     def test_span_normalize_false(self, vcz_store):
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000)
         df_e = windowed_analysis(eager, window_size=5_000, statistics=["pi"],
                                  span_normalize=False)
         df_s = windowed_analysis(stream, window_size=5_000, statistics=["pi"],
@@ -272,7 +271,9 @@ class TestAccessibleBedDispatch:
 
     def test_accessible_bed_equivalent(self, vcz_store, tmp_path):
         bed = self._write_bed(str(tmp_path / "acc.bed"))
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000)
         # eager_chrom must remain "1" for the BED to match the contig name
         df_e = windowed_analysis(eager, window_size=5_000, statistics=["pi"],
                                  accessible_bed=bed, chrom="1")
@@ -335,7 +336,9 @@ class TestGarudStreamingDispatch:
     @pytest.mark.parametrize("stat", ["garud_h1", "garud_h12",
                                        "garud_h123", "garud_h2h1"])
     def test_each_stat_matches_eager(self, vcz_store, stat):
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000)
         df_e = windowed_analysis(eager, window_size=5_000, statistics=[stat])
         df_s = windowed_analysis(stream, window_size=5_000, statistics=[stat])
         # Sort by window start; demand exact-precision parity on the
@@ -352,7 +355,9 @@ class TestGarudStreamingDispatch:
         # Mixed stat set -- the streaming dispatch should run pi and
         # Garud H side by side on the same chunks without either
         # disturbing the other.
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000)
         stats = ["pi", "garud_h12"]
         df_e = windowed_analysis(eager, window_size=5_000, statistics=stats)
         df_s = windowed_analysis(stream, window_size=5_000, statistics=stats)
@@ -475,12 +480,19 @@ class TestSFSDispatch:
 
 class TestStreamingGuardrails:
 
-    def test_window_must_divide_align(self, vcz_store):
+    def test_window_must_divide_chunk(self, vcz_store):
+        # window_size must evenly divide the matrix's chunk width. The former
+        # align_bp property is gone -- the check keys on chunk_bp itself.
         stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
                                             chunk_bp=10_000)
-        with pytest.raises(ValueError, match="must divide"):
+        assert stream.chunk_bp == 10_000
+        with pytest.raises(ValueError, match="must divide.*chunk width"):
             # 7000 does not divide 10000
             windowed_analysis(stream, window_size=7_000, statistics=["pi"])
+        # A divisor of chunk_bp is accepted on the same stream, proving the
+        # guardrail keys on chunk_bp rather than a stale align_bp.
+        df = windowed_analysis(stream, window_size=5_000, statistics=["pi"])
+        assert not df.empty
 
     def test_window_larger_than_chunk_rejected(self, vcz_store):
         # A window that is bigger than the chunk would have to straddle
@@ -507,24 +519,48 @@ class TestStreamingGuardrails:
             windowed_analysis(stream, window_size=5_000,
                               statistics=["local_pca"])
 
-    def test_empty_region_returns_empty_frame(self, vcz_store):
-        # A mappable region with no variants (the fixture spans ~100 kb) yields
-        # no per-chunk results, so streaming windowed analysis returns an empty
-        # frame -- a legitimate "no data" outcome, where the eager path would
-        # raise on an empty matrix.
+    def test_empty_region_yields_empty_windows(self, vcz_store):
+        # A mappable region with no variants (the fixture spans ~100 kb) still
+        # tiles its window grid: the streaming path keeps empty chunks, so each
+        # window is emitted with n_variants=0 and pi=0 rather than vanishing.
+        # (Previously this returned an empty frame.)
         stream = HaplotypeMatrix.from_zarr(
             vcz_store, region="1:5000000-5100000", streaming="always",
             chunk_bp=10_000)
         df = windowed_analysis(stream, window_size=10_000, statistics=["pi"])
-        assert df.empty
-        # The empty frame is the no-variants outcome, not a broken pipeline:
-        # the same streaming call over the populated span yields finite rows.
+        assert not df.empty
+        assert (df["n_variants"] == 0).all()
+        assert (df["pi"] == 0).all()
+        # The populated span yields finite, variant-bearing windows -- the empty
+        # region's all-zero windows are the data outcome, not a broken pipeline.
         populated = HaplotypeMatrix.from_zarr(
             vcz_store, region="1:1-100000", streaming="always",
             chunk_bp=10_000)
         df2 = windowed_analysis(populated, window_size=10_000, statistics=["pi"])
         assert not df2.empty
         assert np.isfinite(df2["pi"].to_numpy()).any()
+
+    def test_partial_empty_region_trailing_windows_match_eager(self, vcz_store):
+        # A region extending past the last variant mixes populated windows
+        # with a trailing empty span. The empty windows must be emitted
+        # (n_variants=0, pi=0) just like a fully-empty chunk, and streaming
+        # must agree with eager window-for-window -- the payoff of the
+        # closed-region bounds + skip_empty=False changes together.
+        # No-region eager bounds are the first/last variant positions.
+        full = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        first, last = int(full.chrom_start), int(full.chrom_end)
+        region = f"1:{first}-{last + 30_000}"
+        eager = HaplotypeMatrix.from_zarr(vcz_store, region=region,
+                                          streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, region=region,
+                                           streaming="always", chunk_bp=10_000)
+        df_e = windowed_analysis(eager, window_size=10_000, statistics=["pi"])
+        df_s = windowed_analysis(stream, window_size=10_000, statistics=["pi"])
+        # Populated windows plus a trailing variant-free span.
+        assert (df_s["n_variants"] > 0).any()
+        assert (df_s["n_variants"] == 0).any()
+        # Eager and streaming agree, empty windows included.
+        _assert_frames_equivalent(df_e, df_s)
 
 
 
@@ -533,7 +569,9 @@ class TestGeneticRelatednessDispatch:
 
     def _both(self, vcz_store, **kw):
         from pg_gpu import relatedness
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000)
         return (relatedness.genetic_relatedness(eager, **kw),
                 relatedness.genetic_relatedness(stream, **kw))
 
@@ -555,7 +593,9 @@ class TestGeneticRelatednessDispatch:
 
     def test_grouped_sample_sets_equivalent(self, vcz_store):
         from pg_gpu import relatedness
-        eager, stream = _aligned_pair(vcz_store, chunk_bp=10_000)
+        eager = HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
+        stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                           chunk_bp=10_000)
         n_hap = stream.num_haplotypes
         half = n_hap // 2
         sets = [list(range(0, half)), list(range(half, n_hap))]
