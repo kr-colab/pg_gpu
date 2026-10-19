@@ -210,9 +210,12 @@ Bug fixes
   directly, ``windowed_statistics_fused`` and
   ``windowed_statistics_fused_chunked`` ignored ``'exclude'`` for every
   statistic except the Garud family and ``omega``; they now apply it to
-  every statistic, and ``n_variants`` counts the complete sites. A
-  Garud-only request is unchanged: its ``n_variants`` still counts every
-  site.
+  every statistic. Under ``'exclude'``, ``n_variants`` now counts only
+  the complete sites on every path; a Garud-only request and the
+  per-window fallback counted every site. Called with a two-population
+  statistic and no ``pop1`` or ``pop2``, the fused engines raised
+  ``TypeError`` under ``'exclude'``; they now raise the same
+  ``ValueError`` as under ``'include'``.
 * ``tally_gpu_haplotypes`` and ``tally_gpu_haplotypes_two_pops`` gave
   wrong counts on complete data when more than 127 haplotypes carried
   the alternate allele at both sites of a pair. The pair count used an

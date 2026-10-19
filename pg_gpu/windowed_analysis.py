@@ -19,6 +19,7 @@ from . import divergence
 from . import diversity
 from . import selection
 from ._utils import population_rows
+from ._haplotype_groups import column_has_missing
 from ._haplotype_hash import garud_h_windows
 
 # Column order of the Garud H family, as garud_h_windows returns it.
@@ -225,6 +226,12 @@ class StatisticsComputer:
                     results[stat.__name__] = np.nan
             return results
 
+        # One n_variants column serves every population, so under 'exclude'
+        # it counts the sites complete in all of them, as the fused engines do.
+        window = replace(window, n_variants=self._n_sites(
+            window.matrix, self.populations or None))
+        results['n_variants'] = window.n_variants
+
         # Single population statistics. Each population's window is built
         # once, so statistics that share work (the Garud H family) can
         # share it through the window's cache.
@@ -234,7 +241,7 @@ class StatisticsComputer:
                 pop_matrix = population_rows(window.matrix, pop)
                 pop_windows[pop] = replace(
                     window, matrix=pop_matrix,
-                    n_variants=pop_matrix.num_variants, cache={})
+                    n_variants=self._n_sites(pop_matrix), cache={})
         for stat in self.single_pop_stats:
             if self.populations:
                 # Compute for each population
@@ -284,6 +291,13 @@ class StatisticsComputer:
                 matrix.haplotypes, [0], [matrix.num_variants],
                 missing_data=self.missing_data))
         return window.cache['garud_h']
+
+    def _n_sites(self, matrix, populations=None):
+        """Sites in ``matrix``; under 'exclude', only the complete ones."""
+        n = matrix.num_variants
+        if self.missing_data == 'exclude':
+            n -= int(matrix._site_has_missing(populations).sum())
+        return n
 
     @staticmethod
     def _store_result(results: Dict, key: str, val):
@@ -1917,6 +1931,20 @@ def _compute_window_ranges(positions, bp_bins):
     return win_start.astype(cp.int64), win_stop.astype(cp.int64)
 
 
+def _window_site_counts(hap, win_start, win_stop, missing_data):
+    """Sites per window: every site, or under 'exclude' the complete ones.
+
+    Only a Garud-only request reaches an engine still under 'exclude' (see
+    ``_apply_exclude``); its sites are counted here because
+    ``garud_h_windows`` skips the incomplete ones without a filtered copy.
+    """
+    if missing_data != 'exclude':
+        return win_stop - win_start
+    n_miss = cp.concatenate([cp.zeros(1, dtype=cp.int64),
+                             cp.cumsum(column_has_missing(hap), dtype=cp.int64)])
+    return (win_stop - win_start) - (n_miss[win_stop] - n_miss[win_start])
+
+
 def _apply_exclude(haplotype_matrix, missing_data, statistics, population,
                    pop1, pop2):
     """The matrix and missing-data mode a fused engine computes on.
@@ -1937,7 +1965,12 @@ def _apply_exclude(haplotype_matrix, missing_data, statistics, population,
     ``garud_h_windows`` drops incomplete columns itself, with no copy.
     Otherwise the filter copies the complete sites, so under 'exclude' an
     engine holds one extra copy of the matrix next to the caller's.
+
+    A two-population statistic without ``pop1`` and ``pop2`` raises here,
+    before the filter reads the populations.
     """
+    if _TWO_POP_STATS & set(statistics) and (pop1 is None or pop2 is None):
+        raise ValueError("pop1 and pop2 required for fst/dxy/da")
     if missing_data != 'exclude' or set(statistics) <= set(_FUSED_GARUD_STATS):
         return haplotype_matrix, missing_data
     if _TWO_POP_STATS & set(statistics):
@@ -1988,8 +2021,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     missing_data : {'include', 'exclude'}
         'include' uses every site with the calls it has. 'exclude' keeps
         only sites with no missing call in the rows the request reads (see
-        ``_apply_exclude``), so ``n_variants`` counts those sites; a
-        Garud-only request keeps every site in ``n_variants``.
+        ``_apply_exclude``), so ``n_variants`` counts those sites.
     chrom : str or int, optional
         Chromosome label emitted in the ``chrom`` output column.
 
@@ -2060,7 +2092,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # overwrite below with a missing-data-aware count.
     results = _init_window_results(
         chrom, ws_cpu, we_cpu,
-        n_variants=(win_stop - win_start).get())
+        n_variants=_window_site_counts(hap_raw, win_start, win_stop,
+                                       missing_data).get())
 
     window_bases = None
     if per_base:
@@ -2141,9 +2174,6 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     # two-pop stats via fused kernel
     if two_pop_requested:
-        if pop1 is None or pop2 is None:
-            raise ValueError("pop1 and pop2 required for fst/dxy/da")
-
         if 'fst_wc' in statistics:
             # The kernel pairs consecutive subset rows into individuals for
             # Weir-Cockerham; the gamete statistics take any row list.
@@ -2517,7 +2547,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     # overwrite below with a missing-data-aware count.
     results = _init_window_results(
         chrom, ws_cpu, we_cpu,
-        n_variants=(win_stop - win_start).get())
+        n_variants=_window_site_counts(hap_raw, win_start, win_stop,
+                                       missing_data).get())
 
     window_bases = None
     if per_base:
@@ -2643,9 +2674,6 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     # two_pop_requested was computed above, before the cap filter, which
     # needs it to pick its reduction source.
     if two_pop_requested:
-        if pop1 is None or pop2 is None:
-            raise ValueError("pop1 and pop2 required for fst/dxy/da")
-
         # The population row numbers index the original matrix, but hap_raw
         # can be the single-population subset (the dispatcher passes
         # population=pop1 alongside pop1/pop2). CuPy fancy indexing does not

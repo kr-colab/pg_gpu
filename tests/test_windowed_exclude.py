@@ -188,6 +188,40 @@ def test_exclude_judges_completeness_within_the_population(case):
     np.testing.assert_allclose(mixed["fst"], ref2["fst"], rtol=1e-12, equal_nan=True)
 
 
+@pytest.mark.parametrize("populations", [None, ["p1"]], ids=["all-rows", "p1"])
+@pytest.mark.parametrize("stats", [["garud_h1"], ["garud_h1", "zns"], ["pi"], ["pi", "n_singletons"],
+                                   ["pi", "n_variants"]],
+                         ids=["garud-only", "fused", "scatter", "fallback", "fallback-statistic"])
+def test_exclude_n_variants_counts_complete_sites_on_every_path(case, stats, populations):
+    # Whichever engine serves the request, n_variants counts the sites with
+    # no missing call in the rows the request reads.
+    hap, _, _ = case
+    complete = _hm(hap, POPS).exclude_missing_sites(populations=populations)
+    df = _exclude(hap, stats, sample_sets=POPS, populations=populations)
+    expected = [complete.get_subset_from_range(lo, hi).num_variants for lo, hi in WINDOWS]
+    np.testing.assert_array_equal(df["n_variants"], expected)
+
+
+@pytest.mark.parametrize("engine", [windowed_statistics_fused, windowed_statistics_fused_chunked])
+def test_direct_engines_count_complete_sites_for_garud_only(case, engine):
+    # A Garud-only request is not filtered before the engine, so the engine
+    # itself must count the complete sites.
+    hap, complete, _ = case
+    edges = np.arange(0, N_VAR * SPACING + 1, WIN)
+    got = engine(_hm(hap), bp_bins=edges, statistics=("garud_h1",), missing_data="exclude")
+    ref = engine(complete, bp_bins=edges, statistics=("garud_h1",), missing_data="include")
+    np.testing.assert_array_equal(got["n_variants"], ref["n_variants"])
+    np.testing.assert_allclose(got["garud_h1"], ref["garud_h1"], rtol=1e-12)
+
+
+@pytest.mark.parametrize("missing_data", ["include", "exclude"])
+@pytest.mark.parametrize("engine", [windowed_statistics_fused, windowed_statistics_fused_chunked])
+def test_direct_engines_require_both_populations(engine, missing_data):
+    hm = HaplotypeMatrix(np.zeros((40, 40), dtype=np.int8), np.arange(40, dtype=np.int64) * 10)
+    with pytest.raises(ValueError, match="pop1 and pop2 required"):
+        engine(hm, bp_bins=np.arange(0, 401, 200), statistics=("fst",), missing_data=missing_data)
+
+
 def test_exclude_keeps_the_grid_when_an_end_site_is_incomplete():
     # The last site is incomplete. Without chromosome bounds the grid comes
     # from the variant hull, which must be taken before the filter.
