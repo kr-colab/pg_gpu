@@ -1542,8 +1542,29 @@ class HaplotypeMatrix:
             Filtered matrix. Returns self if no missing data, and a
             matrix with zero variants when no site is complete.
         """
+        valid = cp.where(~self._site_has_missing(populations))[0]
+        if len(valid) == self.num_variants:
+            return self
+        return self._keep_sites(valid)
+
+    def _site_has_missing(self, populations=None):
+        """Boolean per site: True where a row has a missing call.
+
+        Parameters
+        ----------
+        populations : list of (str or list), optional
+            If given, only these populations' rows are read. Each element
+            is a population name (looked up in sample_sets) or a list of
+            sample indices.
+
+        Returns
+        -------
+        cupy.ndarray, bool, shape (n_variants,)
+        """
         if self.device == 'CPU':
             self.transfer_to_gpu()
+
+        from ._haplotype_groups import column_has_missing
 
         hap = self.haplotypes
         if populations is not None:
@@ -1553,14 +1574,9 @@ class HaplotypeMatrix:
                     idx.extend(self.sample_sets[pop])
                 else:
                     idx.extend(list(pop))
-            has_missing = cp.any(hap[idx] < 0, axis=0)
-        else:
-            has_missing = cp.any(hap < 0, axis=0)
-
-        valid = cp.where(~has_missing)[0]
-        if len(valid) == hap.shape[1]:
-            return self
-        return self._keep_sites(valid)
+            hap = hap[idx]
+        # One pass and one byte per site, with no matrix-sized boolean.
+        return column_has_missing(hap)
 
     def filter_variants_by_missing(self, max_missing_freq=0.1):
         """
