@@ -25,7 +25,8 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     """Compute full pairwise Hamming distance matrix on GPU.
 
     Internal helper returning the raw cupy distance matrix. Used by
-    pairwise_diffs_haploid (condensed numpy output) and divergence
+    pairwise_diffs_haploid and pairwise_diffs_diploid (condensed numpy
+    output), decomposition.pairwise_distance, and the divergence
     two-population statistics (full cupy matrix with pop blocks).
 
     Accepts numpy or cupy input. When given numpy, transfers variant
@@ -109,7 +110,8 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
     population : str or list, optional
     missing_data : str
         'include' - normalize by jointly-valid sites per pair
-        'exclude' - only use sites with no missing data
+        'exclude' - only use sites with no missing data; every pair is
+        NaN when no site is complete
 
     Returns
     -------
@@ -158,7 +160,8 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
     population : str or list, optional
     missing_data : str
         'include' - normalize by jointly-valid sites per pair
-        'exclude' - only sites with no missing data
+        'exclude' - only sites with no missing data; every pair is NaN
+        when no site is complete
 
     Returns
     -------
@@ -199,18 +202,18 @@ def dist_moments(matrix, population=None, missing_data='include'):
     var : float
     skew : float
     kurt : float
-        Each is 0.0 when there are too few pairs to define it, and NaN
-        when there are pairs but none has a distance.
+        A moment needs enough defined pairs (var 2, skew 3, kurt 4). With
+        fewer, it is NaN when some pair has no distance, else 0.0. Skew
+        and kurt are also 0.0 when every defined distance is the same.
     """
     diffs = np.asarray(_get_diffs(matrix, population, missing_data))
-    defined = diffs[np.isfinite(diffs)]
-    if diffs.size and not defined.size:
-        return np.nan, np.nan, np.nan
-    diffs = defined
+    finite = np.isfinite(diffs)
+    fill = 0.0 if finite.all() else np.nan
+    diffs = diffs[finite]
     n = diffs.shape[0]
 
     if n < 2:
-        return 0.0, 0.0, 0.0
+        return fill, fill, fill
 
     mean = np.mean(diffs)
     centered = diffs - mean
@@ -219,14 +222,16 @@ def dist_moments(matrix, population=None, missing_data='include'):
 
     var_val = float(np.sum(c2) / (n - 1))
 
-    if n < 3 or m2 == 0:
-        return var_val, 0.0, 0.0
+    if n < 3:
+        return var_val, fill, fill
+    if m2 == 0:
+        return var_val, 0.0, (0.0 if n >= 4 else fill)
 
     m3 = np.mean(centered ** 3)
     skew_val = float(m3 / (m2 ** 1.5))
 
     if n < 4:
-        return var_val, skew_val, 0.0
+        return var_val, skew_val, fill
 
     m4 = np.mean(centered ** 4)
     kurt_val = float(m4 / (m2 ** 2) - 3.0)
@@ -252,9 +257,9 @@ def dist_kurt(matrix, population=None, missing_data='include'):
 def pairwise_diffs(matrix, population=None, missing_data='include'):
     """Compute pairwise Hamming distances on GPU.
 
-    Accepts HaplotypeMatrix (0/1 data, single matrix multiply) or
-    GenotypeMatrix (0/1/2 data, indicator matrix approach). Dispatches
-    automatically.
+    Accepts HaplotypeMatrix (allele indices) or GenotypeMatrix (0/1/2
+    genotypes); both count differing values with one-hot indicators.
+    Dispatches automatically.
 
     Parameters
     ----------

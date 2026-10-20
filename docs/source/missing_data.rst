@@ -98,7 +98,8 @@ Every public function accepts the ``missing_data`` parameter:
    * - Distance (pairwise_diffs, pca)
      - per-pair, over jointly non-missing sites
      - filter sites
-   * - Two-population distance stats (snn, dxy_min, gmin, dd, dd_rank)
+   * - Two-population distance stats (snn, dxy_min, gmin, dd, dd_rank),
+       pairwise_distance
      - per-pair differences scaled to all sites
      - filter sites
    * - LD (zns, omega)
@@ -123,8 +124,10 @@ A pair that shares no called site has no distance. ``pairwise_diffs``,
 such a pair, not 0.0: a distance of 0.0 would mark the pair as
 identical, and an IBS of 0.0 as sharing nothing. ``dist_var``,
 ``dist_skew`` and ``dist_kurt`` skip these pairs, and so do the windowed
-columns of the same names in each window. ``pcoa`` raises an error,
-because classical MDS needs every distance.
+columns of the same names in each window; a moment that missing data
+leaves with too few defined pairs is NaN. Under
+``missing_data='exclude'`` with no complete site, every pair is NaN.
+``pcoa`` raises an error, because classical MDS needs every distance.
 
 LD Estimator Choice
 -------------------

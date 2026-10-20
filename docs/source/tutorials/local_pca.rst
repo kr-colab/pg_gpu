@@ -81,7 +81,8 @@ The whole pipeline in one call:
    res.local_pca      # LocalPCAResult: per-window eigvals / eigvecs / windows
    res.distance       # (n_windows, n_windows) Frobenius distance
    res.mds            # (n_windows, n_components) MDS coordinates; NaN rows
-                      # for windows with too few variants for a local PCA
+                      # for windows pc_dist cannot compare (too few variants,
+                      # or no variation)
    res.corner_indices # (n_per_corner, n_corners) outlier-window indices
 
 Pass ``jackknife=True`` to also compute the block-within-window
@@ -116,11 +117,12 @@ over them:
        statistics=['local_pca'], window_type='snp', k=2)
 
    dist = pc_dist(result, npc=2, normalize='L1')
-   # A window with too few variants for a local PCA has NaN distances, and
-   # pcoa needs every distance; lostruct() drops such windows the same way.
+   # A window pc_dist cannot compare (too few variants, or no variation) has
+   # NaN distances, and pcoa needs every distance; lostruct() drops such
+   # windows the same way.
    ok = ~np.isnan(np.diag(dist))
    mds, _ = pcoa(dist[np.ix_(ok, ok)], n_components=2)
-   extremes = corners(mds, prop=0.05, k=3)  # row numbers among the ok windows
+   extremes = np.flatnonzero(ok)[corners(mds, prop=0.05, k=3)]  # window indices
 
    # With jackknife standard error (shares per-window matrix prep with local_pca)
    result = windowed_analysis(

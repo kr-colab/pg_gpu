@@ -259,7 +259,7 @@ class TestPairwiseDistance:
                 raw = cp.sum(cp.abs(X[ii] - X[jj]) * (joint if has_missing else 1.0), axis=1)
             else:
                 raw = cp.sum(((X[ii] - X[jj]) ** 2) * (joint if has_missing else 1.0), axis=1)
-            d = cp.where(njoint > 0, raw * nv / njoint, 0.0) if has_missing else raw
+            d = cp.where(njoint > 0, raw * nv / njoint, cp.nan) if has_missing else raw
             if metric == 'euclidean':
                 d = cp.sqrt(d)
             return d.get()
@@ -286,7 +286,7 @@ def _host_pairwise(hap, metric, missing_data='include'):
             valid = (hap[i] >= 0) & (hap[j] >= 0)
             njoint = int(valid.sum())
             m = int(((hap[i] != hap[j]) & valid).sum())
-            d = (m * nv / njoint) if njoint > 0 else 0.0
+            d = (m * nv / njoint) if njoint > 0 else np.nan
             out.append(np.sqrt(d) if metric == 'euclidean' else d)
     return np.array(out)
 

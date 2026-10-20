@@ -50,6 +50,7 @@ def _reference_ibs(g):
             valid = (g[i] >= 0) & (g[j] >= 0)
             n_joint = int(valid.sum())
             if n_joint == 0:
+                ibs_mat[i, j] = ibs_mat[j, i] = np.nan
                 continue
             shared = (2 - np.abs(g[i] - g[j]))[valid].sum()
             val = shared / (2 * n_joint)

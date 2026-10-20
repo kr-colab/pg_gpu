@@ -362,7 +362,8 @@ def ibs(genotype_matrix,
         Population subset.
     missing_data : str
         'include' - use jointly non-missing sites per pair.
-        'exclude' - restrict to sites with no missing data.
+        'exclude' - restrict to sites with no missing data; every pair is
+        NaN when no site is complete.
 
     Returns
     -------

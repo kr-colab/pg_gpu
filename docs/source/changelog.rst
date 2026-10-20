@@ -320,10 +320,14 @@ Bug fixes
   ``pairwise_diffs`` (haploid and diploid),
   ``decomposition.pairwise_distance`` and ``relatedness.ibs``.
   ``dist_var``, ``dist_skew`` and ``dist_kurt``, and their windowed
-  columns, skip these pairs; they are NaN when no pair is defined.
+  columns, skip these pairs; a moment is NaN when missing data leaves
+  too few defined pairs for it.
   ``pcoa`` raises ``ValueError`` on a NaN distance. ``lostruct`` gives a
-  window with no local PCA a NaN ``mds`` row; before, such a window made
-  ``pcoa`` fail with ``LinAlgError``.
+  window that ``pc_dist`` cannot compare (too few variants, or no
+  variation) a NaN ``mds`` row; before, such a window made ``pcoa`` fail
+  with ``LinAlgError``. ``lostruct`` now raises ``ValueError`` when fewer
+  than two windows can be compared, or when corners are requested and
+  the MDS has fewer than two dimensions.
 * ``pbs`` counted a population's own diversity at a site where another
   population in the pair had no data, which pulled that pair's FST down;
   a single such site could change the sign of PBS. PBS now uses, for all
