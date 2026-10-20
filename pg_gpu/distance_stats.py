@@ -167,15 +167,10 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
     """
 
     if population is not None:
-        pop_idx = genotype_matrix.sample_sets.get(population)
-        if pop_idx is None:
-            raise ValueError(f"Population {population} not found")
-        geno = genotype_matrix.genotypes[pop_idx, :]
-    else:
-        geno = genotype_matrix.genotypes
-
-    if not isinstance(geno, cp.ndarray):
-        geno = cp.asarray(geno)
+        genotype_matrix = population_rows(genotype_matrix, population)
+    if genotype_matrix.device == 'CPU':
+        genotype_matrix.transfer_to_gpu()
+    geno = genotype_matrix.genotypes
 
     if missing_data == 'exclude':
         missing_per_var = cp.sum(geno < 0, axis=0)

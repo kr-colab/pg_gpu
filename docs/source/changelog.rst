@@ -221,6 +221,9 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``pairwise_diffs_diploid`` (and so ``dist_moments`` on a
+  ``GenotypeMatrix``) raised ``TypeError`` for a population given as a
+  list of rows. It now selects rows as the haploid path does.
 * ``windowed_analysis`` with ``missing_data='exclude'`` raised
   ``Unknown statistic`` for ``zns``, ``omega``, ``mu_ld``, ``mu_var``,
   ``mu_sfs``, ``daf_hist``, the ``snp_dist_*`` and ``dist_*``

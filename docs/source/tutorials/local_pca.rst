@@ -80,7 +80,8 @@ The whole pipeline in one call:
 
    res.local_pca      # LocalPCAResult: per-window eigvals / eigvecs / windows
    res.distance       # (n_windows, n_windows) Frobenius distance
-   res.mds            # (n_windows, n_components) MDS coordinates
+   res.mds            # (n_windows, n_components) MDS coordinates; NaN rows
+                      # for windows with too few variants for a local PCA
    res.corner_indices # (n_per_corner, n_corners) outlier-window indices
 
 Pass ``jackknife=True`` to also compute the block-within-window
