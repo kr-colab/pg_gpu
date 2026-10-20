@@ -2479,14 +2479,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         edge_site = is_edge.sum(axis=1).astype(cp.float64)
         member_win = site_win[site_ok]
         seg_sum = _scatter_sum(_expand(seg_site)[site_ok], member_win,
-                               n_windows).get()
+                               n_windows)
         edge_sum = _scatter_sum(_expand(edge_site)[site_ok], member_win,
-                                n_windows).get()
-        # matches diversity.mu_sfs, which returns 0.0 when a window has no
-        # segregating (site, allele) entries (rather than NaN)
-        results['mu_sfs'] = np.divide(edge_sum, seg_sum,
-                                      out=np.zeros_like(edge_sum),
-                                      where=seg_sum > 0)
+                                n_windows)
+        # 0/0 is NaN for a window with no segregating entry
+        results['mu_sfs'] = (edge_sum / seg_sum).get()
 
     # Per-window pairwise stats (LD, distance moments)
     ld_pairwise = {'zns', 'omega', 'mu_ld'}
@@ -2500,8 +2497,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         stat_arrays = {s: np.full(n_windows, np.nan) for s in perwin_stats}
         need_dist = bool(perwin_stats & dist_pairwise)
-        need_winmat = ('omega' in stat_arrays or 'mu_ld' in stat_arrays
-                       or need_dist)
+        need_ld_winmat = 'omega' in stat_arrays or 'mu_ld' in stat_arrays
 
         # zns/omega restrict to biallelic; the excluded multiallelic sites are
         # the same across the scan, so warn once here rather than once per
@@ -2526,8 +2522,12 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         for wi in range(n_windows):
             s, e = int(ws_np[wi]), int(we_np[wi])
-            if e - s < 4:
+            if e == s:
                 continue
+            # zns, omega and mu_ld apply their own too-few-sites rule, so a
+            # small window gets the value the scalar gives; the distance
+            # moments keep a four-variant floor.
+            win_dist = need_dist and e - s >= 4
 
             if 'zns' in stat_arrays:
                 # Per-window zns defaults to the unbiased sigma_d2
@@ -2538,7 +2538,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                     hap_clean, valid_mask, s, e,
                     use_projection=True)
 
-            if need_winmat:
+            if need_ld_winmat or win_dist:
                 win_mat = HaplotypeMatrix(matrix.haplotypes[:, s:e],
                                            matrix.positions[s:e])
                 if 'omega' in stat_arrays:
@@ -2550,7 +2550,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                         missing_data=missing_data)
                 if 'mu_ld' in stat_arrays:
                     stat_arrays['mu_ld'][wi] = ld_statistics.mu_ld(win_mat)
-                if need_dist:
+                if win_dist:
                     v, sk, ku = distance_stats.dist_moments(win_mat)
                     if 'dist_var' in stat_arrays:
                         stat_arrays['dist_var'][wi] = v

@@ -68,11 +68,11 @@ def test_zns_from_precomputed_matches_public_zns(use_projection, estimator):
     _agree(z, zns(hm, estimator=estimator))
 
 
-def test_zns_from_precomputed_too_few_sites_returns_zero():
+def test_zns_from_precomputed_too_few_sites_returns_nan():
     hm = _hm()
     hc, vm = _precomputed(hm)
-    # A single-column range has < 2 segregating sites -> 0.0.
-    assert _zns_from_precomputed(hc, vm, 0, 1) == 0.0
+    # A single-column range has < 2 segregating sites -> NaN.
+    assert np.isnan(_zns_from_precomputed(hc, vm, 0, 1))
 
 
 def test_zns_naive_matches_direct_pairwise_correlation():
@@ -202,9 +202,9 @@ def test_zns_from_precomputed_tiling_invariant(use_projection):
 
 
 # ── mu_ld ──────────────────────────────────────────────────────────────
-def test_mu_ld_too_few_variants_returns_zero():
+def test_mu_ld_too_few_variants_returns_nan():
     hm = HaplotypeMatrix(_X[:, :1].copy(), _POS[:1].copy(), 0, 1000)
-    assert mu_ld(hm) == 0.0
+    assert np.isnan(mu_ld(hm))
 
 
 def test_mu_ld_fully_exclusive_patterns():
@@ -339,7 +339,7 @@ def test_r2_matrix_diploid_pairwise_complete_under_missing_data():
 
     gm = GenotypeMatrix(geno, np.array([1, 2], dtype=np.int64))
     _agree(zns(gm, estimator="r2"), 1.0)
-    _agree(omega(gm, estimator="r2"), 0.0)  # fewer than 5 sites: omega's floor
+    assert np.isnan(omega(gm, estimator="r2"))  # fewer than 5 sites
 
 
 def test_r2_matrix_diploid_matches_pairwise_complete_correlation_multi_site():

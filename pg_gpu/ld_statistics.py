@@ -576,7 +576,7 @@ def _zns_tiled(mat, missing_data='include', tile_size=512, use_projection=False)
     """
     hap_clean, valid_mask, m = _prepare_segregating(mat, missing_data)
     if m < 2:
-        return 0.0
+        return float('nan')
 
     B = tile_size
     total = 0.0
@@ -613,7 +613,7 @@ def _zns_tiled(mat, missing_data='include', tile_size=512, use_projection=False)
                     total += 2.0 * float(cp.sum(r2_tile).get())
                     n_pairs += 2 * int(cp.sum(valid_tile).get())
 
-    return total / n_pairs if n_pairs > 0 else 0.0
+    return total / n_pairs if n_pairs > 0 else float('nan')
 
 
 def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
@@ -639,7 +639,7 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
     Returns
     -------
     float
-        ZnS value, or 0.0 if fewer than 2 segregating sites.
+        ZnS value, or NaN if fewer than 2 segregating sites.
     """
     # A bool valid_mask silently corrupts the tiled r2/sigma_d2 math: bool
     # matmul reduces logically instead of counting jointly-valid samples. Any
@@ -656,7 +656,7 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
     seg_idx = cp.where(seg)[0]
     m = len(seg_idx)
     if m < 2:
-        return 0.0
+        return float('nan')
 
     hc = hc[:, seg_idx]
     vm = vm[:, seg_idx]
@@ -696,7 +696,7 @@ def _zns_from_precomputed(hap_clean, valid_mask, col_start, col_end,
                     total += 2.0 * float(cp.sum(r2_tile).get())
                     n_pairs += 2 * int(cp.sum(valid_tile).get())
 
-    return total / n_pairs if n_pairs > 0 else 0.0
+    return total / n_pairs if n_pairs > 0 else float('nan')
 
 
 def _drop_undefined_sites(r2_matrix):
@@ -757,6 +757,7 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     -------
     float
         Mean r-squared (or mean sigma_D^2 when sigma_d2 is selected).
+        NaN when fewer than two sites have a defined r-squared.
 
     Notes
     -----
@@ -787,13 +788,11 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     # copy for its prefix sums; a scalar mean does not).
     finite = ~cp.isnan(r2_matrix)
     cp.fill_diagonal(finite, False)
-    m = int(cp.any(finite, axis=1).sum())
-    if m < 2:
-        return 0.0
-    # Pair count from the finite mask itself, not m * (m - 1): a scattered
-    # undefined pair (both sites otherwise fine) doesn't drop a whole site
-    # from m, so the mean must exclude it from the denominator too.
+    # Count the defined pairs, not m * (m - 1): a scattered undefined pair
+    # (both sites otherwise fine) must leave the denominator too.
     n_pairs = int(finite.sum())
+    if n_pairs == 0:
+        return float('nan')
     total = cp.nansum(r2_matrix) - cp.nansum(cp.diag(r2_matrix))
     return float((total / n_pairs).get())
 
@@ -873,7 +872,8 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     Returns
     -------
     float
-        Maximum omega value. Returns 0 if fewer than 5 SNPs.
+        Maximum omega value. NaN when fewer than 5 sites have a defined
+        r-squared.
 
     Notes
     -----
@@ -911,7 +911,7 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
 
     m = r2_matrix.shape[0]
     if m < 5:
-        return 0.0
+        return float('nan')
 
     # work with upper triangle only (i < j), matching diploSHIC
     r2 = cp.triu(r2_matrix, k=1)
@@ -980,6 +980,7 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     Returns
     -------
     float
+        NaN when there are fewer than two sites or no haplotype.
     """
     from ._haplotype_groups import complete_sites, window_labels
     from ._haplotype_hash import hash_weights
@@ -996,7 +997,7 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     n_hap, n_var = hap.shape
 
     if n_var < 2 or n_hap == 0:
-        return 0.0
+        return float('nan')
 
     mid = n_var // 2
     labels, n_distinct, has_complete = window_labels(

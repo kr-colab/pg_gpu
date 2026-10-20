@@ -182,8 +182,17 @@ Read this section if you are comparing against older pg_gpu results.
   haplotypes. ``grm(GenotypeMatrix, population=...)`` used to raise an
   error and now works.
 * Windowed ``daf_hist`` is now a histogram normalized to sum to 1, and
-  windowed ``mu_sfs`` divides by the number of variable sites and
-  returns 0.0 instead of NaN for an empty window.
+  windowed ``mu_sfs`` divides by the number of variable sites.
+* Statistics that are undefined because there are too few sites or
+  haplotypes now return NaN, not 0.0, which reads as a real value:
+  ``zns`` (fewer than two sites with a defined r-squared), ``omega``
+  (fewer than five), ``mu_ld`` (fewer than two sites, or no haplotype),
+  ``mu_sfs`` (no variable site), ``mu_var`` (a window length that is not
+  positive) and ``haplotype_diversity`` (fewer than two haplotypes). The
+  windowed ``zns``, ``omega``, ``mu_ld`` and ``mu_sfs`` columns follow. A
+  window with one to three variants now gets the same ``zns``, ``omega``
+  and ``mu_ld`` as the scalar functions give; before, it was always NaN.
+  ``zx`` is NaN when one of its ZnS terms is.
 * In ``windowed_statistics``, ``singletons`` now counts only alternate
   alleles seen once (it used to also count reference alleles seen
   once), and ``segregating_sites`` counts mutations.
