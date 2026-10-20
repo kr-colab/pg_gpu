@@ -238,6 +238,11 @@ Bug fixes
   statistic and no ``pop1`` or ``pop2``, the fused engines raised
   ``TypeError`` under ``'exclude'``; they now raise the same
   ``ValueError`` as under ``'include'``.
+* ``windowed_analysis`` raised ``TypeError`` when a population was given
+  as a list of rows and the request took the per-window fallback (for
+  example ``['pi', 'garud_h1']`` with ``missing_data='exclude'``). The
+  fallback now accepts row lists and names their columns as it names
+  the columns of a named population.
 * ``tally_gpu_haplotypes`` and ``tally_gpu_haplotypes_two_pops`` gave
   wrong counts on complete data when more than 127 haplotypes carried
   the alternate allele at both sites of a pair. The pair count used an
@@ -464,6 +469,14 @@ New warnings
   The ``tally_gpu_haplotypes*`` methods keep multiallelic sites, count
   the highest allele against all others, and warn with the number of
   such sites.
+* ``FewCompleteHaplotypesWarning`` -- 10% or more of the windows in a
+  ``windowed_analysis`` or ``moving_garud_h`` call have few haplotypes
+  with no missing call (fewer than 25, or fewer than half the sample
+  when it is under 50). Garud's H and ``haplotype_count`` come out too
+  low there. ``windowed_analysis`` now returns ``n_complete_haplotypes``
+  with any Garud statistic or ``haplotype_count``, and
+  ``min_complete_haplotypes`` sets thinner windows to NaN. See
+  :doc:`missing_data`.
 * ``UnpairedRowsWarning`` -- a statistic that pairs rows into
   individuals got a population list that does not keep each sample's
   two rows together. The row-validation entry above says when it

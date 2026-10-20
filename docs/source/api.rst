@@ -82,6 +82,9 @@ you have already understood and leave the rest on::
 .. autoclass:: pg_gpu.BiallelicOnlyWarning
    :show-inheritance:
 
+.. autoclass:: pg_gpu.FewCompleteHaplotypesWarning
+   :show-inheritance:
+
 .. autoclass:: pg_gpu.MultiallelicCapWarning
    :show-inheritance:
 

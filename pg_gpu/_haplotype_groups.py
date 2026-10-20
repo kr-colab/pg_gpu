@@ -405,6 +405,8 @@ def window_moments(hap, starts, stops, w1, w2, n_seg):
     -------
     sum_f2, top0, top1, top2, n_distinct : cupy.ndarray, float64, (n_windows,)
         NaN for a window with no complete haplotype.
+    n_complete : cupy.ndarray, int64, (n_windows,)
+        Haplotypes with no missing call in the window.
     """
     hap = _as_kernel_input(hap)
     n_windows = int(starts.size)
@@ -414,7 +416,7 @@ def window_moments(hap, starts, stops, w1, w2, n_seg):
         _window_moments(_grid(n_windows), (_THREADS,),
                         (r.goff, r.counts, r.n_single, r.n_complete,
                          np.int32(n_windows), np.float64(hap.shape[0]), *out))
-    return out
+    return (*out, r.n_complete)
 
 
 def window_batch_size(n_hap, n_seg):
