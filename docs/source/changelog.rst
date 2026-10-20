@@ -313,6 +313,14 @@ Bug fixes
   skipped. ``dd`` now takes pi from the same distances, so it matches
   ``distance_based_stats``; before, the two disagreed under missing data.
   Results on data with no missing call are unchanged.
+* A pair with no site called in both samples gets NaN, not 0.0, from
+  ``pairwise_diffs`` (haploid and diploid),
+  ``decomposition.pairwise_distance`` and ``relatedness.ibs``.
+  ``dist_var``, ``dist_skew`` and ``dist_kurt``, and their windowed
+  columns, skip these pairs; they are NaN when no pair is defined.
+  ``pcoa`` raises ``ValueError`` on a NaN distance. ``lostruct`` gives a
+  window with no local PCA a NaN ``mds`` row; before, such a window made
+  ``pcoa`` fail with ``LinAlgError``.
 * ``pbs`` counted a population's own diversity at a site where another
   population in the pair had no data, which pulled that pair's FST down;
   a single such site could change the sign of PBS. PBS now uses, for all

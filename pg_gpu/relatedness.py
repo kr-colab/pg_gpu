@@ -368,7 +368,8 @@ def ibs(genotype_matrix,
     -------
     ndarray, float64, shape (n_individuals, n_individuals)
         Symmetric IBS matrix. Values in [0, 1] where 1 = identical.
-        Diagonal is always 1.
+        Diagonal is always 1. NaN for a pair of individuals with no site
+        called in both, which has no IBS proportion.
     """
     from ._memutil import estimate_variant_chunk_size
     from .streaming_matrix import _StreamingMatrixBase, StreamingHaplotypeMatrix
@@ -426,7 +427,7 @@ def ibs(genotype_matrix,
 
     ibs_mat = cp.where(n_joint > 0,
                         (2.0 * ibs2 + ibs1) / (2.0 * n_joint),
-                        0.0)
+                        cp.nan)
     cp.fill_diagonal(ibs_mat, 1.0)
     return ibs_mat.get()
 
@@ -554,11 +555,11 @@ def _stream_ibs(streaming_matrix, *, population, missing_data,
     chunks = iter(streaming_matrix.iter_gpu_chunks())
     first = next(chunks, None)
     if first is None:
-        # No variants at all; mirror the eager identity-on-diagonal
-        # convention so callers don't have to special-case the empty
+        # No variants at all, so no pair shares a called site; mirror the
+        # eager result so callers don't have to special-case the empty
         # source.
         n_ind = _stream_n_ind(streaming_matrix, population)
-        ibs_mat = np.zeros((n_ind, n_ind), dtype=np.float64)
+        ibs_mat = np.full((n_ind, n_ind), np.nan)
         np.fill_diagonal(ibs_mat, 1.0)
         return ibs_mat
 
@@ -580,9 +581,9 @@ def _stream_ibs(streaming_matrix, *, population, missing_data,
                               block_size=block_size, missing_data=missing_data)
         del geno
 
-    ibs_mat = np.where(n_joint_host > 0,
-                        (2.0 * ibs2_host + ibs1_host) / (2.0 * n_joint_host),
-                        0.0)
+    ibs_mat = np.divide(2.0 * ibs2_host + ibs1_host, 2.0 * n_joint_host,
+                        out=np.full_like(n_joint_host, np.nan),
+                        where=n_joint_host > 0)
     np.fill_diagonal(ibs_mat, 1.0)
     return ibs_mat
 

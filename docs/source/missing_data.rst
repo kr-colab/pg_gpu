@@ -118,6 +118,14 @@ statistics. ``missing_data='exclude'`` does not prevent this, because a
 haplotype with very few calls also reduces the set of complete sites to
 those few sites.
 
+A pair that shares no called site has no distance. ``pairwise_diffs``,
+``decomposition.pairwise_distance`` and ``relatedness.ibs`` give NaN for
+such a pair, not 0.0: a distance of 0.0 would mark the pair as
+identical, and an IBS of 0.0 as sharing nothing. ``dist_var``,
+``dist_skew`` and ``dist_kurt`` skip these pairs, and so do the windowed
+columns of the same names in each window. ``pcoa`` raises an error,
+because classical MDS needs every distance.
+
 LD Estimator Choice
 -------------------
 

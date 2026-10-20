@@ -469,7 +469,8 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     dist : ndarray, float64, shape (n_samples * (n_samples - 1) // 2,)
-        Condensed distance matrix.
+        Condensed distance matrix. NaN for a pair with no site called in
+        both haplotypes, which has no distance.
     """
     from .genotype_matrix import GenotypeMatrix
     if isinstance(haplotype_matrix, GenotypeMatrix):
@@ -503,17 +504,12 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
         complete = missing_per_var == 0
         hap = hap[:, complete]
 
-    n_var = hap.shape[1]
     # m = number of differing jointly-valid sites per pair (multiallelic-correct,
-    # label-independent one-hot Hamming); joint_valid = jointly non-missing site
-    # count per pair. cityblock and sqeuclidean are both m; euclidean is sqrt(m).
-    m, joint_valid = _pairwise_diffs_matrix_gpu(
-        hap, missing_data='include', return_joint_valid=True)
-
-    # Scale the mismatch count to the full variant span when missing sites reduce
-    # the jointly-valid count (raw * n_var / n_joint). With no missing data
-    # joint_valid == n_var, so d == m, the plain mismatch count.
-    d = cp.where(joint_valid > 0, m * n_var / joint_valid, 0.0)
+    # label-independent one-hot Hamming), scaled to the full variant span when
+    # missing sites reduce the jointly-valid count. With no missing data the
+    # scale is 1, so d is the plain mismatch count. cityblock and sqeuclidean
+    # are both m; euclidean is sqrt(m).
+    d = _pairwise_diffs_matrix_gpu(hap, missing_data='scale')
     if metric == 'euclidean':
         d = cp.sqrt(d)
     return _extract_upper_triangle(d)
@@ -537,6 +533,13 @@ def pcoa(dist, n_components: Optional[int] = None):
         Sample coordinates.
     explained_variance_ratio : ndarray, float64, shape (n_components,)
         Proportion of variance explained by each axis.
+
+    Raises
+    ------
+    ValueError
+        If a distance is NaN. Classical MDS needs every pairwise distance,
+        and ``pairwise_distance`` gives NaN for two haplotypes with no site
+        called in both.
     """
     from scipy.spatial.distance import squareform
 
@@ -549,6 +552,14 @@ def pcoa(dist, n_components: Optional[int] = None):
         D = dist
 
     n = D.shape[0]
+    if np.isnan(D).any():
+        n_undefined = int(np.isnan(D[np.triu_indices(n, 1)]).sum())
+        raise ValueError(
+            "pcoa needs every pairwise distance, but some are undefined "
+            f"(NaN): {n_undefined} of {n * (n - 1) // 2} pairs. Drop the rows and columns "
+            "that hold NaN first. From pairwise_distance, a NaN is two "
+            "haplotypes with no site called in both; from pc_dist, it is a "
+            "window with no local PCA.")
 
     # double-centering
     D_sq = D ** 2
@@ -1615,7 +1626,8 @@ class LostructResult:
     distance : numpy.ndarray, shape (n_windows, n_windows)
         Pairwise Frobenius distance between windows from ``pc_dist``.
     mds : numpy.ndarray, shape (n_windows, n_components)
-        MDS coordinates from ``pcoa``.
+        MDS coordinates from ``pcoa``, computed over the valid windows. A
+        window with no local PCA (too few variants) has a NaN row.
     explained_variance_ratio : numpy.ndarray, shape (n_components,)
         Variance fraction explained by each MDS axis.
     corner_indices : numpy.ndarray or None, shape (n_per_corner, n_corners)
@@ -1751,7 +1763,13 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
     LostructResult
         Bundle of the four pipeline outputs. Each piece is also reachable
         via the underlying functions for users who want to recompute one
-        stage with different parameters.
+        stage with different parameters. A window with too few variants
+        for a local PCA is left out of the MDS and has a NaN ``mds`` row.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two windows have a local PCA.
 
     See Also
     --------
@@ -1781,7 +1799,17 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
                         n_subspace_iter=n_subspace_iter,
                         random_state=random_state)
     dist = pc_dist(pca, npc=npc, normalize=normalize, w=pc_dist_weights)
-    mds, evr = pcoa(dist, n_components=n_components)
+    # An invalid window has no PCs, so pc_dist gives it a NaN row and column,
+    # its diagonal too. MDS runs on the valid windows only, and an invalid
+    # window gets a NaN row, which corners skips.
+    valid = ~np.isnan(np.diag(dist))
+    if valid.sum() < 2:
+        raise ValueError(
+            f"lostruct needs at least two windows with a local PCA; "
+            f"{int(valid.sum())} of {len(dist)} windows have one.")
+    mds_valid, evr = pcoa(dist[np.ix_(valid, valid)], n_components=n_components)
+    mds = np.full((len(dist), mds_valid.shape[1]), np.nan)
+    mds[valid] = mds_valid
     if n_corners is None or n_corners <= 0:
         corner_idx = None
     else:

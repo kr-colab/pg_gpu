@@ -105,6 +105,7 @@ over them:
 
 .. code-block:: python
 
+   import numpy as np
    from pg_gpu import HaplotypeMatrix, windowed_analysis
    from pg_gpu.decomposition import pc_dist, pcoa, corners
 
@@ -114,8 +115,11 @@ over them:
        statistics=['local_pca'], window_type='snp', k=2)
 
    dist = pc_dist(result, npc=2, normalize='L1')
-   mds, _ = pcoa(dist, n_components=2)
-   extremes = corners(mds, prop=0.05, k=3)
+   # A window with too few variants for a local PCA has NaN distances, and
+   # pcoa needs every distance; lostruct() drops such windows the same way.
+   ok = ~np.isnan(np.diag(dist))
+   mds, _ = pcoa(dist[np.ix_(ok, ok)], n_components=2)
+   extremes = corners(mds, prop=0.05, k=3)  # row numbers among the ok windows
 
    # With jackknife standard error (shares per-window matrix prep with local_pca)
    result = windowed_analysis(

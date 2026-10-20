@@ -443,11 +443,13 @@ It is the absolute eigenvalue scale that differs, not the structure you
 would read off the plot.
 
 ``pairwise_distance`` counts, for each pair of haplotypes, how many
-sites they differ at (skipping sites where either is missing). Call
-that count :math:`m`. Then ``cityblock`` and ``sqeuclidean`` both
-return :math:`m`, and ``euclidean`` returns :math:`\sqrt{m}`. Counting
-mismatches this way means the answer does not depend on how the alleles
-were numbered. Any other metric raises ``NotImplementedError``.
+sites they differ at (skipping sites where either is missing), scaled to
+all sites when missing calls hide some of them. Call that count
+:math:`m`. Then ``cityblock`` and ``sqeuclidean`` both return :math:`m`,
+and ``euclidean`` returns :math:`\sqrt{m}`. Counting mismatches this way
+means the answer does not depend on how the alleles were numbered. A
+pair with no site called in both gets NaN, and ``pcoa`` raises on NaN.
+Any other metric raises ``NotImplementedError``.
 
 Relatedness and Kinship
 -----------------------
@@ -469,7 +471,7 @@ Relatedness and Kinship
      - Yang et al. (2011)
    * - ``ibs``
      - Pairwise Identity by State proportions (PLINK). Takes a
-       ``GenotypeMatrix``.
+       ``GenotypeMatrix``. NaN for a pair with no site called in both.
      -
 
 ``genetic_relatedness`` is the general-purpose one. It already counts
@@ -504,10 +506,11 @@ Distance Distribution Statistics
      - Description
      - Reference
    * - ``pairwise_diffs``
-     - Number of sites at which each pair differs, skipping sites where
-       either one is missing. The haplotype version compares alleles
+     - Fraction of sites at which each pair differs, over the sites
+       both samples call. The haplotype version compares alleles
        directly, so it works with any number of alleles; the diploid
-       version works on two-allele sites only.
+       version works on two-allele sites only. NaN for a pair with no
+       site called in both; the distance moments skip such pairs.
      -
    * - ``dist_var``
      - Variance of pairwise distance distribution

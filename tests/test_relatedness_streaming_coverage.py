@@ -65,9 +65,11 @@ class TestStreamingIbsDegenerate:
                                       chunk_bp=500, region=_EMPTY_REGION)
         ibs = relatedness._stream_ibs(gm, population=None,
                                       missing_data='include')
+        # With no variants no pair shares a called site, so every
+        # off-diagonal entry is undefined.
         off_diagonal = ibs[~np.eye(ibs.shape[0], dtype=bool)]
         assert np.all(np.diag(ibs) == 1.0)
-        assert np.all(off_diagonal == 0.0)
+        assert np.all(np.isnan(off_diagonal))
 
     def test_empty_source_with_population(self, poly_store):
         gm = GenotypeMatrix.from_zarr(poly_store, streaming="always",
@@ -78,7 +80,7 @@ class TestStreamingIbsDegenerate:
         assert ibs.shape == (2, 2)
         off_diagonal = ibs[~np.eye(2, dtype=bool)]
         assert np.all(np.diag(ibs) == 1.0)
-        assert np.all(off_diagonal == 0.0)
+        assert np.all(np.isnan(off_diagonal))
 
 
 class TestStreamingGeneticRelatednessIndexes:
