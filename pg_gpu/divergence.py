@@ -1150,10 +1150,7 @@ def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     # count makes a haplotype with missing calls look close to everything.
     # Scaling each count to the full site count puts every pair on one
     # footing; with no missing call the scale is 1 and the count is exact.
-    diffs, joint = _pairwise_diffs_matrix_gpu(hap_sub, missing_data='include',
-                                              return_joint_valid=True)
-    n_sites = hap_sub.shape[1]
-    dist = cp.where(joint > 0, diffs * n_sites / cp.maximum(joint, 1.0), cp.nan)
+    dist = _pairwise_diffs_matrix_gpu(hap_sub, missing_data='scale')
 
     return dist[:n1, n1:], dist[:n1, :n1], dist[n1:, n1:]
 

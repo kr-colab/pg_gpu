@@ -464,12 +464,14 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     missing_data : str
         'include' - count mismatches over jointly non-missing sites, scaled to
         the full variant span per pair
-        'exclude' - filter sites with any missing first
+        'exclude' - filter sites with any missing first; every pair is
+        NaN when no site is complete
 
     Returns
     -------
     dist : ndarray, float64, shape (n_samples * (n_samples - 1) // 2,)
-        Condensed distance matrix.
+        Condensed distance matrix. NaN for a pair with no site called in
+        both haplotypes, which has no distance.
     """
     from .genotype_matrix import GenotypeMatrix
     if isinstance(haplotype_matrix, GenotypeMatrix):
@@ -503,17 +505,12 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
         complete = missing_per_var == 0
         hap = hap[:, complete]
 
-    n_var = hap.shape[1]
     # m = number of differing jointly-valid sites per pair (multiallelic-correct,
-    # label-independent one-hot Hamming); joint_valid = jointly non-missing site
-    # count per pair. cityblock and sqeuclidean are both m; euclidean is sqrt(m).
-    m, joint_valid = _pairwise_diffs_matrix_gpu(
-        hap, missing_data='include', return_joint_valid=True)
-
-    # Scale the mismatch count to the full variant span when missing sites reduce
-    # the jointly-valid count (raw * n_var / n_joint). With no missing data
-    # joint_valid == n_var, so d == m, the plain mismatch count.
-    d = cp.where(joint_valid > 0, m * n_var / joint_valid, 0.0)
+    # label-independent one-hot Hamming), scaled to the full variant span when
+    # missing sites reduce the jointly-valid count. With no missing data the
+    # scale is 1, so d is the plain mismatch count. cityblock and sqeuclidean
+    # are both m; euclidean is sqrt(m).
+    d = _pairwise_diffs_matrix_gpu(hap, missing_data='scale')
     if metric == 'euclidean':
         d = cp.sqrt(d)
     return _extract_upper_triangle(d)
@@ -537,6 +534,13 @@ def pcoa(dist, n_components: Optional[int] = None):
         Sample coordinates.
     explained_variance_ratio : ndarray, float64, shape (n_components,)
         Proportion of variance explained by each axis.
+
+    Raises
+    ------
+    ValueError
+        If a distance is NaN. Classical MDS needs every pairwise distance,
+        and ``pairwise_distance`` gives NaN for two haplotypes with no site
+        called in both.
     """
     from scipy.spatial.distance import squareform
 
@@ -549,6 +553,16 @@ def pcoa(dist, n_components: Optional[int] = None):
         D = dist
 
     n = D.shape[0]
+    nan = np.isnan(D)
+    if nan.any():
+        raise ValueError(
+            "pcoa needs every pairwise distance, but some are undefined "
+            f"(NaN): {int(nan[np.triu_indices(n, 1)].sum())} of "
+            f"{n * (n - 1) // 2} pairs, in {int(nan.any(axis=1).sum())} of "
+            f"{n} rows. Drop the rows and columns that hold NaN first. From "
+            "pairwise_distance, a NaN is two haplotypes with no site called "
+            "in both; from pc_dist, it is a window that pc_dist cannot "
+            "compare (too few variants, or no variation).")
 
     # double-centering
     D_sq = D ** 2
@@ -1615,7 +1629,10 @@ class LostructResult:
     distance : numpy.ndarray, shape (n_windows, n_windows)
         Pairwise Frobenius distance between windows from ``pc_dist``.
     mds : numpy.ndarray, shape (n_windows, n_components)
-        MDS coordinates from ``pcoa``.
+        MDS coordinates from ``pcoa``, computed over the valid windows. A
+        window that ``pc_dist`` cannot compare has a NaN row: one with
+        fewer than ``max(k, 2)`` variants, or, when ``normalize`` is set,
+        one with no variation.
     explained_variance_ratio : numpy.ndarray, shape (n_components,)
         Variance fraction explained by each MDS axis.
     corner_indices : numpy.ndarray or None, shape (n_per_corner, n_corners)
@@ -1751,7 +1768,17 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
     LostructResult
         Bundle of the four pipeline outputs. Each piece is also reachable
         via the underlying functions for users who want to recompute one
-        stage with different parameters.
+        stage with different parameters. A window that ``pc_dist`` cannot
+        compare (fewer than ``max(k, 2)`` variants, or no variation when
+        ``normalize`` is set) is left out of the MDS and has a NaN ``mds``
+        row.
+
+    Raises
+    ------
+    ValueError
+        If fewer than two windows can be compared, or if ``n_corners > 0``
+        and the MDS has fewer than two dimensions. ``corners`` uses the
+        first two MDS axes.
 
     See Also
     --------
@@ -1781,11 +1808,32 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
                         n_subspace_iter=n_subspace_iter,
                         random_state=random_state)
     dist = pc_dist(pca, npc=npc, normalize=normalize, w=pc_dist_weights)
-    mds, evr = pcoa(dist, n_components=n_components)
+    # A window pc_dist cannot compare gets a NaN row and column, its diagonal
+    # too. MDS runs on the other windows, and the invalid window gets a NaN
+    # row, which corners skips.
+    valid = ~np.isnan(np.diag(dist))
+    n_valid = int(valid.sum())
+    if n_valid < 2:
+        raise ValueError(
+            "lostruct needs at least two windows that pc_dist can compare "
+            f"(enough variants, and variation); {n_valid} of {len(dist)} "
+            "windows qualify.")
+    mds_valid, evr = pcoa(dist[np.ix_(valid, valid)], n_components=n_components)
+    mds = np.full((len(dist), mds_valid.shape[1]), np.nan)
+    mds[valid] = mds_valid
     if n_corners is None or n_corners <= 0:
         corner_idx = None
     else:
-        corner_idx = corners(mds, prop=corner_prop, k=n_corners,
+        # corners works in the plane of the first two MDS axes.
+        if mds.shape[1] < 2:
+            cause = (f"n_components={n_components} was requested"
+                     if n_components < 2 else
+                     f"the {n_valid} windows that pc_dist can compare give "
+                     f"{mds.shape[1]} MDS dimension(s)")
+            raise ValueError(
+                f"corners needs two MDS dimensions, but {cause}. Use more "
+                "windows or n_components >= 2, or set n_corners=0.")
+        corner_idx = corners(mds[:, :2], prop=corner_prop, k=n_corners,
                              random_state=random_state)
     return LostructResult(
         local_pca=pca,

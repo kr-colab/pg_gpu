@@ -375,13 +375,20 @@ class TestPairwiseDistanceKernel:
         rng = np.random.RandomState(0)
         hap = rng.randint(0, 4, size=(8, 200)).astype(np.int8)  # 4 alleles
         hap[rng.random((8, 200)) < 0.1] = -1                     # 10% missing
+        hap[0, :100] = -1                                        # rows 0 and 1 share
+        hap[1, 100:] = -1                                        # no called site
         assert hap.max() > 1                                     # genuinely multiallelic
         raw_ref, jv_ref = self._direct(hap)
-        norm_ref = np.where(jv_ref > 0, raw_ref / jv_ref, 0.0)
+        assert jv_ref[0, 1] == 0
+        with np.errstate(invalid='ignore', divide='ignore'):
+            norm_ref = np.where(jv_ref > 0, raw_ref / jv_ref, np.nan)
+        scale_ref = norm_ref * hap.shape[1]
         raw = cp.asnumpy(_pairwise_diffs_matrix_gpu(hap, 'include'))
         norm = cp.asnumpy(_pairwise_diffs_matrix_gpu(hap, 'normalize'))
+        scale = cp.asnumpy(_pairwise_diffs_matrix_gpu(hap, 'scale'))
         np.testing.assert_allclose(raw, raw_ref)
         np.testing.assert_allclose(norm, norm_ref)
+        np.testing.assert_allclose(scale, scale_ref)
         assert np.allclose(np.diag(raw), 0)
         assert not (raw < 0).any()          # the old binary-only identity went negative
 

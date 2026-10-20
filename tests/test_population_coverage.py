@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from pg_gpu import (HaplotypeMatrix, GenotypeMatrix, diversity, selection,
-                    decomposition, divergence)
+                    decomposition, divergence, distance_stats)
 
 
 def _host(a):
@@ -141,7 +141,8 @@ def test_daf_histogram_diploid_population_subset(gm, gm_p1):
 @pytest.mark.parametrize("fn", [
     lambda m: diversity.diplotype_frequency_spectrum(m, population="nope"),
     lambda m: diversity.daf_histogram(m, population="nope"),
-], ids=["diplotype_frequency_spectrum", "daf_histogram"])
+    lambda m: distance_stats.pairwise_diffs_diploid(m, population="nope"),
+], ids=["diplotype_frequency_spectrum", "daf_histogram", "pairwise_diffs_diploid"])
 def test_diploid_population_not_found_raises(gm, fn):
     with pytest.raises(ValueError, match="not found"):
         fn(gm)
@@ -176,13 +177,20 @@ def test_pca_dosage_population_list(gm):
     _agree(a, b)
 
 
+def test_pairwise_diffs_diploid_population(gm, gm_p1):
+    by_name = distance_stats.pairwise_diffs_diploid(gm, population="p1")
+    _agree(by_name, distance_stats.pairwise_diffs_diploid(gm_p1))
+    _agree(distance_stats.pairwise_diffs_diploid(gm, population=gm.sample_sets["p1"]), by_name)
+
+
 @pytest.mark.parametrize("fn", [
     lambda m, pop: diversity.diplotype_frequency_spectrum(m, population=pop),
     lambda m, pop: diversity.daf_histogram(m, population=pop),
     lambda m, pop: selection.garud_h(m, population=pop),
     lambda m, pop: decomposition._prepare_dosage(m, population=pop),
+    lambda m, pop: distance_stats.pairwise_diffs_diploid(m, population=pop),
 ], ids=["diplotype_frequency_spectrum", "daf_histogram", "garud_h",
-        "pca_dosage"])
+        "pca_dosage", "pairwise_diffs_diploid"])
 @pytest.mark.parametrize("bad", [[0, 999], []], ids=["out_of_range", "empty"])
 def test_diploid_population_bad_row_list_raises(gm, fn, bad):
     with pytest.raises(ValueError):

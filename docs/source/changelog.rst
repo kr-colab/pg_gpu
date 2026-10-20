@@ -221,6 +221,9 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``pairwise_diffs_diploid`` (and so ``dist_moments`` on a
+  ``GenotypeMatrix``) raised ``TypeError`` for a population given as a
+  list of rows. It now selects rows as the haploid path does.
 * ``windowed_analysis`` with ``missing_data='exclude'`` raised
   ``Unknown statistic`` for ``zns``, ``omega``, ``mu_ld``, ``mu_var``,
   ``mu_sfs``, ``daf_hist``, the ``snp_dist_*`` and ``dist_*``
@@ -313,6 +316,18 @@ Bug fixes
   skipped. ``dd`` now takes pi from the same distances, so it matches
   ``distance_based_stats``; before, the two disagreed under missing data.
   Results on data with no missing call are unchanged.
+* A pair with no site called in both samples gets NaN, not 0.0, from
+  ``pairwise_diffs`` (haploid and diploid),
+  ``decomposition.pairwise_distance`` and ``relatedness.ibs``.
+  ``dist_var``, ``dist_skew`` and ``dist_kurt``, and their windowed
+  columns, skip these pairs; a moment is NaN when missing data leaves
+  too few defined pairs for it.
+  ``pcoa`` raises ``ValueError`` on a NaN distance. ``lostruct`` gives a
+  window that ``pc_dist`` cannot compare (too few variants, or no
+  variation) a NaN ``mds`` row; before, such a window made ``pcoa`` fail
+  with ``LinAlgError``. ``lostruct`` now raises ``ValueError`` when fewer
+  than two windows can be compared, or when corners are requested and
+  the MDS has fewer than two dimensions.
 * ``pbs`` counted a population's own diversity at a site where another
   population in the pair had no data, which pulled that pair's FST down;
   a single such site could change the sign of PBS. PBS now uses, for all
