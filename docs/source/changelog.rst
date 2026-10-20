@@ -183,16 +183,31 @@ Read this section if you are comparing against older pg_gpu results.
   error and now works.
 * Windowed ``daf_hist`` is now a histogram normalized to sum to 1, and
   windowed ``mu_sfs`` divides by the number of variable sites.
-* Statistics that are undefined because there are too few sites or
-  haplotypes now return NaN, not 0.0, which reads as a real value:
-  ``zns`` (fewer than two sites with a defined r-squared), ``omega``
-  (fewer than five), ``mu_ld`` (fewer than two sites, or no haplotype),
-  ``mu_sfs`` (no variable site), ``mu_var`` (a window length that is not
-  positive) and ``haplotype_diversity`` (fewer than two haplotypes). The
-  windowed ``zns``, ``omega``, ``mu_ld`` and ``mu_sfs`` columns follow. A
-  window with one to three variants now gets the same ``zns``, ``omega``
-  and ``mu_ld`` as the scalar functions give; before, it was always NaN.
-  ``zx`` is NaN when one of its ZnS terms is.
+* These statistics now return NaN when they are undefined. Before, they
+  returned 0.0, which looks like a real value:
+
+  - ``zns``: no pair of sites has a defined value;
+  - ``omega``: fewer than five sites have a defined value, or no
+    partition has a positive cross-partition LD sum;
+  - ``mu_ld``: fewer than two segregating sites, or no haplotype;
+  - ``mu_sfs``: no variable site;
+  - ``mu_var``: a window length that is not positive;
+  - ``haplotype_diversity``: fewer than two haplotypes, or no site left
+    after ``missing_data='exclude'``.
+
+  With the default ``sigma_d2`` estimator, ``zns`` and ``omega`` leave
+  out a pair that they cannot estimate (fewer than four haplotypes
+  called at both sites, or a pi2 estimate of 0). Before, ``zns`` counted
+  a pair with a pi2 estimate of 0 as 0, and ``omega`` counted every such
+  pair as 0. ``mu_ld`` now uses the segregating sites only,
+  as RAiSD does. Monomorphic sites no longer move its split point, so
+  its value changes for data that contains invariant sites.
+  ``zx`` is NaN when one of its ZnS terms is NaN.
+
+  The windowed columns change the same way. The windowed ``zns``,
+  ``omega``, ``mu_ld`` and ``dist_*`` columns skipped every window with
+  fewer than four variants. Now a window with one to three variants
+  gets the value that the scalar function gives for its variants.
 * In ``windowed_statistics``, ``singletons`` now counts only alternate
   alleles seen once (it used to also count reference alleles seen
   once), and ``segregating_sites`` counts mutations.

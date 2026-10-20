@@ -2497,7 +2497,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         stat_arrays = {s: np.full(n_windows, np.nan) for s in perwin_stats}
         need_dist = bool(perwin_stats & dist_pairwise)
-        need_ld_winmat = 'omega' in stat_arrays or 'mu_ld' in stat_arrays
+        need_winmat = bool(perwin_stats - {'zns'})
 
         # zns/omega restrict to biallelic; the excluded multiallelic sites are
         # the same across the scan, so warn once here rather than once per
@@ -2522,12 +2522,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         for wi in range(n_windows):
             s, e = int(ws_np[wi]), int(we_np[wi])
+            # The loop skips only empty windows. Each statistic applies its
+            # own too-few-sites rule, so a small window gets the value the
+            # scalar gives.
             if e == s:
                 continue
-            # zns, omega and mu_ld apply their own too-few-sites rule, so a
-            # small window gets the value the scalar gives; the distance
-            # moments keep a four-variant floor.
-            win_dist = need_dist and e - s >= 4
 
             if 'zns' in stat_arrays:
                 # Per-window zns defaults to the unbiased sigma_d2
@@ -2538,7 +2537,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                     hap_clean, valid_mask, s, e,
                     use_projection=True)
 
-            if need_ld_winmat or win_dist:
+            if need_winmat:
                 win_mat = HaplotypeMatrix(matrix.haplotypes[:, s:e],
                                            matrix.positions[s:e])
                 if 'omega' in stat_arrays:
@@ -2550,7 +2549,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                         missing_data=missing_data)
                 if 'mu_ld' in stat_arrays:
                     stat_arrays['mu_ld'][wi] = ld_statistics.mu_ld(win_mat)
-                if win_dist:
+                if need_dist:
                     v, sk, ku = distance_stats.dist_moments(win_mat)
                     if 'dist_var' in stat_arrays:
                         stat_arrays['dist_var'][wi] = v

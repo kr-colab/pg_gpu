@@ -273,12 +273,11 @@ class TestMuLD:
         ml = ld_statistics.mu_ld(hap_data)
         assert 0 <= ml <= 1
 
-    def test_mu_ld_identical(self):
-        """All identical: one pattern per half, exclusive, mu_ld=1."""
+    def test_mu_ld_identical_is_nan(self):
+        """All identical: no segregating site, so mu_ld is undefined."""
         hap = np.zeros((10, 10), dtype=np.int8)
         matrix = HaplotypeMatrix(hap, np.arange(10) * 100, 0, 1000)
-        ml = ld_statistics.mu_ld(matrix)
-        assert ml == 1.0
+        assert np.isnan(ld_statistics.mu_ld(matrix))
 
 
 # ---------------------------------------------------------------------------
