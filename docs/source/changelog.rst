@@ -279,6 +279,12 @@ Read this section if you are comparing against older pg_gpu results.
   produce a defined ``fst_hudson``/``da``/``pbs`` value against anything,
   since it never has its own pair; NaN where data allowed a number
   before.
+* Scalar ``mu_var`` divides by ``get_span()``, the length that ``pi``
+  uses. It used to divide by ``chrom_end - chrom_start``, one base short
+  of the inclusive region, and it ignored an accessible mask. With or
+  without a mask it now agrees with windowed ``mu_var``; with
+  ``n_total_sites`` set and no mask, windowed ``mu_var`` still divides by
+  the window length (see #360).
 * The biallelic and segregating filters keep the parent matrix's
   chromosome bounds. The old filter moved the bounds to the first and
   last surviving variant, which quietly changed the denominator of any
