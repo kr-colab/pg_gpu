@@ -192,8 +192,7 @@ Read this section if you are comparing against older pg_gpu results.
   - ``mu_ld``: fewer than two segregating sites, or no haplotype;
   - ``mu_sfs``: no variable site;
   - ``mu_var``: a window length that is not positive;
-  - ``haplotype_diversity``: fewer than two haplotypes, or no site left
-    after ``missing_data='exclude'``.
+  - ``haplotype_diversity``: fewer than two haplotypes.
 
   With the default ``sigma_d2`` estimator, ``zns`` and ``omega`` leave
   out a pair that they cannot estimate (fewer than four haplotypes

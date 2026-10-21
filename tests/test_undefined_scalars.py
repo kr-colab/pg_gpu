@@ -108,9 +108,12 @@ def test_mu_ld_ignores_monomorphic_sites():
     assert ld_statistics.mu_ld(_hm(padded)) == pytest.approx(ld_statistics.mu_ld(_hm(seg)))
 
 
-def test_haplotype_diversity_exclude_nan_without_complete_site():
-    hap = np.array([[0, 1], [1, -1], [-1, 0], [1, 1]], dtype=np.int8)
-    assert np.isnan(diversity.haplotype_diversity(_hm(hap), missing_data="exclude"))
+def test_haplotype_diversity_exclude_zero_without_complete_site():
+    # With no complete site, every haplotype is the same: one haplotype,
+    # so no diversity. This matches haplotype_count = 1 and H1 = 1.
+    hm = _hm([[0, 1], [1, -1], [-1, 0], [1, 1]])
+    assert diversity.haplotype_diversity(hm, missing_data="exclude") == 0.0
+    assert diversity.haplotype_count(hm, missing_data="exclude") == 1
 
 
 @pytest.mark.parametrize("hap,missing_data", [

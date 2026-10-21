@@ -1206,8 +1206,9 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
         'include' - estimate haplotype frequencies from haplotypes with
         missing calls by EM, as in ``selection.garud_h``. NaN when no
         haplotype is complete.
-        'exclude' - use only sites with no missing call. NaN when no such
-        site remains.
+        'exclude' - use only sites with no missing call. With no such site
+        left, every haplotype is the same, so the value is 0.0, as
+        ``haplotype_count`` gives 1 and ``selection.garud_h`` gives H1 = 1.
 
     Returns
     -------
@@ -1221,9 +1222,6 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
                                           missing_data)
     n_haplotypes = haplotypes.shape[0]
     if n_haplotypes <= 1:
-        return float('nan')
-    # 'exclude' that leaves no site has no data to compare haplotypes on.
-    if haplotypes.shape[1] == 0 and haplotype_matrix.num_variants > 0:
         return float('nan')
 
     f = frequencies(haplotypes)
