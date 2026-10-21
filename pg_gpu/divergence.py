@@ -1379,7 +1379,8 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     float
-        Zx ratio.
+        Zx ratio. NaN when one of the three ZnS values is NaN or the
+        total ZnS is 0.
 
     References
     ----------

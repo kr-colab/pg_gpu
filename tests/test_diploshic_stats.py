@@ -134,13 +134,12 @@ class TestZnSOmega:
         z = ld_statistics.zns(r2)
         assert 0 <= z <= 1
 
-    def test_zns_perfect_ld(self):
-        """All identical haplotypes: r2 matrix is all 0 (no variation), ZnS=0."""
+    def test_zns_no_variation_is_nan(self):
+        """All identical haplotypes: r2 is undefined for every pair, so ZnS is NaN."""
         hap = np.zeros((10, 5), dtype=np.int8)
         matrix = HaplotypeMatrix(hap, np.arange(5) * 100, 0, 500)
         r2 = matrix.pairwise_r2()
-        z = ld_statistics.zns(r2)
-        assert z == 0.0
+        assert np.isnan(ld_statistics.zns(r2))
 
     def test_omega_range(self, hap_data):
         r2 = hap_data.pairwise_r2()
@@ -148,9 +147,9 @@ class TestZnSOmega:
         assert o >= 0
 
     def test_omega_small_matrix(self):
-        """Omega requires at least 4 SNPs."""
+        """Omega requires at least 5 SNPs."""
         r2 = cp.zeros((3, 3), dtype=cp.float64)
-        assert ld_statistics.omega(r2) == 0.0
+        assert np.isnan(ld_statistics.omega(r2))
 
     def test_zns_diploid(self, geno_data):
         z = ld_statistics.zns_diploid(geno_data)
@@ -167,11 +166,12 @@ class TestZnSOmega:
         np.testing.assert_allclose(stat(_with_zero_variance_sites(geno_data)),
                                    expected, rtol=1e-12)
 
-    def test_zns_diploid_all_zero_variance_is_zero(self):
+    def test_zns_diploid_all_zero_variance_is_nan(self):
         # Every dosage 1: segregating by allele counts, no dosage variance
         # anywhere, so everything drops and the too-few-sites value returns.
         gm = GenotypeMatrix(np.ones((10, 6), np.int8), np.arange(6) * 1000)
-        assert ld_statistics.zns(gm) == 0.0
+        assert np.isnan(ld_statistics.zns(gm))
+        assert np.isnan(ld_statistics.omega(gm))
 
     def test_zns_default_is_sigma_d2_for_haplotype_matrix(self, hap_data):
         # Default 'auto' should resolve to sigma_d2 for HaplotypeMatrix
@@ -273,12 +273,11 @@ class TestMuLD:
         ml = ld_statistics.mu_ld(hap_data)
         assert 0 <= ml <= 1
 
-    def test_mu_ld_identical(self):
-        """All identical: one pattern per half, exclusive, mu_ld=1."""
+    def test_mu_ld_identical_is_nan(self):
+        """All identical: no segregating site, so mu_ld is undefined."""
         hap = np.zeros((10, 10), dtype=np.int8)
         matrix = HaplotypeMatrix(hap, np.arange(10) * 100, 0, 1000)
-        ml = ld_statistics.mu_ld(matrix)
-        assert ml == 1.0
+        assert np.isnan(ld_statistics.mu_ld(matrix))
 
 
 # ---------------------------------------------------------------------------

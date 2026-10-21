@@ -1206,12 +1206,15 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
         'include' - estimate haplotype frequencies from haplotypes with
         missing calls by EM, as in ``selection.garud_h``. NaN when no
         haplotype is complete.
-        'exclude' - use only sites with no missing call.
+        'exclude' - use only sites with no missing call. With no such site
+        left, every haplotype is the same, so the value is 0.0, as
+        ``haplotype_count`` gives 1 and ``selection.garud_h`` gives H1 = 1.
 
     Returns
     -------
     float
-        Haplotype diversity value
+        Haplotype diversity value. NaN for fewer than two haplotypes,
+        where n / (n - 1) is undefined.
     """
     from ._haplotype_groups import frequencies
 
@@ -1219,7 +1222,7 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
                                           missing_data)
     n_haplotypes = haplotypes.shape[0]
     if n_haplotypes <= 1:
-        return 0.0
+        return float('nan')
 
     f = frequencies(haplotypes)
     if f.size == 0:
@@ -1864,6 +1867,7 @@ def mu_var(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     float
+        NaN when the window length is not positive.
     """
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
@@ -1874,7 +1878,7 @@ def mu_var(haplotype_matrix: HaplotypeMatrix,
     if window_length is None:
         window_length = matrix.chrom_end - matrix.chrom_start
     if window_length <= 0:
-        return 0.0
+        return float('nan')
 
     return float(n_snps / window_length)
 
@@ -1898,6 +1902,7 @@ def mu_sfs(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     float
+        NaN when there is no segregating site.
     """
 
     if population is not None:
@@ -1922,5 +1927,5 @@ def mu_sfs(haplotype_matrix: HaplotypeMatrix,
 
     n_seg = int(cp.sum(is_seg).get())
     if n_seg == 0:
-        return 0.0
+        return float('nan')
     return float(cp.sum(is_edge).get() / n_seg)
