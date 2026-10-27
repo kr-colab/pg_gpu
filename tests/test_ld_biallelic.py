@@ -77,12 +77,12 @@ class TestRestrictMethods:
         mono = [[0, 0], [0, 0], [0, 0]]
         assert _hm(mono).restrict_to_segregating().num_variants == 0
         # an all-multiallelic matrix has no biallelic sites: zns/omega return
-        # their too-few-sites value (0.0) instead of raising "genotypes cannot
+        # their too-few-sites value (NaN) instead of raising "genotypes cannot
         # be empty" on the empty filter output
         with pytest.warns(BiallelicOnlyWarning):
             for est in ('auto', 'r2'):
-                assert zns(_hm(multi), estimator=est) == 0.0
-                assert omega(_hm(multi), estimator=est) == 0.0
+                assert np.isnan(zns(_hm(multi), estimator=est))
+                assert np.isnan(omega(_hm(multi), estimator=est))
 
     def test_indicator_identity_and_recode(self):
         base = [[0, 0, 1], [1, 2, 2], [0, 0, 1], [1, 2, 2]]  # {0,1},{0,2},{1,2}

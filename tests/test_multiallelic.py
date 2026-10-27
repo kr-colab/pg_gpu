@@ -856,10 +856,9 @@ class TestWindowedDafMuSfsMatchesScalar:
                                statistics=['mu_sfs'], missing_data='include')
         w_mu = wa['mu_sfs'].values[0]
         sc_mu = diversity.mu_sfs(hm, missing_data='include')
-        # no segregating sites -> mu_sfs is 0.0 (matching the scalar), and in
+        # no segregating sites -> mu_sfs is NaN (matching the scalar), and in
         # particular the monomorphic-derived-plus-missing site is not a spurious edge
-        np.testing.assert_allclose(w_mu, sc_mu, atol=1e-12)
-        np.testing.assert_allclose(w_mu, 0.0, atol=1e-12)
+        assert np.isnan(w_mu) and np.isnan(sc_mu)
 
 
 class TestMultiallelicEdgeCases:

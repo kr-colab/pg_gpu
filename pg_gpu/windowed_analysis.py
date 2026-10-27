@@ -2479,14 +2479,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         edge_site = is_edge.sum(axis=1).astype(cp.float64)
         member_win = site_win[site_ok]
         seg_sum = _scatter_sum(_expand(seg_site)[site_ok], member_win,
-                               n_windows).get()
+                               n_windows)
         edge_sum = _scatter_sum(_expand(edge_site)[site_ok], member_win,
-                                n_windows).get()
-        # matches diversity.mu_sfs, which returns 0.0 when a window has no
-        # segregating (site, allele) entries (rather than NaN)
-        results['mu_sfs'] = np.divide(edge_sum, seg_sum,
-                                      out=np.zeros_like(edge_sum),
-                                      where=seg_sum > 0)
+                                n_windows)
+        # 0/0 is NaN for a window with no segregating entry
+        results['mu_sfs'] = (edge_sum / seg_sum).get()
 
     # Per-window pairwise stats (LD, distance moments)
     ld_pairwise = {'zns', 'omega', 'mu_ld'}
@@ -2500,8 +2497,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         stat_arrays = {s: np.full(n_windows, np.nan) for s in perwin_stats}
         need_dist = bool(perwin_stats & dist_pairwise)
-        need_winmat = ('omega' in stat_arrays or 'mu_ld' in stat_arrays
-                       or need_dist)
+        need_winmat = bool(perwin_stats - {'zns'})
 
         # zns/omega restrict to biallelic; the excluded multiallelic sites are
         # the same across the scan, so warn once here rather than once per
@@ -2526,7 +2522,10 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         for wi in range(n_windows):
             s, e = int(ws_np[wi]), int(we_np[wi])
-            if e - s < 4:
+            # The loop skips only empty windows. Each statistic applies its
+            # own too-few-sites rule, so a small window gets the value the
+            # scalar gives.
+            if e == s:
                 continue
 
             if 'zns' in stat_arrays:

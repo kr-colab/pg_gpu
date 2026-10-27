@@ -177,7 +177,8 @@ Linkage Disequilibrium
        as ``zns``.
      - Kim & Nielsen (2004); Ragsdale & Gravel (2019)
    * - ``mu_ld``
-     - Haplotype pattern exclusivity (RAiSD LD component)
+     - Haplotype pattern exclusivity (RAiSD LD component), on the
+       segregating sites only
      - Alachiotis & Pavlidis (2018)
 
 Selection Scans
@@ -618,7 +619,7 @@ falls back to a slower route that produces the same numbers.
      - Features used by RAiSD and diploSHIC. ``daf_hist`` is a histogram
        of alternate-allele frequencies in the window, scaled to sum to 1.
        ``mu_sfs`` is the fraction of variable alleles sitting at the very
-       low or very high end of the frequency range, and is 0.0 for a
+       low or very high end of the frequency range, and is NaN for a
        window with nothing variable in it. Both need
        ``missing_data='include'``.
    * - ``snp_dist_mean``, ``snp_dist_var``, ``snp_dist_min``, ``snp_dist_max``
