@@ -251,6 +251,9 @@ class TestNanHandling:
         dist = pc_dist(res, npc=2)
         assert np.isnan(dist[0]).all()
         assert np.isfinite(dist[1:, 1:]).all()
+        # pcoa needs every distance; lostruct drops the invalid window first.
+        with pytest.raises(ValueError, match="pc_dist"):
+            pcoa(dist)
 
 
 # ---------------------------------------------------------------------------

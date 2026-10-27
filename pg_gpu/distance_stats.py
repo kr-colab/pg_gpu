@@ -21,12 +21,12 @@ def _extract_upper_triangle(mat):
     return result.get() if hasattr(result, 'get') else result
 
 
-def _pairwise_diffs_matrix_gpu(hap, missing_data='include',
-                               return_joint_valid=False):
+def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     """Compute full pairwise Hamming distance matrix on GPU.
 
     Internal helper returning the raw cupy distance matrix. Used by
-    pairwise_diffs_haploid (condensed numpy output) and divergence
+    pairwise_diffs_haploid and pairwise_diffs_diploid (condensed numpy
+    output), decomposition.pairwise_distance, and the divergence
     two-population statistics (full cupy matrix with pop blocks).
 
     Accepts numpy or cupy input. When given numpy, transfers variant
@@ -45,21 +45,19 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include',
     Parameters
     ----------
     hap : numpy.ndarray or cupy.ndarray, shape (n_haplotypes, n_variants)
-        Haplotype data, optionally pre-filtered.
+        Haplotype data (or 0/1/2 genotypes), optionally pre-filtered.
     missing_data : str
         'include' - raw counts at jointly non-missing sites
         'normalize' - per-site average (divide by jointly valid count)
-    return_joint_valid : bool
-        When True, also return the (n_hap, n_hap) count of jointly non-missing
-        sites per pair, so a caller can apply its own normalization with the
-        same counts. Default False (existing callers are unchanged).
+        'scale' - raw count scaled to every site (``* n_variants / joint``),
+        so a pair with missing calls is not made to look close
+        Under 'normalize' and 'scale' a pair with no jointly non-missing
+        site has no distance and gets NaN.
 
     Returns
     -------
     diffs_mat : cupy.ndarray, float64, shape (n_hap, n_hap)
         Pairwise distance matrix on GPU.
-    joint_valid : cupy.ndarray, float64, shape (n_hap, n_hap)
-        Only returned when ``return_joint_valid`` is True.
     """
     from ._memutil import estimate_variant_chunk_size
 
@@ -90,11 +88,11 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include',
 
     diffs_mat = joint_valid - matches
 
-    if missing_data == 'normalize':
-        diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
-
-    if return_joint_valid:
-        return diffs_mat, joint_valid
+    if missing_data in ('normalize', 'scale'):
+        scale = n_var if missing_data == 'scale' else 1.0
+        diffs_mat = cp.where(joint_valid > 0,
+                             diffs_mat * scale / cp.maximum(joint_valid, 1.0),
+                             cp.nan)
     return diffs_mat
 
 
@@ -112,12 +110,14 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
     population : str or list, optional
     missing_data : str
         'include' - normalize by jointly-valid sites per pair
-        'exclude' - only use sites with no missing data
+        'exclude' - only use sites with no missing data; every pair is
+        NaN when no site is complete
 
     Returns
     -------
     diffs : ndarray, float64, condensed form (n_pairs,)
-        Per-site average differences.
+        Per-site average differences. NaN for a pair with no site called
+        in both haplotypes.
     """
 
     if population is not None:
@@ -143,8 +143,9 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
                            missing_data='include'):
     """Compute pairwise genotype differences between diploid individuals.
 
-    For 0/1/2 genotypes, uses indicator matrices: matches = I0.T@I0 +
-    I1.T@I1 + I2.T@I2, then diffs = n_var - matches.
+    Two genotypes differ when their 0/1/2 values differ: the one-hot count
+    of ``_pairwise_diffs_matrix_gpu`` with the genotype values as alleles,
+    divided by the sites both individuals call.
 
     Biallelic only: the input is a ``GenotypeMatrix`` of 0/1/2 alt-allele dosage,
     which is a biallelic representation by construction (multiallelic sites are
@@ -159,62 +160,36 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
     population : str or list, optional
     missing_data : str
         'include' - normalize by jointly-valid sites per pair
-        'exclude' - only sites with no missing data
+        'exclude' - only sites with no missing data; every pair is NaN
+        when no site is complete
 
     Returns
     -------
     diffs : ndarray, float64, condensed form (n_pairs,)
+        NaN for a pair with no site called in both individuals.
     """
 
     if population is not None:
-        pop_idx = genotype_matrix.sample_sets.get(population)
-        if pop_idx is None:
-            raise ValueError(f"Population {population} not found")
-        geno = genotype_matrix.genotypes[pop_idx, :]
-    else:
-        geno = genotype_matrix.genotypes
-
-    if not isinstance(geno, cp.ndarray):
-        geno = cp.asarray(geno)
+        genotype_matrix = population_rows(genotype_matrix, population)
+    if genotype_matrix.device == 'CPU':
+        genotype_matrix.transfer_to_gpu()
+    geno = genotype_matrix.genotypes
 
     if missing_data == 'exclude':
         missing_per_var = cp.sum(geno < 0, axis=0)
         complete = missing_per_var == 0
         geno = geno[:, complete]
 
-    # 'include' mode (default): mask missing, normalize per pair
-    # Chunk over variants to avoid OOM from float64 indicator matrices
-    from ._memutil import estimate_variant_chunk_size
-    n_ind, n_var = geno.shape
-    chunk_size = estimate_variant_chunk_size(n_ind, bytes_per_element=8,
-                                             n_intermediates=4)
-
-    matches = cp.zeros((n_ind, n_ind), dtype=cp.float64)
-    joint_valid = cp.zeros((n_ind, n_ind), dtype=cp.float64)
-
-    for start in range(0, n_var, chunk_size):
-        end = min(start + chunk_size, n_var)
-        g_chunk = geno[:, start:end]
-        v_chunk = (g_chunk >= 0).astype(cp.float64)
-        gc = cp.where(g_chunk >= 0, g_chunk, 0)
-        i0 = (gc == 0).astype(cp.float64) * v_chunk
-        i1 = (gc == 1).astype(cp.float64) * v_chunk
-        i2 = (gc == 2).astype(cp.float64) * v_chunk
-        matches += i0 @ i0.T + i1 @ i1.T + i2 @ i2.T
-        joint_valid += v_chunk @ v_chunk.T
-        del g_chunk, v_chunk, gc, i0, i1, i2
-
-    diffs_mat = joint_valid - matches
-    diffs_mat = cp.where(joint_valid > 0, diffs_mat / joint_valid, 0.0)
-
-    return _extract_upper_triangle(diffs_mat)
+    return _extract_upper_triangle(
+        _pairwise_diffs_matrix_gpu(geno, missing_data='normalize'))
 
 
 def dist_moments(matrix, population=None, missing_data='include'):
     """Compute variance, skewness, and kurtosis of pairwise distances.
 
     Computes the distance matrix once and derives all three moments,
-    avoiding redundant matrix multiplies.
+    avoiding redundant matrix multiplies. A pair with no site called in
+    both samples has no distance, so the moments skip it.
 
     Parameters
     ----------
@@ -227,12 +202,18 @@ def dist_moments(matrix, population=None, missing_data='include'):
     var : float
     skew : float
     kurt : float
+        A moment needs enough defined pairs (var 2, skew 3, kurt 4). With
+        fewer, it is NaN when some pair has no distance, else 0.0. Skew
+        and kurt are also 0.0 when every defined distance is the same.
     """
     diffs = np.asarray(_get_diffs(matrix, population, missing_data))
+    finite = np.isfinite(diffs)
+    fill = 0.0 if finite.all() else np.nan
+    diffs = diffs[finite]
     n = diffs.shape[0]
 
     if n < 2:
-        return 0.0, 0.0, 0.0
+        return fill, fill, fill
 
     mean = np.mean(diffs)
     centered = diffs - mean
@@ -241,14 +222,16 @@ def dist_moments(matrix, population=None, missing_data='include'):
 
     var_val = float(np.sum(c2) / (n - 1))
 
-    if n < 3 or m2 == 0:
-        return var_val, 0.0, 0.0
+    if n < 3:
+        return var_val, fill, fill
+    if m2 == 0:
+        return var_val, 0.0, (0.0 if n >= 4 else fill)
 
     m3 = np.mean(centered ** 3)
     skew_val = float(m3 / (m2 ** 1.5))
 
     if n < 4:
-        return var_val, skew_val, 0.0
+        return var_val, skew_val, fill
 
     m4 = np.mean(centered ** 4)
     kurt_val = float(m4 / (m2 ** 2) - 3.0)
@@ -274,9 +257,9 @@ def dist_kurt(matrix, population=None, missing_data='include'):
 def pairwise_diffs(matrix, population=None, missing_data='include'):
     """Compute pairwise Hamming distances on GPU.
 
-    Accepts HaplotypeMatrix (0/1 data, single matrix multiply) or
-    GenotypeMatrix (0/1/2 data, indicator matrix approach). Dispatches
-    automatically.
+    Accepts HaplotypeMatrix (allele indices) or GenotypeMatrix (0/1/2
+    genotypes); both count differing values with one-hot indicators.
+    Dispatches automatically.
 
     Parameters
     ----------
@@ -287,6 +270,7 @@ def pairwise_diffs(matrix, population=None, missing_data='include'):
     Returns
     -------
     diffs : ndarray, float64, condensed form (n_pairs,)
+        NaN for a pair with no site called in both samples.
     """
     if isinstance(matrix, GenotypeMatrix):
         return pairwise_diffs_diploid(matrix, population, missing_data)
