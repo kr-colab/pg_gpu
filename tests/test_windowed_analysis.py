@@ -1656,8 +1656,8 @@ class TestCanonicalWindowSchema:
 
 class TestWindowedGarudCorrectness:
     """Anchor windowed Garud H against scikit-allel's per-window
-    garud_h. ``pg_gpu`` runs the windowed pass on the GPU via a fused
-    kernel; this confirms each window's H1 / H12 / H123 / H2H1 lines
+    garud_h. ``pg_gpu`` runs the windowed pass on the fallback engine;
+    this confirms each window's H1 / H12 / H123 / H2H1 lines
     up with the canonical implementation."""
 
     @pytest.mark.parametrize("seed", [1, 2, 3])
@@ -1667,9 +1667,10 @@ class TestWindowedGarudCorrectness:
         n_hap = 32
         n_var = 600
         window_size_var = 50  # variants per window
-        # Use unit-stride positions so window_size_var-many variants
-        # land in each tile window.
-        positions = np.arange(n_var, dtype=np.int64)
+        # Spread positions on a non-unit stride so a 50-bp grid and a 50-variant snp
+        # grid diverge. Previous check passed even though the fused engine was silently using
+        # a bp window_type, not snp.
+        positions = (np.arange(n_var) * 100).astype(np.int64)
         chrom_len = int(positions[-1]) + 1
         haps = rng.integers(0, 2, (n_hap, n_var), dtype=np.int8)
 
@@ -1680,6 +1681,7 @@ class TestWindowedGarudCorrectness:
                                window_type="snp",
                                statistics=["garud_h1", "garud_h12",
                                             "garud_h123", "garud_h2h1"])
+        assert len(df) == n_var // window_size_var   # 12 genuine snp windows
 
         # Each tile window is exactly window_size_var variants on the
         # contiguous range; allel.garud_h expects (n_var, n_hap).
@@ -1787,6 +1789,26 @@ class TestFusedPerSiteWindowMembership:
                                daf_bin, f"bp bin {wi}")
 
 
+def _region_case(seed=0):
+    """A matrix plus custom regions (unsorted, overlapping/nested, gapped, all
+    populated) for the regions-dispatch agreement tests. Every region holds at
+    least one variant so the fallback -- which skips empty regions -- yields a
+    row per region too, aligned with the fused engine's dense output.
+    """
+    rng = np.random.RandomState(seed)
+    n_var = 400
+    pos = np.sort(rng.choice(np.arange(1, 1_000_000), n_var, replace=False))
+    hap = rng.randint(0, 2, (40, n_var)).astype(np.int8)
+    hm = HaplotypeMatrix(hap, pos, 1, 999_999)
+    hm.sample_sets = {'p1': list(range(20)), 'p2': list(range(20, 40))}
+    regions = pd.DataFrame({
+        'chrom': [1, 1, 1, 1],
+        'start': [600_000, 100_000, 100_000, 400_000],
+        'end':   [900_000, 300_000, 250_000, 500_000],
+    })
+    return hm, regions
+
+
 class TestEngineGridAgreement:
     """Both windowed engines tile the same grid for the same matrix,
     anchored at the matrix chromosome bounds when they are set."""
@@ -1852,6 +1874,49 @@ class TestEngineGridAgreement:
         in2 = int(((pos >= 300_000) & (pos < 400_000)).sum())
         assert int(r1['n_variants'].sum()) == in1
         assert int(r2['n_variants'].sum()) == in2
+
+    def test_region_windows_single_pop_fused_vs_fallback(self):
+        # window_type='regions' must honour the regions (one window each, not
+        # the default bp grid -- the reported bug) and route single-pop stats
+        # through the fused engine, whose raw values match the per-window
+        # fallback. pi's agreement also confirms both paths normalize by the
+        # region span (the second fault).
+        hm, regions = _region_case()
+        stats = ['pi', 'tajimas_d', 'segregating_sites', 'garud_h1']
+        fused = windowed_analysis(hm, window_type='regions', regions=regions,
+                                  statistics=stats)
+        fb = WindowedAnalyzer(window_type='regions', regions=regions,
+                              statistics=stats, progress_bar=False).compute(hm)
+        # Regions honoured, not the default bp grid.
+        assert len(fused) == len(regions)
+        assert list(fused['start'].astype(int)) == list(regions['start'])
+        assert list(fused['end'].astype(int)) == list(regions['end'])
+        # Same window order in both engines; raw values agree.
+        for k in stats:
+            np.testing.assert_allclose(fused[k].to_numpy(dtype=float),
+                                       fb[k].to_numpy(dtype=float),
+                                       rtol=1e-9, atol=1e-11, equal_nan=True,
+                                       err_msg=k)
+
+    def test_region_windows_two_pop_fused_vs_fallback(self):
+        # Two-pop stats over regions: the fused engine (bare column names) and
+        # the fallback (suffixed names) agree, and dxy's agreement confirms the
+        # region span normalization on the two-pop path too.
+        hm, regions = _region_case(seed=1)
+        fused = windowed_analysis(hm, window_type='regions', regions=regions,
+                                  statistics=['fst_hudson', 'dxy'],
+                                  populations=['p1', 'p2'])
+        fb = WindowedAnalyzer(window_type='regions', regions=regions,
+                              statistics=['fst_hudson', 'dxy'],
+                              populations=['p1', 'p2'],
+                              progress_bar=False).compute(hm)
+        assert len(fused) == len(regions)
+        for bare, suffixed in (('fst_hudson', 'fst_hudson_p1_p2'),
+                               ('dxy', 'dxy_p1_p2')):
+            np.testing.assert_allclose(fused[bare].to_numpy(dtype=float),
+                                       fb[suffixed].to_numpy(dtype=float),
+                                       rtol=1e-9, atol=1e-11, equal_nan=True,
+                                       err_msg=bare)
 
 
 def _host(a):

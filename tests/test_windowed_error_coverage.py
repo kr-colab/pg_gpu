@@ -3,6 +3,7 @@ the unknown-statistic, unknown-population, unknown-window-type, and
 missing-regions raises, and the fused engine's CPU->GPU transfer.
 """
 import numpy as np
+import pandas as pd
 import pytest
 
 from pg_gpu import HaplotypeMatrix
@@ -68,3 +69,31 @@ def test_fused_transfers_cpu_matrix():
                                        statistics=("pi",), population="p1")
     assert m.device == "GPU"
     assert np.isfinite(result["pi"][0])
+
+
+# ── forward-looking: window_type/statistic combinations deferred to later ──
+# Each case below raises NotImplementedError today and marks work the issue
+# leaves for the future. When one is implemented its dispatch guard goes away
+# and this test fails -- the signal to drop that case here and from the guard.
+
+# Scatter-only theta estimators / neutrality tests and per-site stats. The
+# fused regions path can't serve them, and they aren't implemented in the
+# per-window fallback either, so the dispatch raises.
+_REGIONS_UNSUPPORTED = ["theta_l", "zeng_e", "zeng_dh", "normalized_fay_wu_h",
+                        "mean_nsl", "daf_hist", "mu_sfs"]
+# snp windows route to the per-window fallback, so stats that aren't
+# implemented there still raise.
+_SNP_UNSUPPORTED = ["theta_l", "zeng_e", "theta_h", "max_daf", "mean_nsl",
+                    "zns"]
+
+
+@pytest.mark.parametrize("window_type,stat", (
+    [("regions", s) for s in _REGIONS_UNSUPPORTED]
+    + [("snp", s) for s in _SNP_UNSUPPORTED]))
+def test_deferred_window_type_stats_raise(window_type, stat):
+    m = _matrix(n_var=40)
+    regions = (pd.DataFrame({"chrom": [1], "start": [100], "end": [3000]})
+               if window_type == "regions" else None)
+    with pytest.raises(NotImplementedError):
+        windowed_analysis(m, window_size=10, window_type=window_type,
+                          statistics=[stat], regions=regions)

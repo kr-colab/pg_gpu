@@ -62,6 +62,30 @@ def _compare(hm, statistics, monkeypatch, window_size=10_000,
                                    atol=1e-14, equal_nan=True, err_msg=k)
 
 
+def _region_edges():
+    """Custom window edges the dispatcher builds for ``window_type='regions'``:
+    overlapping, nested, out-of-order, gapped, and one past the last variant
+    (empty). No grid structure, so each engine must bin every window on its own.
+    """
+    starts = np.array([40_000, 10_000, 10_000, 55_000, 200_000], dtype=np.float64)
+    stops = np.array([70_000, 30_000, 25_000, 60_000, 210_000], dtype=np.float64)
+    return starts, stops
+
+
+def _compare_edges(hm, statistics, monkeypatch, starts, stops, **kwargs):
+    """Like ``_compare`` but drives the engines from explicit window edges
+    (``bp_bins=None``) instead of a bp grid."""
+    common = dict(statistics=tuple(statistics), bp_bins=None,
+                  _win_starts=starts, _win_stops=stops, **kwargs)
+    single = windowed_statistics_fused(hm, **common)
+    monkeypatch.setattr(_memutil, "estimate_fused_chunk_size",
+                        lambda n, memory_fraction=0.35: _CHUNK)
+    chunked = windowed_statistics_fused_chunked(hm, **common)
+    for k in statistics:
+        np.testing.assert_allclose(single[k], chunked[k], rtol=1e-10,
+                                   atol=1e-14, equal_nan=True, err_msg=k)
+
+
 # ── two-population: fst_hudson column + per_base=False dxy/da ───────────
 def test_twopop_fst_hudson_and_perbase_false(twopop_hm, monkeypatch):
     _compare(twopop_hm, ["fst", "fst_hudson", "dxy", "da"], monkeypatch,
@@ -107,6 +131,21 @@ def test_sparse_windows_empty_overlap(twopop_hm, monkeypatch):
     _compare(twopop_hm, ["pi", "fst_hudson", "dxy"], monkeypatch,
              window_size=5_000, step_size=50_000, per_base=False,
              pop1="p1", pop2="p2")
+
+
+# ── custom region windows: overlapping / nested / unsorted / empty ─────
+def test_region_windows_fused_vs_chunked(twopop_hm, monkeypatch):
+    # The dispatcher feeds window_type='regions' as explicit _win_starts /
+    # _win_stops with no grid structure, so the chunked engine must bin and
+    # accumulate arbitrary windows the same as the single-shot engine: pi
+    # (per-base accumulation + span), tajimas_d / segregating_sites (single-pop
+    # kernels), fst_hudson (two-pop kernel), and garud_h1 (delegated to the
+    # single-shot engine -- this checks the delegation forwards the edges).
+    starts, stops = _region_edges()
+    _compare_edges(twopop_hm,
+                   ["pi", "tajimas_d", "segregating_sites", "fst_hudson",
+                    "garud_h1"],
+                   monkeypatch, starts, stops, pop1="p1", pop2="p2")
 
 
 # ── population validation (before the chunk loop) ──────────────────────
