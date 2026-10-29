@@ -1656,7 +1656,7 @@ class TestCanonicalWindowSchema:
 
 class TestWindowedGarudCorrectness:
     """Anchor windowed Garud H against scikit-allel's per-window
-    garud_h. ``pg_gpu`` runs the windowed pass on the fallback engine; 
+    garud_h. ``pg_gpu`` runs the windowed pass on the fallback engine;
     this confirms each window's H1 / H12 / H123 / H2H1 lines
     up with the canonical implementation."""
 
