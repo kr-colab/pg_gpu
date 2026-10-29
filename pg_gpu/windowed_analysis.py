@@ -32,8 +32,7 @@ _TWO_POP_STATS = frozenset({'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'})
 # Kwargs that the 'local_pca' / 'local_pca_jackknife' dispatch consumes but
 # scalar-stat paths don't accept. Filtered out before the recursive call.
 _LOCAL_PCA_ONLY_KWARGS = frozenset(
-    {'k', 'population', 'batch_size', 'window_type', 'regions',
-     'n_blocks', 'aggregate'})
+    {'k', 'population', 'batch_size', 'n_blocks', 'aggregate'})
 
 
 def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
@@ -432,8 +431,8 @@ class WindowIterator:
             raise ValueError("Regions must be provided for region window type")
 
         for window_id, region in self.params.regions.iterrows():
-            start = region['start']
-            end = region['end']
+            start = int(region['start'])
+            end = int(region['end'])
             center = (start + end) // 2
 
             # Find variants in region
@@ -442,6 +441,8 @@ class WindowIterator:
 
             if len(variant_indices) > 0:
                 window_matrix = self.matrix.get_subset(variant_indices)
+                window_matrix.chrom_start = start
+                window_matrix.chrom_end = end - 1 #TODO: treat region bounds as inclusive.
                 self._attach_window_mask(window_matrix, start, end)
 
                 yield WindowData(
@@ -1197,6 +1198,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
 
 def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      window_size: int = 50000,
+                     window_type: str = 'bp',
                      step_size: Optional[int] = None,
                      statistics: List[str] = ['pi'],
                      populations: Optional[List[str]] = None,
@@ -1215,6 +1217,8 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         Input haplotype data
     window_size : int
         Window size in base pairs
+    window_type : str
+        Type of windows: 'bp' (base pairs), 'regions', or 'snp'.
     step_size : int, optional
         Step size. If None, uses window_size
     statistics : list
@@ -1247,8 +1251,10 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         of haplotypes with no missing call in each window (suffixed by
         population where the Garud columns are).
     """
+    if window_type not in ('bp', 'snp', 'regions'):
+        raise ValueError(f"Unknown window_type: {window_type!r}")
     result = _windowed_analysis(
-        haplotype_matrix, window_size=window_size, step_size=step_size,
+        haplotype_matrix, window_size=window_size, window_type=window_type, step_size=step_size,
         statistics=statistics, populations=populations,
         missing_data=missing_data, span_normalize=span_normalize,
         accessible_bed=accessible_bed, chrom=chrom, **kwargs)
@@ -1292,6 +1298,7 @@ def _check_complete_haplotypes(df, matrix, populations, min_complete):
 
 def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                       window_size: int = 50000,
+                      window_type: str = 'bp',
                       step_size: Optional[int] = None,
                       statistics: List[str] = ['pi'],
                       populations: Optional[List[str]] = None,
@@ -1303,6 +1310,11 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     """The body of ``windowed_analysis``, without its final checks."""
     from .streaming_matrix import StreamingHaplotypeMatrix
     if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
+        if window_type in ('regions', 'snp'):
+            raise NotImplementedError(
+                "window_type='regions' or 'snp' is not available "
+                "on a StreamingHaplotypeMatrix."
+            )
         return _stream_windowed_analysis(
             haplotype_matrix,
             window_size=window_size, step_size=step_size,
@@ -1332,7 +1344,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             'batch_size': kwargs.get('batch_size', None),
             'window_size': window_size,
             'step_size': step_size,
-            'window_type': kwargs.get('window_type', 'bp'),
+            'window_type': window_type,
             'regions': kwargs.get('regions', None),
         }
         if want_jackknife:
@@ -1348,6 +1360,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             scalar_df = _windowed_analysis(
                 haplotype_matrix,
                 window_size=window_size,
+                window_type=window_type,
                 step_size=step_size,
                 statistics=other_stats,
                 populations=populations,
@@ -1374,7 +1387,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     scatter_twopop = _TWO_POP_STATS
     requested = set(statistics)
 
-    if missing_data in ('include', 'exclude'):
+    if window_type == 'bp':
         # Pure single-pop request
         if requested <= scatter_single and len(populations or []) <= 1:
             result = _windowed_thetas_scatter(
@@ -1437,6 +1450,10 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     can_fuse = ((missing_data == 'include' or requested <= fused_garud
                  or bool(requested & fused_only))
                 and requested <= fused_all
+                # The fused engine tiles bp grids and custom regions; snp
+                # windows are variant-index ranges that only the per-window
+                # fallback builds, so they must skip the fused path.
+                and window_type in ('bp', 'regions')
                 # A two-population statistic with anything other than exactly
                 # two populations must not reach the fused engine, which
                 # computes the first pair only and names the column after the
@@ -1444,6 +1461,24 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 # and suffixes the names, the same as missing_data='exclude'.
                 and (not (requested & fused_two)
                      or len(populations or []) == 2))
+
+    if window_type == 'regions':
+        # theta_l, zeng_e, zeng_dh, normalized_fay_wu_h, mean_nsl,
+        # daf_hist, mu_sfs currently not supported with window_type = 'regions'.
+        unsupported_regions = {'theta_l', 'zeng_e', 'zeng_dh', 'normalized_fay_wu_h',
+                                'mean_nsl', 'daf_hist', 'mu_sfs'}
+        if requested & unsupported_regions:
+            raise NotImplementedError(f"{sorted(requested & unsupported_regions)} are not "
+            "supported for window_type='regions'."
+            )
+
+    #fused engine can't handle 'snp' windows yet, only local_pca and fallback.
+    if window_type == 'snp':
+        unsupported_snp = {s for s in requested if isinstance(s, str)} - _fallback_stats()
+        if unsupported_snp:
+            raise NotImplementedError(
+                f"{sorted(unsupported_snp)} not yet supported for window_type='snp'."
+            )
 
     if can_fuse:
         if haplotype_matrix.device == 'CPU':
@@ -1453,16 +1488,25 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             positions = positions.get()
         positions = np.asarray(positions)
 
-        chrom_start, chrom_end = _bp_grid_bounds(haplotype_matrix, positions)
+        if window_type == 'regions':
+            regions = kwargs.get('regions')
+            if regions is None:
+                raise ValueError("Regions must be provided for region window type")
+            win_starts = np.asarray(regions['start'], dtype=np.float64)
+            win_stops = np.asarray(regions['end'], dtype=np.float64)
+            bp_bins = None
+        else:
+            chrom_start, chrom_end = _bp_grid_bounds(haplotype_matrix, positions)
 
-        # Build window start/stop arrays (supports overlapping windows)
-        win_starts, win_stops = _bp_window_grid(
-            chrom_start, chrom_end, window_size, step_size)
-        # A zero-span matrix (one variant, no bounds) tiles no windows.
+            # Build window start/stop arrays (supports overlapping windows)
+            win_starts, win_stops = _bp_window_grid(
+                chrom_start, chrom_end, window_size, step_size)
+            # A zero-span matrix (one variant, no bounds) tiles no windows.
+            bp_bins = np.concatenate([win_starts, [win_stops[-1]]])
+
         if len(win_starts) == 0:
             return pd.DataFrame()
         # Build equivalent bp_bins for _compute_window_ranges
-        bp_bins = np.concatenate([win_starts, [win_stops[-1]]])
 
         pop1 = populations[0] if populations and len(populations) >= 1 else None
         pop2 = populations[1] if populations and len(populations) >= 2 else None
@@ -1497,7 +1541,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
 
     # Fallback: per-window Python loop
     analyzer = WindowedAnalyzer(
-        window_type='bp',
+        window_type=window_type,
         window_size=window_size,
         step_size=step_size,
         statistics=statistics,
@@ -2068,7 +2112,7 @@ def _apply_exclude(haplotype_matrix, missing_data, statistics, population,
 
 
 def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
-                              bp_bins,
+                              bp_bins=None,
                               statistics=('pi', 'theta_w', 'tajimas_d',
                                           'segregating_sites', 'singletons'),
                               population=None,
@@ -2170,12 +2214,15 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         n_windows = len(ws_gpu)
         win_start = cp.searchsorted(positions, ws_gpu, side='left').astype(cp.int64)
         win_stop = cp.searchsorted(positions, we_gpu, side='left').astype(cp.int64)
-    else:
+    elif bp_bins is not None:
         bp_bins_gpu = cp.asarray(bp_bins, dtype=cp.float64)
         n_windows = len(bp_bins_gpu) - 1
         win_start, win_stop = _compute_window_ranges(positions, bp_bins_gpu)
         ws_gpu = bp_bins_gpu[:-1]
         we_gpu = bp_bins_gpu[1:]
+    else:
+        raise ValueError('bp_bins and _win_starts/_win_stops must not both be None.')
+
 
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
@@ -2564,7 +2611,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
 
 def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
-                                      bp_bins,
+                                      bp_bins=None,
                                       statistics=('pi', 'theta_w', 'tajimas_d'),
                                       population=None,
                                       pop1=None,
@@ -2624,12 +2671,14 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         n_windows = len(ws_gpu)
         win_start = cp.searchsorted(positions, ws_gpu, side='left').astype(cp.int64)
         win_stop = cp.searchsorted(positions, we_gpu, side='left').astype(cp.int64)
-    else:
+    elif bp_bins is not None:
         bp_bins_gpu = cp.asarray(bp_bins, dtype=cp.float64)
         n_windows = len(bp_bins_gpu) - 1
         win_start, win_stop = _compute_window_ranges(positions, bp_bins_gpu)
         ws_gpu = bp_bins_gpu[:-1]
         we_gpu = bp_bins_gpu[1:]
+    else:
+        raise ValueError('bp_bins and _win_starts/_win_stops must not both be None.')
 
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
