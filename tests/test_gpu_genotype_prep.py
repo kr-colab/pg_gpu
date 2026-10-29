@@ -36,7 +36,7 @@ class TestBuildHaplotypeMatrix:
 
     def test_layout_matches_load_pop_file_convention(self, synthetic_gt):
         gt, pos = synthetic_gt
-        hm = build_haplotype_matrix(gt, pos)
+        hm = build_haplotype_matrix(gt, pos, phased=False)
         haps_host = cp.asnumpy(hm.haplotypes)
         np.testing.assert_array_equal(haps_host, _reference_reshape(gt))
 
@@ -44,7 +44,7 @@ class TestBuildHaplotypeMatrix:
         # downstream kernels use 'include' / 'exclude' missing-data modes,
         # so the helper must keep -1 cells rather than dropping them.
         gt, pos = synthetic_gt
-        hm = build_haplotype_matrix(gt, pos)
+        hm = build_haplotype_matrix(gt, pos, phased=False)
         haps_host = cp.asnumpy(hm.haplotypes)
         # rows 3, 17, 42 should be all -1 across haplotypes.
         assert (haps_host[:, 3] == -1).all()
@@ -53,14 +53,14 @@ class TestBuildHaplotypeMatrix:
 
     def test_positions_passed_through(self, synthetic_gt):
         gt, pos = synthetic_gt
-        hm = build_haplotype_matrix(gt, pos)
+        hm = build_haplotype_matrix(gt, pos, phased=False)
         pos_host = cp.asnumpy(hm.positions)
         np.testing.assert_array_equal(pos_host, pos)
 
     def test_kwargs_forwarded(self, synthetic_gt):
         gt, pos = synthetic_gt
         hm = build_haplotype_matrix(
-            gt, pos,
+            gt, pos, phased=True,
             chrom_start=1000, chrom_end=20000,
             samples=[f"s{i}" for i in range(50)],
             sample_sets={"all": list(range(100))},
@@ -72,20 +72,21 @@ class TestBuildHaplotypeMatrix:
 
     def test_accepts_device_inputs(self, synthetic_gt):
         gt, pos = synthetic_gt
-        hm = build_haplotype_matrix(cp.asarray(gt), cp.asarray(pos))
+        hm = build_haplotype_matrix(cp.asarray(gt), cp.asarray(pos),
+                                    phased=False)
         np.testing.assert_array_equal(cp.asnumpy(hm.haplotypes),
                                       _reference_reshape(gt))
 
     def test_mismatched_shapes_raise(self, synthetic_gt):
         gt, pos = synthetic_gt
         with pytest.raises(ValueError, match="disagree on n_var"):
-            build_haplotype_matrix(gt, pos[:50])
+            build_haplotype_matrix(gt, pos[:50], phased=False)
 
     def test_wrong_ploidy_raises(self):
         gt = np.zeros((10, 5, 3), dtype=np.int8)
         pos = np.arange(10, dtype=np.int64)
         with pytest.raises(ValueError, match="must have shape"):
-            build_haplotype_matrix(gt, pos)
+            build_haplotype_matrix(gt, pos, phased=False)
 
 
 def _reference_dosage(gt):

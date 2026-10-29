@@ -212,9 +212,19 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_assignment,
 class HaplotypeMatrix:
     """Haplotype matrix for population genetics analysis.
 
-    Stores phased haplotype data with variant positions and population
-    labels. Supports GPU-accelerated computation of diversity, divergence,
+    Stores haplotype data with variant positions and population labels.
+    Supports GPU-accelerated computation of diversity, divergence,
     selection, and LD statistics.
+
+    Phasing
+    -------
+    The ``phased`` flag records whether the gamete rows represent true
+    phased haplotypes or a pseudo-phasing (random assignment of alleles
+    to rows within each individual).  It defaults to ``False`` on the raw
+    constructor and on ``from_vcf`` / ``from_zarr``, and to ``True`` on
+    ``from_ts`` (tree-sequence haplotypes are phased by definition).  The
+    flag is the caller's assertion -- **no loader verifies it from the
+    data**.  Use ``set_phased()`` to change it after construction.
 
     Row order
     ---------
@@ -263,6 +273,7 @@ class HaplotypeMatrix:
                  accessible_mask=None,
                  fields: dict = None,
                  allow_empty: bool = False,
+                 phased: bool = False,
                 ):
         # ``allow_empty`` is set only by the streaming chunk builder, which
         # yields zero-variant chunks over empty regions (e.g. an acrocentric
@@ -305,6 +316,7 @@ class HaplotypeMatrix:
         # requested at load time. Shape disambiguates per-variant vs
         # per-genotype.
         self.fields = dict(fields) if fields else {}
+        self._phased = bool(phased)
 
         if accessible_mask is not None and not isinstance(accessible_mask, AccessibleMask):
             accessible_mask = resolve_accessible_mask(
@@ -419,6 +431,16 @@ class HaplotypeMatrix:
     def has_accessible_mask(self):
         """Whether an accessible site mask is attached."""
         return self.accessible_mask is not None
+
+    @property
+    def phased(self):
+        """Whether the haplotype rows represent true phased haplotypes."""
+        return self._phased
+
+    def set_phased(self, phased: bool = True):
+        """Mark this matrix as phased or unphased.  Returns ``self``."""
+        self._phased = bool(phased)
+        return self
 
     def set_accessible_mask(self, mask_or_path, chrom=None):
         """Attach an accessible site mask (non-destructive).
@@ -541,7 +563,8 @@ class HaplotypeMatrix:
     @classmethod
     def from_vcf(cls, path: str, region: str = None,
                  samples: list = None, include_invariant: bool = False,
-                 accessible_bed: str = None, fields: list = None):
+                 accessible_bed: str = None, fields: list = None,
+                 phased: bool = False):
         """Construct a HaplotypeMatrix from a VCF file.
 
         Parameters
@@ -566,10 +589,14 @@ class HaplotypeMatrix:
             ``(n_var, n_samples)`` array. Tags missing from the VCF are
             warned and dropped silently.
 
+        phased : bool
+            Whether the data are phased haplotypes.  Default ``False``:
+            the loader does not inspect the VCF phase bit.
+
         Returns
         -------
         HaplotypeMatrix
-            Phased haplotype data with sample names stored.
+            Haplotype data with sample names stored.
         """
         from ._warnings import _maybe_memory_warn
         _maybe_memory_warn(path, region=region)
@@ -627,7 +654,7 @@ class HaplotypeMatrix:
         n_total_sites = num_variants if include_invariant else None
         hm = cls(haplotypes, positions, chrom_start, chrom_end,
                  n_total_sites=n_total_sites, samples=sample_names,
-                 fields=qc_fields)
+                 fields=qc_fields, phased=phased)
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
         return hm
@@ -640,7 +667,8 @@ class HaplotypeMatrix:
                   chunk_bp: int = 1_500_000,
                   prefetch: int = 1,
                   backend: str = "auto",
-                  fields: list = None):
+                  fields: list = None,
+                  phased: bool = False):
         """Construct a HaplotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
@@ -713,6 +741,8 @@ class HaplotypeMatrix:
             ``(n_var,)`` array, ``call_<tag>`` as ``(n_var, n_samples)``.
             Tags missing from the store are warned and dropped silently.
             Not supported on the streaming path.
+        phased : bool
+            Whether the data are phased haplotypes.  Default ``False``.
 
         Returns
         -------
@@ -739,6 +769,7 @@ class HaplotypeMatrix:
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 backend=backend, accessible_bed=accessible_bed,
+                phased=phased,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits; 'auto'
@@ -762,15 +793,16 @@ class HaplotypeMatrix:
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 source=source, backend=backend, accessible_bed=accessible_bed,
+                phased=phased,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
                                 pop_assignment=pop_assignment,
-                                fields=fields)
+                                fields=fields, phased=phased)
 
     @classmethod
     def _build_eager(cls, path, *, region, accessible_bed, pop_assignment,
-                     fields=None):
+                     fields=None, phased=False):
         from .zarr_io import read_genotypes, read_qc_fields
         from ._gpu_genotype_prep import build_haplotype_matrix
 
@@ -795,6 +827,7 @@ class HaplotypeMatrix:
             chrom_start=start,
             chrom_end=stop,
             samples=list(sample_names) if sample_names is not None else None,
+            phased=phased,
         )
 
         if fields:
@@ -831,7 +864,7 @@ class HaplotypeMatrix:
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
                          prefetch, source=None, backend="auto",
-                         accessible_bed=None):
+                         accessible_bed=None, phased=False):
         from .streaming_matrix import (
             HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
             _pick_chunk_fetcher,
@@ -862,6 +895,7 @@ class HaplotypeMatrix:
             source, fetcher,
             chunk_bp=chunk_bp, prefetch=prefetch,
             accessible_mask=accessible_mask,
+            phased=phased,
         )
 
     def to_zarr(self, zarr_path: str, format: str = 'vcz',
@@ -1015,7 +1049,8 @@ class HaplotypeMatrix:
     def from_ts(cls, ts: tskit.TreeSequence, device: str = 'CPU',
                 include_invariant: bool = False,
                 accessible_bed: str = None,
-                chrom: str = None) -> 'HaplotypeMatrix':
+                chrom: str = None,
+                phased: bool = True) -> 'HaplotypeMatrix':
         """
         Create a HaplotypeMatrix from a tskit.TreeSequence.
 
@@ -1027,6 +1062,8 @@ class HaplotypeMatrix:
                 invariant sites analytically (no extra rows stored).
             accessible_bed: Path to a BED file defining accessible regions.
             chrom: Chromosome name for BED file filtering.
+            phased: Whether the data are phased.  Default ``True``
+                (tree-sequence haplotypes are phased by definition).
 
         Returns:
             HaplotypeMatrix: A new HaplotypeMatrix instance
@@ -1072,7 +1109,7 @@ class HaplotypeMatrix:
 
         n_total_sites = int(ts.sequence_length) if include_invariant else None
         hm = cls(haplotypes, positions, chrom_start, chrom_end,
-                 n_total_sites=n_total_sites)
+                 n_total_sites=n_total_sites, phased=phased)
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
 
@@ -1156,7 +1193,8 @@ class HaplotypeMatrix:
         first_pos = self.positions[0] if self.positions.size > 0 else None
         last_pos = self.positions[-1] if self.positions.size > 0 else None
         return (f"HaplotypeMatrix(shape={self.shape}, "
-                f"first_position={first_pos}, last_position={last_pos})")
+                f"first_position={first_pos}, last_position={last_pos}, "
+                f"phased={self._phased})")
 
     def _empty_subset(self) -> "HaplotypeMatrix":
         """Build a copy of this matrix that holds no variants.
@@ -1175,6 +1213,7 @@ class HaplotypeMatrix:
         result._hap_filtered = None
         result._pos_filtered = None
         result._device = self._device
+        result._phased = self._phased
         result._sample_sets = self._sample_sets
         result.chrom_start = self.chrom_start
         result.chrom_end = self.chrom_end
@@ -1228,6 +1267,7 @@ class HaplotypeMatrix:
             n_total_sites=self.n_total_sites,
             samples=self.samples,
             fields=slice_fields(self.fields, positions, self._accessible_idx),
+            phased=self._phased,
         )
 
     def get_subset_from_range(self, low: int, high: int) -> "HaplotypeMatrix":
@@ -1277,6 +1317,7 @@ class HaplotypeMatrix:
             samples=self.samples,
             accessible_mask=sliced_mask,
             fields=slice_fields(self.fields, indices, self._accessible_idx),
+            phased=self._phased,
         )
 
     def _keep_sites(self, keep) -> "HaplotypeMatrix":
@@ -1301,6 +1342,7 @@ class HaplotypeMatrix:
             accessible_mask=self.accessible_mask,
             samples=self.samples,
             fields=slice_fields(self.fields, keep, self._accessible_idx),
+            phased=self._phased,
         )
 
     def restrict_to_biallelic(self, *, warn_context=None) -> "HaplotypeMatrix":
@@ -1701,6 +1743,7 @@ class HaplotypeMatrix:
             sample_sets=self._sample_sets,
             samples=self.samples,
             fields=new_fields,
+            phased=self._phased,
         )
 
     def summarize_missing_data(self):

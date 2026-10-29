@@ -723,6 +723,23 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
     ``materialize`` a sub-region for repeated calls on the same data.
     """
 
+    def __init__(self, source, fetcher, chunk_bp, prefetch, *,
+                 phased, accessible_mask=None, n_total_sites=None):
+        super().__init__(source, fetcher, chunk_bp, prefetch,
+                         accessible_mask=accessible_mask,
+                         n_total_sites=n_total_sites)
+        self._phased = bool(phased)
+
+    @property
+    def phased(self):
+        """Whether the haplotype rows represent true phased haplotypes."""
+        return self._phased
+
+    def set_phased(self, phased: bool = True):
+        """Mark this stream as phased or unphased.  Returns ``self``."""
+        self._phased = bool(phased)
+        return self
+
     @property
     def num_haplotypes(self):
         return self._source.num_haplotypes
@@ -749,13 +766,14 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
         # re-validation -- np.unique per population per chunk adds up to
         # minutes over a biobank-scale walk.
         sets = kwargs.pop('sample_sets', None)
-        m = build_haplotype_matrix(gt, pos, allow_empty = True, **kwargs)
+        m = build_haplotype_matrix(gt, pos, allow_empty=True,
+                                   phased=self._phased, **kwargs)
         if sets is not None:
             m._sample_sets = sets
         return m
 
     def _repr_sample_axis(self):
-        return f"num_haplotypes={self.num_haplotypes}"
+        return f"num_haplotypes={self.num_haplotypes}, phased={self._phased}"
 
     def compute_ld_statistics_gpu_single_pop(self, bp_bins, raw=False,
                                               chunk_size='auto'):

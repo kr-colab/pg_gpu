@@ -4,6 +4,20 @@ Changelog
 Unreleased
 ----------
 
+HaplotypeMatrix now tracks phasing
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Added ``phased`` attribute to ``HaplotypeMatrix`` (which defaults to 
+``False``). This tracks whether the haplotypes in the matrix 
+represent true phased haplotypes or not. Each loader exposes a 
+``phased`` keyword argument: ``from_vcf`` and ``from_zarr`` default 
+to ``False``; ``from_ts`` defaults to ``True``. It is necessary to
+call ``set_phased()`` to change it after construction.
+
+No numeric results change; the flag is informational for now.  A future
+release will use it to warn when an unphased matrix is passed to a
+phase-dependent statistic.
+
 Sites with more than two alleles are now handled correctly
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
