@@ -44,6 +44,7 @@ diploid genotypes; haploid and polyploid stores are rejected.
 .. autoclass:: pg_gpu.streaming_matrix.StreamingHaplotypeMatrix
    :members: iter_gpu_chunks, materialize, num_haplotypes, num_variants,
              chrom, chrom_start, chrom_end, sample_sets, align_bp,
+             phased, set_phased,
              compute_ld_statistics_gpu_single_pop,
              compute_ld_statistics_gpu_two_pops
    :show-inheritance:

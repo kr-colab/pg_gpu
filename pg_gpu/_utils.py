@@ -78,6 +78,7 @@ def get_population_matrix(matrix, population: Union[str, list],
                 UserWarning, stacklevel=2)
     cls = GenotypeMatrix if is_genotype else HaplotypeMatrix
     data = matrix.genotypes if is_genotype else matrix.haplotypes
+    hm_kw = {} if is_genotype else {'phased': matrix.phased}
     return cls(
         data[pop_indices, :],
         matrix.positions,
@@ -87,6 +88,7 @@ def get_population_matrix(matrix, population: Union[str, list],
         n_total_sites=matrix.n_total_sites,
         allow_empty=allow_empty,
         **extra,
+        **hm_kw,
     )
 
 

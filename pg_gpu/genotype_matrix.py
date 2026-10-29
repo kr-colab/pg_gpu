@@ -445,7 +445,8 @@ class GenotypeMatrix:
                                sample_sets=new_sample_sets,
                                samples=self.samples,
                                fields=slice_fields(self.fields, xp.arange(n_var),
-                                                   self._accessible_idx))
+                                                   self._accessible_idx),
+                               phased=False)
 
     @classmethod
     def from_vcf(cls, path, include_invariant=False, accessible_bed=None,
