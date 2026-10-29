@@ -7,21 +7,31 @@ Basic Usage
 Loading Data
 ~~~~~~~~~~~~
 
-The primary container, ``HaplotypeMatrix``, holds *phased* haplotypes
-(one row per haplotype, two rows per diploid sample). When loaded from a
-diploid VCF, the two haploid copies of each sample become two rows; the
-loader does not check whether your data are actually phased, so if the
-VCF contains unphased calls the resulting matrix is best thought of as a
-random-phasing of the genotypes. For unphased / diploid-aware analyses,
-use ``GenotypeMatrix`` (see "Phased to Unphased" below).
+The primary data structure, ``HaplotypeMatrix``, holds haplotypes (one row
+per haplotype, with variants as columns). When loaded from a diploid
+VCF, the two haploid copies of each sample become two adjacent rows.
+
+The ``phased`` flag records whether the rows represent true phased
+haplotypes or a pseudo-phased (arbitrary assignment of alleles within
+each individual). The loaders default to ``phased=False`` for VCF and
+Zarr, but ``from_ts`` defaults to ``phased=True`` for tree sequences. 
+You can override it at load time or flip it later with ``set_phased()``. 
+Note some analyses use genotype dosages (0, 1, 2 or -1 for missing), in which case
+you should use ``GenotypeMatrix`` (see "HaplotypeMatrix vs GenotypeMatrix" below).
 
 .. code-block:: python
 
    from pg_gpu import HaplotypeMatrix
 
    # From VCF file (sample names are stored automatically). Diploid VCFs
-   # are loaded as 2*n_samples haplotypes -- treated as phased.
+   # are loaded as 2*n_samples haplotypes -- treated as unphased by default..
    h = HaplotypeMatrix.from_vcf("data.vcf.gz")
+
+   # If the VCF is phased, you can set it at load time:
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz", phased=True)
+
+   # Or change it after loading:
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz").set_phased()
 
    # Load a region; both ends are inclusive, as in samtools
    # (requires tabix index)
@@ -527,18 +537,21 @@ directly:
        statistics=('pi', 'theta_w', 'tajimas_d'),
    )
 
-Phased to Unphased
-~~~~~~~~~~~~~~~~~~
+HaplotypeMatrix vs GenotypeMatrix
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Use ``GenotypeMatrix`` for unphased diploid genotypes (entries 0 / 1 / 2
-counting alt alleles). Many functions auto-dispatch on input type, so
-the same call works on either container:
+In ``HaplotypeMatrix``, rows are haplotypes (0/1 per allele, two rows 
+per diploid individual). In ``GenotypeMatrix``, rows are individuals 
+(0/1/2 dosage). Use ``GenotypeMatrix`` only for statistics which need
+dosage encoding. Many functions auto-dispatch on input type, so the same
+call works on either a ``HaplotypeMatrix`` or a ``GenotypeMatrix``.
 
 .. code-block:: python
 
    from pg_gpu import GenotypeMatrix, distance_stats
 
-   # Convert from haploid (pairs consecutive haplotypes)
+   # Convert to dosages: each pair of consecutive haplotype rows is
+   # summed into one individual's 0/1/2 alternate-allele count.
    gm = GenotypeMatrix.from_haplotype_matrix(h)
 
    # Same functions work on both types
@@ -548,6 +561,10 @@ the same call works on either container:
 
    # Distance distribution moments
    var, skew, kurt = distance_stats.dist_moments(gm)
+
+Note that ``gm.to_haplotype_matrix()`` always produces an unphased
+(``phased=False``) matrix, because the conversion assigns heterozygous
+sites as ``(0, 1)`` arbitrarily.
 
 Custom Theta via FrequencySpectrum
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
