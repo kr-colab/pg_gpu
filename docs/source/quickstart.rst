@@ -9,10 +9,11 @@ Loading Data
 
 The primary data structure, ``HaplotypeMatrix``, holds haplotypes (one row
 per haplotype, with variants as columns). When loaded from a diploid 
-(or n-ploid) VCF, the two haploid copies of each sample become 2 (or n) rows.
+(or n-ploid) VCF, the two haploid copies of each sample become 2 (or n) 
+adjacent rows.
 
 The ``phased`` flag records whether the rows represent true phased
-haplotypes or a pseudo-phasing (arbitrary assignment of alleles within
+haplotypes or a pseudo-phased (arbitrary assignment of alleles within
 each individual). The loaders default to ``phased=False`` for VCF and
 Zarr, but ``from_ts`` defaults to ``phased=True`` for tree sequences. 
 You can override it at load time or flip it later with ``set_phased()``. 
@@ -23,10 +24,11 @@ you should use ``GenotypeMatrix`` (see "HaplotypeMatrix vs GenotypeMatrix" below
 
    from pg_gpu import HaplotypeMatrix
 
-   # From VCF -- phased=False by default (loader does not check phase)
+   # From VCF file (sample names are stored automatically). Diploid VCFs
+   # are loaded as 2*n_samples haplotypes -- treated as unphased by default..
    h = HaplotypeMatrix.from_vcf("data.vcf.gz")
 
-   # If you know the VCF is phased, you can set it at load time:
+   # If the VCF is phased, you can set it at load time:
    h = HaplotypeMatrix.from_vcf("data.vcf.gz", phased=True)
 
    # Or change it after loading:
@@ -539,18 +541,19 @@ directly:
 HaplotypeMatrix vs GenotypeMatrix
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``HaplotypeMatrix`` rows are gametes (0/1 per allele, two rows per
-individual). ``GenotypeMatrix`` rows are individuals (0/1/2 dosage).
-Use ``GenotypeMatrix`` when you have unphased diploid genotypes or when
-a statistic needs the diploid encoding:
+In ``HaplotypeMatrix``, rows are haplotypes (0/1 per allele, two rows 
+per diploid individual). In ``GenotypeMatrix``, rows are individuals 
+(0/1/2 dosage). Use ``GenotypeMatrix`` only for statistics which need
+dosage encoding. Many functions auto-dispatch on input type, so the same
+call works on either a ``HaplotypeMatrix`` or a ``GenotypeMatrix``.
 
 .. code-block:: python
 
    from pg_gpu import GenotypeMatrix, distance_stats
 
    # Convert from haploid (pairs consecutive haplotypes).
-   # The result is always phased=False: heterozygotes are assigned as
-   # (0, 1), which is a pseudo-phasing.
+   # The result is always phased=False, since heterozygotes are 
+   # assigned as (0, 1) arbitrarily.
    gm = GenotypeMatrix.from_haplotype_matrix(h)
 
    # Same functions work on both types
@@ -563,7 +566,7 @@ a statistic needs the diploid encoding:
 
 Note that ``gm.to_haplotype_matrix()`` always produces an unphased
 (``phased=False``) matrix, because the conversion assigns heterozygous
-sites as ``(0, 1)`` by convention, not by true phasing.
+sites as ``(0, 1)`` arbitrarily.
 
 Custom Theta via FrequencySpectrum
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

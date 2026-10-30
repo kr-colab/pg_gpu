@@ -218,13 +218,11 @@ class HaplotypeMatrix:
 
     Phasing
     -------
-    The ``phased`` flag records whether the gamete rows represent true
-    phased haplotypes or a pseudo-phasing (random assignment of alleles
-    to rows within each individual).  It defaults to ``False`` on the raw
+    The ``phased`` flag records whether the haplotype rows represent true
+    phased haplotypes or not.  It defaults to ``False`` on the raw
     constructor and on ``from_vcf`` / ``from_zarr``, and to ``True`` on
-    ``from_ts`` (tree-sequence haplotypes are phased by definition).  The
-    flag is the caller's assertion -- **no loader verifies it from the
-    data**.  Use ``set_phased()`` to change it after construction.
+    ``from_ts`` (tree-sequence haplotypes are phased by definition). Use 
+    ``set_phased()`` to change it to phased after construction.
 
     Row order
     ---------

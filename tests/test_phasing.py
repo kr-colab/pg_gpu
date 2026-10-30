@@ -14,7 +14,7 @@ from pg_gpu._gpu_genotype_prep import build_haplotype_matrix
 # ---------------------------------------------------------------------------
 
 def _small_hm(phased=False):
-    """Minimal eager HaplotypeMatrix for flag-propagation tests."""
+    """Minimal HaplotypeMatrix for flag-propagation tests."""
     hap = np.array([[0, 1, 0], [1, 0, 1], [0, 0, 1], [1, 1, 0]], dtype=np.int8)
     pos = np.array([100, 200, 300], dtype=np.int64)
     return HaplotypeMatrix(hap, pos, chrom_start=0, chrom_end=400, phased=phased)
