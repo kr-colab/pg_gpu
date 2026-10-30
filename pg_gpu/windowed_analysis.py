@@ -2539,7 +2539,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
             if need_winmat:
                 win_mat = HaplotypeMatrix(matrix.haplotypes[:, s:e],
-                                           matrix.positions[s:e])
+                                           matrix.positions[s:e],
+                                           phased=matrix.phased)
                 if 'omega' in stat_arrays:
                     # Feed already-biallelic input so omega's own restriction
                     # drops nothing and stays silent; warned once for the scan
