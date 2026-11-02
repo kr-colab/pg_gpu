@@ -1224,8 +1224,8 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         example, if you want the regions 1000-5000 and 8000-9000 on chromosome
         1, then `regions = {'chrom': [1, 1], 'start': [1000, 8000], 'end': [5000, 9000]}`.
         Any number of regions can be specified for any combination of chromosomes. Region
-        intervals are treated as half open, so a window spans [start, end). If 'snp' is given, 
-        then `window_size` counts the number of variants. 
+        intervals are treated as half open, so a window spans [start, end). If 'snp' is given,
+        then `window_size` counts the number of variants.
     step_size : int, optional
         Step size. If None, uses window_size
     statistics : list
@@ -1262,12 +1262,11 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     if window_type not in valid_wt:
         raise ValueError(f"Unknown window_type: {window_type!r}. Valid types are {valid_wt}.")
     if (kwargs.get('regions') is not None) & (window_type != 'regions'):
-        raise ValueError(f"`regions` requested with incompatible `window_type`. Please pass `window_type = 'regions'`.")
+        raise ValueError("`regions` requested with incompatible `window_type`. Please pass `window_type = 'regions'`.")
     if (window_type == 'regions') & (kwargs.get('regions') is None):
         raise ValueError("`regions` kwarg must be provided for `window_type='regions'`.")
     if missing_data not in ('include', 'exlcude'):
         raise ValueError("Unknown value for `missing_data`. Please use 'include' or 'exclude'.")
-        
     result = _windowed_analysis(
         haplotype_matrix, window_size=window_size, step_size=step_size, window_type=window_type,
         statistics=statistics, populations=populations,
