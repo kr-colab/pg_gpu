@@ -34,7 +34,6 @@ _TWO_POP_STATS = frozenset({'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'})
 _LOCAL_PCA_ONLY_KWARGS = frozenset(
     {'k', 'population', 'batch_size', 'n_blocks', 'aggregate'})
 
-
 def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
                           is_accessible=None):
     """Compute per-window accessible base counts for per-base normalization.
@@ -442,7 +441,7 @@ class WindowIterator:
             if len(variant_indices) > 0:
                 window_matrix = self.matrix.get_subset(variant_indices)
                 window_matrix.chrom_start = start
-                window_matrix.chrom_end = end - 1 #TODO: treat region bounds as inclusive.
+                window_matrix.chrom_end = end - 1 # TODO: treat region bounds as inclusive.
                 self._attach_window_mask(window_matrix, start, end)
 
                 yield WindowData(
@@ -1198,8 +1197,8 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
 
 def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      window_size: int = 50000,
-                     window_type: str = 'bp',
                      step_size: Optional[int] = None,
+                     window_type: str = 'bp',
                      statistics: List[str] = ['pi'],
                      populations: Optional[List[str]] = None,
                      missing_data: str = 'include',
@@ -1216,9 +1215,17 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
         Input haplotype data
     window_size : int
-        Window size in base pairs
+        Window size in base pairs if `window_type = 'bp'` or number of variants
+        if `window_type='snp'`. Not used if `window_type = 'regions'`.
     window_type : str
-        Type of windows: 'bp' (base pairs), 'regions', or 'snp'.
+        Type of windows: 'bp' (base pairs), 'regions', or 'snp'. If 'regions',
+        then provide an additional kwarg `regions` as a dictionary with the
+        form `{'chrom':[A, B, ...], 'start': [A_s, B_s, ...], 'end': [A_e, B_e, ...]}`. For
+        example, if you want the regions 1000-5000 and 8000-9000 on chromosome
+        1, then `regions = {'chrom': [1, 1], 'start': [1000, 8000], 'end': [5000, 9000]}`.
+        Any number of regions can be specified for any combination of chromosomes. Region
+        intervals are treated as half open, so a window spans [start, end). If 'snp' is given, 
+        then `window_size` counts the number of variants. 
     step_size : int, optional
         Step size. If None, uses window_size
     statistics : list
@@ -1251,10 +1258,18 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         of haplotypes with no missing call in each window (suffixed by
         population where the Garud columns are).
     """
-    if window_type not in ('bp', 'snp', 'regions'):
-        raise ValueError(f"Unknown window_type: {window_type!r}")
+    valid_wt = ('bp', 'snp', 'regions')
+    if window_type not in valid_wt:
+        raise ValueError(f"Unknown window_type: {window_type!r}. Valid types are {valid_wt}.")
+    if (kwargs.get('regions') is not None) & (window_type != 'regions'):
+        raise ValueError(f"`regions` requested with incompatible `window_type`. Please pass `window_type = 'regions'`.")
+    if (window_type == 'regions') & (kwargs.get('regions') is None):
+        raise ValueError("`regions` kwarg must be provided for `window_type='regions'`.")
+    if missing_data not in ('include', 'exlcude'):
+        raise ValueError("Unknown value for `missing_data`. Please use 'include' or 'exclude'.")
+        
     result = _windowed_analysis(
-        haplotype_matrix, window_size=window_size, window_type=window_type, step_size=step_size,
+        haplotype_matrix, window_size=window_size, step_size=step_size, window_type=window_type,
         statistics=statistics, populations=populations,
         missing_data=missing_data, span_normalize=span_normalize,
         accessible_bed=accessible_bed, chrom=chrom, **kwargs)
@@ -1298,8 +1313,8 @@ def _check_complete_haplotypes(df, matrix, populations, min_complete):
 
 def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                       window_size: int = 50000,
-                      window_type: str = 'bp',
                       step_size: Optional[int] = None,
+                      window_type: str = 'bp',
                       statistics: List[str] = ['pi'],
                       populations: Optional[List[str]] = None,
                       missing_data: str = 'include',
@@ -1360,8 +1375,8 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             scalar_df = _windowed_analysis(
                 haplotype_matrix,
                 window_size=window_size,
-                window_type=window_type,
                 step_size=step_size,
+                window_type=window_type,
                 statistics=other_stats,
                 populations=populations,
                 missing_data=missing_data,
@@ -1472,7 +1487,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             "supported for window_type='regions'."
             )
 
-    #fused engine can't handle 'snp' windows yet, only local_pca and fallback.
+    # fused engine can't handle 'snp' windows yet, only local_pca and fallback.
     if window_type == 'snp':
         unsupported_snp = {s for s in requested if isinstance(s, str)} - _fallback_stats()
         if unsupported_snp:
@@ -1506,7 +1521,6 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
 
         if len(win_starts) == 0:
             return pd.DataFrame()
-        # Build equivalent bp_bins for _compute_window_ranges
 
         pop1 = populations[0] if populations and len(populations) >= 1 else None
         pop2 = populations[1] if populations and len(populations) >= 2 else None
@@ -2222,7 +2236,6 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         we_gpu = bp_bins_gpu[1:]
     else:
         raise ValueError('bp_bins and _win_starts/_win_stops must not both be None.')
-
 
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
