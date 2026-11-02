@@ -494,6 +494,14 @@ Bug fixes
   ``compute_ld_statistics`` also gained ``chunk_size`` and
   ``available_memory_bytes`` arguments to override the estimate; they do
   not change results, only memory use.
+* ``windowed_analysis`` ignored ``window_type='regions'`` and ``regions``
+  kwarg for statistics that went to the scattered or fused paths; only the
+  fallback used them. Now ``window_type`` defaults to ``'bp'`` and if 
+  ``'regions'`` is specified, it is sent to the proper engines. An error is
+  raised if no engine can compute the requested set of statistics or if 
+  ``regions`` is not passed alongside ``window_type='regions'`` and vice-versa.
+  An error is raise when ``window_type='snp'`` or ``'regions'`` for a 
+  ``StreamingHaplotypeMatrix``.
 
 New warnings
 ~~~~~~~~~~~~
