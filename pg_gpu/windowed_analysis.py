@@ -34,6 +34,7 @@ _TWO_POP_STATS = frozenset({'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'})
 _LOCAL_PCA_ONLY_KWARGS = frozenset(
     {'k', 'population', 'batch_size', 'n_blocks', 'aggregate'})
 
+
 def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
                           is_accessible=None):
     """Compute per-window accessible base counts for per-base normalization.
@@ -1198,7 +1199,6 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
 def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      window_size: int = 50000,
                      step_size: Optional[int] = None,
-                     window_type: str = 'bp',
                      statistics: List[str] = ['pi'],
                      populations: Optional[List[str]] = None,
                      missing_data: str = 'include',
@@ -1206,6 +1206,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      accessible_bed: str = None,
                      chrom: str = None,
                      min_complete_haplotypes: Optional[int] = None,
+                     window_type: str = 'bp',
                      **kwargs) -> pd.DataFrame:
     """
     Convenience function for windowed analysis.
@@ -1217,15 +1218,6 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     window_size : int
         Window size in base pairs if `window_type = 'bp'` or number of variants
         if `window_type='snp'`. Not used if `window_type = 'regions'`.
-    window_type : str
-        Type of windows: 'bp' (base pairs), 'regions', or 'snp'. If 'regions',
-        then provide an additional kwarg `regions` as a dictionary with the
-        form `{'chrom':[A, B, ...], 'start': [A_s, B_s, ...], 'end': [A_e, B_e, ...]}`. For
-        example, if you want the regions 1000-5000 and 8000-9000 on chromosome
-        1, then `regions = {'chrom': [1, 1], 'start': [1000, 8000], 'end': [5000, 9000]}`.
-        Any number of regions can be specified for any combination of chromosomes. Region
-        intervals are treated as half open, so a window spans [start, end). If 'snp' is given,
-        then `window_size` counts the number of variants.
     step_size : int, optional
         Step size. If None, uses window_size
     statistics : list
@@ -1247,6 +1239,14 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         missing call (the ``n_complete_haplotypes`` column). When it is not
         given, a ``FewCompleteHaplotypesWarning`` reports when many windows
         have few complete haplotypes, where H1 and H12 come out too low.
+    window_type : str
+        Type of windows: 'bp' (base pairs), 'regions', or 'snp'. If 'regions',
+        then provide an additional kwarg `regions` as a pandas DataFrame with the
+        form `pd.DataFrame({'chrom':[A, B, ...], 'start': [A_s, B_s, ...], 'end': [A_e, B_e, ...]})`. For
+        example, if you want the regions 1000-5000 and 8000-9000 on chromosome
+        1, then `regions = pd.DataFrame({'chrom': [1, 1], 'start': [1000, 8000], 'end': [5000, 9000]})`.
+        Any number of regions can be specified on the matrix's chromosome. Region intervals are treated as half open, so a window
+        spans [start, end). If 'snp' is given, then `window_size` counts the number of variants.
     **kwargs
         Additional arguments passed to WindowedAnalyzer
 
@@ -1261,17 +1261,17 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     valid_wt = ('bp', 'snp', 'regions')
     if window_type not in valid_wt:
         raise ValueError(f"Unknown window_type: {window_type!r}. Valid types are {valid_wt}.")
-    if (kwargs.get('regions') is not None) & (window_type != 'regions'):
+    if (kwargs.get('regions') is not None) and (window_type != 'regions'):
         raise ValueError("`regions` requested with incompatible `window_type`. Please pass `window_type = 'regions'`.")
     if (window_type == 'regions') & (kwargs.get('regions') is None):
         raise ValueError("`regions` kwarg must be provided for `window_type='regions'`.")
-    if missing_data not in ('include', 'exlcude'):
+    if missing_data not in ('include', 'exclude'):
         raise ValueError("Unknown value for `missing_data`. Please use 'include' or 'exclude'.")
     result = _windowed_analysis(
-        haplotype_matrix, window_size=window_size, step_size=step_size, window_type=window_type,
+        haplotype_matrix, window_size=window_size, step_size=step_size,
         statistics=statistics, populations=populations,
         missing_data=missing_data, span_normalize=span_normalize,
-        accessible_bed=accessible_bed, chrom=chrom, **kwargs)
+        accessible_bed=accessible_bed, chrom=chrom, window_type=window_type, **kwargs)
     # A local-PCA request returns a LocalPCAResult; its scalar columns sit
     # in .windows.
     frame = getattr(result, 'windows', result)
@@ -1313,13 +1313,13 @@ def _check_complete_haplotypes(df, matrix, populations, min_complete):
 def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                       window_size: int = 50000,
                       step_size: Optional[int] = None,
-                      window_type: str = 'bp',
                       statistics: List[str] = ['pi'],
                       populations: Optional[List[str]] = None,
                       missing_data: str = 'include',
                       span_normalize=True,
                       accessible_bed: str = None,
                       chrom: str = None,
+                      window_type: str = 'bp',
                       **kwargs) -> pd.DataFrame:
     """The body of ``windowed_analysis``, without its final checks."""
     from .streaming_matrix import StreamingHaplotypeMatrix
@@ -1375,13 +1375,13 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 haplotype_matrix,
                 window_size=window_size,
                 step_size=step_size,
-                window_type=window_type,
                 statistics=other_stats,
                 populations=populations,
                 missing_data=missing_data,
                 span_normalize=span_normalize,
                 accessible_bed=None,  # already applied above
                 chrom=chrom,
+                window_type=window_type,
                 **{k: v for k, v in kwargs.items()
                    if k not in _LOCAL_PCA_ONLY_KWARGS},
             )
