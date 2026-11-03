@@ -4,9 +4,11 @@ The chunk-size estimator is pure arithmetic on an explicit memory budget, so
 these tests pass ``available_memory_bytes`` and never query the GPU or try to
 provoke an out-of-memory condition (which is platform-dependent).
 """
+import numpy as np
+import cupy as cp
 import pytest
 
-from pg_gpu.ld_pipeline import estimate_ld_chunk_size, ld_names
+from pg_gpu.ld_pipeline import estimate_ld_chunk_size, ld_names, weighted_nanmean
 
 
 class TestEstimateLdChunkSize:
@@ -51,3 +53,37 @@ class TestEstimateLdChunkSize:
     def test_float_budget_gives_int_chunk(self):
         # A float budget must not leak a float chunk size.
         assert isinstance(estimate_ld_chunk_size(400, 105, 5.0e9), int)
+
+
+class TestWeightedNanmean:
+    def test_all_defined_matches_plain_weighted_mean(self):
+        terms = [cp.array([1.0, 2.0]), cp.array([3.0, 4.0])]
+        out = cp.asnumpy(weighted_nanmean([0.25, 0.75], terms))
+        np.testing.assert_allclose(out, [0.25*1+0.75*3, 0.25*2+0.75*4])
+
+    def test_one_undefined_term_is_excluded_not_averaged_in(self):
+        # A pair defined in one symmetric arrangement but not another must
+        # recover that one arrangement's own value, not a value diluted by
+        # averaging in the undefined arrangement's missing contribution.
+        terms = [cp.array([2.0, cp.nan]), cp.array([cp.nan, 5.0])]
+        out = cp.asnumpy(weighted_nanmean([0.5, 0.5], terms))
+        np.testing.assert_allclose(out, [2.0, 5.0])
+
+    def test_all_undefined_gives_nan(self):
+        terms = [cp.array([cp.nan]), cp.array([cp.nan])]
+        out = cp.asnumpy(weighted_nanmean([0.5, 0.5], terms))
+        assert np.isnan(out[0])
+
+    def test_single_term_passthrough(self):
+        terms = [cp.array([1.0, cp.nan, 3.0])]
+        out = cp.asnumpy(weighted_nanmean([1.0], terms))
+        np.testing.assert_allclose(out[[0, 2]], [1.0, 3.0])
+        assert np.isnan(out[1])
+
+    def test_unequal_weights_renormalize_over_defined_terms(self):
+        # Weight 0.25/0.25/0.5; the middle term is undefined, so the
+        # remaining 0.25 and 0.5 weights must renormalize to sum to 1
+        # between themselves, rather than keep their partial original sum.
+        terms = [cp.array([4.0]), cp.array([cp.nan]), cp.array([10.0])]
+        out = cp.asnumpy(weighted_nanmean([0.25, 0.25, 0.5], terms))
+        np.testing.assert_allclose(out, [(0.25*4 + 0.5*10) / 0.75])

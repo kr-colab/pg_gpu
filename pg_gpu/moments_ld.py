@@ -388,7 +388,10 @@ def _compute_ld_sums(mat, pops, bins, gen_dists_gpu, max_bp_dist,
 
         valid = (cb >= 0) & (cb < n_bins)
         vb = cb[valid]
-        vs = stats[valid]
+        # A pair below a statistic's sample-size threshold is NaN; scattering
+        # it as-is into bin_sums via cp.add.at (no NaN-aware mode) would
+        # poison that bin's whole running sum. Zero-fill excludes it instead.
+        vs = cp.nan_to_num(stats[valid], nan=0.0)
         flat_idx = vb[:, None] * n_ld + cp.arange(n_ld)[None, :]
         cp.add.at(bin_sums.ravel(), flat_idx.ravel(), vs.ravel())
 

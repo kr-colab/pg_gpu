@@ -156,10 +156,11 @@ class TestComputeAllDispatch:
 
 class TestEdgeCases:
 
-    def test_n_below_4_returns_zero(self):
-        """Both kernel and polynomial return 0 when n<4 (denominator
-        guard). Build a small fixture where the per-pair valid sample
-        count is below 4 to exercise the early-return branch."""
+    def test_n_below_4_is_nan(self):
+        """Both kernel and polynomial give NaN when n<4 (denominator
+        guard): the statistic is undefined there, not a real zero. Build a
+        small fixture where the per-pair valid sample count is below 4 to
+        exercise the early-return branch."""
         n_indiv, n_var = 3, 4
         rng = np.random.default_rng(0)
         geno = rng.integers(0, 3, (n_indiv, n_var)).astype(np.int8)
@@ -168,5 +169,5 @@ class TestEdgeCases:
         p = _build_pop_data(gm)
         kern = _kernel_dd_single(p).get()
         poly = ldg.dd_geno_single(p).get()
-        assert np.all(kern == 0.0)
-        assert np.all(poly == 0.0)
+        assert np.all(np.isnan(kern))
+        assert np.all(np.isnan(poly))

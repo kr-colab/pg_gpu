@@ -164,13 +164,14 @@ class TestSinglePopParity:
         # An explicit chunk_size (not 'auto') exercises the fixed-size
         # branch, and a top bin wider than the sequence has no pairs, so
         # the empty-bin formatter path runs. Streaming must still match
-        # eager, including the empty bin's zero tuple.
+        # eager, including the empty bin's NaN tuple (no pair means no
+        # defined statistic, not a 0.0 indistinguishable from a real one).
         eager, stream = _aligned_single_pop_pair(vcz_store, chunk_bp=10_000)
         bp_bins = [0, 10_000, 250_000, 500_000]  # last bin empty (seq 200kb)
         e = eager.compute_ld_statistics_gpu_single_pop(bp_bins)
         s = stream.compute_ld_statistics_gpu_single_pop(bp_bins, chunk_size=64)
         _assert_single_pop_equivalent(e, s)
-        assert s[(250_000.0, 500_000.0)] == (0.0, 0.0, 0.0)
+        assert all(np.isnan(v) for v in s[(250_000.0, 500_000.0)])
 
 
 class TestTwoPopParity:
