@@ -92,7 +92,7 @@ _SNP_UNSUPPORTED = ["theta_l", "zeng_e", "theta_h", "max_daf", "mean_nsl",
     + [("snp", s) for s in _SNP_UNSUPPORTED]))
 def test_deferred_window_type_stats_raise(window_type, stat):
     m = _matrix(n_var=40)
-    regions = (pd.DataFrame({"chrom": [1], "start": [100], "end": [3000]})
+    regions = (pd.DataFrame({"start": [100], "end": [3000]})
                if window_type == "regions" else None)
     with pytest.raises(NotImplementedError):
         windowed_analysis(m, window_size=10, window_type=window_type,

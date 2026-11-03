@@ -86,7 +86,6 @@ class TestWindowIterator:
         haplotypes = np.random.randint(0, 2, size=(10, n_variants))
 
         regions = pd.DataFrame({
-            'chrom': [1, 1, 1],
             'start': [10000, 30000, 70000],
             'end': [20000, 50000, 90000]
         })
@@ -1802,7 +1801,6 @@ def _region_case(seed=0):
     hm = HaplotypeMatrix(hap, pos, 1, 999_999)
     hm.sample_sets = {'p1': list(range(20)), 'p2': list(range(20, 40))}
     regions = pd.DataFrame({
-        'chrom': [1, 1, 1, 1],
         'start': [600_000, 100_000, 100_000, 400_000],
         'end':   [900_000, 300_000, 250_000, 500_000],
     })

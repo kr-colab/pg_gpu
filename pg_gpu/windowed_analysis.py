@@ -1242,11 +1242,12 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     window_type : str
         Type of windows: 'bp' (base pairs), 'regions', or 'snp'. If 'regions',
         then provide an additional kwarg `regions` as a pandas DataFrame with the
-        form `pd.DataFrame({'chrom':[A, B, ...], 'start': [A_s, B_s, ...], 'end': [A_e, B_e, ...]})`. For
-        example, if you want the regions 1000-5000 and 8000-9000 on chromosome
-        1, then `regions = pd.DataFrame({'chrom': [1, 1], 'start': [1000, 8000], 'end': [5000, 9000]})`.
-        Any number of regions can be specified on the matrix's chromosome. Region intervals are treated as half open, so a window
-        spans [start, end). If 'snp' is given, then `window_size` counts the number of variants.
+        form `pd.DataFrame({'start': [s1, s2, ...], 'end': [e1, e2, ...]})`. For
+        example, if you want the regions 1000-5000 and 8000-9000 on the chromosome,
+        then `regions = pd.DataFrame({'start': [1000, 8000], 'end': [5000, 9000]})`.
+        Any number of regions can be specified. Region intervals are treated as half open,
+        so a window spans [start, end). If 'snp' is given, then `window_size` counts the
+        number of variants.
     **kwargs
         Additional arguments passed to WindowedAnalyzer
 
