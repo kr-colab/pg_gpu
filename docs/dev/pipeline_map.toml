@@ -1,0 +1,2367 @@
+# pg_gpu pipeline map
+#
+# Every input format, matrix type, dispatch path and analysis endpoint in
+# pg_gpu, with the axes that a change must cover. Read it before you add a
+# statistic, change a rule (span, missing data, undefined values, window
+# grid), or change one code path of a statistic that has parallel paths.
+#
+# How to use it:
+#   1. Find your function or statistic: grep for `"diversity.pi"` or
+#      `[windowed.pi]`.
+#   2. Read its `parallel` list (functions) or `engines` list (windowed).
+#      Each entry is an implementation that must change in step with yours.
+#   3. Go through [axes] and [checklists]. For each axis, decide what your
+#      change does on each value, and test each value.
+#
+# tests/test_pipeline_map.py checks the map against the code. It fails when
+# the code and the map do not agree on:
+#   - the modules of the package ([meta]),
+#   - the public functions of each inventory module and their axis keywords,
+#   - the loaders and their parameters ([inputs]),
+#   - the public methods of each matrix class ([matrices]),
+#   - which engine computes each windowed statistic ([windowed], [engines]),
+#   - any dotted name that starts with a module or a matrix class, in any
+#     field: each must resolve in the code.
+# The test does not check the rest of the free text (`inputs`, `streaming`,
+# `missing_data`, `span`, `span_normalized`, `undefined`, `notes` and the
+# descriptions). Keep it true when you change the code.
+#
+# Names: "module.function" is relative to the pg_gpu package, and
+# "Class.method" names a method of a class in [matrices]. Write a code path
+# in this dotted form, so that the test can check it.
+
+[meta]
+# Modules with one [functions] row for each public function.
+inventory_modules = [
+    "diversity", "divergence", "sfs", "selection", "ld_statistics",
+    "ld_statistics_genotype", "admixture", "decomposition", "distance_stats",
+    "relatedness", "resampling", "moments_ld", "ld_pipeline", "accessible",
+    "plotting", "windowed_analysis",
+]
+# Keywords that put a function on an axis. A function row's `axis_kwargs`
+# lists the ones in its signature.
+axis_kwargs = [
+    "missing_data",
+    "population", "populations", "pop1", "pop2", "pop_a", "pop_b", "pop_c", "pop_d",
+    "span_normalize", "per_base", "is_accessible", "accessible_bed",
+    "window_size", "step_size", "bp_bins", "window_type", "regions",
+]
+
+# Every other module, with its role.
+[meta.other_modules]
+__init__ = "Package exports and the import-time CUDA check. It exports the function windowed_analysis under the module's name, so `import pg_gpu.windowed_analysis as w` gives the function; use importlib.import_module."
+haplotype_matrix = "HaplotypeMatrix and its loaders; haplotype_matrix._decide_streaming_mode chooses eager or streaming for from_zarr."
+genotype_matrix = "GenotypeMatrix and its loaders. It repeats the span bookkeeping of HaplotypeMatrix (n_total_sites from the mask) but has no get_span."
+streaming_matrix = "StreamingHaplotypeMatrix and StreamingGenotypeMatrix: chunk iteration over a VCZ store, with chunk fetchers (host thread or kvikio)."
+zarr_source = "ZarrGenotypeSource: lazy region, chunk and sample-subset reads of a VCZ store."
+zarr_io = "VCZ (bio2zarr) and scikit-allel zarr layouts: format detection, reads and writes."
+_gpu_genotype_prep = "Builds HaplotypeMatrix and GenotypeMatrix arrays on the GPU from raw VCZ genotype blocks; the streaming chunks use it."
+_haplotype_groups = "Haplotype frequencies in windows with missing calls (maximum likelihood); Garud H and haplotype_count use it."
+_haplotype_hash = "Exact haplotype hashing; garud_h_windows is the one Garud H and haplotype_count implementation for the scalar and windowed paths."
+_memutil = "Chunking helpers that bound GPU memory over variants."
+_utils = "Shared helpers; population_rows resolves a population name or row list to a row subset."
+_warnings = "Warning classes and the load-time checks that emit them."
+genotype_kernels = "CUDA kernels for genotype (diploid) LD statistics: DD, Dz, pi2."
+haplotype_kernels = "CUDA kernels for haplotype LD statistics: DD, Dz, pi2."
+
+# ---------------------------------------------------------------------------
+# Axes: the dimensions that a feature or a fix must cover.
+# ---------------------------------------------------------------------------
+
+[axes.input]
+description = "How data enters pg_gpu. Each loader sets a different span source and a different set of metadata (sample names, fields, sample_sets)."
+values = ["VCF (from_vcf)", "VCZ zarr (from_zarr)", "scikit-allel zarr (from_zarr)", "tskit TreeSequence (from_ts)", "numpy or cupy arrays (constructor)", "streaming VCZ (from_zarr, streaming='always' or 'auto')"]
+see = "[inputs]"
+
+[axes.matrix]
+description = "The object that a statistic receives. Many functions accept only HaplotypeMatrix; check `inputs` in the function row."
+values = ["HaplotypeMatrix", "GenotypeMatrix", "StreamingHaplotypeMatrix", "StreamingGenotypeMatrix", "array"]
+see = "[matrices]"
+
+[axes.missing_data]
+description = "'include' uses each site with the calls it has; 'exclude' keeps only sites with no missing call in the rows the statistic reads. A few functions accept other values (for example 'scale' in distance_stats)."
+values = ["include", "exclude"]
+check = "Each engine applies 'exclude' on its own: windowed_analysis._apply_exclude (fused), the scatter engines, windowed_analysis.StatisticsComputer._n_sites (fallback), and each scalar function."
+
+[axes.span]
+description = "The per-base denominator. HaplotypeMatrix.get_span('auto') uses the accessible-mask count, then n_total_sites, then chrom_end - chrom_start + 1 (both bounds are inclusive)."
+values = ["accessible mask", "n_total_sites", "region length", "raw (span_normalize=False)"]
+check = "Scalar: HaplotypeMatrix.get_span. Fused engines: windowed_analysis._compute_window_bases (mask, else window length). Scatter engines: inline code in windowed_analysis._windowed_thetas_scatter and windowed_analysis._windowed_twopop_scatter (mask, else a share of n_total_sites, else window length). Fallback: the scalar function on the window matrix. Streaming: streaming_matrix._StreamingMatrixBase.get_span."
+
+[axes.population]
+description = "Which rows a statistic reads. A population is a name in sample_sets or a list of row indices; _utils.population_rows resolves both."
+values = ["none (all rows)", "name in sample_sets", "list of rows", "two populations (pop1, pop2)", "three or more (admixture, pairwise loops)"]
+check = "Names and row lists must give the same values. Two-population windowed statistics name the column after the statistic only when exactly two populations are given."
+
+[axes.windowing]
+description = "How windows are formed. windowed_analysis picks one engine per request; see [engines]. Other functions make their own windows."
+values = ["bp windows (window_size, step_size)", "snp windows (window_type='snp'; the fallback and local_pca only)", "regions (window_type='regions' with a regions DataFrame of half-open [start, end) windows; the fused engines and the fallback; theta_l, zeng_e, zeng_dh, normalized_fay_wu_h, mean_nsl, daf_hist and mu_sfs raise NotImplementedError)", "bp_bins edges (windowed_statistics*, LD bins)", "moving windows in variant counts (moving_*)"]
+check = "windowed_analysis._bp_window_grid makes the bp grid for the scatter and fused engines; for window_type='regions' the fused engines take regions['start'] and regions['end'] as window edges; windowed_analysis.WindowIterator makes the fallback windows. The fused engines give a row for an empty region, but the fallback gives none (#356). No engine reads a chrom column in regions to select variants; the fallback copies it into the output chrom column, and the fused engines write the chrom argument."
+
+[axes.streaming]
+description = "A StreamingHaplotypeMatrix has no .haplotypes array. A function runs on it chunk by chunk (native), rejects it with a pointed error, or fails with the generic NotImplementedError of the .haplotypes property."
+values = ["native", "rejects", "generic_error"]
+check = "windowed_analysis runs each chunk through the eager dispatcher, so a windowed statistic streams when its eager engine works on one chunk. Statistics that integrate across variants (mean_nsl) are cut at chunk edges."
+
+[axes.undefined]
+description = "What a statistic returns when it has no value, for example too few haplotypes, no site, or no accessible base."
+values = ["NaN", "0.0 or another fixed value", "raises"]
+check = "The scalar function, each windowed engine and the fallback must agree. A consumer (pcoa, plotting, resampling) must handle the NaN that its producer can emit."
+
+[axes.alleles]
+description = "Biallelic and multiallelic sites. Allele codes are 0..k, and -1 is missing."
+values = ["biallelic", "multiallelic"]
+check = "The fused engines drop sites above an allele cap (windowed_analysis._filter_fused_allele_cap_raw, MultiallelicCapWarning). Some functions call HaplotypeMatrix.restrict_to_biallelic."
+
+# ---------------------------------------------------------------------------
+# Inputs: every loader. `params` is checked against the signature.
+# ---------------------------------------------------------------------------
+
+[inputs."HaplotypeMatrix.__init__"]
+params = ["genotypes", "positions", "chrom_start", "chrom_end", "sample_sets", "n_total_sites", "samples", "accessible_mask", "fields", "allow_empty"]
+returns = "HaplotypeMatrix"
+span = "n_total_sites and accessible_mask as given; a mask with no n_total_sites sets n_total_sites to the accessible bases in [chrom_start, chrom_end]."
+
+[inputs."HaplotypeMatrix.from_vcf"]
+params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields"]
+returns = "HaplotypeMatrix"
+span = "include_invariant=True sets n_total_sites to the record count. accessible_bed sets the mask and n_total_sites."
+notes = "region is samtools style with an inclusive end; chrom_start and chrom_end come from the region, else from the first and last variant."
+
+[inputs."HaplotypeMatrix.from_zarr"]
+params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields"]
+returns = "HaplotypeMatrix, or StreamingHaplotypeMatrix when streaming='always', or 'auto' and the matrix does not fit"
+span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None."
+notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=."
+
+[inputs."HaplotypeMatrix.from_ts"]
+params = ["ts", "device", "include_invariant", "accessible_bed", "chrom"]
+returns = "HaplotypeMatrix"
+span = "include_invariant=True sets n_total_sites to the sequence length. accessible_bed sets the mask."
+
+[inputs."GenotypeMatrix.__init__"]
+params = ["genotypes", "positions", "chrom_start", "chrom_end", "sample_sets", "n_total_sites", "samples", "accessible_mask", "fields", "allow_empty"]
+returns = "GenotypeMatrix"
+span = "Same rule as HaplotypeMatrix.__init__, in its own code."
+
+[inputs."GenotypeMatrix.from_vcf"]
+params = ["path", "include_invariant", "accessible_bed", "fields"]
+returns = "GenotypeMatrix"
+span = "include_invariant=True sets n_total_sites to the record count. accessible_bed sets the mask."
+notes = "No region and no samples parameter, unlike HaplotypeMatrix.from_vcf."
+
+[inputs."GenotypeMatrix.from_zarr"]
+params = ["path", "region", "accessible_bed", "include_invariant", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields"]
+returns = "GenotypeMatrix, or StreamingGenotypeMatrix on the streaming path"
+span = "include_invariant=True sets n_total_sites to the variant count on the eager path only; the streaming path ignores it. accessible_bed sets the mask on both paths."
+
+[inputs."GenotypeMatrix.from_haplotype_matrix"]
+params = ["hap_matrix"]
+returns = "GenotypeMatrix"
+span = "Copies n_total_sites and accessible_mask."
+notes = "Pairs haplotype rows 2i and 2i+1 into individual i."
+
+# ---------------------------------------------------------------------------
+# Matrices: the public methods and properties of each class (checked).
+# ---------------------------------------------------------------------------
+
+[matrices.HaplotypeMatrix]
+module = "haplotype_matrix"
+methods = [
+    "Tajimas_D", "accessible_mask", "compute_ld_statistics_gpu_single_pop",
+    "compute_ld_statistics_gpu_two_pops", "count_called", "count_missing",
+    "device", "diversity", "exclude_missing_sites", "filter",
+    "filter_variants_by_missing", "from_ts", "from_vcf", "from_zarr",
+    "get_matrix", "get_positions", "get_span", "get_subset",
+    "get_subset_from_range", "haplotypes", "has_accessible_mask",
+    "has_invariant_info", "is_called", "is_missing", "load_pop_file",
+    "locate_unlinked", "n_callable_sites", "n_invariant_sites",
+    "n_segregating_sites", "num_haplotypes", "num_variants", "pairwise_LD_v",
+    "pairwise_r2", "positions", "remove_accessible_mask",
+    "restrict_to_biallelic", "restrict_to_segregating", "sample_sets",
+    "set_accessible_mask", "shape", "summarize_missing_data",
+    "tally_gpu_haplotypes", "tally_gpu_haplotypes_two_pops",
+    "tally_gpu_haplotypes_two_pops_with_missing", "to_zarr", "transfer_to_cpu",
+    "transfer_to_gpu", "vcf_to_zarr", "watersons_theta", "windowed_r_squared",
+]
+notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask."
+
+[matrices.GenotypeMatrix]
+module = "genotype_matrix"
+methods = [
+    "accessible_mask", "device", "filter", "from_haplotype_matrix", "from_vcf",
+    "from_zarr", "genotypes", "has_accessible_mask", "has_invariant_info",
+    "load_pop_file", "n_callable_sites", "n_invariant_sites",
+    "n_segregating_sites", "num_individuals", "num_variants", "positions",
+    "remove_accessible_mask", "restrict_to_segregating", "sample_sets",
+    "set_accessible_mask", "shape", "to_haplotype_matrix", "to_zarr",
+    "transfer_to_cpu", "transfer_to_gpu",
+]
+notes = "No get_span, no from_ts, no get_subset; a statistic that needs these on genotypes converts or carries its own code."
+
+[matrices.StreamingHaplotypeMatrix]
+module = "streaming_matrix"
+methods = [
+    "chrom", "chrom_end", "chrom_start", "chunk_bp",
+    "compute_ld_statistics_gpu_single_pop", "compute_ld_statistics_gpu_two_pops",
+    "get_span", "haplotypes", "iter_gpu_chunks", "materialize",
+    "num_haplotypes", "num_variants", "sample_sets",
+]
+notes = "accessible_mask and n_total_sites are instance attributes: the loader sets accessible_mask from accessible_bed and leaves n_total_sites None. .haplotypes raises. iter_gpu_chunks yields closed chunks [s, s + chunk_bp - 1] as eager HaplotypeMatrix objects; materialize(region=) gives an eager sub-region."
+
+[matrices.StreamingGenotypeMatrix]
+module = "streaming_matrix"
+methods = [
+    "chrom", "chrom_end", "chrom_start", "chunk_bp",
+    "genotypes", "get_span", "iter_gpu_chunks", "materialize",
+    "num_individuals", "num_variants", "sample_sets",
+]
+notes = ".genotypes raises. Chunks are eager GenotypeMatrix objects."
+
+# ---------------------------------------------------------------------------
+# Windowed engines: the implementations that windowed_analysis dispatches to.
+# `stats` names the set of statistics that the engine computes, as the code
+# holds it. The test resolves it (and calls it when it is a function) and
+# compares it with the `engines` list of each [windowed] row. The streaming
+# engine runs the other engines on each chunk, so it has no set of its own.
+# ---------------------------------------------------------------------------
+
+[engines.thetas_scatter]
+function = "windowed_analysis._windowed_thetas_scatter"
+stats = "windowed_analysis._SCATTER_SINGLE_STATS"
+chosen = "window_type='bp', every requested name is in its set and at most one population is given. A mixed request of these and two-population names with two populations runs both scatter engines and joins the columns."
+span = "Inline: the accessible mask, else a share of n_total_sites in proportion to the window length, else the window length."
+missing_data = ["include", "exclude"]
+
+[engines.twopop_scatter]
+function = "windowed_analysis._windowed_twopop_scatter"
+stats = "windowed_analysis._TWO_POP_STATS"
+chosen = "window_type='bp', every requested name is a two-population statistic and exactly two populations are given."
+span = "Inline, the same rule as thetas_scatter, in its own code."
+missing_data = ["include", "exclude"]
+
+[engines.fused]
+function = "windowed_analysis.windowed_statistics_fused"
+stats = "windowed_analysis._FUSED_STATS"
+chosen = "No scatter engine takes the request, window_type is 'bp' or 'regions' (for regions, mean_nsl, daf_hist and mu_sfs raise NotImplementedError), every name is in its set, two-population names come with exactly two populations, and missing_data='include'. Under 'exclude' it runs only for a Garud-only request or a request with a name that the fallback does not know."
+span = "windowed_analysis._compute_window_bases: the accessible mask, else the window length. It does not read n_total_sites."
+missing_data = ["include", "exclude"]
+
+[engines.fused_chunked]
+function = "windowed_analysis.windowed_statistics_fused_chunked"
+stats = "windowed_analysis._CHUNKED_OWN_STATS"
+chosen = "The fused engine is chosen and its transposed int8 copy would not fit in 70 percent of free GPU memory. It computes its own statistics again in chunks and hands every other fused statistic to windowed_statistics_fused."
+span = "windowed_analysis._compute_window_bases."
+missing_data = ["include", "exclude"]
+
+[engines.fallback]
+function = "windowed_analysis.StatisticsComputer.compute"
+stats = "windowed_analysis._fallback_stats"
+chosen = "No other engine takes the request. It is the only engine for window_type='snp', where a name it does not know raises NotImplementedError. It also accepts callables as custom statistics."
+span = "The scalar function on each window matrix. windowed_analysis.WindowIterator slices it with get_subset, which keeps the parent's n_total_sites; with a mask, windowed_analysis.WindowIterator._attach_window_mask sets the window's accessible count. So with n_total_sites and no mask, each window divides by the n_total_sites of the whole region."
+missing_data = ["include", "exclude"]
+notes = "A window with no variant gives NaN for every statistic. A request whose names no single engine covers (for example theta_l with zns) reaches this engine and fails with 'Unknown statistic'."
+
+[engines.local_pca]
+function = "decomposition.local_pca"
+stats = "windowed_analysis._LOCAL_PCA_STATS"
+chosen = "A requested name is local_pca or local_pca_jackknife. It returns a LocalPCAResult; the other names run through the dispatcher and join .windows."
+span = "none"
+missing_data = ["include", "exclude"]
+
+[engines.streaming]
+function = "windowed_analysis._stream_windowed_analysis"
+chosen = "The input is a StreamingHaplotypeMatrix. Each chunk runs through the eager dispatcher, so each chunk picks its own engine."
+span = "The chunk matrix; a BED mask is parsed once and shared by all chunks."
+missing_data = ["include", "exclude"]
+notes = "Rejects step_size != window_size and a window_size that does not divide chunk_bp. mean_nsl is cut at chunk edges."
+
+# ---------------------------------------------------------------------------
+# Windowed statistics: every name that windowed_analysis accepts.
+# `engines` is checked. `scalar` (checked to resolve) is the function that
+# should give the same value on one window; "" means none exists.
+# ---------------------------------------------------------------------------
+
+[windowed.pi]
+scalar = "diversity.pi"
+engines = ["thetas_scatter", "fused", "fused_chunked", "fallback"]
+span_normalized = true
+
+[windowed.theta_w]
+scalar = "diversity.theta_w"
+engines = ["thetas_scatter", "fused", "fused_chunked", "fallback"]
+span_normalized = true
+
+[windowed.tajimas_d]
+scalar = "diversity.tajimas_d"
+engines = ["thetas_scatter", "fused", "fused_chunked", "fallback"]
+span_normalized = false
+
+[windowed.segregating_sites]
+scalar = "diversity.segregating_sites"
+engines = ["thetas_scatter", "fused", "fused_chunked", "fallback"]
+span_normalized = false
+
+[windowed.singletons]
+scalar = "diversity.singleton_count"
+engines = ["thetas_scatter", "fused", "fused_chunked"]
+span_normalized = false
+notes = "The fallback calls the same count n_singletons."
+
+[windowed.n_singletons]
+scalar = "diversity.singleton_count"
+engines = ["fallback"]
+span_normalized = false
+notes = "The scatter and fused engines call it singletons."
+
+[windowed.n_variants]
+scalar = ""
+engines = ["fallback"]
+span_normalized = false
+notes = "Also a prefix column of every engine; under 'exclude' it counts the complete sites."
+
+[windowed.theta_h]
+scalar = "diversity.theta_h"
+engines = ["thetas_scatter", "fused", "fused_chunked"]
+span_normalized = true
+
+[windowed.theta_l]
+scalar = "diversity.theta_l"
+engines = ["thetas_scatter"]
+span_normalized = true
+
+[windowed.fay_wu_h]
+scalar = "diversity.fay_wus_h"
+engines = ["thetas_scatter", "fused", "fused_chunked"]
+span_normalized = true
+
+[windowed.normalized_fay_wu_h]
+scalar = "diversity.normalized_fay_wus_h"
+engines = ["thetas_scatter"]
+span_normalized = false
+
+[windowed.zeng_e]
+scalar = "diversity.zeng_e"
+engines = ["thetas_scatter"]
+span_normalized = false
+
+[windowed.zeng_dh]
+scalar = "diversity.zeng_dh"
+engines = ["thetas_scatter"]
+span_normalized = true
+notes = "The scatter engine combines Tajima's D with H divided by the window span; diversity.zeng_dh uses the raw H."
+
+[windowed.max_daf]
+scalar = "diversity.max_daf"
+engines = ["thetas_scatter", "fused", "fused_chunked"]
+span_normalized = false
+
+[windowed.daf_hist]
+scalar = "diversity.daf_histogram"
+engines = ["fused"]
+span_normalized = false
+notes = "Gives the columns daf_bin_0 .. daf_bin_19 (windowed_analysis.N_DAF_BINS)."
+
+[windowed.mu_sfs]
+scalar = "diversity.mu_sfs"
+engines = ["fused"]
+span_normalized = false
+
+[windowed.mu_var]
+scalar = "diversity.mu_var"
+engines = ["fused"]
+span_normalized = true
+
+[windowed.dxy]
+scalar = "divergence.dxy"
+engines = ["twopop_scatter", "fused", "fused_chunked", "fallback"]
+span_normalized = true
+
+[windowed.da]
+scalar = "divergence.da"
+engines = ["twopop_scatter", "fused", "fused_chunked", "fallback"]
+span_normalized = true
+
+[windowed.fst]
+scalar = "divergence.fst"
+engines = ["twopop_scatter", "fused", "fused_chunked", "fallback"]
+span_normalized = false
+notes = "Hudson FST in every engine; the same values as fst_hudson."
+
+[windowed.fst_hudson]
+scalar = "divergence.fst_hudson"
+engines = ["twopop_scatter", "fused", "fused_chunked", "fallback"]
+span_normalized = false
+
+[windowed.fst_wc]
+scalar = "divergence.fst_weir_cockerham"
+engines = ["twopop_scatter", "fused", "fused_chunked", "fallback"]
+span_normalized = false
+
+[windowed.garud_h1]
+scalar = "selection.garud_h"
+engines = ["fused", "fallback"]
+span_normalized = false
+notes = "Every Garud name and haplotype_count come from _haplotype_hash.garud_h_windows on every path, and add n_complete_haplotypes columns."
+
+[windowed.garud_h12]
+scalar = "selection.garud_h"
+engines = ["fused", "fallback"]
+span_normalized = false
+
+[windowed.garud_h123]
+scalar = "selection.garud_h"
+engines = ["fused", "fallback"]
+span_normalized = false
+
+[windowed.garud_h2h1]
+scalar = "selection.garud_h"
+engines = ["fused", "fallback"]
+span_normalized = false
+
+[windowed.haplotype_count]
+scalar = "diversity.haplotype_count"
+engines = ["fused", "fallback"]
+span_normalized = false
+
+[windowed.mean_nsl]
+scalar = "selection.nsl"
+engines = ["fused"]
+span_normalized = false
+notes = "nSL is computed over the whole matrix, then averaged per window; on the streaming path it is cut at chunk edges."
+
+[windowed.zns]
+scalar = "ld_statistics.zns"
+engines = ["fused"]
+span_normalized = false
+
+[windowed.omega]
+scalar = "ld_statistics.omega"
+engines = ["fused"]
+span_normalized = false
+
+[windowed.mu_ld]
+scalar = "ld_statistics.mu_ld"
+engines = ["fused"]
+span_normalized = false
+
+[windowed.dist_var]
+scalar = "distance_stats.dist_var"
+engines = ["fused"]
+span_normalized = false
+
+[windowed.dist_skew]
+scalar = "distance_stats.dist_skew"
+engines = ["fused"]
+span_normalized = false
+
+[windowed.dist_kurt]
+scalar = "distance_stats.dist_kurt"
+engines = ["fused"]
+span_normalized = false
+
+[windowed.snp_dist_mean]
+scalar = ""
+engines = ["fused"]
+span_normalized = false
+notes = "The snp_dist names exist only in the fused engine: the distances between adjacent variants in the window."
+
+[windowed.snp_dist_var]
+scalar = ""
+engines = ["fused"]
+span_normalized = false
+
+[windowed.snp_dist_min]
+scalar = ""
+engines = ["fused"]
+span_normalized = false
+
+[windowed.snp_dist_max]
+scalar = ""
+engines = ["fused"]
+span_normalized = false
+
+[windowed.ld_decay]
+scalar = "HaplotypeMatrix.pairwise_r2"
+engines = ["fallback"]
+span_normalized = false
+notes = "Needs custom_stat_kwargs={'ld_decay': {'max_distance': ...}}; without it the call raises TypeError."
+
+[windowed.mean_r2]
+scalar = "HaplotypeMatrix.pairwise_r2"
+engines = ["fallback"]
+span_normalized = false
+notes = "Needs custom_stat_kwargs={'mean_r2': {'max_dist': ...}}; without it the call raises TypeError."
+
+[windowed.local_pca]
+scalar = "decomposition.local_pca"
+engines = ["local_pca"]
+span_normalized = false
+
+[windowed.local_pca_jackknife]
+scalar = "decomposition.local_pca_jackknife"
+engines = ["local_pca"]
+span_normalized = false
+
+# ---------------------------------------------------------------------------
+# Checklists: when you change X, also check Y.
+# ---------------------------------------------------------------------------
+
+[checklists]
+new_windowed_statistic = [
+    "Add the name to the set of each engine that computes it (windowed_analysis module constants, windowed_analysis.StatisticsComputer for the fallback).",
+    "Add a [windowed] row here and run tests/test_pipeline_map.py.",
+    "Test it alone, together with a name from each other engine family, with two populations, under 'include' and 'exclude', with and without a mask, and on a StreamingHaplotypeMatrix.",
+    "Compare each engine with the scalar function on one window.",
+]
+span_rule = [
+    "HaplotypeMatrix.get_span and streaming_matrix._StreamingMatrixBase.get_span.",
+    "windowed_analysis._compute_window_bases (fused, fused_chunked, windowed_statistics).",
+    "The inline spans in windowed_analysis._windowed_thetas_scatter and windowed_analysis._windowed_twopop_scatter.",
+    "GenotypeMatrix, which has its own n_total_sites code and no get_span.",
+    "Every function row with span other than \"none\".",
+]
+missing_data_rule = [
+    "windowed_analysis._apply_exclude (fused), the 'exclude' code of each scatter engine, windowed_analysis.StatisticsComputer._n_sites (fallback).",
+    "Every function row whose missing_data list holds the mode, and the GenotypeMatrix branch of each.",
+]
+undefined_value_rule = [
+    "The scalar function, each engine in its [windowed] row, and the fallback rule (NaN for a window with no variant).",
+    "The consumers: decomposition.pcoa, the plotting functions, resampling.",
+]
+window_grid = [
+    "windowed_analysis._bp_window_grid (scatter and fused) and windowed_analysis.WindowIterator (fallback).",
+    "The streaming chunk edges (StreamingHaplotypeMatrix.iter_gpu_chunks) and the rule that window_size divides chunk_bp.",
+    "The moving_* functions and local_pca, which make their own windows.",
+]
+new_loader_or_input = [
+    "Set chrom_start and chrom_end as inclusive bounds, n_total_sites, the mask, sample_sets and samples the way the other loaders do.",
+    "Add an [inputs] row, and give both HaplotypeMatrix and GenotypeMatrix the loader or note why not.",
+]
+new_scalar_statistic = [
+    "Decide each axis: inputs, streaming, missing_data, span, population, undefined, alleles.",
+    "Add a [functions] row; the test fails until you do.",
+]
+
+# ---------------------------------------------------------------------------
+# Functions: one row for each public function of each inventory module.
+# `axis_kwargs` and `parallel` are checked; the other fields are not.
+# ---------------------------------------------------------------------------
+
+[functions."windowed_analysis.windowed_analysis"]
+# signature: (haplotype_matrix, window_size, step_size, statistics, populations, missing_data, span_normalize, accessible_bed, chrom, min_complete_haplotypes, window_type, kwargs)
+axis_kwargs = ["missing_data", "populations", "span_normalize", "accessible_bed", "window_size", "step_size", "window_type"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "per engine; see [engines]"
+undefined = "per statistic and engine; the scatter and fused engines give a row for a window with no variant, the fallback gives no row"
+parallel = []
+notes = "The dispatcher. It picks one engine per request ([engines]); the streaming path runs it once per chunk. It raises ValueError for an unknown window_type or missing_data, for regions without window_type='regions' and the reverse, and NotImplementedError for window_type 'snp' or 'regions' on a StreamingHaplotypeMatrix and for names that no engine computes on those window types."
+
+[functions."windowed_analysis.windowed_statistics"]
+# signature: (haplotype_matrix, bp_bins, statistics, population, pop1, pop2, per_base, is_accessible, chrom)
+axis_kwargs = ["population", "pop1", "pop2", "per_base", "is_accessible", "bp_bins"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = []
+span = "windowed_analysis._compute_window_bases"
+undefined = "NaN for a window with no accessible base"
+parallel = ["windowed_analysis._windowed_thetas_scatter", "windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused"]
+notes = "A separate scatter engine that windowed_analysis does not call; it takes bp_bins edges (half-open windows) and has no missing_data parameter."
+
+[functions."windowed_analysis.windowed_statistics_fused"]
+# signature: (haplotype_matrix, bp_bins, statistics, population, pop1, pop2, per_base, is_accessible, _win_starts, _win_stops, missing_data, chrom)
+axis_kwargs = ["missing_data", "population", "pop1", "pop2", "per_base", "is_accessible", "bp_bins"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "windowed_analysis._compute_window_bases"
+undefined = "per statistic"
+parallel = ["windowed_analysis.windowed_statistics_fused_chunked"]
+notes = "The fused engine ([engines.fused]); public, so it can also be called with bp_bins directly."
+
+[functions."windowed_analysis.windowed_statistics_fused_chunked"]
+# signature: (haplotype_matrix, bp_bins, statistics, population, pop1, pop2, per_base, is_accessible, _win_starts, _win_stops, missing_data, chrom)
+axis_kwargs = ["missing_data", "population", "pop1", "pop2", "per_base", "is_accessible", "bp_bins"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "windowed_analysis._compute_window_bases"
+undefined = "per statistic"
+parallel = ["windowed_analysis.windowed_statistics_fused"]
+notes = "The chunked fused engine ([engines.fused_chunked]); it has its own code for its statistics and calls windowed_statistics_fused for every other fused statistic."
+
+[functions."diversity.compute_sigma_ij"]
+# signature: (n)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "(0, 0) array for n = 1; ZeroDivisionError for n = 0"
+parallel = ["diversity._achaz_alpha_beta"]
+notes = "Takes an int sample size; _achaz_alpha_beta uses the same Fu (1995) sigma structure without building the matrix, so a change to one must go to the other."
+
+[functions."diversity.project_sfs"]
+# signature: (sfs, n_from, n_to)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "raises ValueError when n_to > n_from"
+parallel = ["sfs._projection_matrix_vec"]
+notes = "numpy only (a CuPy sfs raises TypeError); diversity._projection_matrix (exact comb) and sfs._projection_matrix_vec (gammaln) build the same hypergeometric matrix."
+
+[functions."diversity.pi_components"]
+# signature: (haplotypes, n_total_sites, n_haplotypes_full)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "all zeros when no site has two valid haplotypes"
+parallel = ["diversity._ac_contribution", "divergence._site_components_from_counts"]
+notes = "CuPy haplotype array only (numpy raises TypeError in allele_counts); sites with n_valid < 2 are left out of diffs and comps."
+
+[functions."diversity.pi"]
+# signature: (haplotype_matrix, population, span_normalize, missing_data)
+axis_kwargs = ["missing_data", "population", "span_normalize"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "get_span"
+undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
+parallel = ["diversity.pi_components", "diversity.FrequencySpectrum.theta", "divergence._site_components_from_counts", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis.windowed_statistics"]
+notes = "The no-variant check runs before the span check, so a mask that removes every variant gives 0.0, not NaN; _fused_windowed_kernel_v2 has its own C copy of the per-site formula."
+
+[functions."diversity.theta_w"]
+# signature: (haplotype_matrix, population, span_normalize, missing_data)
+axis_kwargs = ["missing_data", "population", "span_normalize"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "get_span"
+undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
+parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis.windowed_statistics"]
+notes = "Per site (alleles present - 1) * 1/a1(n_valid); FrequencySpectrum.theta sums xi instead and differs at reference-absent multiallelic sites."
+
+[functions."diversity.tajimas_d"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN with no variants, S < 3, harmonic-mean n < 3, or variance <= 0"
+parallel = ["diversity.diversity_stats", "diversity.FrequencySpectrum.neutrality_test", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_tajimas_d", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics"]
+notes = "diversity_stats repeats the Achaz test inline instead of calling _compute_neutrality_test."
+
+[functions."diversity.segregating_sites"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "0 when no site has two valid haplotypes"
+parallel = ["diversity._compute_thetas", "diversity.FrequencySpectrum.__init__", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics", "haplotype_matrix.HaplotypeMatrix.n_segregating_sites", "genotype_matrix.GenotypeMatrix.n_segregating_sites"]
+notes = "Counts mutations (alleles present - 1, so a triallelic site counts 2); the n_segregating_sites properties use a different biallelic rule."
+
+[functions."diversity.singleton_count"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "0 when no derived allele has count 1"
+parallel = ["windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics"]
+notes = "Counts derived alleles only; the per-window fallback names this statistic 'n_singletons', the engines 'singletons'."
+
+[functions."diversity.diversity_stats"]
+# signature: (haplotype_matrix, population, statistics, span_normalize, missing_data)
+axis_kwargs = ["missing_data", "population", "span_normalize"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "get_span"
+undefined = "with no variants, theta keys 0.0 and test keys NaN; tests NaN when S < 3 or n < 3; fay_wus_h has no minimum"
+parallel = ["diversity._compute_neutrality_test", "diversity.fay_wus_h"]
+notes = "Only theta keys are span-normalized; span_normalize also passes a get_span mode string through; the tests and fay_wus_h are computed inline, not by calling the scalar functions."
+
+[functions."diversity.fay_wus_h"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN with no variants; 0.0 with fewer than two haplotypes"
+parallel = ["diversity.diversity_stats", "diversity.FrequencySpectrum.fay_wu_h", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
+notes = "Returns the raw pi - theta_H sum, but the windowed 'fay_wu_h' column divides by the window span."
+
+[functions."diversity.haplotype_diversity"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN with fewer than two haplotypes; NaN under 'include' when no haplotype is complete"
+parallel = []
+notes = "'include' uses EM frequencies from _haplotype_groups.frequencies; 'exclude' with no complete site makes every haplotype equal and gives 0.0."
+
+[functions."diversity.theta_h"]
+# signature: (haplotype_matrix, population, span_normalize, missing_data)
+axis_kwargs = ["missing_data", "population", "span_normalize"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "get_span"
+undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
+parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
+
+[functions."diversity.theta_l"]
+# signature: (haplotype_matrix, population, span_normalize, missing_data)
+axis_kwargs = ["missing_data", "population", "span_normalize"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "get_span"
+undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
+parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter"]
+notes = "Only the scatter engine computes it windowed; a request that adds a fused-only statistic (e.g. mu_var) falls to the per-window fallback and raises 'Unknown statistic'."
+
+[functions."diversity.normalized_fay_wus_h"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN with no variants, S < 3, harmonic-mean n < 3, or variance <= 0"
+parallel = ["diversity.diversity_stats", "diversity.FrequencySpectrum.neutrality_test", "windowed_analysis._windowed_thetas_scatter"]
+notes = "The windowed column is named 'normalized_fay_wu_h' (no s)."
+
+[functions."diversity.zeng_e"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN with no variants, S < 3, harmonic-mean n < 3, or variance <= 0"
+parallel = ["diversity.diversity_stats", "diversity.FrequencySpectrum.neutrality_test", "windowed_analysis._windowed_thetas_scatter"]
+
+[functions."diversity.zeng_dh"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when Tajima's D or Fay-Wu H is NaN; 0.0 unless both are negative"
+parallel = ["windowed_analysis._windowed_thetas_scatter"]
+notes = "Scalar multiplies D by the raw H; the scatter engine multiplies D by the span-normalized H."
+
+[functions."diversity.max_daf"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "0.0 with no derived allele; -1.0 under 'exclude' when no complete site carries a derived allele"
+parallel = ["windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
+notes = "Scalar 'include' keeps sites with n_valid = 1; the windowed engines need n_valid >= 2."
+
+[functions."diversity.haplotype_count"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN under 'include' when no haplotype is complete; the row count when there are one or no haplotypes"
+parallel = ["_haplotype_hash.garud_h_windows"]
+notes = "Returns int, or float NaN; garud_h_windows has its own hash path for complete windows and is used by both the fused engine and StatisticsComputer._garud_h."
+
+[functions."diversity.daf_histogram"]
+# signature: (matrix, n_bins, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero histogram when no derived allele is present (HaplotypeMatrix)"
+parallel = ["diversity._daf_histogram_diploid", "windowed_analysis.windowed_statistics_fused"]
+notes = "The GenotypeMatrix branch calls _daf_histogram_diploid, which drops missing_data and uses a different DAF rule (dosage sum, monomorphic sites binned at 0)."
+
+[functions."diversity.diplotype_frequency_spectrum"]
+# signature: (genotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "(empty array, NaN) under 'include' when no diplotype is complete"
+parallel = []
+
+[functions."diversity.daf_histogram_diploid"]
+# signature: (genotype_matrix, n_bins, population)
+axis_kwargs = ["population"]
+inputs = ["GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = []
+span = "none"
+undefined = "sites with no valid call are binned at frequency 0; all-zero histogram only with no sites"
+parallel = []
+notes = "Alias of _daf_histogram_diploid, which daf_histogram calls for GenotypeMatrix input; the HaplotypeMatrix branch of daf_histogram computes the same histogram by a different rule (per derived allele, absent alleles not binned)."
+
+[functions."diversity.neutrality_tests"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "per key, as tajimas_d, fay_wus_h, pi, theta_w and segregating_sites"
+parallel = []
+notes = "Wrapper; pi and theta_w are forced to span_normalize=False."
+
+[functions."diversity.heterozygosity_expected"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "per-site NaN where n_valid < 2 ('include') or where any call is missing ('exclude')"
+parallel = ["windowed_analysis.windowed_statistics"]
+notes = "Any mode other than 'include' divides by the full n, not n_valid; an unknown string gets that branch with no NaN masking."
+
+[functions."diversity.heterozygosity_observed"]
+# signature: (haplotype_matrix, population, ploidy, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "per-site NaN where no individual is fully called; raises ValueError when rows are not divisible by ploidy"
+parallel = []
+notes = "Pairs consecutive rows into individuals and warns on an unpaired row list (ploidy 2)."
+
+[functions."diversity.inbreeding_coefficient"]
+# signature: (haplotype_matrix, population, ploidy, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "per-site NaN where He <= 0 or He is NaN"
+parallel = []
+
+[functions."diversity.mu_var"]
+# signature: (haplotype_matrix, window_length, population)
+axis_kwargs = ["population"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = []
+span = "window_length, else chrom_end - chrom_start (no +1; ignores the mask and n_total_sites)"
+undefined = "NaN when the length is <= 0"
+parallel = ["windowed_analysis.windowed_statistics_fused"]
+notes = "Reads only num_variants and chrom bounds, so streaming input with population=None returns a value (no chunk walk) and with population= fails on .haplotypes; counts every variant, monomorphic too."
+
+[functions."diversity.mu_sfs"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when no derived allele is segregating"
+parallel = ["windowed_analysis.windowed_statistics_fused"]
+
+[functions."sfs.sfs"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero array with no segregating derived allele; None on streaming input with no non-empty chunk"
+parallel = ["diversity.FrequencySpectrum.__init__"]
+notes = "FrequencySpectrum builds its own per-n SFS with the same 0 < count < n rule; streaming sums per-chunk results with _stream_sum."
+
+[functions."sfs.sfs_folded"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero array with no polymorphic allele; None on streaming input with no non-empty chunk"
+parallel = ["sfs.fold_sfs"]
+notes = "Per allele with weight 1/2 (tskit rule); fold_sfs applied to sfs() gives a different result for even n, also on biallelic data."
+
+[functions."sfs.sfs_scaled"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero array with no segregating derived allele"
+parallel = []
+notes = "Wrapper: scale_sfs(sfs(...)); streaming support comes from sfs."
+
+[functions."sfs.sfs_folded_scaled"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero array with no polymorphic allele"
+parallel = []
+notes = "Streaming works only with population=None: sfs_folded_scaled calls population_rows on the stream, which fails on .haplotypes."
+
+[functions."sfs.joint_sfs"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero array with no allele segregating in the pooled cohort; None on streaming input with no non-empty chunk"
+parallel = ["sfs.project_joint_sfs"]
+notes = "project_joint_sfs shares _joint_per_allele_counts; its streaming branch has its own chunk loop."
+
+[functions."sfs.project_joint_sfs"]
+# signature: (haplotype_matrix, pop1, pop2, target_n1, target_n2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "raises ValueError when a target exceeds its population size; all-zero array with no allele"
+parallel = ["sfs.joint_sfs", "diversity._projection_matrix"]
+notes = "Streaming branch reads population sizes from sample_sets itself and loops chunks with _project_joint_sfs_chunk_gpu, not _stream_sum."
+
+[functions."sfs.joint_sfs_folded"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero array with no allele segregating in the pooled cohort; None on streaming input with no non-empty chunk"
+parallel = ["sfs.fold_joint_sfs"]
+notes = "Folds each allele by the global minor (tskit rule), not per axis; fold_joint_sfs gives a different array."
+
+[functions."sfs.joint_sfs_scaled"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero array with no allele segregating in the pooled cohort"
+parallel = []
+notes = "Wrapper: scale_joint_sfs(joint_sfs(...))."
+
+[functions."sfs.joint_sfs_folded_scaled"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero array with no allele segregating in the pooled cohort"
+parallel = []
+notes = "Wrapper: scale_joint_sfs_folded on joint_sfs_folded, with n1 and n2 read from the array shape."
+
+[functions."sfs.scale_sfs"]
+# signature: (s)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n/a"
+parallel = []
+notes = "numpy only; a CuPy array raises TypeError."
+
+[functions."sfs.scale_sfs_folded"]
+# signature: (s, n)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "NaN and -inf when n = 0"
+parallel = []
+notes = "numpy only."
+
+[functions."sfs.scale_joint_sfs"]
+# signature: (s)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n/a"
+parallel = []
+notes = "numpy only."
+
+[functions."sfs.scale_joint_sfs_folded"]
+# signature: (s, n1, n2)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n/a"
+parallel = []
+notes = "numpy only."
+
+[functions."sfs.fold_sfs"]
+# signature: (s, n)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n/a"
+parallel = ["sfs.sfs_folded"]
+notes = "numpy only; a copy of scikit-allel fold_sfs. For even n it pairs bin i with bin n-1-i and returns n//2 bins, so it does not equal sfs_folded (n//2+1 bins); for odd n the two agree. tests/test_sfs_allel_comparison.py checks parity with scikit-allel."
+
+[functions."sfs.fold_joint_sfs"]
+# signature: (s, n1, n2)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n/a"
+parallel = ["sfs.joint_sfs_folded"]
+notes = "numpy only; per-axis fold with the same n-1-i pairing as fold_sfs, not the global-minor fold of joint_sfs_folded."
+
+[functions."divergence.dxy_components"]
+# signature: (pop1_haps, pop2_haps)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "(0.0, 0.0, 0) when no site has data in both populations; the caller divides"
+parallel = []
+notes = "CuPy arrays only (NumPy raises TypeError); returns ratio-of-sums parts, not the sum of per-site means that dxy uses."
+
+[functions."divergence.fst"]
+# signature: (haplotype_matrix, pop1, pop2, method, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN from the selected method (see each fst_* row); ValueError for an unknown method"
+parallel = []
+notes = "Dispatcher only; windowed 'fst' is always Hudson, and method='tskit' or 'nei' has no windowed path."
+
+[functions."divergence.fst_hudson"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when no site has den > 0 (no joint data or no between-pop difference), or when exclude leaves no site"
+parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel", "windowed_analysis.windowed_statistics", "divergence._windowed_fst"]
+notes = "Scatter and windowed_statistics reuse the per-site helpers but own the window sums and NaN gate; the CUDA kernel recomputes the per-site terms."
+
+[functions."divergence.fst_tskit"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when sum(Hb) + sum(Hw) is 0, or when exclude leaves no site"
+parallel = []
+notes = "Not available as a windowed statistic."
+
+[functions."divergence.fst_weir_cockerham"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when sum(a+b+c) <= 0 (so a negative denominator also gives NaN), or when exclude leaves no site"
+parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
+notes = "Pairs consecutive rows into diploids and only warns on unpaired row lists."
+
+[functions."divergence.fst_nei"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when no site has HT > 0 with data in both pops, or when exclude leaves no site"
+parallel = []
+notes = "Not available as a windowed statistic."
+
+[functions."divergence.dxy"]
+# signature: (haplotype_matrix, pop1, pop2, per_site, missing_data, span_normalize)
+axis_kwargs = ["missing_data", "pop1", "pop2", "span_normalize"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "get_span"
+undefined = "Under include, the sum over sites with data in both pops divided by the span: 0.0 when no site has such data, NaN when the span is 0. Under exclude, 0.0 when no complete site is left, before the span check, so also at span 0; per_site=True then gives an empty array."
+parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel", "windowed_analysis.windowed_statistics"]
+notes = "per_site=True returns raw per-site values for the kept sites only, with no span."
+
+[functions."divergence.da"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data, span_normalize)
+axis_kwargs = ["missing_data", "pop1", "pop2", "span_normalize"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "get_span"
+undefined = "Under include, the raw value divided by the span: 0.0 when no site has data in both pops, NaN when the span is 0. Under exclude, 0.0 when no complete site is left, before the span check, so also at span 0."
+parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
+notes = "Within-pop pi terms count only sites where both pops have data, so they differ from diversity.pi on the same population."
+
+[functions."divergence.pi_within_population"]
+# signature: (haplotype_matrix, pop, missing_data, span_normalize)
+axis_kwargs = ["missing_data", "span_normalize"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "get_span"
+undefined = "0.0 when the population has no variant (also after exclude); NaN when span is 0"
+parallel = []
+notes = "Thin wrapper over diversity.pi; its parallel paths are in the diversity.pi row."
+
+[functions."divergence.divergence_stats"]
+# signature: (haplotype_matrix, pop1, pop2, statistics, missing_data, span_normalize)
+axis_kwargs = ["missing_data", "pop1", "pop2", "span_normalize"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "get_span (dxy, da, pi1, pi2 only; FST keys are not span-normalized)"
+undefined = "each key follows its scalar function; ValueError for an unknown statistic name"
+parallel = []
+notes = "Calls the scalar functions; key 'fst' is always Hudson, 'fst_wc' is Weir-Cockerham."
+
+[functions."divergence.pairwise_fst"]
+# signature: (haplotype_matrix, populations, method, missing_data)
+axis_kwargs = ["missing_data", "populations"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN entries follow fst(); diagonal is 0.0; ValueError when populations is None and no sample_sets"
+parallel = []
+notes = "Returns a CuPy matrix, not NumPy, plus the population name list."
+
+[functions."divergence.pbs"]
+# signature: (haplotype_matrix, pop1, pop2, pop3, window_size, window_start, window_stop, window_step, normed, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2", "window_size"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for a window where any pairwise Hudson denominator sum is 0; empty array when no window fits"
+parallel = []
+notes = "window_size counts variants, not bp, and all three pairs use only sites where every population has data."
+
+[functions."divergence.pairwise_distance_matrix"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for a pair with no site called by both haplotypes"
+parallel = []
+notes = "'include' maps to the helper's 'scale' mode (count scaled to all sites), not the per-site mean of distance_stats.pairwise_diffs_haploid."
+
+[functions."divergence.snn"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when no haplotype has any defined neighbor distance"
+parallel = []
+notes = "missing_data is ignored when distance_matrices is given; ties get a fractional score."
+
+[functions."divergence.dxy_min"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when no between-pop distance is defined"
+parallel = []
+notes = "Value is a scaled difference count (not per site); missing_data is ignored when distance_matrices is given."
+
+[functions."divergence.gmin"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when no between-pop distance is defined or the mean between distance is 0"
+parallel = []
+notes = "missing_data is ignored when distance_matrices is given."
+
+[functions."divergence.dd"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN per element when the pop has no defined within pair, its mean within distance is 0, or dxy_min is NaN"
+parallel = []
+notes = "The pi denominator equals diversity.pi(span_normalize=False) only when no call is missing."
+
+[functions."divergence.dd_rank"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN per element when the pop has no defined within pair or dxy_min is NaN"
+parallel = []
+notes = "missing_data is ignored when distance_matrices is given."
+
+[functions."divergence.zx"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when one of the three ZnS values is NaN (for example fewer than two segregating sites) or the total ZnS is 0"
+parallel = []
+notes = "The total term uses every row of the matrix, not only pop1 and pop2."
+
+[functions."divergence.distance_based_stats"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "each key follows its scalar function (NaN rules of snn, dxy_min, gmin, dd, dd_rank)"
+parallel = []
+notes = "Computes the distance matrices once and passes them to the five scalar functions."
+
+[functions."admixture.patterson_f2"]
+# signature: (haplotype_matrix, pop_a, pop_b, missing_data)
+axis_kwargs = ["missing_data", "pop_a", "pop_b"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "0.0 at a site with fewer than 2 calls in either pop; empty array when exclude leaves no site"
+parallel = []
+notes = "Returns a per-variant NumPy array; multiallelic (sums over alleles)."
+
+[functions."admixture.patterson_f3"]
+# signature: (haplotype_matrix, pop_c, pop_a, pop_b, missing_data)
+axis_kwargs = ["missing_data", "pop_a", "pop_b", "pop_c"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "T is 0.0 where pop_c has fewer than 2 calls or a source has none; B is 0.0 where pop_c has fewer than 2 calls; empty arrays when exclude leaves no site"
+parallel = []
+notes = "Returns per-variant (T, B); pop_c is the target and the first argument."
+
+[functions."admixture.patterson_f4"]
+# signature: (haplotype_matrix, pop_a, pop_b, pop_c, pop_d, missing_data)
+axis_kwargs = ["missing_data", "pop_a", "pop_b", "pop_c", "pop_d"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "0.0 at a site where any pop has no call; empty array when exclude leaves no site"
+parallel = []
+notes = "Multiallelic per-variant f4; unlike patterson_d it keeps >2-allele sites."
+
+[functions."admixture.patterson_d"]
+# signature: (haplotype_matrix, pop_a, pop_b, pop_c, pop_d, missing_data)
+axis_kwargs = ["missing_data", "pop_a", "pop_b", "pop_c", "pop_d"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "num = den = 0 at >2-allele sites and at sites where any pop has no call; empty arrays when exclude leaves no site"
+parallel = []
+notes = "Biallelic only, with a BiallelicOnlyWarning for dropped sites; returns per-variant (num, den)."
+
+[functions."admixture.moving_patterson_f3"]
+# signature: (haplotype_matrix, pop_c, pop_a, pop_b, size, start, stop, step, normed, missing_data)
+axis_kwargs = ["missing_data", "pop_a", "pop_b", "pop_c"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for a window with sum(B) == 0 when normed; empty array when no window fits"
+parallel = []
+notes = "Windows count variants; normed=False is the mean of per-site T, where non-estimable sites count as 0.0."
+
+[functions."admixture.moving_patterson_d"]
+# signature: (haplotype_matrix, pop_a, pop_b, pop_c, pop_d, size, start, stop, step, missing_data)
+axis_kwargs = ["missing_data", "pop_a", "pop_b", "pop_c", "pop_d"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for a window with sum(den) == 0; empty array when no window fits"
+parallel = []
+notes = "Windows count variants."
+
+[functions."admixture.average_patterson_f3"]
+# signature: (haplotype_matrix, pop_c, pop_a, pop_b, blen, normed, missing_data)
+axis_kwargs = ["missing_data", "pop_a", "pop_b", "pop_c"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN or inf when sum(B) == 0 (normed, no guard); raises ZeroDivisionError when the jackknife SE is exactly 0 or when no full block exists"
+parallel = []
+notes = "The point estimate uses every variant but the jackknife blocks drop the trailing n % blen variants, the same as scikit-allel."
+
+[functions."admixture.average_patterson_d"]
+# signature: (haplotype_matrix, pop_a, pop_b, pop_c, pop_d, blen, missing_data)
+axis_kwargs = ["missing_data", "pop_a", "pop_b", "pop_c", "pop_d"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when sum(den) == 0; raises ZeroDivisionError when the jackknife SE is exactly 0 or when no full block exists"
+parallel = []
+notes = "The point estimate uses every variant but the jackknife blocks drop the trailing n % blen variants, the same as scikit-allel."
+
+[functions."resampling.block_jackknife"]
+# signature: (values, statistic, weights)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "raises ZeroDivisionError on empty input; with one block the estimate is statistic(empty) and SE is 0.0 or NaN; ValueError on bad weights"
+parallel = ["decomposition._local_pca_with_jackknife"]
+notes = "Host NumPy only (a CuPy array raises TypeError)."
+
+[functions."resampling.block_bootstrap"]
+# signature: (values, statistic, n_replicates, rng)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "SE is NaN when n_replicates <= 1; estimate is whatever statistic returns on the full data"
+parallel = []
+notes = "Host NumPy only (a CuPy array raises TypeError)."
+
+[functions."selection.standardize"]
+# signature: (score)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "NaN everywhere when the std is 0 or every score is NaN"
+parallel = []
+notes = "Runs on CPU with numpy; a cupy array raises TypeError."
+
+[functions."selection.standardize_by_allele_count"]
+# signature: (score, aac, bins, n_bins)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "NaN for NaN scores and for every score in a bin whose std is 0 or NaN"
+parallel = []
+notes = "Runs on CPU with numpy and scipy binned_statistic; a cupy array raises TypeError."
+
+[functions."selection.garud_h"]
+# signature: (matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for all four when no haplotype is complete ('include')"
+parallel = ["_haplotype_hash.garud_h_windows"]
+notes = "Uses _haplotype_groups.frequencies for all data, while garud_h_windows hashes clean windows; a GenotypeMatrix goes to garud_h_diploid."
+
+[functions."selection.moving_garud_h"]
+# signature: (haplotype_matrix, size, start, stop, step, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN in a window with no complete haplotype ('include')"
+parallel = ["selection.garud_h"]
+notes = "Thin wrapper over _haplotype_hash.garud_h_windows, the same function the windowed engines and StatisticsComputer._garud_h call; no GenotypeMatrix dispatch."
+
+[functions."selection.garud_h_diploid"]
+# signature: (genotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for all four when no diplotype is complete ('include')"
+parallel = []
+notes = "Alias of _garud_h_diploid; frequencies come from diversity.diplotype_frequency_spectrum."
+
+[functions."selection.nsl"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN where an allele class has no homozygous pair; all NaN when there is no alternate allele"
+parallel = []
+notes = "Under 'exclude' the result has one entry per complete site, not per input site."
+
+[functions."selection.xpnsl"]
+# signature: (haplotype_matrix, pop1, pop2, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when a population has fewer than two haplotypes"
+parallel = []
+notes = "Under 'exclude' sites are dropped on missing calls in every row of the matrix, not only pop1 and pop2."
+
+[functions."selection.ihs"]
+# signature: (haplotype_matrix, pos, map_pos, min_ehh, min_maf, include_edges, gap_scale, max_gap, is_accessible, population, missing_data)
+axis_kwargs = ["missing_data", "population", "is_accessible"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none (gaps scaled by is_accessible or gap_scale)"
+undefined = "NaN where MAF < min_maf, EHH does not decay below min_ehh (unless include_edges), or past a gap > max_gap; all NaN with no alternate allele"
+parallel = []
+notes = "Under 'exclude' pos is subset but map_pos is not, so a map_pos with dropped sites raises IndexError."
+
+[functions."selection.xpehh"]
+# signature: (haplotype_matrix, pop1, pop2, pos, map_pos, min_ehh, include_edges, gap_scale, max_gap, is_accessible, missing_data)
+axis_kwargs = ["missing_data", "pop1", "pop2", "is_accessible"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none (gaps scaled by is_accessible or gap_scale)"
+undefined = "NaN where EHH does not decay below min_ehh (unless include_edges) or past a gap > max_gap"
+parallel = []
+notes = "Under 'exclude' sites are dropped on every row of the matrix, and map_pos is not subset (IndexError)."
+
+[functions."selection.ehh_decay"]
+# signature: (haplotype_matrix, truncate, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "raises ValueError when there are fewer than two haplotypes"
+parallel = []
+notes = "EHH is measured from the first variant only; under 'exclude' the output length is the number of complete sites."
+
+[functions."ld_statistics.dd"]
+# signature: (counts, populations, n_valid)
+axis_kwargs = ["populations"]
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n < 4 (within) or n < 2 in either population (between)"
+parallel = ["haplotype_kernels.compute_all_dd_hap", "genotype_kernels.compute_all_dd_geno", "ld_statistics._tile_sigma_d2"]
+notes = "Counts are (N, 4*P) haplotype counts; a tuple n_valid raises AttributeError on the within-population branches."
+
+[functions."ld_statistics.dz"]
+# signature: (counts, populations, n_valid)
+axis_kwargs = ["populations"]
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where a population's n is below its falling-factorial order (n < 4 for one population)"
+parallel = ["haplotype_kernels.compute_all_dz_hap", "genotype_kernels.compute_all_dz_geno"]
+notes = "Returns the raw (i, j, k) term; callers average (i, j, k) and (i, k, j) to get the moments Dz."
+
+[functions."ld_statistics.pi2"]
+# signature: (counts, populations, n_valid)
+axis_kwargs = ["populations"]
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where a population's n is below its falling-factorial order (n < 4 for one population)"
+parallel = ["haplotype_kernels.compute_all_pi2_hap", "genotype_kernels.compute_all_pi2_geno", "ld_pipeline.generate_stat_specs", "ld_statistics._tile_sigma_d2"]
+notes = "Averages over the symmetry orbit internally; generate_stat_specs encodes the same weights for the kernel path."
+
+[functions."ld_statistics.dd_within"]
+# signature: (counts, n_valid)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n < 4"
+parallel = ["haplotype_kernels.compute_all_dd_hap", "genotype_kernels.compute_all_dd_geno", "ld_statistics._tile_sigma_d2"]
+
+[functions."ld_statistics.dd_between"]
+# signature: (counts, pop1_idx, pop2_idx, n_valid)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n < 2 in either population"
+parallel = ["haplotype_kernels.compute_all_dd_hap", "genotype_kernels.compute_all_dd_geno"]
+notes = "A 1-D n_valid is used for both populations."
+
+[functions."ld_statistics.r"]
+# signature: (counts, n_valid)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "NaN where either locus is monomorphic"
+parallel = []
+notes = "Needs cupy counts; a numpy array raises TypeError."
+
+[functions."ld_statistics.r_squared"]
+# signature: (counts, n_valid)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "NaN where either locus is monomorphic"
+parallel = ["HaplotypeMatrix.pairwise_r2", "HaplotypeMatrix.locate_unlinked", "ld_statistics._tile_r2_naive", "ld_statistics._r2_matrix_diploid"]
+notes = "Needs cupy counts; a numpy array raises TypeError."
+
+[functions."ld_statistics.d_prime"]
+# signature: (counts, n_valid)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "NaN where either locus is monomorphic or D_max is 0"
+parallel = []
+notes = "Needs cupy counts; a numpy array raises TypeError."
+
+[functions."ld_statistics.rogers_huff_r"]
+# signature: (matrix, tile_size)
+axis_kwargs = []
+inputs = ["GenotypeMatrix"]
+streaming = "rejects"
+missing_data = []
+span = "none"
+undefined = "NaN where either variant has constant dosage; empty array for fewer than two variants"
+parallel = ["ld_statistics._r2_matrix_diploid"]
+notes = "Raises ValueError on any missing call and TypeError on a HaplotypeMatrix."
+
+[functions."ld_statistics.rogers_huff_r_squared"]
+# signature: (matrix, tile_size)
+axis_kwargs = []
+inputs = ["GenotypeMatrix"]
+streaming = "rejects"
+missing_data = []
+span = "none"
+undefined = "NaN where either variant has constant dosage; empty array for fewer than two variants"
+parallel = ["ld_statistics._r2_matrix_diploid"]
+notes = "Raises ValueError on any missing call and TypeError on a HaplotypeMatrix."
+
+[functions."ld_statistics.zns"]
+# signature: (r2_matrix_or_matrix, missing_data, estimator)
+axis_kwargs = ["missing_data"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix", "array"]
+streaming = "rejects"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when fewer than two segregating sites or no defined pair"
+parallel = ["ld_statistics._zns_from_precomputed", "windowed_analysis.windowed_statistics_fused"]
+notes = "HaplotypeMatrix 'r2'/'sigma_d2' use the tiled path; 'rogers_huff' and GenotypeMatrix use _r2_matrix_diploid."
+
+[functions."ld_statistics.omega"]
+# signature: (r2_matrix_or_matrix, missing_data, estimator)
+axis_kwargs = ["missing_data"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix", "array"]
+streaming = "rejects"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when fewer than five sites have a defined r^2, or no partition has a positive cross-partition LD sum"
+parallel = ["ld_statistics._tile_sigma_d2"]
+notes = "Its sigma_d2 matrix comes from ld_statistics._build_sigma_d2_matrix, which uses ld_statistics._tile_sigma_d2, the pair rule that zns uses."
+
+[functions."ld_statistics.mu_ld"]
+# signature: (haplotype_matrix, missing_data)
+axis_kwargs = ["missing_data"]
+inputs = ["HaplotypeMatrix"]
+streaming = "rejects"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when fewer than two segregating sites or no haplotype; NaN when a half has no complete haplotype ('include')"
+parallel = []
+notes = "Drops monomorphic sites first, so they do not move the midpoint. The windowed engine calls this per window and leaves NaN only for a window with no variant."
+
+[functions."ld_statistics.r2_matrix_diploid"]
+# signature: (genotype_matrix)
+axis_kwargs = []
+inputs = ["GenotypeMatrix", "array"]
+streaming = "generic_error"
+missing_data = []
+span = "none"
+undefined = "NaN for a pair where either site has no dosage variance in the jointly valid samples; diagonal 0.0"
+parallel = ["ld_statistics._rogers_huff_pairwise_r"]
+notes = "Alias of _r2_matrix_diploid; missing calls are always handled pairwise-complete, with no mode switch."
+
+[functions."ld_statistics.zns_diploid"]
+# signature: (r2_matrix_or_matrix, missing_data, estimator)
+axis_kwargs = ["missing_data"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix", "array"]
+streaming = "rejects"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when fewer than two segregating sites or no defined pair"
+parallel = ["ld_statistics._zns_from_precomputed", "windowed_analysis.windowed_statistics_fused"]
+notes = "Alias: the same object as zns."
+
+[functions."ld_statistics.omega_diploid"]
+# signature: (r2_matrix_or_matrix, missing_data, estimator)
+axis_kwargs = ["missing_data"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix", "array"]
+streaming = "rejects"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN when fewer than five sites have a defined r^2, or no partition has a positive cross-partition LD sum"
+parallel = ["ld_statistics._tile_sigma_d2"]
+notes = "Alias: the same object as omega."
+
+[functions."ld_statistics.compute_ld_statistics"]
+# signature: (counts, statistics, populations, n_valid)
+axis_kwargs = ["populations"]
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 for dd/dz/pi2 below the sample-size floor; NaN for undefined r/r_squared; ValueError for an unknown name"
+parallel = ["haplotype_kernels.compute_multi_pop_statistics_batch_hap", "genotype_kernels.compute_multi_pop_statistics_batch_geno"]
+notes = "Accepts 'dd', 'dz', 'pi2', 'r', 'r_squared' but not 'd_prime'."
+
+[functions."ld_statistics_genotype.dd_geno_single"]
+# signature: (p)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n < 4"
+parallel = ["genotype_kernels._DD_GENO_SINGLE_KERN", "genotype_kernels._SIGMA_D2_GENO_KERN", "ld_statistics.dd"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.dd_geno_between"]
+# signature: (pi, pj)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n < 2 in either population"
+parallel = ["genotype_kernels._DD_GENO_BETWEEN_KERN", "ld_statistics.dd_between"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.dz_geno_single"]
+# signature: (p)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n < 4"
+parallel = ["genotype_kernels._DZ_III_KERN", "ld_statistics.dz"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.dz_geno_p1p2"]
+# signature: (pi, pj)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 3 or n2 < 1"
+parallel = ["genotype_kernels._DZ_IIJ_KERN", "genotype_kernels._DZ_PRECOMP_KERN", "ld_statistics.dz"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.dz_geno_p1p3"]
+# signature: (pi, pj)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 3 or n2 < 1"
+parallel = ["genotype_kernels._DZ_IJI_KERN", "genotype_kernels._DZ_PRECOMP_KERN", "ld_statistics.dz"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.dz_geno_p2p3"]
+# signature: (pi, pj)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 2 or n2 < 2"
+parallel = ["genotype_kernels._DZ_IJJ_KERN", "genotype_kernels._DZ_PRECOMP_KERN", "ld_statistics.dz"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.dz_geno_alldiff"]
+# signature: (pi, pj, pk)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 2, n2 < 1 or n3 < 1"
+parallel = ["genotype_kernels._DZ_DISTINCT_KERN", "genotype_kernels._DZ_PRECOMP_KERN", "ld_statistics.dz"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.pi2_geno_single"]
+# signature: (p)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n < 4"
+parallel = ["genotype_kernels._PI2_IIII_KERN", "genotype_kernels._SIGMA_D2_GENO_KERN", "ld_statistics.pi2"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.pi2_geno_triple_123"]
+# signature: (pi, pj)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 3 or n2 < 1"
+parallel = ["genotype_kernels._PI2_IIIJ_KERN", "ld_statistics.pi2"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.pi2_geno_triple_134"]
+# signature: (pi, pj)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 3 or n2 < 1"
+parallel = ["genotype_kernels._PI2_IJII_KERN", "ld_statistics.pi2"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.pi2_geno_iikk"]
+# signature: (pi, pj)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 2 or n2 < 2"
+parallel = ["genotype_kernels._PI2_IIKK_KERN", "ld_statistics.pi2"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.pi2_geno_ijij"]
+# signature: (pi, pj)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 2 or n2 < 2"
+parallel = ["genotype_kernels._PI2_IJIJ_KERN", "ld_statistics.pi2"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.pi2_geno_iikl"]
+# signature: (pi, pj, pk)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 2, n2 < 1 or n3 < 1"
+parallel = ["genotype_kernels._PI2_IIKL_KERN", "ld_statistics.pi2"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.pi2_geno_ijkk"]
+# signature: (pi, pj, pk)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 2, n2 < 1 or n3 < 1"
+parallel = ["genotype_kernels._PI2_IJKK_KERN", "ld_statistics.pi2"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.pi2_geno_shared"]
+# signature: (pi, pj, pk)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where n1 < 2, n2 < 1 or n3 < 1"
+parallel = ["genotype_kernels._PI2_SHARED_KERN", "ld_statistics.pi2"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.pi2_geno_alldiff"]
+# signature: (pi, pj, pk, pl)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where any of n1..n4 < 1"
+parallel = ["genotype_kernels._PI2_ALLDIFF_KERN", "ld_statistics.pi2"]
+notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
+
+[functions."ld_statistics_genotype.sigma_d2_geno"]
+# signature: (matrix, idx_i, idx_j)
+axis_kwargs = []
+inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
+streaming = "rejects"
+missing_data = []
+span = "none"
+undefined = "NaN where fewer than four individuals or pi^2 <= 0"
+parallel = ["genotype_kernels._DD_GENO_SINGLE_KERN", "genotype_kernels._PI2_IIII_KERN", "ld_statistics._tile_sigma_d2"]
+notes = "Streaming input meets an isinstance TypeError that names the type, not a streaming message; raises ValueError on any missing call."
+
+[functions."moments_ld.compute_ld_statistics"]
+# signature: (vcf_file, rec_map_file, pop_file, pops, r_bins, bp_bins, use_genotypes, report, haplotype_matrix, genotype_matrix, accessible_bed, pop_assignment, chunk_size, available_memory_bytes)
+axis_kwargs = ["accessible_bed", "bp_bins"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix", "other"]
+streaming = "generic_error"
+missing_data = []
+span = "none"
+undefined = "pairs below a population's sample-size floor add 0.0; an empty bin sums to 0.0"
+parallel = ["HaplotypeMatrix.compute_ld_statistics_gpu_single_pop", "HaplotypeMatrix.compute_ld_statistics_gpu_two_pops", "haplotype_matrix._stream_ld_single_pop", "haplotype_matrix._stream_ld_two_pops"]
+notes = "'other' is a VCF path; two-pop haplotype runs use ld_statistics.dd/dz/pi2, all other cases the fused kernels."
+
+[functions."decomposition.pca"]
+# signature: (haplotype_matrix, n_components, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "zero coords and NaN explained_variance_ratio when no segregating column is left"
+parallel = ["decomposition.randomized_pca", "relatedness._relatedness_columns"]
+notes = "Rejects GenotypeMatrix with a TypeError; sums the Gram over variant chunks with cublas syrk and divides it by the segregating-site count."
+
+[functions."decomposition.randomized_pca"]
+# signature: (haplotype_matrix, n_components, population, n_iter, random_state, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "empty (n, 0) coords and ratio when no column is left; NaN ratio when the total variance is 0"
+parallel = ["decomposition.pca", "decomposition.randomized_pca_dosage"]
+notes = "Holds the full centered one-hot matrix on the GPU (no variant chunking, unlike pca); with random_state=None it draws from the global CuPy RNG."
+
+[functions."decomposition.pca_dosage"]
+# signature: (genotype_matrix, n_components, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["GenotypeMatrix"]
+streaming = "rejects"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "zero coords and NaN explained_variance_ratio when no variant is left or every site is monomorphic (scale 1, adds 0)"
+parallel = ["decomposition.randomized_pca_dosage", "relatedness.grm"]
+notes = "Raises ValueError on a dosage above 2; builds the full standardized X (no chunked Gram) and does not divide the Gram by the site count; the TypeError for a non-GenotypeMatrix does not mention streaming."
+
+[functions."decomposition.randomized_pca_dosage"]
+# signature: (genotype_matrix, n_components, population, n_iter, random_state, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["GenotypeMatrix"]
+streaming = "rejects"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "empty (n, 0) coords and ratio when no variant is left; NaN ratio when the total variance is 0"
+parallel = ["decomposition.pca_dosage", "decomposition.randomized_pca"]
+notes = "Same standardization as pca_dosage (_prepare_dosage); the randomized SVD loop is a copy of the one in randomized_pca."
+
+[functions."decomposition.pairwise_distance"]
+# signature: (haplotype_matrix, metric, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for a pair with no site called in both; every pair is NaN under exclude when no site is complete"
+parallel = ["divergence.pairwise_distance_matrix", "distance_stats.pairwise_diffs_haploid"]
+notes = "Uses _pairwise_diffs_matrix_gpu in 'scale' mode (count * n_sites / joint sites), as divergence does; distance_stats uses 'normalize' (per-site mean); rejects GenotypeMatrix with a TypeError."
+
+[functions."decomposition.pcoa"]
+# signature: (dist, n_components)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "raises ValueError on any NaN distance; keeps only positive eigenvalues"
+parallel = []
+notes = "Runs on the CPU with numpy and scipy squareform, not on the GPU; a cupy input fails in np.asarray."
+
+[functions."decomposition.local_pca"]
+# signature: (haplotype_matrix, window_params, k, missing_data, population, batch_size, window_size, step_size, window_type, regions, engine, tile_size, oversample, n_subspace_iter, random_state)
+axis_kwargs = ["missing_data", "population", "window_size", "step_size", "window_type", "regions"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN eigvals, eigvecs and sumsq for a window with fewer than max(k, 2) variants (count before the exclude filter); raises ValueError when there is no window"
+parallel = ["decomposition._local_pca_streaming", "decomposition._local_pca_with_jackknife"]
+notes = "windowed_analysis reaches it through _LOCAL_PCA_STATS with window_type default 'bp' and no engine kwargs, and raises NotImplementedError for a StreamingHaplotypeMatrix; a GenotypeMatrix fails with AttributeError num_haplotypes."
+
+[functions."decomposition.pc_dist"]
+# signature: (source, npc, normalize, w)
+axis_kwargs = []
+inputs = ["array", "other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "NaN row and column for a window with NaN eigvals, or with a zero eigenvalue sum under L1 or L2"
+parallel = []
+notes = "Takes a LocalPCAResult or a flat lostruct matrix (npc is then required)."
+
+[functions."decomposition.corners"]
+# signature: (xy, prop, k, random_state)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "drops NaN rows; raises ValueError with fewer than max(k, 3) valid points"
+parallel = []
+notes = "A k below 3 is raised to 3, so the output has max(k, 3) columns; runs on the CPU."
+
+[functions."decomposition.lostruct"]
+# signature: (haplotype_matrix, window_params, k, missing_data, population, batch_size, window_size, step_size, window_type, regions, jackknife, n_blocks, jackknife_aggregate, npc, normalize, pc_dist_weights, n_components, corner_prop, n_corners, random_state, engine, tile_size, oversample, n_subspace_iter)
+axis_kwargs = ["missing_data", "population", "window_size", "step_size", "window_type", "regions"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN mds row for a window that pc_dist cannot compare; raises ValueError with fewer than 2 comparable windows"
+parallel = []
+notes = "With jackknife=True it calls _local_pca_with_jackknife and drops engine, tile_size, oversample, n_subspace_iter and random_state for the local PCA step."
+
+[functions."decomposition.local_pca_jackknife"]
+# signature: (haplotype_matrix, window_params, k, n_blocks, missing_data, population, aggregate, batch_size, window_size, step_size, window_type, regions)
+axis_kwargs = ["missing_data", "population", "window_size", "step_size", "window_type", "regions"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN rows for a window with fewer than max(k, 2) * n_blocks variants; raises ValueError when there is no window"
+parallel = ["decomposition._local_pca_with_jackknife"]
+notes = "windowed_analysis and lostruct use the private _local_pca_with_jackknife, which gates on one-hot columns, not variants; blocks split the one-hot column axis."
+
+[functions."distance_stats.pairwise_diffs_haploid"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for a pair with no site called in both; every pair is NaN under exclude when no site is complete"
+parallel = ["decomposition.pairwise_distance", "divergence.pairwise_distance_matrix", "distance_stats.pairwise_diffs_diploid"]
+notes = "Per-site mean ('normalize' mode of _pairwise_diffs_matrix_gpu), not the scaled count of pairwise_distance; a GenotypeMatrix fails with AttributeError haplotypes."
+
+[functions."distance_stats.pairwise_diffs_diploid"]
+# signature: (genotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for a pair with no site called in both; every pair is NaN under exclude when no site is complete"
+parallel = ["distance_stats.pairwise_diffs_haploid"]
+notes = "Same helper and exclude filter as the haploid form, run on 0/1/2 values; a HaplotypeMatrix fails with AttributeError genotypes."
+
+[functions."distance_stats.dist_moments"]
+# signature: (matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "skips NaN pairs; with too few defined pairs (var 2, skew 3, kurt 4) NaN if some pair is NaN, else 0.0; skew and kurt 0.0 when all distances are equal"
+parallel = ["windowed_analysis.windowed_statistics_fused"]
+notes = "Moments are computed on the host with numpy; the fused windowed loop calls this per window and leaves NaN only for a window with no variant."
+
+[functions."distance_stats.dist_var"]
+# signature: (matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN with fewer than 2 defined pairs when some pair is NaN, else 0.0"
+parallel = ["windowed_analysis.windowed_statistics_fused"]
+notes = "Wrapper that computes all three moments through dist_moments and returns one."
+
+[functions."distance_stats.dist_skew"]
+# signature: (matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN with fewer than 3 defined pairs when some pair is NaN, else 0.0; 0.0 when all distances are equal"
+parallel = ["windowed_analysis.windowed_statistics_fused"]
+notes = "Wrapper that computes all three moments through dist_moments and returns one."
+
+[functions."distance_stats.dist_kurt"]
+# signature: (matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN with fewer than 4 defined pairs when some pair is NaN, else 0.0; 0.0 when all distances are equal"
+parallel = ["windowed_analysis.windowed_statistics_fused"]
+notes = "Wrapper that computes all three moments through dist_moments and returns one; excess kurtosis (minus 3)."
+
+[functions."distance_stats.pairwise_diffs"]
+# signature: (matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
+streaming = "generic_error"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for a pair with no site called in both"
+parallel = ["decomposition.pairwise_distance", "divergence.pairwise_distance_matrix"]
+notes = "Dispatches on isinstance(GenotypeMatrix), so a StreamingGenotypeMatrix goes to the haploid branch and fails on .device."
+
+[functions."relatedness.genetic_relatedness"]
+# signature: (haplotype_matrix, sample_sets, indexes, centre, polarised, proportion, span_normalize, missing_data)
+axis_kwargs = ["missing_data", "span_normalize"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "get_span"
+undefined = "a set with no valid sample at a site gets frequency 0 under include; returns the raw sum when the span or the segregating count is 0"
+parallel = ["relatedness._stream_genetic_relatedness", "decomposition._centered_block"]
+notes = "Rejects GenotypeMatrix and StreamingGenotypeMatrix with a TypeError; proportion=True divides by segregating sites and ignores span_normalize."
+
+[functions."relatedness.grm"]
+# signature: (genotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["GenotypeMatrix", "StreamingGenotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero matrix when no polymorphic site is left"
+parallel = ["relatedness._stream_grm", "decomposition._prepare_dosage"]
+notes = "Divides by the count of polymorphic sites, not by the sites each pair calls; rejects HaplotypeMatrix and StreamingHaplotypeMatrix with a TypeError."
+
+[functions."relatedness.ibs"]
+# signature: (genotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["GenotypeMatrix", "StreamingGenotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "NaN for a pair with no jointly called site; the diagonal is always set to 1.0"
+parallel = ["relatedness._stream_ibs"]
+notes = "Rejects HaplotypeMatrix and StreamingHaplotypeMatrix with a TypeError; the streaming path sums on the host in row blocks."
+
+[functions."plotting.plot_sfs"]
+# signature: (s, ax, folded, scaled, clip_endpoints, log_scale, color, kwargs)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "a NaN bar is not drawn; log y-scale only when some value is above 0"
+parallel = []
+notes = "Needs a numpy array (sfs.* return numpy); a cupy array raises TypeError in np.asarray."
+
+[functions."plotting.plot_joint_sfs"]
+# signature: (s, ax, log_scale, cmap, clip_endpoints, kwargs)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "masks zeros only; any NaN, or an all-zero matrix, raises ValueError under log_scale"
+parallel = []
+notes = "clip_endpoints drops only row 0 and column 0, though the docstring says the last ones too."
+
+[functions."plotting.plot_pairwise_ld"]
+# signature: (r2_matrix, ax, cmap, vmin, vmax, positions, kwargs)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "imshow shows a NaN cell as blank (bad color)"
+parallel = []
+notes = "HaplotypeMatrix.pairwise_r2, the producer the docstring names, returns a cupy array, which np.asarray rejects with TypeError."
+
+[functions."plotting.plot_ld_decay"]
+# signature: (distances, r2_values, ax, bins, color, percentile, kwargs)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "drops NaN r2 (not NaN distances); NaN for an empty bin; raises ValueError when no r2 is finite and bins is an int"
+parallel = []
+notes = "With an int bins the pair at the largest distance falls outside the last bin (np.digitize); a numpy integer bins is taken as edges and fails."
+
+[functions."plotting.plot_pca"]
+# signature: (coords, ax, pc_x, pc_y, explained_variance, labels, palette, s, alpha, kwargs)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "scatter skips a NaN row silently; a NaN explained_variance prints as nan%"
+parallel = []
+
+[functions."plotting.plot_pairwise_distance"]
+# signature: (dist, ax, labels, cmap, kwargs)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "imshow shows a NaN pair as blank (bad color)"
+parallel = []
+notes = "A condensed input goes through scipy squareform, which sets the diagonal to 0."
+
+[functions."plotting.plot_windowed"]
+# signature: (window_start, values, ax, stat_name, color, fill_alpha, kwargs)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "the line and the fill break at a NaN window"
+parallel = []
+notes = "The x unit (bp, kb, Mb) comes from the largest window_start."
+
+[functions."plotting.plot_windowed_panel"]
+# signature: (results, statistics, figsize, colors)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "as plot_windowed: gaps at NaN windows"
+parallel = []
+notes = "results is a dict or windowed DataFrame with a 'start' key; with statistics=None it plots every key not in CANONICAL_WINDOW_PREFIX."
+
+[functions."plotting.plot_haplotype_frequencies"]
+# signature: (freqs, ax, palette, singleton_color)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "a NaN frequency makes the running x NaN, so that span and all later spans are not drawn (no error)"
+parallel = []
+
+[functions."plotting.plot_variant_locator"]
+# signature: (positions, ax, step, color)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "raises IndexError on empty positions"
+parallel = []
+notes = "Draws one line per variant in a Python loop; use step for large inputs."
+
+[functions."accessible.parse_bed"]
+# signature: (path, chrom)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "source intervals for the accessible mask that get_span('auto') counts"
+undefined = "skips comment, track, browser and short lines; chrom=None returns every contig"
+parallel = []
+notes = "Input is a plain-text BED path (open() with no gzip support); coordinates stay 0-based half-open."
+
+[functions."accessible.bed_to_mask"]
+# signature: (path, chrom, length, offset)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "builds the AccessibleMask that get_span('auto') counts"
+undefined = "all-False mask, with no error, when the BED has no interval on chrom"
+parallel = []
+notes = "Input is a BED path; mask index k is 1-based position offset + k."
+
+[functions."accessible.resolve_accessible_mask"]
+# signature: (mask_or_path, chrom_start, chrom_end, chrom)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "builds the AccessibleMask that get_span('auto') counts"
+undefined = "raises ValueError when the BED has no interval on chrom; chrom=None reads every contig"
+parallel = ["windowed_analysis._compute_window_bases"]
+notes = "Takes a BED path, a numpy bool array (offset chrom_start, or 0) or an AccessibleMask; a cupy array is not caught and is opened as a path (TypeError)."
+
+[functions."accessible.slice_fields"]
+# signature: (fields, keep_idx, accessible_idx)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "returns {} for empty fields"
+parallel = []
+notes = "fields is a dict of host arrays sliced on axis 0; keep_idx (numpy or cupy) moves to host, and accessible_idx maps a masked-view index to the full array."
+
+[functions."accessible.resolve_streaming_accessible_mask"]
+# signature: (accessible_bed, source, region)
+axis_kwargs = ["accessible_bed"]
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "builds the mask that streaming get_span('auto') counts and that filters each chunk"
+undefined = "returns None when accessible_bed is None; else as resolve_accessible_mask"
+parallel = ["windowed_analysis._stream_windowed_analysis"]
+notes = "Takes a BED path, numpy array or AccessibleMask plus a ZarrGenotypeSource; bounds are source.grid_start and grid_end, and the contig comes from region, else source.chrom."
+
+[functions."ld_pipeline.estimate_ld_chunk_size"]
+# signature: (n_gathered_rows, n_stats, available_memory_bytes)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "raises ValueError when n_stats < 1; the result is clamped to [1000, 10000000]"
+parallel = []
+notes = "Takes ints; with available_memory_bytes=None it uses half of free GPU memory, and the 1000-pair floor can exceed that budget."
+
+[functions."ld_pipeline.iter_pairs_within_distance"]
+# signature: (positions, max_dist, chunk_size)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "yields nothing for fewer than 2 variants or no pair within max_dist"
+parallel = []
+notes = "positions must be a sorted cupy array (numpy raises NotImplementedError in cp.searchsorted); a pair is kept when pos[j] - pos[i] <= max_dist."
+
+[functions."ld_pipeline.compute_counts_for_pairs"]
+# signature: (haplotypes, idx_i, idx_j, pop_indices, has_missing)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n_valid is None when has_missing is False"
+parallel = ["haplotype_matrix.HaplotypeMatrix._tally_pairs_impl", "ld_statistics._tile_counts"]
+notes = "Counts only values 0 and 1, so an allele 2 is valid but not counted; every caller passes _biallelic_indicator() output."
+
+[functions."ld_pipeline.compute_genotype_counts_for_pairs"]
+# signature: (genotypes, idx_i, idx_j, pop_indices)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n_valid is None when the population rows have no missing call"
+parallel = []
+notes = "RawKernel loops over individuals per pair; it casts the input to int8 and reduces the whole matrix for has_missing on every call."
+
+[functions."ld_pipeline.compute_two_pop_statistics_batch"]
+# signature: (counts_pop1, counts_pop2, n_valid1, n_valid2, ld_statistics)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where a pair has too few valid samples (ld_statistics dd, dz, pi2 rules)"
+parallel = ["haplotype_kernels.compute_multi_pop_statistics_batch_hap", "ld_pipeline.generate_stat_specs"]
+notes = "Hand-unrolls the 2-pop Dz averaging that generate_stat_specs encodes; the column order must match ld_names(2)."
+
+[functions."ld_pipeline.compute_single_pop_statistics_batch"]
+# signature: (counts, n_valid, ld_statistics)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "0.0 where a pair has fewer than 4 valid samples (ld_statistics dd, dz, pi2 rules)"
+parallel = ["haplotype_kernels.compute_multi_pop_statistics_batch_hap"]
+notes = "moments_ld with one population uses the fused multi-pop kernels instead of this function."
+
+[functions."ld_pipeline.ld_names"]
+# signature: (num_pops)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n/a"
+parallel = ["ld_pipeline.compute_two_pop_statistics_batch"]
+notes = "Order must match moments.LD.Util.ld_names and the column order that compute_two_pop_statistics_batch stacks."
+
+[functions."ld_pipeline.het_names"]
+# signature: (num_pops)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n/a"
+parallel = ["moments_ld._compute_heterozygosity"]
+notes = "moments_ld._compute_heterozygosity builds the same H_i_j keys with its own loop."
+
+[functions."ld_pipeline.generate_stat_specs"]
+# signature: (num_pops)
+axis_kwargs = []
+inputs = ["other"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "n/a"
+parallel = ["ld_statistics._pi2_multi", "ld_pipeline.compute_two_pop_statistics_batch"]
+notes = "The pi2 weights encode the same symmetry orbit that ld_statistics._pi2_multi averages over."
