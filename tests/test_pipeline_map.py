@@ -15,7 +15,12 @@ import tomllib
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-MAP = tomllib.loads((ROOT / "docs" / "dev" / "pipeline_map.toml").read_text())
+MAP_PATH = ROOT / "docs" / "dev" / "pipeline_map.toml"
+if not MAP_PATH.exists():
+    # The source distribution ships tests/ but not docs/, so the map exists
+    # only in a repository checkout.
+    pytest.skip(f"{MAP_PATH} is not in this tree", allow_module_level=True)
+MAP = tomllib.loads(MAP_PATH.read_text())
 
 
 def _module(name):
@@ -141,6 +146,21 @@ def test_windowed_rows_name_known_engines():
     named = {e for row in MAP["windowed"].values() for e in row["engines"]}
     unknown = named - set(ENGINES)
     assert not unknown, f"[windowed] rows name engines with no `stats` in [engines]: {sorted(unknown)}"
+
+
+def test_alias_rows_match():
+    # An alias is the same function object under a second name, so its row
+    # must say the same as the row of the name it aliases; only notes differ.
+    groups = {}
+    for name in MAP["functions"]:
+        groups.setdefault(id(_resolve(name)), []).append(name)
+    for names in (g for g in groups.values() if len(g) > 1):
+        first, *rest = sorted(names)
+        expect = {k: v for k, v in MAP["functions"][first].items() if k != "notes"}
+        for name in rest:
+            got = {k: v for k, v in MAP["functions"][name].items() if k != "notes"}
+            differ = sorted(k for k in expect.keys() | got.keys() if expect.get(k) != got.get(k))
+            assert not differ, f"{name} aliases {first}, but their rows differ in {differ}"
 
 
 def test_every_named_path_resolves():

@@ -95,7 +95,7 @@ check = "Names and row lists must give the same values. Two-population windowed 
 
 [axes.windowing]
 description = "How windows are formed. windowed_analysis picks one engine per request; see [engines]. Other functions make their own windows."
-values = ["bp windows (window_size, step_size)", "snp windows (window_type='snp'; the fallback and local_pca only)", "regions (window_type='regions' with a regions DataFrame of half-open [start, end) windows; the fused engines and the fallback)", "bp_bins edges (windowed_statistics*, LD bins)", "moving windows in variant counts (moving_*)"]
+values = ["bp windows (window_size, step_size)", "snp windows (window_type='snp'; the fallback and local_pca only)", "regions (window_type='regions' with a regions DataFrame of half-open [start, end) windows; the fused engines and the fallback; theta_l, zeng_e, zeng_dh, normalized_fay_wu_h, mean_nsl, daf_hist and mu_sfs raise NotImplementedError)", "bp_bins edges (windowed_statistics*, LD bins)", "moving windows in variant counts (moving_*)"]
 check = "windowed_analysis._bp_window_grid makes the bp grid for the scatter and fused engines; for window_type='regions' the fused engines take regions['start'] and regions['end'] as window edges; windowed_analysis.WindowIterator makes the fallback windows. The fused engines give a row for an empty region, but the fallback gives none (#356). No engine reads a chrom column in regions to select variants; the fallback copies it into the output chrom column, and the fused engines write the chrom argument."
 
 [axes.streaming]
@@ -243,7 +243,7 @@ missing_data = ["include", "exclude"]
 [engines.fused]
 function = "windowed_analysis.windowed_statistics_fused"
 stats = "windowed_analysis._FUSED_STATS"
-chosen = "No scatter engine takes the request, window_type is 'bp' or 'regions', every name is in its set, two-population names come with exactly two populations, and missing_data='include'. Under 'exclude' it runs only for a Garud-only request or a request with a name that the fallback does not know."
+chosen = "No scatter engine takes the request, window_type is 'bp' or 'regions' (for regions, mean_nsl, daf_hist and mu_sfs raise NotImplementedError), every name is in its set, two-population names come with exactly two populations, and missing_data='include'. Under 'exclude' it runs only for a Garud-only request or a request with a name that the fallback does not know."
 span = "windowed_analysis._compute_window_bases: the accessible mask, else the window length. It does not read n_total_sites."
 missing_data = ["include", "exclude"]
 
@@ -1122,7 +1122,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "0.0 when no site has data in both pops (also when exclude leaves none, before any span check); NaN when span is 0; per_site=True gives an empty array under exclude with no complete site"
+undefined = "Under include, the sum over sites with data in both pops divided by the span: 0.0 when no site has such data, NaN when the span is 0. Under exclude, 0.0 when no complete site is left, before the span check, so also at span 0; per_site=True then gives an empty array."
 parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel", "windowed_analysis.windowed_statistics"]
 notes = "per_site=True returns raw per-site values for the kept sites only, with no span."
 
@@ -1133,7 +1133,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "0.0 when no site has data in both pops or exclude leaves none; NaN when span is 0"
+undefined = "Under include, the raw value divided by the span: 0.0 when no site has data in both pops, NaN when the span is 0. Under exclude, 0.0 when no complete site is left, before the span check, so also at span 0."
 parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
 notes = "Within-pop pi terms count only sites where both pops have data, so they differ from diversity.pi on the same population."
 
@@ -1649,7 +1649,7 @@ inputs = ["HaplotypeMatrix", "GenotypeMatrix", "array"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "0.0 when fewer than two segregating sites or no defined pair"
+undefined = "NaN when fewer than two segregating sites or no defined pair"
 parallel = ["ld_statistics._zns_from_precomputed", "windowed_analysis.windowed_statistics_fused"]
 notes = "Alias: the same object as zns."
 
@@ -1660,7 +1660,7 @@ inputs = ["HaplotypeMatrix", "GenotypeMatrix", "array"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "0.0 when fewer than five sites have a defined r^2"
+undefined = "NaN when fewer than five sites have a defined r^2, or no partition has a positive cross-partition LD sum"
 parallel = ["ld_statistics._tile_sigma_d2"]
 notes = "Alias: the same object as omega."
 
