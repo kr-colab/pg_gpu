@@ -502,6 +502,14 @@ Bug fixes
   ``regions`` is not passed alongside ``window_type='regions'`` and vice-versa.
   An error is raised when ``window_type='snp'`` or ``'regions'`` for a
   ``StreamingHaplotypeMatrix``.
+* ``windowed_analysis`` ignored an unknown keyword argument when the
+  scatter or fused engine served the request, so a misspelled name, or
+  ``population=`` in place of ``populations=``, changed nothing and gave
+  no error. It now raises ``TypeError`` for any name that no engine reads,
+  whichever engine serves the request, and suggests the closest valid
+  name. ``population``, ``k``, ``n_blocks``, ``batch_size`` and
+  ``aggregate`` are valid only with ``local_pca`` or
+  ``local_pca_jackknife``.
 
 New warnings
 ~~~~~~~~~~~~

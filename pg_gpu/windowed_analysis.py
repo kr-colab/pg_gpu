@@ -5,6 +5,8 @@ This module provides efficient computation of statistics in sliding or non-overl
 with intelligent memory management and GPU acceleration.
 """
 
+import difflib
+import inspect
 import numpy as np
 import cupy as cp
 import pandas as pd
@@ -1231,6 +1233,31 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
     return out
 
 
+def _check_windowed_kwargs(kwargs, statistics):
+    """Raise TypeError for a keyword argument that no engine reads.
+
+    Only WindowedAnalyzer (the fallback) and the local-PCA dispatch read
+    ``**kwargs``; the scatter and fused engines drop it. Without this check,
+    a misspelled name changes nothing when a fast engine serves the request.
+    """
+    allowed = set(inspect.signature(WindowedAnalyzer.__init__).parameters) - {'self'}
+    if not _LOCAL_PCA_STATS.isdisjoint(statistics):
+        allowed |= _LOCAL_PCA_ONLY_KWARGS
+    unknown = sorted(set(kwargs) - allowed)
+    if not unknown:
+        return
+    named = set(inspect.signature(windowed_analysis).parameters) - {'kwargs'}
+    lines = [f"windowed_analysis() got unexpected keyword arguments {unknown}."]
+    for name in unknown:
+        match = difflib.get_close_matches(name, sorted(allowed | named), n=1)
+        if match:
+            lines.append(f"Did you mean {match[0]!r} for {name!r}?")
+    if not _LOCAL_PCA_ONLY_KWARGS.isdisjoint(unknown):
+        lines.append(f"{sorted(_LOCAL_PCA_ONLY_KWARGS)} apply only to the "
+                     "'local_pca' and 'local_pca_jackknife' statistics.")
+    raise TypeError(" ".join(lines))
+
+
 def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      window_size: int = 50000,
                      step_size: Optional[int] = None,
@@ -1284,7 +1311,11 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         so a window spans [start, end). If 'snp' is given, then `window_size` counts the
         number of variants.
     **kwargs
-        Additional arguments passed to WindowedAnalyzer
+        Passed to WindowedAnalyzer (``regions``, ``ld_bins``,
+        ``custom_stat_kwargs``, ``progress_bar`` and its other parameters),
+        and, for the local-PCA statistics, to the local-PCA functions
+        (``k``, ``population``, ``batch_size``, ``n_blocks``,
+        ``aggregate``). Any other name raises ``TypeError``.
 
     Returns
     -------
@@ -1294,6 +1325,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         of haplotypes with no missing call in each window (suffixed by
         population where the Garud columns are).
     """
+    _check_windowed_kwargs(kwargs, statistics)
     valid_wt = ('bp', 'snp', 'regions')
     if window_type not in valid_wt:
         raise ValueError(f"Unknown window_type: {window_type!r}. Valid types are {valid_wt}.")
