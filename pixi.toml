@@ -84,6 +84,9 @@ ruff = ">=0.4"
 [feature.map-check.dependencies]
 pytest = ">=7.0"
 
+[feature.map-check.tasks]
+check-map = { cmd = "pytest tests/test_pipeline_map.py -v", env = { PG_GPU_SKIP_CUDA_CHECK = "1" } }
+
 [environments]
 default = ["gpu", "dev", "docs"]
 moments = ["gpu", "dev", "docs", "moments"]

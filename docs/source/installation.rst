@@ -130,3 +130,15 @@ validation:
 .. code-block:: bash
 
    pixi run -e moments test   # includes moments LD validation tests
+
+The pipeline map (``docs/dev/pipeline_map.toml``) lists every public
+function, loader, matrix method and windowed statistic, with the parallel
+code paths that must change together. A drift test checks the map against
+the code. It needs no GPU, and CI runs it on every pull request:
+
+.. code-block:: bash
+
+   pixi run check-map
+
+When you add, remove or rename one of these, or change its signature, update
+the map in the same pull request. ``docs/dev/README.md`` says how.

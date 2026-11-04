@@ -44,7 +44,8 @@ def _resolve(name):
 
 def _diff(label, in_code, in_map):
     """A message naming the entries that only the code or only the map has."""
-    lines = [f"{label}: the map and the code disagree."]
+    lines = [f"{label}: the map and the code disagree. Edit "
+             "docs/dev/pipeline_map.toml; docs/dev/README.md says how."]
     if in_code - in_map:
         lines.append(f"  add to the map: {sorted(in_code - in_map)}")
     if in_map - in_code:
