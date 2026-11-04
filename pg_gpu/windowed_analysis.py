@@ -29,6 +29,46 @@ _FUSED_GARUD_STATS = ('garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
 # Statistics that read the rows of two populations.
 _TWO_POP_STATS = frozenset({'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'})
 
+# Single-population statistics that the scatter-add engine
+# (_windowed_thetas_scatter) computes from per-allele counts.
+_SCATTER_SINGLE_STATS = frozenset({
+    'pi', 'theta_w', 'tajimas_d', 'segregating_sites', 'theta_h', 'theta_l',
+    'fay_wu_h', 'singletons', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh',
+    'max_daf'})
+
+# Single-population statistics of the main fused kernel, in both the
+# fused and the chunked engine.
+_FUSED_SINGLE_STATS = frozenset({
+    'pi', 'theta_w', 'tajimas_d', 'segregating_sites', 'singletons',
+    'theta_h', 'fay_wu_h', 'max_daf'})
+
+# Fused stats scattered per variant into windows; they share the window
+# membership arrays built in windowed_statistics_fused.
+_PER_SITE_SCATTER_STATS = ('mean_nsl', 'daf_hist', 'mu_sfs')
+
+# Fused statistics of the variant positions in each window; mu_var is the
+# variant density.
+_SNP_DIST_STATS = frozenset({
+    'snp_dist_mean', 'snp_dist_var', 'snp_dist_min', 'snp_dist_max',
+    'mu_var'})
+
+# Fused statistics computed window by window from the window's variants.
+_PAIRWISE_LD_STATS = frozenset({'zns', 'omega', 'mu_ld'})
+_DIST_MOMENT_STATS = frozenset({'dist_var', 'dist_skew', 'dist_kurt'})
+
+# Statistics that windowed_statistics_fused computes.
+_FUSED_STATS = (_FUSED_SINGLE_STATS | _TWO_POP_STATS
+                | frozenset(_FUSED_GARUD_STATS) | frozenset(_PER_SITE_SCATTER_STATS)
+                | _SNP_DIST_STATS | _PAIRWISE_LD_STATS | _DIST_MOMENT_STATS)
+
+# Statistics that windowed_statistics_fused_chunked computes itself, in
+# chunks. It hands every other fused statistic to windowed_statistics_fused,
+# because those do not need the transposed matrix that the chunking bounds.
+_CHUNKED_OWN_STATS = _FUSED_SINGLE_STATS | _TWO_POP_STATS
+
+# Statistics that windowed_analysis hands to decomposition.local_pca.
+_LOCAL_PCA_STATS = frozenset({'local_pca', 'local_pca_jackknife'})
+
 # Kwargs that the 'local_pca' / 'local_pca_jackknife' dispatch consumes but
 # scalar-stat paths don't accept. Filtered out before the recursive call.
 _LOCAL_PCA_ONLY_KWARGS = frozenset(
@@ -71,11 +111,6 @@ def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
 
 CANONICAL_WINDOW_PREFIX = (
     'chrom', 'start', 'end', 'center', 'n_variants', 'window_id')
-
-# Fused stats scattered per variant into windows; they share the window
-# membership arrays built in windowed_statistics_fused, and the chunked
-# engine delegates them to the non-chunked function.
-_PER_SITE_SCATTER_STATS = ('mean_nsl', 'daf_hist', 'mu_sfs')
 
 # Frequency bins of the windowed daf_hist columns (daf_bin_0 .. daf_bin_19).
 N_DAF_BINS = 20
@@ -1148,7 +1183,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             f"re-open the store with a matching chunk_bp."
         )
 
-    if any(s in ("local_pca", "local_pca_jackknife") for s in statistics):
+    if not _LOCAL_PCA_STATS.isdisjoint(statistics):
         raise NotImplementedError(
             "local_pca requires a chromosome-wide reference and is not "
             "available on the StreamingHaplotypeMatrix path; materialize "
@@ -1349,7 +1384,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     # stats merged into .windows if requested alongside).
     # 'local_pca_jackknife' implies 'local_pca' -- the SE is meaningless
     # without the base eigendecomposition.
-    if 'local_pca' in statistics or 'local_pca_jackknife' in statistics:
+    if not _LOCAL_PCA_STATS.isdisjoint(statistics):
         from . import decomposition
         want_jackknife = 'local_pca_jackknife' in statistics
         local_pca_kwargs = {
@@ -1370,7 +1405,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         else:
             result = decomposition.local_pca(haplotype_matrix, **local_pca_kwargs)
         other_stats = [s for s in statistics
-                       if s not in ('local_pca', 'local_pca_jackknife')]
+                       if s not in _LOCAL_PCA_STATS]
         if other_stats:
             scalar_df = _windowed_analysis(
                 haplotype_matrix,
@@ -1395,16 +1430,11 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 on='window_id', how='left')
         return result
 
-    # Scatter-add path: single-pop theta estimators via per-allele counts + scatter
-    scatter_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
-                      'theta_h', 'theta_l', 'fay_wu_h', 'singletons',
-                      'normalized_fay_wu_h', 'zeng_e', 'zeng_dh', 'max_daf'}
-    scatter_twopop = _TWO_POP_STATS
     requested = set(statistics)
 
     if window_type == 'bp':
         # Pure single-pop request
-        if requested <= scatter_single and len(populations or []) <= 1:
+        if requested <= _SCATTER_SINGLE_STATS and len(populations or []) <= 1:
             result = _windowed_thetas_scatter(
                 haplotype_matrix, window_size, step_size,
                 statistics, populations, missing_data, span_normalize,
@@ -1413,7 +1443,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 return result
 
         # Pure two-pop request
-        if requested <= scatter_twopop and len(populations or []) == 2:
+        if requested <= _TWO_POP_STATS and len(populations or []) == 2:
             result = _windowed_twopop_scatter(
                 haplotype_matrix, window_size, step_size,
                 statistics, populations, missing_data, span_normalize,
@@ -1422,10 +1452,10 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 return result
 
         # Mixed single + two-pop request
-        single_stats = sorted(requested & scatter_single)
-        twopop_stats = sorted(requested & scatter_twopop)
+        single_stats = sorted(requested & _SCATTER_SINGLE_STATS)
+        twopop_stats = sorted(requested & _TWO_POP_STATS)
         if (single_stats and twopop_stats
-                and requested <= (scatter_single | scatter_twopop)
+                and requested <= (_SCATTER_SINGLE_STATS | _TWO_POP_STATS)
                 and len(populations or []) == 2):
             df1 = _windowed_thetas_scatter(
                 haplotype_matrix, window_size, step_size,
@@ -1444,27 +1474,15 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 return df1
 
     # Fused CUDA kernel path for more complex stat combinations.
-    fused_single = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
-                    'singletons', 'theta_h', 'fay_wu_h', 'max_daf'}
-    fused_two = _TWO_POP_STATS
-    fused_garud = set(_FUSED_GARUD_STATS)
-    fused_selection = {'mean_nsl'}
-    fused_diploshic = {'snp_dist_mean', 'snp_dist_var', 'snp_dist_min',
-                       'snp_dist_max', 'mu_var', 'mu_sfs', 'mu_ld',
-                       'daf_hist', 'zns', 'omega',
-                       'dist_var', 'dist_skew', 'dist_kurt'}
-    fused_all = (fused_single | fused_two | fused_garud | fused_selection
-                 | fused_diploshic)
-    requested = set(statistics)
 
     # Under 'exclude' the fused engine serves Garud-only requests and any
     # request with a statistic only it computes (the per-window fallback
     # does not know them); every other 'exclude' request keeps the
     # per-window fallback.
-    fused_only = fused_all - _fallback_stats()
-    can_fuse = ((missing_data == 'include' or requested <= fused_garud
+    fused_only = _FUSED_STATS - _fallback_stats()
+    can_fuse = ((missing_data == 'include' or requested.issubset(_FUSED_GARUD_STATS)
                  or bool(requested & fused_only))
-                and requested <= fused_all
+                and requested <= _FUSED_STATS
                 # The fused engine tiles bp grids and custom regions; snp
                 # windows are variant-index ranges that only the per-window
                 # fallback builds, so they must skip the fused path.
@@ -1474,7 +1492,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 # computes the first pair only and names the column after the
                 # bare statistic. The per-window fallback computes every pair
                 # and suffixes the names, the same as missing_data='exclude'.
-                and (not (requested & fused_two)
+                and (not (requested & _TWO_POP_STATS)
                      or len(populations or []) == 2))
 
     if window_type == 'regions':
@@ -1533,7 +1551,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         n_var = haplotype_matrix.num_variants
         transpose_bytes = n_var * n_hap  # int8
         free_mem = cp.cuda.Device().mem_info[0]
-        use_chunked = (bool(requested - fused_garud)
+        use_chunked = (bool(requested.difference(_FUSED_GARUD_STATS))
                        and transpose_bytes * 2 > free_mem * 0.7)
 
         fused_fn = (windowed_statistics_fused_chunked if use_chunked
@@ -2253,9 +2271,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             results['end'], is_accessible)
 
     # single-pop stats via fused kernel
-    single_pop_stats = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
-                        'singletons', 'theta_h', 'fay_wu_h', 'max_daf'}
-    single_pop_requested = any(s in statistics for s in single_pop_stats)
+    single_pop_requested = not _FUSED_SINGLE_STATS.isdisjoint(statistics)
     if single_pop_requested:
         from .diversity import _get_a1_inv
 
@@ -2465,9 +2481,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         results['mean_nsl'] = _windowed_mean(vals, wins, valid, n_windows)
 
     # SNP distance stats per window
-    snp_dist_stats = {'snp_dist_mean', 'snp_dist_var', 'snp_dist_min',
-                      'snp_dist_max', 'mu_var'}
-    if any(s in statistics for s in snp_dist_stats):
+    if not _SNP_DIST_STATS.isdisjoint(statistics):
         ws_np, we_np = win_start.get(), win_stop.get()
         pos_cpu = positions.get() if hasattr(positions, 'get') else np.asarray(positions)
         sd_mean = np.full(n_windows, np.nan)
@@ -2546,9 +2560,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         results['mu_sfs'] = (edge_sum / seg_sum).get()
 
     # Per-window pairwise stats (LD, distance moments)
-    ld_pairwise = {'zns', 'omega', 'mu_ld'}
-    dist_pairwise = {'dist_var', 'dist_skew', 'dist_kurt'}
-    perwin_stats = {s for s in (ld_pairwise | dist_pairwise) if s in statistics}
+    perwin_stats = (_PAIRWISE_LD_STATS | _DIST_MOMENT_STATS) & set(statistics)
 
     if perwin_stats:
         from . import ld_statistics
@@ -2556,7 +2568,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         ws_np, we_np = win_start.get(), win_stop.get()
 
         stat_arrays = {s: np.full(n_windows, np.nan) for s in perwin_stats}
-        need_dist = bool(perwin_stats & dist_pairwise)
+        need_dist = bool(perwin_stats & _DIST_MOMENT_STATS)
         need_winmat = bool(perwin_stats - {'zns'})
 
         # zns/omega restrict to biallelic; the excluded multiallelic sites are
@@ -2715,9 +2727,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     chunk_size = max(chunk_size, max_win_variants + 1)
 
     # ── Single-pop stats via chunked fused kernel ────────────────────────
-    single_pop_stats = {'pi', 'theta_w', 'tajimas_d', 'segregating_sites',
-                        'singletons', 'theta_h', 'fay_wu_h', 'max_daf'}
-    single_pop_requested = any(s in statistics for s in single_pop_stats)
+    single_pop_requested = not _FUSED_SINGLE_STATS.isdisjoint(statistics)
     if single_pop_requested:
         from .diversity import _get_a1_inv
 
@@ -2964,18 +2974,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             else:
                 results['da'] = da_sum.get()
 
-    # Delegate Garud H / scatter-add stats / per-window LD to the
-    # non-chunked function (they already handle large data or operate
-    # per-window).
-    garud_stats = set(_FUSED_GARUD_STATS)
-    scatter_stats = {*_PER_SITE_SCATTER_STATS, 'snp_dist_mean',
-                     'snp_dist_var', 'snp_dist_min', 'snp_dist_max',
-                     'mu_var', 'zns', 'omega', 'mu_ld', 'dist_var',
-                     'dist_skew', 'dist_kurt'}
-    remaining = set(statistics) & (garud_stats | scatter_stats)
+    remaining = (set(statistics) & _FUSED_STATS) - _CHUNKED_OWN_STATS
     if remaining:
-        # Call the non-chunked function for just these stats;
-        # they don't need the full transposed matrix.
         extra = windowed_statistics_fused(
             haplotype_matrix, bp_bins=bp_bins,
             statistics=tuple(remaining),
