@@ -39,6 +39,7 @@ the compatible groups, and one kernel runs EM with one thread block per
 window, iterating to convergence on the device with no host round trip.
 """
 
+from functools import cache
 from types import SimpleNamespace
 
 import cupy as cp
@@ -266,12 +267,13 @@ void window_moments(const long long* goff, const double* counts,
 }
 '''.replace('@EM_THREADS@', str(_EM_THREADS)))
 
-_col_missing = _module.get_function('col_missing')
-_window_row_missing = _module.get_function('window_row_missing')
-_compat_count = _module.get_function('compat_count')
-_compat_fill = _module.get_function('compat_fill')
-_em_windows = _module.get_function('em_windows')
-_window_moments = _module.get_function('window_moments')
+
+@cache
+def _kernel(name):
+    # get_function compiles the module, which needs a CUDA device, so the
+    # compile waits for the first call; `import pg_gpu` then works without
+    # a GPU (docs builds, the CPU-only CI job).
+    return _module.get_function(name)
 
 
 def _grid(n):
@@ -285,7 +287,7 @@ def column_has_missing(hap):
     out = cp.zeros(n_var, dtype=cp.uint8)
     if n_var and n_hap:
         stride0, stride1 = hap.strides
-        _col_missing(_grid(n_var), (_THREADS,),
+        _kernel('col_missing')(_grid(n_var), (_THREADS,),
                      (hap, np.int64(stride0), np.int64(stride1), np.int32(n_hap),
                       np.int64(n_var), out))
     return out.view(cp.bool_)
@@ -310,7 +312,7 @@ def _group_windows(hap, starts, stops, w1, w2, n_seg):
     n_miss = cp.zeros((n_windows, n_hap), dtype=cp.int32)
     total_threads = n_windows * n_hap * n_seg
     if total_threads:
-        _window_row_missing(
+        _kernel('window_row_missing')(
             _grid(total_threads), (_THREADS,),
             (hap, np.int64(stride0), np.int64(stride1), starts, stops,
              np.int32(n_hap), np.int32(n_windows), np.int64(n_seg),
@@ -358,7 +360,7 @@ def _group_windows(hap, starts, stops, w1, w2, n_seg):
 
     n_compat = cp.empty(n_inc, dtype=cp.int32)
     first = cp.empty(n_inc, dtype=cp.int64)
-    _compat_count(_grid(n_inc), (_THREADS,),
+    _kernel('compat_count')(_grid(n_inc), (_THREADS,),
                   (hap, np.int64(stride0), np.int64(stride1), starts, stops,
                    inc_w, inc_row, np.int64(n_inc), goff, reps, n_compat, first))
     one = n_compat == 1
@@ -369,7 +371,7 @@ def _group_windows(hap, starts, stops, w1, w2, n_seg):
     csr_off = cp.concatenate([cp.zeros(1, dtype=cp.int64), cp.cumsum(lengths)])
     csr_g = cp.empty(int(csr_off[-1].get()), dtype=cp.int64)
     if n_amb:
-        _compat_fill(_grid(n_amb), (_THREADS,),
+        _kernel('compat_fill')(_grid(n_amb), (_THREADS,),
                      (hap, np.int64(stride0), np.int64(stride1), starts, stops,
                       inc_w, inc_row, amb, np.int64(n_amb), goff, reps,
                       csr_off, csr_g))
@@ -385,7 +387,7 @@ def _group_windows(hap, starts, stops, w1, w2, n_seg):
     total = (n_complete + anchored).astype(cp.float64)
     p = cp.empty(n_total_groups, dtype=cp.float64)
     counts = cp.empty(n_total_groups, dtype=cp.float64)
-    _em_windows((n_windows,), (_EM_THREADS,),
+    _kernel('em_windows')((n_windows,), (_EM_THREADS,),
                 (goff, amb_off, csr_off, csr_g, t_off, t_row, n_g, fixed,
                  n_complete.astype(cp.float64), total,
                  np.float64(_EM_TOL), np.int32(_EM_MAX_ITER),
@@ -413,7 +415,7 @@ def window_moments(hap, starts, stops, w1, w2, n_seg):
     r = _group_windows(hap, starts, stops, w1, w2, n_seg)
     out = tuple(cp.empty(n_windows, dtype=cp.float64) for _ in range(5))
     if n_windows:
-        _window_moments(_grid(n_windows), (_THREADS,),
+        _kernel('window_moments')(_grid(n_windows), (_THREADS,),
                         (r.goff, r.counts, r.n_single, r.n_complete,
                          np.int32(n_windows), np.float64(hap.shape[0]), *out))
     return (*out, r.n_complete)
