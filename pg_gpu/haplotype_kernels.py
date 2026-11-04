@@ -75,7 +75,7 @@ void k(const double*c1, const double*c2, const double*c3, const double*c4,
     double a=c1[i],b=c2[i],c=c3[i],d=c4[i],n=nn[i];
     double num=a*(a-1.)*d*(d-1.)+b*(b-1.)*c*(c-1.)-2.*a*b*c*d;
     double den=n*(n-1.)*(n-2.)*(n-3.);
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 _DD_BETWEEN_KERN = cp.RawKernel(r'''
@@ -85,7 +85,7 @@ void k(const double*D, const double*nn,
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=M)return;
     int i=I[t],j=J[t];
     double den=nn[i]*(nn[i]-1.)*nn[j]*(nn[j]-1.);
-    out[t]=(den>0.)?D[i]*D[j]/den:0.;
+    out[t]=(den>0.)?D[i]*D[j]/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
     double sqa=c+d-a-b, sqb=b+d-a-c, sqc=b+c-a-d;
     double num=diff*sqa*sqb+diff*sqc+2.*(b*c+a*d);
     double den=n*(n-1.)*(n-2.)*(n-3.);
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 _DZ_IIJ_KERN = cp.RawKernel(r'''
@@ -116,7 +116,7 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
     double D=c2[i]*c3[i]-c1[i]*c4[i];
     double num=(-pA[i]+qA[i])*(-D)*(-c1[j]+c2[j]-c3[j]+c4[j]);
     double den=nn[j]*nn[i]*(nn[i]-1.)*(nn[i]-2.);
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 _DZ_IJI_KERN = cp.RawKernel(r'''
@@ -129,7 +129,7 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
     double D=c2[i]*c3[i]-c1[i]*c4[i];
     double num=(-c1[i]+c2[i]-c3[i]+c4[i])*(-D)*(-pA[j]+qA[j]);
     double den=nn[j]*nn[i]*(nn[i]-1.)*(nn[i]-2.);
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 _DZ_IJJ_KERN = cp.RawKernel(r'''
@@ -143,7 +143,7 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
     double num=(-Di)*(-c1[j]+c2[j]+c3[j]-c4[j])
               +(-Di)*(-c1[j]+c2[j]-c3[j]+c4[j])*(-pA[j]+qA[j]);
     double den=nn[i]*(nn[i]-1.)*nn[j]*(nn[j]-1.);
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 _DZ_DIFF_KERN = cp.RawKernel(r'''
@@ -156,7 +156,7 @@ void k(const double*D,const double*nn,
     int i=I[t],j=J[t],k=K[t];
     double num=-(D[i]*(pA[j]-qA[j])*(c1[k]-c2[k]+c3[k]-c4[k]));
     double den=nn[i]*(nn[i]-1.)*nn[j]*nn[k];
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 # ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ void k(const double*pA,const double*qA,const double*pB,const double*qB,
     double HA=(pA[i]*qA[j]+qA[i]*pA[j]);
     double HB=(pB[k]*qB[l]+qB[k]*pB[l]);
     double den=nn[i]*nn[j]*nn[k]*nn[l];
-    out[t]=(den>0.)?HA*HB/(4.*den):0.;
+    out[t]=(den>0.)?HA*HB/(4.*den):nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_IIKK_KERN = cp.RawKernel(r'''
@@ -186,7 +186,7 @@ void k(const double*pA,const double*qA,const double*pB,const double*qB,
     int i=I[t],k=K[t];
     double fA=pA[i]*qA[i], fB=pB[k]*qB[k];
     double den=nn[i]*(nn[i]-1.)*nn[k]*(nn[k]-1.);
-    out[t]=(den>0.)?fA*fB/den:0.;
+    out[t]=(den>0.)?fA*fB/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_IIKL_KERN = cp.RawKernel(r'''
@@ -199,7 +199,7 @@ void k(const double*pA,const double*qA,const double*pB,const double*qB,
     double fA=pA[i]*qA[i];
     double HB=(pB[k]*qB[l]+qB[k]*pB[l]);
     double den=nn[i]*(nn[i]-1.)*nn[k]*nn[l];
-    out[t]=(den>0.)?fA*HB/(2.*den):0.;
+    out[t]=(den>0.)?fA*HB/(2.*den):nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_IJKK_KERN = cp.RawKernel(r'''
@@ -212,7 +212,7 @@ void k(const double*pA,const double*qA,const double*pB,const double*qB,
     double HA=(pA[i]*qA[j]+qA[i]*pA[j]);
     double fB=pB[k]*qB[k];
     double den=nn[k]*(nn[k]-1.)*nn[i]*nn[j];
-    out[t]=(den>0.)?fB*HA/(2.*den):0.;
+    out[t]=(den>0.)?fB*HA/(2.*den):nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_SHARED_KERN = cp.RawKernel(r'''
@@ -237,7 +237,7 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
               +(qA[a])*((-1.+cs1)*cb1-cb3+cs1*(cb2+cb3+cb4)))
     )/4.;
     double den=ns*(ns-1.)*na*nb;
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_IJIJ_KERN = cp.RawKernel(r'''
@@ -262,7 +262,7 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
           +a1*b4-a1*a1*b4-a1*a2*b4-a1*a3*b4-a2*a3*b4-a2*b1*b4-a3*b1*b4-a1*b2*b4-a3*b2*b4-a1*b3*b4-a2*b3*b4-a1*b4*b4
         )/4.;
     double den=nn[i]*(nn[i]-1.)*nn[j]*(nn[j]-1.);
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_TRIPLE_KERN = cp.RawKernel(r'''
@@ -285,7 +285,7 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
         +(tpA*(t1+t3)*tqA*sqB)
     )/2.;
     double den=nn[sp]*nt*(nt-1.)*(nt-2.);
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_IIII_KERN = cp.RawKernel(r'''
@@ -300,7 +300,7 @@ void k(const double*c1,const double*c2,const double*c3,const double*c4,
         -a*d*(-1.+a+3.*b+3.*c+d)
         -b*c*(-1.+3.*a+b+c+3.*d);
     double den=n*(n-1.)*(n-2.)*(n-3.);
-    out[t]=(den>0.)?num/den:0.;
+    out[t]=(den>0.)?num/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 
@@ -587,7 +587,7 @@ def compute_multi_pop_statistics_batch_hap(counts_per_pop, n_valid_per_pop,
 
     Drop-in replacement for _compute_multi_pop_statistics_batch.
     """
-    from .ld_pipeline import PopData as _PopData
+    from .ld_pipeline import PopData as _PopData, weighted_nanmean
 
     n_pairs = counts_per_pop[0].shape[0]
     n_stats = len(stat_specs)
@@ -634,7 +634,8 @@ def compute_multi_pop_statistics_batch_hap(counts_per_pop, n_valid_per_pop,
             else:
                 result[:, stat_idx] = w * raw_cache[(st, pi)]
         else:
-            val = sum(w * raw_cache[(st, pi)] for w, st, pi in calls)
-            result[:, stat_idx] = val
+            weights = [w for w, st, pi in calls]
+            terms = [raw_cache[(st, pi)] for w, st, pi in calls]
+            result[:, stat_idx] = weighted_nanmean(weights, terms)
 
     return result

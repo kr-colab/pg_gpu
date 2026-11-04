@@ -9,10 +9,11 @@ Two layers:
 
 * Robustness -- when missing data drops a population's per-pair sample count
   below the order of a statistic's denominator (``n*(n-1)*(n-2)`` etc.), the
-  per-pair statistic is 0/0, which is *undefined* in moments too (its formula
-  raises / yields nan). pg_gpu contributes 0 there -- excluding the undefined
-  pair -- instead of poisoning the whole r-bin sum with a NaN. These checks
-  need only a GPU.
+  per-pair statistic is 0/0: pg_gpu gives NaN there (or when the statistic is
+  undefined for any other reason), and the accumulation layer
+  (``_accumulate_pair_bins``/``_compute_ld_sums``), not the per-pair kernel,
+  excludes it from a running sum without poisoning the whole bin. These
+  checks need only a GPU.
 """
 import numpy as np
 import cupy as cp
@@ -99,7 +100,7 @@ def _pop_counts(g, pop_idx, n_var):
         cp.asarray(pop_idx, dtype=cp.int32))
 
 
-def test_between_pop_dz_degenerate_pair_is_finite():
+def test_between_pop_dz_degenerate_pair_is_nan():
     # pop0 small, with missing data leaving one individual typed at both loci of
     # the pair -- the n*(n-1)*(n-2)=0 case. pops 1, 2 fully typed.
     M = -1
@@ -114,17 +115,21 @@ def test_between_pop_dz_degenerate_pair_is_finite():
 
     stats = cp.asnumpy(compute_multi_pop_statistics_batch_geno(
         list(counts), list(n_valid), None, _generate_stat_specs(3)))
-    assert np.all(np.isfinite(stats))
 
     names = _ld_names(3)
     for nm in ("Dz_0_0_1", "Dz_0_1_1", "Dz_0_1_2"):
-        assert stats[0, names.index(nm)] == 0.0
+        assert np.isnan(stats[0, names.index(nm)])
+    # Every stat not involving pop0's degenerate pair stays well-defined --
+    # the undefined pair must not poison anything beyond its own entries.
+    unaffected = [k for k, nm in enumerate(names)
+                 if "0" not in nm.split("_")[1:]]
+    assert np.all(np.isfinite(stats[0, unaffected]))
 
 
-def test_between_pop_pi2_zero_sample_pop_is_finite():
+def test_between_pop_pi2_zero_sample_pop_is_nan():
     # pop0 entirely missing at the second locus -> zero jointly-typed -> the
-    # normalized-frequency pi2 kernels (alldiff, iikl, ijkk, shared) would emit
-    # NaN from 1/n=inf without the guard.
+    # normalized-frequency pi2 kernels (alldiff, iikl, ijkk, shared) are
+    # undefined there.
     M = -1
     g = np.array([
         [1, M], [0, M], [2, M],
@@ -139,11 +144,38 @@ def test_between_pop_pi2_zero_sample_pop_is_finite():
 
     stats = cp.asnumpy(compute_multi_pop_statistics_batch_geno(
         list(counts), list(n_valid), None, _generate_stat_specs(4)))
-    assert np.all(np.isfinite(stats))
 
     names = _ld_names(4)
     for nm in ("pi2_0_1_2_3", "pi2_0_2_1_3"):
-        assert stats[0, names.index(nm)] == 0.0
+        assert np.isnan(stats[0, names.index(nm)])
+    unaffected = [k for k, nm in enumerate(names)
+                 if "0" not in nm.split("_")[1:]]
+    assert np.all(np.isfinite(stats[0, unaffected]))
+
+
+def test_single_pop_dd_dz_pi2_degenerate_is_nan():
+    # pop0 has only one individual jointly typed at both loci (ns=1 < 4);
+    # pop1 is fully typed. The single-population "same" kernels
+    # (DD_i_i, Dz_i_i_i, pi2_i_i_i_i) dispatch through _DD_GENO_SINGLE_KERN/
+    # _DZ_III_KERN/_PI2_IIII_KERN, a different code path from the
+    # between-population kernels above.
+    M = -1
+    g = np.array([
+        [1, 1], [0, M], [M, 2], [M, M],
+        [0, 1], [1, 1], [2, 0], [1, 2],
+    ], dtype=np.int8)
+    pops = [list(range(0, 4)), list(range(4, 8))]
+    counts, n_valid = zip(*(_pop_counts(g, p, g.shape[1]) for p in pops))
+    assert int(counts[0].sum()) == 1
+
+    stats = cp.asnumpy(compute_multi_pop_statistics_batch_geno(
+        list(counts), list(n_valid), None, _generate_stat_specs(2)))
+
+    names = _ld_names(2)
+    for nm in ("DD_0_0", "Dz_0_0_0", "pi2_0_0_0_0"):
+        assert np.isnan(stats[0, names.index(nm)])
+    for nm in ("DD_1_1", "Dz_1_1_1", "pi2_1_1_1_1"):
+        assert np.isfinite(stats[0, names.index(nm)])
 
 
 def test_heterozygosity_zero_sample_pop_site_is_finite():

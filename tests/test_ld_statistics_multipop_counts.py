@@ -119,3 +119,51 @@ def test_multi_pop_configs_are_non_degenerate(counts_and_pops):
     counts, n_valid, _ = counts_and_pops
     assert np.any(cp.asnumpy(ld_statistics.pi2(counts, (0, 1, 2, 3), n_valid)) != 0)
     assert np.any(cp.asnumpy(ld_statistics.dz(counts, (0, 1, 2), n_valid)) != 0)
+
+
+@pytest.fixture(scope="module")
+def degenerate_counts_and_pops():
+    """Same shape as ``counts_and_pops``, but population 0 is entirely
+    missing (n=0) at every pair -- below every pattern's threshold -- while
+    populations 1-3 stay well-sampled. Every DZ_CONFIGS/PI2_CONFIGS pattern
+    involves population 0, so this drives ``ld_statistics.dz``/``pi2`` and
+    the fused kernels through the undefined regime together: if the two
+    independent implementations disagreed about *where* NaN starts, one
+    side would return a real number against the other's NaN and ``_agree``
+    (``equal_nan=True``) would catch it."""
+    rng = np.random.default_rng(1)
+    counts = np.zeros((N_PAIRS, 4 * N_POPS), dtype=np.float64)
+    for p in range(1, N_POPS):
+        for r in range(N_PAIRS):
+            counts[r, p * 4:p * 4 + 4] = rng.multinomial(16, [0.4, 0.2, 0.2, 0.2])
+    counts = cp.asarray(counts)
+    n_valid = cp.stack(
+        [counts[:, p * 4:p * 4 + 4].sum(axis=1) for p in range(N_POPS)], axis=1)
+    pops = [PopData(counts[:, p * 4:p * 4 + 4], n_valid[:, p])
+            for p in range(N_POPS)]
+    return counts, n_valid, pops
+
+
+@pytest.mark.parametrize("cfg", DZ_CONFIGS, ids=[str(c) for c in DZ_CONFIGS])
+def test_dz_counts_api_matches_fused_when_degenerate(degenerate_counts_and_pops, cfg):
+    counts, n_valid, pops = degenerate_counts_and_pops
+    _agree(ld_statistics.dz(counts, cfg, n_valid),
+           compute_all_dz_hap(pops, [cfg])[0])
+
+
+@pytest.mark.parametrize("cfg", PI2_CONFIGS, ids=[str(c) for c in PI2_CONFIGS])
+def test_pi2_counts_api_matches_symmetrized_fused_when_degenerate(
+        degenerate_counts_and_pops, cfg):
+    counts, n_valid, pops = degenerate_counts_and_pops
+    _agree(ld_statistics.pi2(counts, cfg, n_valid),
+           _pi2_symmetrized_fused(pops, cfg))
+
+
+def test_degenerate_fixture_actually_hits_the_undefined_regime(
+        degenerate_counts_and_pops):
+    # Guard against a fixture that trivially agrees because both sides
+    # stayed finite: every config touches population 0, so both must be NaN.
+    counts, n_valid, _ = degenerate_counts_and_pops
+    assert np.all(np.isnan(cp.asnumpy(ld_statistics.dz(counts, (0, 1, 2), n_valid))))
+    assert np.all(np.isnan(cp.asnumpy(
+        ld_statistics.pi2(counts, (0, 1, 2, 3), n_valid))))

@@ -33,7 +33,7 @@ void k(const double* __restrict__ g, double* __restrict__ out, const long long N
     double n1=row[0],n2=row[1],n3=row[2],n4=row[3],n5=row[4],
            n6=row[5],n7=row[6],n8=row[7],n9=row[8];
     double ns=n1+n2+n3+n4+n5+n6+n7+n8+n9;
-    if(ns<4.0){out[idx]=0.0;return;}
+    if(ns<4.0){out[idx]=nan("");return;}
     // D from genotype frequencies (matches _PopDataGeno.D_geno).
     double Dg=-(0.5*n2+n3+0.25*n5+0.5*n6)*(0.5*n4+0.25*n5+n7+0.5*n8)
               +(n1+0.5*n2+0.5*n4+0.25*n5)*(0.25*n5+0.5*n6+0.5*n8+n9);
@@ -77,7 +77,7 @@ void k(const double*D, const double*nn,
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=M)return;
     int i=I[t], j=J[t];
     double den=nn[i]*(nn[i]-1.0)*nn[j]*(nn[j]-1.0);
-    out[t]=(den>0.0)?4.0*D[i]*D[j]/den:0.0;
+    out[t]=(den>0.0)?4.0*D[i]*D[j]/den:nan("");
 }''', "k", options=("-std=c++11",))
 
 # ---------------------------------------------------------------------------
@@ -198,12 +198,9 @@ void k(const double*g, double*ns, double*D, double*A, double*Bv,
 
 # The between-pop Dz denominators are products of falling factorials of the
 # per-pair valid sample counts (n, n*(n-1), n*(n-1)*(n-2)). With missing data a
-# pop's valid count at a pair can fall below the order of its factorial -- e.g.
+# pop's valid count at a pair can fall below the order of its factorial, e.g.
 # a 14-sample pop with only two individuals typed at both loci gives
-# n*(n-1)*(n-2)=0 -- so the unguarded ratio was 0/0 = NaN, and one such pair
-# poisoned the whole bin sum. A degenerate pair contributes nothing, so emit 0
-# when the denominator is non-positive (matching _DZ_III_KERN and the pi2
-# kernels, which already guard the same way).
+# n*(n-1)*(n-2)=0, making the pair's statistic undefined (NaN), not a real 0.
 _DZ_DISTINCT_KERN = cp.RawKernel(r'''
 extern "C" __global__
 void k(const double*ns,const double*D,const double*A,const double*Bv,
@@ -211,7 +208,7 @@ void k(const double*ns,const double*D,const double*A,const double*Bv,
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
     int i=I[t],j=J[t],k=K[t];
     double d=ns[i]*(ns[i]-1.)*ns[j]*ns[k];
-    out[t]=(d>0.0)?2.*D[i]*Bv[j]*A[k]/d:0.0;
+    out[t]=(d>0.0)?2.*D[i]*Bv[j]*A[k]/d:nan("");
 }''', "k", options=("-std=c++11",))
 
 _DZ_IIJ_KERN = cp.RawKernel(r'''
@@ -221,7 +218,7 @@ void k(const double*ns,const double*Ucoef,const double*A,
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
     int i=I[t],j=J[t];
     double d=ns[j]*ns[i]*(ns[i]-1.)*(ns[i]-2.);
-    out[t]=(d>0.0)?2.*Ucoef[i]*A[j]/d:0.0;
+    out[t]=(d>0.0)?2.*Ucoef[i]*A[j]/d:nan("");
 }''', "k", options=("-std=c++11",))
 
 _DZ_IJI_KERN = cp.RawKernel(r'''
@@ -231,7 +228,7 @@ void k(const double*ns,const double*Vcoef,const double*Bv,
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
     int i=I[t],j=J[t];
     double d=ns[j]*ns[i]*(ns[i]-1.)*(ns[i]-2.);
-    out[t]=(d>0.0)?2.*Vcoef[i]*Bv[j]/d:0.0;
+    out[t]=(d>0.0)?2.*Vcoef[i]*Bv[j]/d:nan("");
 }''', "k", options=("-std=c++11",))
 
 _DZ_IJJ_KERN = cp.RawKernel(r'''
@@ -241,7 +238,7 @@ void k(const double*ns,const double*D,const double*Wjj,
     int t=blockDim.x*blockIdx.x+threadIdx.x; if(t>=N)return;
     int i=I[t],j=J[t];
     double d=ns[j]*(ns[j]-1.)*ns[i]*(ns[i]-1.);
-    out[t]=(d>0.0)?2.*D[i]*Wjj[j]/d:0.0;
+    out[t]=(d>0.0)?2.*D[i]*Wjj[j]/d:nan("");
 }''', "k", options=("-std=c++11",))
 
 _DZ_III_KERN = cp.RawKernel(r'''
@@ -252,7 +249,7 @@ void k(const double*g, double*out, const long long N){
     const double*row=g+9*idx;
     double n1=row[0],n2=row[1],n3=row[2],n4=row[3],n5=row[4],n6=row[5],n7=row[6],n8=row[7],n9=row[8];
     double ns=n1+n2+n3+n4+n5+n6+n7+n8+n9;
-    if(ns<4.){out[idx]=0.;return;}
+    if(ns<4.){out[idx]=nan("");return;}
     double x00=n1+.5*n2+.5*n4+.25*n5, x01=.5*n2+n3+.25*n5+.5*n6;
     double x10=.5*n4+.25*n5+n7+.5*n8, x11=.25*n5+.5*n6+.5*n8+n9;
     double D=x00*x11-x01*x10;
@@ -336,7 +333,7 @@ extern "C" __global__ void k(const double*AQ3,const double*AS3,
     int i=I[t],j=J[t];
     double ni=nn[i],nj=nn[j];
     double d=ni*(ni-1.0)*(ni-2.0)*nj;
-    out[t]=(d>0.0)?(AQ3[i]*Q[j]+AS3[i]*S[j])/d:0.0;
+    out[t]=(d>0.0)?(AQ3[i]*Q[j]+AS3[i]*S[j])/d:nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_IJII_KERN = cp.RawKernel(r'''
@@ -347,7 +344,7 @@ extern "C" __global__ void k(const double*BP3,const double*BR3,
     int i=I[t],j=J[t];
     double ni=nn[i],nj=nn[j];
     double d=ni*(ni-1.0)*(ni-2.0)*nj;
-    out[t]=(d>0.0)?(BP3[i]*P[j]+BR3[i]*R[j])/d:0.0;
+    out[t]=(d>0.0)?(BP3[i]*P[j]+BR3[i]*R[j])/d:nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_IJIJ_KERN = cp.RawKernel(r'''
@@ -370,7 +367,7 @@ extern "C" __global__ void k(
     num+=-0.25*PSi*Rj-0.25*Pi*RSj+0.25*X01i*RSj+0.25*PQi*RSj;
     num+=0.25*X11i*Bj+0.25*Bi*X11j-1.0*X11i*X11j;
     double d=ni*(ni-1.0)*nj*(nj-1.0);
-    out[t]=(d>0.0)?num/d:0.0;
+    out[t]=(d>0.0)?num/d:nan("");
 }''', "k", options=("-std=c++11",))
 
 _PI2_IIII_KERN = cp.RawKernel(r'''
@@ -381,7 +378,7 @@ void k(const double* __restrict__ g, double* __restrict__ out, const long long N
     const double*row=g+9*idx;
     double n1=row[0],n2=row[1],n3=row[2],n4=row[3],n5=row[4],n6=row[5],n7=row[6],n8=row[7],n9=row[8];
     double ns=n1+n2+n3+n4+n5+n6+n7+n8+n9;
-    if(ns<4.0){out[idx]=0.0;return;}
+    if(ns<4.0){out[idx]=nan("");return;}
     double a1=n1+n2+n3+0.5*n4+0.5*n5+0.5*n6;
     double a2=n1+0.5*n2+n4+0.5*n5+n7+0.5*n8;
     double a3=0.5*n2+n3+0.5*n5+n6+0.5*n8+n9;
@@ -468,18 +465,21 @@ class _PopDataGeno:
         H_L = self.g4 + self.g5 + self.g6  # het count at locus A
         H_R = self.g2 + self.g5 + self.g8  # het count at locus B
         nn1 = 4 * self.n * (self.n - 1)
-        self.B_L = (4*self.pA*self.qA - H_L) / cp.maximum(nn1, 1)
-        self.B_R = (4*self.pB*self.qB - H_R) / cp.maximum(nn1, 1)
+        # n < 2 makes nn1 <= 0 (NaN, not a clamped finite value), shared
+        # across all six quantities below that divide by it.
+        inv_nn1 = cp.where(nn1 > 0, 1.0 / cp.maximum(nn1, 1), cp.nan)
+        self.B_L = (4*self.pA*self.qA - H_L) * inv_nn1
+        self.B_R = (4*self.pB*self.qB - H_R) * inv_nn1
         # Same-individual joint allele matrix X (2x2 per pair)
         x_AB = self.g1 + self.g2/2 + self.g4/2 + self.g5/4
         x_Ab = self.g2/2 + self.g3 + self.g5/4 + self.g6/2
         x_aB = self.g4/2 + self.g5/4 + self.g7 + self.g8/2
         x_ab = self.g5/4 + self.g6/2 + self.g8/2 + self.g9
         # C_i = ([P,R]^T [Q,S] - X) / (4*n*(n-1))
-        self.C00 = (self.pA*self.pB - x_AB) / cp.maximum(nn1, 1)
-        self.C01 = (self.pA*self.qB - x_Ab) / cp.maximum(nn1, 1)
-        self.C10 = (self.qA*self.pB - x_aB) / cp.maximum(nn1, 1)
-        self.C11 = (self.qA*self.qB - x_ab) / cp.maximum(nn1, 1)
+        self.C00 = (self.pA*self.pB - x_AB) * inv_nn1
+        self.C01 = (self.pA*self.qB - x_Ab) * inv_nn1
+        self.C10 = (self.qA*self.pB - x_aB) * inv_nn1
+        self.C11 = (self.qA*self.qB - x_ab) * inv_nn1
         # ijij features
         self.X01 = x_Ab
         self.X10 = x_aB
@@ -528,14 +528,12 @@ class _GenoPopFlat:
         def flat(arrs):
             return cp.ascontiguousarray(cp.concatenate(arrs))
 
-        # Guard n==0 (a population with no individual genotyped at both loci of
-        # a pair, which missing data allows): 1/n would be inf and feed NaN into
-        # the normalized-frequency pi2 kernels (alldiff, iikl, ijkk, shared,
-        # none of which divide by a per-pair denominator that could catch it).
-        # The allele counts pA..qB are 0 whenever n is 0, so a maximum(n,1)
-        # divisor yields frequency 0 and the degenerate pair contributes
-        # nothing -- matching the falling-factorial guards used elsewhere.
-        inv_n = [1.0 / cp.maximum(p.n, 1.0) for p in pops]
+        # A population with no individual genotyped at both loci of a pair
+        # has an undefined (NaN) allele frequency, not zero, since the
+        # normalized-frequency pi2 kernels have no denominator of their own
+        # to catch it.
+        inv_n = [cp.where(p.n > 0, 1.0 / cp.maximum(p.n, 1.0), cp.nan)
+                for p in pops]
         # Normalized frequencies for between-pop factored kernels
         self.p = flat([pops[i].pA * inv_n[i] for i in range(P)])
         self.r = flat([pops[i].qA * inv_n[i] for i in range(P)])
@@ -904,6 +902,8 @@ def compute_multi_pop_statistics_batch_geno(counts_per_pop, n_valid_per_pop,
     Drop-in replacement for _compute_multi_pop_statistics_batch but uses
     9-way genotype counts and genotype-specific formulas.
     """
+    from .ld_pipeline import weighted_nanmean
+
     n_pairs = counts_per_pop[0].shape[0]
     n_stats = len(stat_specs)
 
@@ -949,7 +949,8 @@ def compute_multi_pop_statistics_batch_geno(counts_per_pop, n_valid_per_pop,
             else:
                 result[:, stat_idx] = w * raw_cache[(st, pi)]
         else:
-            val = sum(w * raw_cache[(st, pi)] for w, st, pi in calls)
-            result[:, stat_idx] = val
+            weights = [w for w, st, pi in calls]
+            terms = [raw_cache[(st, pi)] for w, st, pi in calls]
+            result[:, stat_idx] = weighted_nanmean(weights, terms)
 
     return result

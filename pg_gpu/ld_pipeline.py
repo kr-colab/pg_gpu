@@ -314,14 +314,14 @@ def compute_two_pop_statistics_batch(counts_pop1, counts_pop2,
     DD_1_1 = ld_statistics.dd(counts_pop2, n_valid=n_valid2)
 
     Dz_0_0_0 = ld_statistics.dz(counts_pop1, n_valid=n_valid1)
-    Dz_0_0_1 = 0.5 * (
-        ld_statistics.dz(counts_between, populations=(0, 0, 1), n_valid=n_valid_between)
-        + ld_statistics.dz(counts_between, populations=(0, 1, 0), n_valid=n_valid_between))
+    Dz_0_0_1 = weighted_nanmean([0.5, 0.5], [
+        ld_statistics.dz(counts_between, populations=(0, 0, 1), n_valid=n_valid_between),
+        ld_statistics.dz(counts_between, populations=(0, 1, 0), n_valid=n_valid_between)])
     Dz_0_1_1 = ld_statistics.dz(counts_between, populations=(0, 1, 1), n_valid=n_valid_between)
     Dz_1_0_0 = ld_statistics.dz(counts_between, populations=(1, 0, 0), n_valid=n_valid_between)
-    Dz_1_0_1 = 0.5 * (
-        ld_statistics.dz(counts_between, populations=(1, 0, 1), n_valid=n_valid_between)
-        + ld_statistics.dz(counts_between, populations=(1, 1, 0), n_valid=n_valid_between))
+    Dz_1_0_1 = weighted_nanmean([0.5, 0.5], [
+        ld_statistics.dz(counts_between, populations=(1, 0, 1), n_valid=n_valid_between),
+        ld_statistics.dz(counts_between, populations=(1, 1, 0), n_valid=n_valid_between)])
     Dz_1_1_1 = ld_statistics.dz(counts_pop2, n_valid=n_valid2)
 
     pi2_0_0_0_0 = ld_statistics.pi2(counts_pop1, n_valid=n_valid1)
@@ -399,6 +399,19 @@ def het_names(num_pops):
         for jj in range(ii, num_pops):
             names.append(f"H_{ii}_{jj}")
     return names
+
+
+def weighted_nanmean(weights, terms):
+    """Weighted mean of same-shape arrays, renormalized over the non-NaN
+    terms (or NaN when every term is undefined)."""
+    stacked = cp.stack(terms, axis=0)
+    w = cp.asarray(weights, dtype=cp.float64).reshape(
+        (-1,) + (1,) * (stacked.ndim - 1))
+    valid = ~cp.isnan(stacked)
+    w_valid = cp.where(valid, w, 0.0)
+    w_sum = w_valid.sum(axis=0)
+    numer = (w_valid * cp.where(valid, stacked, 0.0)).sum(axis=0)
+    return cp.where(w_sum > 0, numer / w_sum, cp.nan)
 
 
 def generate_stat_specs(num_pops):

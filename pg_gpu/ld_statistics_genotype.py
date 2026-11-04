@@ -24,8 +24,8 @@ import cupy as cp
 
 
 def _safe_div(numer, denom, valid):
-    """Element-wise division returning 0 where *valid* is False."""
-    return cp.where(valid, numer / cp.maximum(denom, 1), 0.0)
+    """Element-wise division, NaN where *valid* is False."""
+    return cp.where(valid, numer / cp.maximum(denom, 1), cp.nan)
 
 
 # ===========================================================================

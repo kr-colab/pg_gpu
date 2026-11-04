@@ -1207,6 +1207,15 @@ def _get_pop_data(counts, n_valid, pop_idx):
     return pop_counts[:, 0], pop_counts[:, 1], pop_counts[:, 2], pop_counts[:, 3], pop_n
 
 
+def _masked_ratio(valid_mask: cp.ndarray, numer: cp.ndarray,
+                  denom: cp.ndarray) -> cp.ndarray:
+    """``numer / denom`` where ``valid_mask`` (or NaN when the statistic is
+    undefined)."""
+    result = cp.full_like(numer, cp.nan, dtype=cp.float64)
+    result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+    return result
+
+
 def _dd_single(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Compute D² for single population."""
     c1, c2, c3, c4 = counts[:, 0], counts[:, 1], counts[:, 2], counts[:, 3]
@@ -1216,8 +1225,7 @@ def _dd_single(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.n
     denom = n * (n - 1) * (n - 2) * (n - 3)
 
     valid_mask = n >= 4
-    result = cp.zeros_like(n, dtype=cp.float64)
-    result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+    result = _masked_ratio(valid_mask, numer, denom)
 
     return result
 
@@ -1257,8 +1265,7 @@ def _dd_between(counts: cp.ndarray,
     denom = n1 * (n1 - 1) * n2 * (n2 - 1)
 
     valid_mask = (n1 >= 2) & (n2 >= 2)
-    result = cp.zeros_like(n1, dtype=cp.float64)
-    result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+    result = _masked_ratio(valid_mask, numer, denom)
 
     return result
 
@@ -1277,8 +1284,7 @@ def _dz_single(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.n
     denom = n * (n - 1) * (n - 2) * (n - 3)
 
     valid_mask = n >= 4
-    result = cp.zeros_like(n, dtype=cp.float64)
-    result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+    result = _masked_ratio(valid_mask, numer, denom)
 
     return result
 
@@ -1315,8 +1321,7 @@ def _dz_multi(counts: cp.ndarray,
         denom = n2 * n1 * (n1 - 1) * (n1 - 2)
 
         valid_mask = (n1 >= 3) & (n2 >= 1)
-        result = cp.zeros_like(n1, dtype=cp.float64)
-        result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+        result = _masked_ratio(valid_mask, numer, denom)
 
     elif pop1 == pop3:  # Dz(i,j,i)
         c11, c12, c13, c14, n1 = get_pop_data(pop1)
@@ -1330,8 +1335,7 @@ def _dz_multi(counts: cp.ndarray,
         denom = n2 * n1 * (n1 - 1) * (n1 - 2)
 
         valid_mask = (n1 >= 3) & (n2 >= 1)
-        result = cp.zeros_like(n1, dtype=cp.float64)
-        result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+        result = _masked_ratio(valid_mask, numer, denom)
 
     elif pop2 == pop3:  # Dz(i,j,j)
         c11, c12, c13, c14, n1 = get_pop_data(pop1)
@@ -1343,8 +1347,7 @@ def _dz_multi(counts: cp.ndarray,
         denom = n1 * (n1 - 1) * n2 * (n2 - 1)
 
         valid_mask = (n1 >= 2) & (n2 >= 2)
-        result = cp.zeros_like(n1, dtype=cp.float64)
-        result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+        result = _masked_ratio(valid_mask, numer, denom)
 
     else:
         # Dz(i,j,k) all different populations
@@ -1360,8 +1363,7 @@ def _dz_multi(counts: cp.ndarray,
         denom = n1 * (n1 - 1) * n2 * n3
 
         valid_mask = (n1 >= 2) & (n2 >= 1) & (n3 >= 1)
-        result = cp.zeros_like(n1, dtype=cp.float64)
-        result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+        result = _masked_ratio(valid_mask, numer, denom)
 
     return result
 
@@ -1384,8 +1386,7 @@ def _pi2_single(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.
     denom = n * (n - 1) * (n - 2) * (n - 3)
 
     valid_mask = n >= 4
-    result = cp.zeros_like(n, dtype=cp.float64)
-    result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+    result = _masked_ratio(valid_mask, numer, denom)
 
     return result
 
@@ -1397,17 +1398,16 @@ def _pi2_multi(counts: cp.ndarray,
 
     pi2 is invariant under swapping its two loci and under swapping the two
     populations within a locus, so the named statistic is the raw
-    per-arrangement term averaged over that symmetry orbit. Averaging makes
-    ``pi2`` return the same kind of quantity for every index pattern, and
-    matches the fused pipeline, which sums the same orbit one layer up in
-    ``generate_stat_specs``. When the orbit collapses to a single
-    arrangement (e.g. one population), the average is that one term.
+    per-arrangement term averaged over that symmetry orbit (or NaN when the
+    whole orbit is undefined). Matches the fused pipeline, which sums the
+    same orbit one layer up in ``generate_stat_specs``.
     """
+    from .ld_pipeline import weighted_nanmean
     i, j, k, l = populations
     orbit = {(i, j, k, l), (i, j, l, k), (j, i, k, l), (j, i, l, k),
              (k, l, i, j), (l, k, i, j), (k, l, j, i), (l, k, j, i)}
-    return sum(_pi2_single_term(counts, cfg, n_valid)
-               for cfg in orbit) / len(orbit)
+    terms = [_pi2_single_term(counts, cfg, n_valid) for cfg in orbit]
+    return weighted_nanmean([1.0 / len(orbit)] * len(orbit), terms)
 
 
 def _pi2_single_term(counts: cp.ndarray,
@@ -1454,8 +1454,7 @@ def _pi2_single_term(counts: cp.ndarray,
         denom = n1 * (n1 - 1) * n2 * (n2 - 1)
 
         valid_mask = (n1 >= 2) & (n2 >= 2)
-        result = cp.zeros_like(n1, dtype=cp.float64)
-        result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+        result = _masked_ratio(valid_mask, numer, denom)
 
     elif i == j and k != l:
         # pi2(i,i,k,l) type -- handles both 2 and 3 distinct populations
@@ -1517,8 +1516,7 @@ def _pi2_single_term(counts: cp.ndarray,
 
         denom = n1 * (n1 - 1) * n2 * (n2 - 1)
         valid_mask = (n1 >= 2) & (n2 >= 2)
-        result = cp.zeros_like(n1, dtype=cp.float64)
-        result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+        result = _masked_ratio(valid_mask, numer, denom)
 
     else:
         if n_unique == 4:
@@ -1526,7 +1524,9 @@ def _pi2_single_term(counts: cp.ndarray,
         elif n_unique == 3:
             result = _pi2_shared_pop(counts, populations, n_valid)
         else:
-            result = cp.zeros_like(get_pop_data(0)[4], dtype=cp.float64)
+            # Unreachable: n_unique in {1, 2} is always caught by an
+            # earlier branch above, given 4 population slots.
+            result = cp.full_like(get_pop_data(0)[4], cp.nan, dtype=cp.float64)
 
     return result
 
@@ -1558,8 +1558,7 @@ def _pi2_iiij(counts: cp.ndarray,
     denom = n2 * n1 * (n1 - 1) * (n1 - 2)
     valid_mask = (n1 >= 3) & (n2 >= 1)
 
-    result = cp.zeros_like(n1, dtype=cp.float64)
-    result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+    result = _masked_ratio(valid_mask, numer, denom)
 
     return result
 
@@ -1594,8 +1593,7 @@ def _pi2_iikl(counts: cp.ndarray,
 
         denom = n1 * (n1 - 1) * n2 * n3
         valid_mask = (n1 >= 2) & (n2 >= 1) & (n3 >= 1)
-        result = cp.zeros_like(n1, dtype=cp.float64)
-        result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+        result = _masked_ratio(valid_mask, numer, denom)
 
     return result
 
@@ -1629,8 +1627,7 @@ def _pi2_ijkk(counts: cp.ndarray,
     denom = n1 * (n1 - 1) * n2 * n3
     valid_mask = (n1 >= 2) & (n2 >= 1) & (n3 >= 1)
 
-    result = cp.zeros_like(n1, dtype=cp.float64)
-    result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+    result = _masked_ratio(valid_mask, numer, denom)
 
     return result
 
@@ -1659,8 +1656,10 @@ def _pi2_shared_pop(counts: cp.ndarray,
     elif j == l:    # pi2(i,j;k,j)
         shared, other1, other2 = j, i, k
     else:
+        # Unreachable: callers only reach _pi2_shared_pop for a population
+        # pattern with exactly one shared index between the two pairs.
         n1 = get_pop_data(0)[4]
-        return cp.zeros_like(n1, dtype=cp.float64)
+        return cp.full_like(n1, cp.nan, dtype=cp.float64)
 
     c11, c12, c13, c14, n1 = get_pop_data(shared)
     c21, c22, c23, c24, n2 = get_pop_data(other1)
@@ -1703,8 +1702,7 @@ def _pi2_shared_pop(counts: cp.ndarray,
 
     denom = n1 * (n1 - 1) * n2 * n3
     valid_mask = (n1 >= 2) & (n2 >= 1) & (n3 >= 1)
-    result = cp.zeros_like(n1, dtype=cp.float64)
-    result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+    result = _masked_ratio(valid_mask, numer, denom)
     return result
 
 
@@ -1731,6 +1729,5 @@ def _pi2_all_different(counts: cp.ndarray,
 
     denom = n1 * n2 * n3 * n4
     valid_mask = (n1 >= 1) & (n2 >= 1) & (n3 >= 1) & (n4 >= 1)
-    result = cp.zeros_like(n1, dtype=cp.float64)
-    result[valid_mask] = numer[valid_mask] / denom[valid_mask]
+    result = _masked_ratio(valid_mask, numer, denom)
     return result

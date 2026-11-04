@@ -2248,7 +2248,8 @@ class HaplotypeMatrix:
             into intervals [bp_bins[i], bp_bins[i+1]).
         raw : bool, optional
             If True, return raw sums of statistics across pairs in each bin.
-            If False (default), return means.
+            If False (default), return means (or NaN when the statistic is
+            undefined for every pair in the bin).
         chunk_size : int or 'auto', optional
             Number of pairs to process per chunk. If 'auto' (default),
             automatically estimates optimal size based on available GPU memory.
@@ -2284,7 +2285,7 @@ class HaplotypeMatrix:
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
         bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
-        bin_counts = cp.zeros(n_bins, dtype=cp.float64)
+        bin_counts = cp.zeros((n_bins, 3), dtype=cp.float64)
         _accumulate_pair_bins(
             seg._biallelic_indicator(), pos, bp_bins_cp, n_bins,
             max_dist, int(chunk_size), n_tail=0,
@@ -2319,7 +2320,8 @@ class HaplotypeMatrix:
             Name of second population (must exist in sample_sets)
         raw : bool, optional
             If True, return raw sums of statistics across pairs in each bin.
-            If False (default), return means.
+            If False (default), return means (or NaN when the statistic is
+            undefined for every pair in the bin).
         chunk_size : int or 'auto', optional
             Number of pairs to process per chunk. If 'auto' (default),
             automatically estimates optimal size based on available GPU memory.
@@ -2361,7 +2363,7 @@ class HaplotypeMatrix:
         if not isinstance(pos, cp.ndarray):
             pos = cp.array(pos)
         bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
-        bin_counts = cp.zeros(n_bins, dtype=cp.float64)
+        bin_counts = cp.zeros((n_bins, 15), dtype=cp.float64)
         _accumulate_pair_bins(
             seg._biallelic_indicator(), pos, bp_bins_cp, n_bins,
             max_dist, int(chunk_size), n_tail=0,
@@ -2422,9 +2424,11 @@ def _accumulate_pair_bins(
 ):
     """Walk pair batches on ``haps`` / ``pos``, drop already-counted
     (tail, tail) pairs, and scatter-add per-pair statistics into
-    ``bin_sums`` / ``bin_counts``. ``pop2_indices=None`` selects the
-    single-population path; otherwise both pops feed the two-population
-    batch kernel."""
+    ``bin_sums`` / ``bin_counts``, excluding NaN pairs (undefined
+    statistics) rather than scattering the NaN itself. ``bin_counts`` is
+    shaped like ``bin_sums``, one defined-pair count per statistic.
+    ``pop2_indices=None`` selects the single-population path; otherwise
+    both pops feed the two-population batch kernel."""
     from pg_gpu import ld_statistics
     two_pop = pop2_indices is not None
     has_miss_p1 = _missing_flag(haps, pop1_indices)
@@ -2465,12 +2469,16 @@ def _accumulate_pair_bins(
         valid_mask = (chunk_bin_inds >= 0) & (chunk_bin_inds < n_bins)
         valid_bin_inds = chunk_bin_inds[valid_mask]
         valid_stats = chunk_stats[valid_mask]
+        defined = ~cp.isnan(valid_stats)
         for s in range(chunk_stats.shape[1]):
-            cp.add.at(bin_sums[:, s], valid_bin_inds, valid_stats[:, s])
-        cp.add.at(
-            bin_counts, valid_bin_inds,
-            cp.ones(len(valid_bin_inds), dtype=cp.float64),
-        )
+            cp.add.at(
+                bin_sums[:, s], valid_bin_inds,
+                cp.where(defined[:, s], valid_stats[:, s], 0.0),
+            )
+            cp.add.at(
+                bin_counts[:, s], valid_bin_inds,
+                defined[:, s].astype(cp.float64),
+            )
 
 
 def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, chunk_size):
@@ -2486,7 +2494,7 @@ def _stream_ld_single_pop(streaming_hm, *, bp_bins, raw, chunk_size):
     else:
         chunk_size_int = int(chunk_size)
     bin_sums = cp.zeros((n_bins, 3), dtype=cp.float64)
-    bin_counts = cp.zeros(n_bins, dtype=cp.float64)
+    bin_counts = cp.zeros((n_bins, 3), dtype=cp.float64)
 
     n_dropped = 0
     tail_haps, tail_pos = None, None
@@ -2534,7 +2542,7 @@ def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
     else:
         chunk_size_int = int(chunk_size)
     bin_sums = cp.zeros((n_bins, 15), dtype=cp.float64)
-    bin_counts = cp.zeros(n_bins, dtype=cp.float64)
+    bin_counts = cp.zeros((n_bins, 15), dtype=cp.float64)
 
     n_dropped = 0
     tail_haps, tail_pos = None, None
@@ -2566,6 +2574,15 @@ def _stream_ld_two_pops(streaming_hm, *, bp_bins, pop1, pop2, raw,
     return _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw)
 
 
+def _mean_row(sums_row, counts_row):
+    """Elementwise ``sums_row / counts_row``, NaN where a statistic had no
+    defined pair in this bin."""
+    row = np.full(sums_row.shape, np.nan)
+    defined = counts_row > 0
+    row[defined] = sums_row[defined] / counts_row[defined]
+    return row
+
+
 def _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw):
     # One device->host transfer for each accumulator; per-bin format
     # then reads from host memory rather than syncing per element.
@@ -2576,15 +2593,9 @@ def _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw):
         key = (float(bp_bins_arr[i]), float(bp_bins_arr[i + 1]))
         if raw:
             out[key] = (float(sums[i, 0]), float(sums[i, 1]), float(sums[i, 2]))
-        elif counts[i] > 0:
-            inv = 1.0 / float(counts[i])
-            out[key] = (
-                float(sums[i, 0]) * inv,
-                float(sums[i, 1]) * inv,
-                float(sums[i, 2]) * inv,
-            )
         else:
-            out[key] = (0.0, 0.0, 0.0)
+            row = _mean_row(sums[i], counts[i])
+            out[key] = (float(row[0]), float(row[1]), float(row[2]))
     return out
 
 
@@ -2595,12 +2606,7 @@ def _format_ld_two_pops(bp_bins_arr, bin_sums, bin_counts, raw):
     out = {}
     for i in range(len(bp_bins_arr) - 1):
         key = (float(bp_bins_arr[i]), float(bp_bins_arr[i + 1]))
-        if raw:
-            row = sums[i]
-        elif counts[i] > 0:
-            row = sums[i] / float(counts[i])
-        else:
-            row = np.zeros(len(names))
+        row = sums[i] if raw else _mean_row(sums[i], counts[i])
         out[key] = OrderedDict(
             (name, float(row[j])) for j, name in enumerate(names)
         )

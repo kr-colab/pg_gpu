@@ -1496,7 +1496,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n < 4 (within) or n < 2 in either population (between)"
+undefined = "NaN where n < 4 (within) or n < 2 in either population (between)"
 parallel = ["haplotype_kernels.compute_all_dd_hap", "genotype_kernels.compute_all_dd_geno", "ld_statistics._tile_sigma_d2"]
 notes = "Counts are (N, 4*P) haplotype counts; a tuple n_valid raises AttributeError on the within-population branches."
 
@@ -1507,7 +1507,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where a population's n is below its falling-factorial order (n < 4 for one population)"
+undefined = "NaN where a population's n is below its falling-factorial order (n < 4 for one population)"
 parallel = ["haplotype_kernels.compute_all_dz_hap", "genotype_kernels.compute_all_dz_geno"]
 notes = "Returns the raw (i, j, k) term; callers average (i, j, k) and (i, k, j) to get the moments Dz."
 
@@ -1518,7 +1518,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where a population's n is below its falling-factorial order (n < 4 for one population)"
+undefined = "NaN where a population's n is below its falling-factorial order (n < 4 for one population)"
 parallel = ["haplotype_kernels.compute_all_pi2_hap", "genotype_kernels.compute_all_pi2_geno", "ld_pipeline.generate_stat_specs", "ld_statistics._tile_sigma_d2"]
 notes = "Averages over the symmetry orbit internally; generate_stat_specs encodes the same weights for the kernel path."
 
@@ -1529,7 +1529,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n < 4"
+undefined = "NaN where n < 4"
 parallel = ["haplotype_kernels.compute_all_dd_hap", "genotype_kernels.compute_all_dd_geno", "ld_statistics._tile_sigma_d2"]
 
 [functions."ld_statistics.dd_between"]
@@ -1539,7 +1539,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n < 2 in either population"
+undefined = "NaN where n < 2 in either population"
 parallel = ["haplotype_kernels.compute_all_dd_hap", "genotype_kernels.compute_all_dd_geno"]
 notes = "A 1-D n_valid is used for both populations."
 
@@ -1671,7 +1671,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 for dd/dz/pi2 below the sample-size floor; NaN for undefined r/r_squared; ValueError for an unknown name"
+undefined = "NaN for dd/dz/pi2 below the sample-size floor or undefined r/r_squared; ValueError for an unknown name"
 parallel = ["haplotype_kernels.compute_multi_pop_statistics_batch_hap", "genotype_kernels.compute_multi_pop_statistics_batch_geno"]
 notes = "Accepts 'dd', 'dz', 'pi2', 'r', 'r_squared' but not 'd_prime'."
 
@@ -1682,7 +1682,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n < 4"
+undefined = "NaN where n < 4"
 parallel = ["genotype_kernels._DD_GENO_SINGLE_KERN", "genotype_kernels._SIGMA_D2_GENO_KERN", "ld_statistics.dd"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1693,7 +1693,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n < 2 in either population"
+undefined = "NaN where n < 2 in either population"
 parallel = ["genotype_kernels._DD_GENO_BETWEEN_KERN", "ld_statistics.dd_between"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1704,7 +1704,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n < 4"
+undefined = "NaN where n < 4"
 parallel = ["genotype_kernels._DZ_III_KERN", "ld_statistics.dz"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1715,7 +1715,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 3 or n2 < 1"
+undefined = "NaN where n1 < 3 or n2 < 1"
 parallel = ["genotype_kernels._DZ_IIJ_KERN", "genotype_kernels._DZ_PRECOMP_KERN", "ld_statistics.dz"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1726,7 +1726,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 3 or n2 < 1"
+undefined = "NaN where n1 < 3 or n2 < 1"
 parallel = ["genotype_kernels._DZ_IJI_KERN", "genotype_kernels._DZ_PRECOMP_KERN", "ld_statistics.dz"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1737,7 +1737,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 2 or n2 < 2"
+undefined = "NaN where n1 < 2 or n2 < 2"
 parallel = ["genotype_kernels._DZ_IJJ_KERN", "genotype_kernels._DZ_PRECOMP_KERN", "ld_statistics.dz"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1748,7 +1748,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 2, n2 < 1 or n3 < 1"
+undefined = "NaN where n1 < 2, n2 < 1 or n3 < 1"
 parallel = ["genotype_kernels._DZ_DISTINCT_KERN", "genotype_kernels._DZ_PRECOMP_KERN", "ld_statistics.dz"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1759,7 +1759,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n < 4"
+undefined = "NaN where n < 4"
 parallel = ["genotype_kernels._PI2_IIII_KERN", "genotype_kernels._SIGMA_D2_GENO_KERN", "ld_statistics.pi2"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1770,7 +1770,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 3 or n2 < 1"
+undefined = "NaN where n1 < 3 or n2 < 1"
 parallel = ["genotype_kernels._PI2_IIIJ_KERN", "ld_statistics.pi2"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1781,7 +1781,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 3 or n2 < 1"
+undefined = "NaN where n1 < 3 or n2 < 1"
 parallel = ["genotype_kernels._PI2_IJII_KERN", "ld_statistics.pi2"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1792,7 +1792,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 2 or n2 < 2"
+undefined = "NaN where n1 < 2 or n2 < 2"
 parallel = ["genotype_kernels._PI2_IIKK_KERN", "ld_statistics.pi2"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1803,7 +1803,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 2 or n2 < 2"
+undefined = "NaN where n1 < 2 or n2 < 2"
 parallel = ["genotype_kernels._PI2_IJIJ_KERN", "ld_statistics.pi2"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1814,7 +1814,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 2, n2 < 1 or n3 < 1"
+undefined = "NaN where n1 < 2, n2 < 1 or n3 < 1"
 parallel = ["genotype_kernels._PI2_IIKL_KERN", "ld_statistics.pi2"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1825,7 +1825,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 2, n2 < 1 or n3 < 1"
+undefined = "NaN where n1 < 2, n2 < 1 or n3 < 1"
 parallel = ["genotype_kernels._PI2_IJKK_KERN", "ld_statistics.pi2"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1836,7 +1836,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where n1 < 2, n2 < 1 or n3 < 1"
+undefined = "NaN where n1 < 2, n2 < 1 or n3 < 1"
 parallel = ["genotype_kernels._PI2_SHARED_KERN", "ld_statistics.pi2"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -1847,7 +1847,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where any of n1..n4 < 1"
+undefined = "NaN where any of n1..n4 < 1"
 parallel = ["genotype_kernels._PI2_ALLDIFF_KERN", "ld_statistics.pi2"]
 notes = "Takes genotype_kernels._PopDataGeno objects; reference only, no production caller, parity target for the kernel."
 
@@ -2318,7 +2318,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where a pair has too few valid samples (ld_statistics dd, dz, pi2 rules)"
+undefined = "NaN where a pair has too few valid samples (ld_statistics dd, dz, pi2 rules)"
 parallel = ["haplotype_kernels.compute_multi_pop_statistics_batch_hap", "ld_pipeline.generate_stat_specs"]
 notes = "Hand-unrolls the 2-pop Dz averaging that generate_stat_specs encodes; the column order must match ld_names(2)."
 
@@ -2329,7 +2329,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "0.0 where a pair has fewer than 4 valid samples (ld_statistics dd, dz, pi2 rules)"
+undefined = "NaN where a pair has fewer than 4 valid samples (ld_statistics dd, dz, pi2 rules)"
 parallel = ["haplotype_kernels.compute_multi_pop_statistics_batch_hap"]
 notes = "moments_ld with one population uses the fused multi-pop kernels instead of this function."
 
@@ -2354,6 +2354,17 @@ span = "none"
 undefined = "n/a"
 parallel = ["moments_ld._compute_heterozygosity"]
 notes = "moments_ld._compute_heterozygosity builds the same H_i_j keys with its own loop."
+
+[functions."ld_pipeline.weighted_nanmean"]
+# signature: (weights, terms)
+axis_kwargs = []
+inputs = ["array"]
+streaming = "n/a"
+missing_data = []
+span = "none"
+undefined = "NaN for an element where every term is NaN, or where the weights of its non-NaN terms sum to 0"
+parallel = []
+notes = "Renormalizes weights over the non-NaN terms per element rather than averaging unconditionally over every term, so an undefined term does not dilute a symmetrized or orbit-averaged statistic."
 
 [functions."ld_pipeline.generate_stat_specs"]
 # signature: (num_pops)

@@ -98,23 +98,29 @@ class TestLDStatisticsGPUSinglePop:
         """Test handling of empty bins in single population computation."""
         h_gpu = HaplotypeMatrix.from_vcf(single_pop_vcf)
 
-        # Create bins that will have some empty ranges
+        # Create bins that will have some empty ranges. Positions 100, 200,
+        # 500, 1000, 2000 give pairwise distances 100, 300, 400, 500, 800,
+        # 900, 1000, 1500, 1800, 1900, landing only in bins [100,150),
+        # [200,500), [500,1000), [1000,2500); bins [0,10), [10,20), [20,100),
+        # [150,200) hold no pair at all.
         bp_bins = np.array([0, 10, 20, 100, 150, 200, 500, 1000, 2500])
+        empty_bins = {0, 1, 2, 4}
 
         gpu_stats = h_gpu.compute_ld_statistics_gpu_single_pop(
             bp_bins=bp_bins,
             raw=False,
         )
 
-        # Check all bins are present and empty bins have zero values
+        # A bin with no pair is NaN; a bin with at least one pair, on this
+        # fully-phased 4-haplotype data, has every statistic defined.
         for i in range(len(bp_bins) - 1):
             bin_range = (float(bp_bins[i]), float(bp_bins[i+1]))
             assert bin_range in gpu_stats
             stats = gpu_stats[bin_range]
-
-            # Empty bins should have all zeros
-            if all(s == 0.0 for s in stats):
-                assert stats == (0.0, 0.0, 0.0)
+            if i in empty_bins:
+                assert all(np.isnan(s) for s in stats)
+            else:
+                assert all(np.isfinite(s) for s in stats)
 
     def test_single_vs_two_population_same_pop(self, single_pop_vcf):
         """Test that single-pop function matches two-pop function with same population."""

@@ -447,3 +447,98 @@ def test_get_pop_data_nvalid_forms():
     # None -> sum of that pop's four counts
     *_, n = _get_pop_data(counts, None, 0)
     _agree(n, cp.array([10.0]))
+
+
+# ── dd/dz/pi2 undefined-pair sentinel (NaN below each threshold) ───────
+def test_dd_single_below_threshold_is_nan():
+    below = cp.array([[1, 1, 1, 0]], dtype=cp.float64)  # n=3 < 4
+    above = cp.array([[2, 2, 2, 2]], dtype=cp.float64)  # n=8 >= 4
+    assert bool(cp.isnan(dd(below)[0]))
+    assert bool(cp.isfinite(dd(above)[0]))
+
+
+def test_dd_between_below_threshold_is_nan():
+    # pop0 well-sampled (n=8); pop1 has only one valid haplotype (n=1 < 2).
+    counts = cp.array([[2, 2, 2, 2, 1, 0, 0, 0]], dtype=cp.float64)
+    assert bool(cp.isnan(dd(counts, populations=(0, 1))[0]))
+    well_sampled = cp.array([[2, 2, 2, 2, 2, 2, 2, 2]], dtype=cp.float64)
+    assert bool(cp.isfinite(dd(well_sampled, populations=(0, 1))[0]))
+
+
+def test_dz_single_below_threshold_is_nan():
+    below = cp.array([[1, 1, 1, 0]], dtype=cp.float64)  # n=3 < 4
+    above = cp.array([[2, 2, 2, 2]], dtype=cp.float64)
+    assert bool(cp.isnan(dz(below)[0]))
+    assert bool(cp.isfinite(dz(above)[0]))
+
+
+class TestDzMultiThresholds:
+    """Each of _dz_multi's four population-pattern branches gates on its own
+    threshold; below it the result is NaN, not 0.0."""
+
+    def test_iij_pattern(self):
+        # Dz(i,i,j) needs n_i>=3 & n_j>=1.
+        below = cp.array([[1, 1, 0, 0, 1, 0, 0, 0]], dtype=cp.float64)  # n_i=2
+        above = cp.array([[2, 1, 1, 2, 1, 0, 0, 0]], dtype=cp.float64)  # n_i=6
+        assert bool(cp.isnan(dz(below, populations=(0, 0, 1))[0]))
+        assert bool(cp.isfinite(dz(above, populations=(0, 0, 1))[0]))
+
+    def test_iji_pattern(self):
+        # Dz(i,j,i) shares the iij branch's threshold with the roles swapped.
+        below = cp.array([[1, 1, 0, 0, 1, 0, 0, 0]], dtype=cp.float64)
+        above = cp.array([[2, 1, 1, 2, 1, 0, 0, 0]], dtype=cp.float64)
+        assert bool(cp.isnan(dz(below, populations=(0, 1, 0))[0]))
+        assert bool(cp.isfinite(dz(above, populations=(0, 1, 0))[0]))
+
+    def test_ijj_pattern(self):
+        # Dz(i,j,j) needs n_i>=2 & n_j>=2.
+        below = cp.array([[2, 2, 2, 2, 1, 0, 0, 0]], dtype=cp.float64)  # n_j=1
+        above = cp.array([[2, 2, 2, 2, 1, 1, 0, 0]], dtype=cp.float64)  # n_j=2
+        assert bool(cp.isnan(dz(below, populations=(0, 1, 1))[0]))
+        assert bool(cp.isfinite(dz(above, populations=(0, 1, 1))[0]))
+
+    def test_all_different_pattern(self):
+        # Dz(i,j,k) needs n_i>=2 & n_j>=1 & n_k>=1.
+        below = cp.array([[1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]],
+                         dtype=cp.float64)  # n_i=1 < 2
+        above = cp.array([[1, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]],
+                         dtype=cp.float64)  # n_i=2
+        assert bool(cp.isnan(dz(below, populations=(0, 1, 2))[0]))
+        assert bool(cp.isfinite(dz(above, populations=(0, 1, 2))[0]))
+
+
+def test_pi2_single_below_threshold_is_nan():
+    below = cp.array([[1, 1, 1, 0]], dtype=cp.float64)  # n=3 < 4
+    above = cp.array([[2, 2, 2, 2]], dtype=cp.float64)
+    assert bool(cp.isnan(pi2(below)[0]))
+    assert bool(cp.isfinite(pi2(above)[0]))
+
+
+class TestPi2MultiThresholds:
+    def test_two_distinct_pops_each_need_at_least_two(self):
+        # pi2(i,i,k,k) needs n_i>=2 & n_k>=2.
+        below = cp.array([[2, 2, 2, 2, 1, 0, 0, 0]], dtype=cp.float64)  # n_k=1
+        above = cp.array([[2, 2, 2, 2, 1, 1, 0, 0]], dtype=cp.float64)  # n_k=2
+        assert bool(cp.isnan(pi2(below, populations=(0, 0, 1, 1))[0]))
+        assert bool(cp.isfinite(pi2(above, populations=(0, 0, 1, 1))[0]))
+
+    def test_all_four_distinct_pops_each_need_at_least_one(self):
+        below = cp.array(
+            [[1, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]],
+            dtype=cp.float64)  # pop3 (last) has n=0
+        above = cp.array(
+            [[1, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]],
+            dtype=cp.float64)  # pop3 has n=1
+        assert bool(cp.isnan(pi2(below, populations=(0, 1, 2, 3))[0]))
+        assert bool(cp.isfinite(pi2(above, populations=(0, 1, 2, 3))[0]))
+
+    def test_orbit_uniformly_undefined_when_one_population_is_empty(self):
+        # pi2(i,i,i,j) appears in several structurally different formula
+        # branches across its symmetry orbit (_pi2_iikl, _pi2_ijkk), but
+        # population j's multiplicity (appearing exactly once) is invariant
+        # across every arrangement, so every branch requires n_j>=1 and the
+        # whole orbit is undefined together when j is entirely missing.
+        counts = cp.array(
+            [[2, 2, 2, 2, 0, 0, 0, 0]], dtype=cp.float64)  # pop1 (j) has n=0
+        assert bool(cp.isnan(pi2(counts, populations=(0, 0, 0, 1))[0]))
+        assert bool(cp.isnan(pi2(counts, populations=(1, 1, 1, 0))[0]))
