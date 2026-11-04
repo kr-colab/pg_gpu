@@ -884,6 +884,17 @@ span = "none"
 undefined = "NaN when no derived allele is segregating"
 parallel = ["windowed_analysis.windowed_statistics_fused"]
 
+[functions."sfs.sfs"]
+# signature: (haplotype_matrix, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
+inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
+streaming = "native"
+missing_data = ["include", "exclude"]
+span = "none"
+undefined = "all-zero array with no segregating derived allele; None on streaming input with no non-empty chunk"
+parallel = ["diversity.FrequencySpectrum.__init__"]
+notes = "FrequencySpectrum builds its own per-n SFS with the same 0 < count < n rule; streaming sums per-chunk results with _stream_sum."
+
 [functions."sfs.sfs_folded"]
 # signature: (haplotype_matrix, population, missing_data)
 axis_kwargs = ["missing_data", "population"]
