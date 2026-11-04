@@ -21,6 +21,20 @@ jobs:
           environments: lint
       - run: pixi run -e lint ruff check pg_gpu/ tests/ examples/
 
-  # GPU tests and moments integration require a GPU and must be run locally:
+  pipeline-map:
+    name: Pipeline map
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.66.0
+          environments: map-check
+      # The drift test reads signatures and constants only, so it runs on a
+      # runner with no GPU; the task sets the flag that lets pg_gpu import
+      # without one.
+      - run: pixi run -e map-check check-map
+
+  # The other tests and the moments integration need a GPU; run them locally:
   #   pixi run pytest tests/ -v
   #   pixi run -e moments pytest tests/test_moments_ld.py -v

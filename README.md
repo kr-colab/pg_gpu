@@ -95,4 +95,10 @@ Interactive walkthrough: [examples/pg_gpu_tour.ipynb](examples/pg_gpu_tour.ipynb
 ```bash
 pixi run pytest tests/
 pixi run -e lint ruff check pg_gpu/
+pixi run check-map      # pipeline-map drift test; needs no GPU
 ```
+
+Before you change a statistic, a loader or a rule, read
+[docs/dev/README.md](docs/dev/README.md). The pipeline map there lists the
+parallel code paths that must change together, and CI fails when the map and
+the code disagree.

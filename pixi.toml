@@ -78,10 +78,20 @@ sphinx-rtd-theme = ">=1.0"
 python = ">=3.12"
 ruff = ">=0.4"
 
+# The pipeline-map drift test reads signatures and constants only, so CI runs
+# it on a runner with no GPU (PG_GPU_SKIP_CUDA_CHECK=1). The default feature
+# already brings pg_gpu and its runtime stack; this adds only pytest.
+[feature.map-check.dependencies]
+pytest = ">=7.0"
+
+[feature.map-check.tasks]
+check-map = { cmd = "pytest tests/test_pipeline_map.py -v", env = { PG_GPU_SKIP_CUDA_CHECK = "1" } }
+
 [environments]
 default = ["gpu", "dev", "docs"]
 moments = ["gpu", "dev", "docs", "moments"]
 lint = ["lint"]
+map-check = ["map-check"]
 
 [tasks]
 test = { cmd = "pytest tests/ -v" }
