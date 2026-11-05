@@ -11,7 +11,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from pg_gpu import HaplotypeMatrix, sfs, plotting
-from pg_gpu.windowed_analysis import windowed_statistics
+from pg_gpu.windowed_analysis import windowed_analysis
 
 
 @pytest.fixture(autouse=True)
@@ -103,18 +103,17 @@ class TestWindowedPlots:
 
     def test_plot_windowed(self, sim_data):
         matrix, _, _ = sim_data
-        bp_bins = np.arange(0, 100001, 10000)
-        result = windowed_statistics(matrix, bp_bins, statistics=('pi',))
+        result = windowed_analysis(matrix, window_size=10000, step_size=10000,
+                                   statistics=['pi'])
         ax = plotting.plot_windowed(result['start'], result['pi'],
                                     stat_name='pi')
         assert ax is not None
 
     def test_plot_windowed_panel(self, sim_data):
         matrix, _, _ = sim_data
-        bp_bins = np.arange(0, 100001, 20000)
-        result = windowed_statistics(
-            matrix, bp_bins,
-            statistics=('pi', 'theta_w', 'segregating_sites'))
+        result = windowed_analysis(
+            matrix, window_size=20000, step_size=20000,
+            statistics=['pi', 'theta_w', 'segregating_sites'])
         fig, axes = plotting.plot_windowed_panel(result)
         assert fig is not None
         assert len(axes) == 3
@@ -165,8 +164,8 @@ class TestPlotEdgeInputs:
 
     def test_windowed_panel_single_statistic(self, sim_data):
         matrix, _, _ = sim_data
-        bp_bins = np.arange(0, 100001, 20000)
-        result = windowed_statistics(matrix, bp_bins, statistics=('pi',))
+        result = windowed_analysis(matrix, window_size=20000, step_size=20000,
+                                   statistics=['pi'])
         _, axes = plotting.plot_windowed_panel(result)
         assert len(axes) == 1
 

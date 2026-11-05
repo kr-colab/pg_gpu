@@ -1184,15 +1184,18 @@ class TestMultiallelicSinglePop:
                                chrom_start=int(start), chrom_end=int(stop))
 
     def test_scatter_path_matches_scalar(self, sim_hm):
-        """Host scatter engine: per-window pi/theta_w/segregating equal the
-        per-allele scalar functions on the window subset."""
+        """Host scatter engine (no missing data): per-window pi/theta_w/
+        segregating_sites/singletons/tajimas_d equal the per-allele scalar
+        functions on the window subset."""
         window_size = 25_000
         df = windowed_analysis(sim_hm, window_size=window_size,
                                step_size=window_size,
-                               statistics=['pi', 'theta_w', 'segregating_sites'],
+                               statistics=['pi', 'theta_w', 'segregating_sites',
+                                           'singletons', 'tajimas_d'],
                                span_normalize=False)
-        for start, pi_w, tw_w, seg_w in zip(
-                df['start'], df['pi'], df['theta_w'], df['segregating_sites']):
+        for start, pi_w, tw_w, seg_w, sing_w, td_w in zip(
+                df['start'], df['pi'], df['theta_w'], df['segregating_sites'],
+                df['singletons'], df['tajimas_d']):
             stop = start + window_size
             if stop > sim_hm.chrom_end:
                 continue
@@ -1205,6 +1208,12 @@ class TestMultiallelicSinglePop:
                               rtol=1e-9, atol=1e-12)
             assert np.isclose(seg_w, diversity.segregating_sites(sub),
                               rtol=1e-9, atol=1e-12)
+            assert sing_w == diversity.singleton_count(sub)
+            td_ref = diversity.tajimas_d(sub)
+            if np.isnan(td_w) or np.isnan(td_ref):
+                assert np.isnan(td_w) and np.isnan(td_ref)
+            else:
+                assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-12)
 
     def test_fused_kernel_matches_scalar(self, sim_hm):
         """Fused CUDA kernel: per-window pi/segregating/theta_h equal the
@@ -1230,41 +1239,6 @@ class TestMultiallelicSinglePop:
             assert np.isclose(seg_w, diversity.segregating_sites(sub),
                               rtol=1e-9, atol=1e-12)
 
-    def test_per_variant_matches_scalar(self, sim_hm):
-        """Per-variant engine (windowed_statistics): all six single-pop stats
-        per window == the per-allele scalar functions on the window subset."""
-        from pg_gpu.windowed_analysis import windowed_statistics
-        window_size = 25_000
-        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
-                       dtype=float)
-        stats = ['pi', 'theta_w', 'segregating_sites', 'singletons',
-                 'het_expected', 'tajimas_d']
-        r = windowed_statistics(sim_hm, bp_bins=bp, statistics=stats,
-                                per_base=False, chrom='1')
-        for i, start in enumerate(r['start']):
-            stop = start + window_size
-            if stop > sim_hm.chrom_end:
-                continue
-            sub = self._window_subset(sim_hm, start, stop)
-            if sub.num_variants == 0:
-                continue
-            assert np.isclose(r['pi'][i], diversity.pi(sub, span_normalize=False),
-                              rtol=1e-9, atol=1e-11)
-            assert np.isclose(r['theta_w'][i],
-                              diversity.theta_w(sub, span_normalize=False),
-                              rtol=1e-9, atol=1e-11)
-            assert r['segregating_sites'][i] == diversity.segregating_sites(sub)
-            assert r['singletons'][i] == diversity.singleton_count(sub)
-            assert np.isclose(
-                r['het_expected'][i],
-                float(np.nanmean(diversity.heterozygosity_expected(sub))),
-                rtol=1e-9, atol=1e-11)
-            td_w, td_ref = r['tajimas_d'][i], diversity.tajimas_d(sub)
-            if np.isnan(td_w) or np.isnan(td_ref):
-                assert np.isnan(td_w) and np.isnan(td_ref)
-            else:
-                assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
-
     @pytest.fixture(scope="class")
     def sim_hm_missing(self, sim_hm):
         """Multiallelic data with ~10% missing calls injected (-1)."""
@@ -1279,61 +1253,6 @@ class TestMultiallelicSinglePop:
         hap[rng.random(hap.shape) < 0.1] = -1
         return HaplotypeMatrix(hap, pos, chrom_start=sim_hm.chrom_start,
                                chrom_end=sim_hm.chrom_end)
-
-    def test_per_variant_missing_data_matches_scalar(self, sim_hm_missing):
-        """With missing data, the per-variant engine still matches the scalar
-        for the stats that use per-site n_valid."""
-        from pg_gpu.windowed_analysis import windowed_statistics
-        hm = sim_hm_missing
-        window_size = 25_000
-        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
-                       dtype=float)
-        stats = ['pi', 'theta_w', 'segregating_sites', 'singletons',
-                 'het_expected']
-        r = windowed_statistics(hm, bp_bins=bp, statistics=stats,
-                                per_base=False, chrom='1')
-        for i, start in enumerate(r['start']):
-            stop = start + window_size
-            if stop > hm.chrom_end:
-                continue
-            sub = self._window_subset(hm, start, stop)
-            if sub.num_variants == 0:
-                continue
-            assert np.isclose(r['pi'][i], diversity.pi(sub, span_normalize=False),
-                              rtol=1e-9, atol=1e-11)
-            assert np.isclose(r['theta_w'][i],
-                              diversity.theta_w(sub, span_normalize=False),
-                              rtol=1e-9, atol=1e-11)
-            assert r['segregating_sites'][i] == diversity.segregating_sites(sub)
-            assert r['singletons'][i] == diversity.singleton_count(sub)
-            assert np.isclose(
-                r['het_expected'][i],
-                float(np.nanmean(diversity.heterozygosity_expected(sub))),
-                rtol=1e-9, atol=1e-11)
-
-    def test_per_variant_missing_data_tajimas_d_matches_scalar(self,
-                                                               sim_hm_missing):
-        """Per-window tajimas_d must equal the scalar on the window subset
-        under missing data (per-window harmonic-mean effective n)."""
-        from pg_gpu.windowed_analysis import windowed_statistics
-        hm = sim_hm_missing
-        window_size = 25_000
-        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
-                       dtype=float)
-        r = windowed_statistics(hm, bp_bins=bp, statistics=['tajimas_d'],
-                                per_base=False, chrom='1')
-        for i, start in enumerate(r['start']):
-            stop = start + window_size
-            if stop > hm.chrom_end:
-                continue
-            sub = self._window_subset(hm, start, stop)
-            if sub.num_variants == 0:
-                continue
-            td_w, td_ref = r['tajimas_d'][i], diversity.tajimas_d(sub)
-            if np.isnan(td_w) or np.isnan(td_ref):
-                assert np.isnan(td_w) and np.isnan(td_ref)
-            else:
-                assert np.isclose(td_w, td_ref, rtol=1e-9, atol=1e-11)
 
     def _check_fused_missing_data(self, hm, fn, **kwargs):
         """Shared body for the fused/chunked missing-data checks below."""
@@ -1480,32 +1399,6 @@ class TestMultiallelicTwoPop:
                     assert np.isnan(got) and np.isnan(ref)
                 else:
                     assert np.isclose(got, ref, rtol=1e-9, atol=1e-12)
-
-    def test_per_variant_dxy_fst_match_scalar(self, sim_hm):
-        """Per-variant engine (windowed_statistics): two-pop dxy/fst per window
-        == scalar. Inherits the per-allele _twopop_site_components fix."""
-        from pg_gpu.windowed_analysis import windowed_statistics
-        window_size = 25_000
-        bp = np.arange(0, int(sim_hm.chrom_end) + window_size, window_size,
-                       dtype=float)
-        r = windowed_statistics(
-            sim_hm, bp_bins=bp, statistics=['fst', 'dxy'],
-            pop1='p1', pop2='p2', per_base=False, chrom='1')
-        for start, dxy_w, fst_w in zip(r['start'], r['dxy'], r['fst']):
-            stop = start + window_size
-            if stop > sim_hm.chrom_end:
-                continue
-            sub = self._window_subset(sim_hm, start, stop)
-            if sub.num_variants == 0:
-                continue
-            assert np.isclose(dxy_w,
-                              divergence.dxy(sub, 'p1', 'p2', span_normalize=False),
-                              rtol=1e-9, atol=1e-12)
-            fst_ref = divergence.fst_hudson(sub, 'p1', 'p2')
-            if np.isnan(fst_w) or np.isnan(fst_ref):
-                assert np.isnan(fst_w) and np.isnan(fst_ref)
-            else:
-                assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
 
 
 class TestMultiallelicCap:
@@ -1919,6 +1812,85 @@ class TestEngineGridAgreement:
 
 def _host(a):
     return a.get() if hasattr(a, "get") else np.asarray(a)
+
+
+class TestWindowedHetExpected:
+    """``het_expected`` -- the per-window mean of per-site expected
+    heterozygosity over the sites with a defined value -- equals the scalar
+    ``diversity.heterozygosity_expected`` averaged over each window's variant
+    subset, on every window family and both missing-data modes.
+
+    This is the scalar-parity coverage that the removed ``windowed_statistics``
+    engine carried (bp windows only), retargeted to ``windowed_analysis`` and
+    extended to snp and regions (sorted, unordered, overlapping) windows.
+    """
+
+    @staticmethod
+    def _matrix(missing=False, seed=0):
+        rng = np.random.RandomState(seed)
+        n_hap, n_var = 40, 400
+        hap = rng.randint(0, 2, (n_hap, n_var)).astype(np.int8)
+        if missing:
+            hap[rng.random(hap.shape) < 0.1] = -1
+        pos = np.sort(rng.choice(np.arange(1, 1_000_000), n_var, replace=False))
+        return HaplotypeMatrix(hap, pos, 1, 999_999)
+
+    @staticmethod
+    def _subset(hm, start, stop):
+        pos, hap = _host(hm.positions), _host(hm.haplotypes)
+        mask = (pos >= start) & (pos < stop)
+        return HaplotypeMatrix(hap[:, mask], pos[mask],
+                               chrom_start=int(start), chrom_end=int(stop))
+
+    @staticmethod
+    def _ref(sub, missing_data):
+        """np.nanmean of the per-site scalar He over the window subset, NaN for
+        a window with no defined site -- the value het_expected must return."""
+        he = np.asarray(
+            diversity.heterozygosity_expected(sub, missing_data=missing_data),
+            dtype=float)
+        return float(np.nanmean(he)) if np.any(np.isfinite(he)) else np.nan
+
+    def _check(self, hm, df, missing_data, inclusive_end=False):
+        assert len(df) > 0
+        for _, row in df.iterrows():
+            # snp windows report 'end' as the last variant's position
+            # (inclusive); bp and regions windows are half-open [start, end).
+            stop = row['end'] + 1 if inclusive_end else row['end']
+            sub = self._subset(hm, row['start'], stop)
+            got, ref = row['het_expected'], self._ref(sub, missing_data)
+            if np.isnan(got) or np.isnan(ref):
+                assert np.isnan(got) and np.isnan(ref), (row['start'], got, ref)
+            else:
+                assert np.isclose(got, ref, rtol=1e-9, atol=1e-11), \
+                    (row['start'], got, ref)
+
+    @pytest.mark.parametrize('missing_data', ['include', 'exclude'])
+    def test_bp_windows(self, missing_data):
+        hm = self._matrix(missing=(missing_data == 'exclude'))
+        df = windowed_analysis(hm, window_size=100_000, step_size=100_000,
+                               statistics=['het_expected'],
+                               missing_data=missing_data)
+        self._check(hm, df, missing_data)
+
+    def test_snp_windows(self):
+        hm = self._matrix()
+        df = windowed_analysis(hm, window_size=50, step_size=50,
+                               statistics=['het_expected'], window_type='snp')
+        self._check(hm, df, 'include', inclusive_end=True)
+
+    @pytest.mark.parametrize('missing_data', ['include', 'exclude'])
+    def test_region_windows_unordered_overlapping(self, missing_data):
+        hm, regions = _region_case()
+        if missing_data == 'exclude':
+            pos, hap = _host(hm.positions), _host(hm.haplotypes).copy()
+            rng = np.random.RandomState(9)
+            hap[rng.random(hap.shape) < 0.1] = -1
+            hm = HaplotypeMatrix(hap, pos, 1, 999_999)
+        df = windowed_analysis(hm, window_type='regions', regions=regions,
+                               statistics=['het_expected'],
+                               missing_data=missing_data)
+        self._check(hm, df, missing_data)
 
 
 class TestOneGridAllModes:
