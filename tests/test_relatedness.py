@@ -354,6 +354,32 @@ class TestGeneticRelatedness:
                                             span_normalize=True)
         np.testing.assert_allclose(a, b)
 
+    def test_proportion_no_segregating_sites_is_nan_pin(self):
+        # A region with only monomorphic sites has zero segregating sites, so
+        # the proportion is 0/0 -- undefined, not the raw covariance (0 when
+        # centred, the raw per-site sum when not). tskit's own full-matrix
+        # computation of this is itself float-fragile at the 0/0 edge (it can
+        # land on inf instead of nan from roundoff in the numerator), so this
+        # pins to the same restricted pair selection tskit gives a clean nan
+        # for, rather than the full D x D matrix.
+        import msprime
+        tables = msprime.sim_ancestry(3, sequence_length=1000,
+                                      random_seed=1).dump_tables()
+        for x in np.arange(5) * 100 + 50:
+            tables.sites.add_row(position=x, ancestral_state="A")
+        ts = tables.tree_sequence()
+        hm = HaplotypeMatrix.from_ts(ts)
+        tsk_sets = [[s] for s in ts.samples()]
+        pairs = [(0, 0), (0, 1), (0, 2)]
+        for centre in (True, False):
+            exp = ts.genetic_relatedness(tsk_sets, indexes=pairs, mode='site',
+                                         proportion=True, centre=centre,
+                                         span_normalise=False)
+            got = relatedness.genetic_relatedness(hm, proportion=True,
+                                                  centre=centre, indexes=pairs)
+            assert np.all(np.isnan(exp))
+            assert np.all(np.isnan(got))
+
     def test_indexes_selection(self, multiallelic_hm):
         _, hm = multiallelic_hm
         full = relatedness.genetic_relatedness(hm, span_normalize=False)

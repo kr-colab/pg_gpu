@@ -45,7 +45,8 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         Divide by the number of segregating sites among the analyzed samples
         (the per-site sum of ``num_alleles - 1``), giving a relatedness
         proportion. When True, ``span_normalize`` has no effect (it cancels
-        between the covariance and the segregating-site count).
+        between the covariance and the segregating-site count). NaN when no
+        site is segregating.
     span_normalize : bool or str
         True (default) divides by the analysis span (see ``get_span``); False
         returns the raw sum. Like tskit's ``span_normalise``, except that when
@@ -62,8 +63,8 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     ndarray, float64
         The ``(D, D)`` matrix, or a 1-D array of values for the requested
         ``indexes``. NaN for a pair of sets with no column called in both.
-        0 when no column is called at all, unless ``proportion=True``, which
-        is then NaN too (0 segregating sites).
+        0 when no column is called at all and ``proportion=False``.
+        ``proportion=True`` gives NaN whenever no site segregates.
     """
     from ._memutil import estimate_variant_chunk_size
     from .streaming_matrix import StreamingHaplotypeMatrix
@@ -169,6 +170,8 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         denom = float(seg_cols - seg_sites)
         if denom > 0:
             R = R / denom
+        else:
+            R = cp.full_like(R, cp.nan)
     elif span_normalize is not False:
         mode = 'auto' if span_normalize is True else span_normalize
         span = haplotype_matrix.get_span(mode)
@@ -273,6 +276,8 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
         denom = seg_cols - float(seg_sites.get())
         if denom > 0:
             R = R / denom
+        else:
+            R = np.full_like(R, np.nan)
     elif span_normalize is not False:
         # Same span source as the eager path: get_span('auto') prefers the
         # accessible mask / n_total_sites (set at load via accessible_bed) over

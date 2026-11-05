@@ -143,3 +143,16 @@ class TestStreamingGeneticRelatednessMissingData:
         Rp = relatedness.genetic_relatedness(sh, missing_data='exclude',
                                              proportion=True)
         assert np.all(np.isnan(Rp))
+
+
+class TestStreamingGeneticRelatednessProportion:
+
+    def test_no_segregating_sites_is_nan(self, mono_store):
+        # Every site is monomorphic, so there are zero segregating sites and
+        # the proportion is 0/0 -- undefined, not the raw covariance.
+        sh = HaplotypeMatrix.from_zarr(mono_store, streaming="always",
+                                       chunk_bp=500)
+        for centre in (True, False):
+            R = relatedness.genetic_relatedness(sh, proportion=True,
+                                                centre=centre)
+            assert np.all(np.isnan(R))
