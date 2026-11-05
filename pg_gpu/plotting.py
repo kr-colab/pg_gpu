@@ -340,7 +340,7 @@ def plot_windowed(window_start, values, ax=None, stat_name='',
     Parameters
     ----------
     window_start : array_like
-        Window start positions (from windowed_statistics results).
+        Window start positions (from windowed_analysis results).
     values : array_like
         Statistic values per window.
     ax : matplotlib.axes.Axes, optional
@@ -389,9 +389,9 @@ def plot_windowed_panel(results, statistics=None, figsize=None, colors=None):
 
     Parameters
     ----------
-    results : dict
-        Output from windowed_statistics() or windowed_statistics_fused().
-        Must contain 'start' and statistic arrays.
+    results : pandas.DataFrame or dict
+        Output from windowed_analysis(). Must contain 'start' and statistic
+        columns.
     statistics : list of str, optional
         Which statistics to plot. If None, plots all non-metadata keys.
     figsize : tuple, optional

@@ -222,27 +222,24 @@ Compute multiple statistics across thousands of windows without Python loops:
 
 .. code-block:: python
 
-   from pg_gpu.windowed_analysis import windowed_statistics
+   from pg_gpu.windowed_analysis import windowed_analysis
    import numpy as np
 
-   # Define windows across 1Mb region
-   bp_bins = np.arange(0, 1_000_001, 10_000)  # 100 windows of 10kb
-
-   # Compute 4 diversity stats in one GPU pass
-   result = windowed_statistics(
-       h, bp_bins,
-       statistics=('pi', 'theta_w', 'tajimas_d', 'segregating_sites')
+   # Compute 4 diversity stats in one GPU pass over 10kb windows
+   result = windowed_analysis(
+       h, window_size=10_000, step_size=10_000,
+       statistics=['pi', 'theta_w', 'tajimas_d', 'segregating_sites']
    )
 
-   # Results are numpy arrays, one value per window
+   # Results are a DataFrame, one row per window
    print(f"Mean pi: {np.nanmean(result['pi']):.6f}")
    print(f"Mean Tajima's D: {np.nanmean(result['tajimas_d']):.3f}")
 
    # Windowed FST between populations
-   result = windowed_statistics(
-       h, bp_bins,
-       statistics=('pi', 'fst', 'dxy'),
-       pop1='CEU', pop2='YRI'
+   result = windowed_analysis(
+       h, window_size=10_000, step_size=10_000,
+       statistics=['pi', 'fst', 'dxy'],
+       populations=['CEU', 'YRI']
    )
 
 For end-to-end command-line workflows (``vcf_to_zarr.py``,
