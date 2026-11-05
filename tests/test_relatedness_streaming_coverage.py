@@ -99,3 +99,27 @@ class TestStreamingGeneticRelatednessIndexes:
             sh, sample_sets=sets, indexes=pairs))
         assert idxed.shape == (len(pairs),)
         np.testing.assert_allclose(idxed, [full[i, j] for i, j in pairs])
+
+
+class TestStreamingGeneticRelatednessMissingData:
+
+    def test_pair_with_no_shared_called_site_is_nan(self, tmp_path):
+        # Same disjoint-missingness pattern as the eager-path test: haplotypes
+        # 0 and 1 are each called at a disjoint half of the sites, so they
+        # share no called site and must get NaN through the streaming
+        # two-pass path too, not a coincidental 0.0.
+        hap = np.array([[0, 0, 0, -1, -1, -1],
+                       [-1, -1, -1, 1, 1, 1],
+                       [0, 0, 0, 1, 1, 1],
+                       [1, 1, 1, 0, 0, 0]], dtype=np.int8)
+        store = _write_vcz(hap, str(tmp_path / "disjoint.vcz"))
+        sh = HaplotypeMatrix.from_zarr(store, streaming="always", chunk_bp=500)
+        R = relatedness.genetic_relatedness(sh, centre=False,
+                                            span_normalize=False)
+        assert np.isnan(R[0, 1]) and np.isnan(R[1, 0])
+        expected = np.array([[3, np.nan, 3, 0],
+                             [np.nan, 3, 3, 0],
+                             [3, 3, 6, 0],
+                             [0, 0, 0, 6]], dtype=np.float64)
+        mask = ~np.isnan(expected)
+        np.testing.assert_allclose(R[mask], expected[mask])
