@@ -120,8 +120,9 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     seg_sites = cp.zeros((), dtype=cp.float64)
     if hap.shape[1] > 0:
         K = int(hap.max()) + 1
+        # cols + valid_mask (as float) + the two matmul outputs, per chunk.
         chunk = estimate_variant_chunk_size(n_hap, bytes_per_element=8,
-                                            n_intermediates=3,
+                                            n_intermediates=4,
                                             memory_fraction=0.25)
         for start in range(0, hap.shape[1], chunk):
             end = min(start + chunk, hap.shape[1])
@@ -194,7 +195,8 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
     seg_cols = 0
     seg_sites = cp.zeros((), dtype=cp.float64)
     if block_size is None:
-        block_size = estimate_indiv_block_size(D, n_intermediates=3)
+        # cols + valid_mask (as float) + the two matmul outputs, per block.
+        block_size = estimate_indiv_block_size(D, n_intermediates=4)
 
     # iter_gpu_chunks already attaches any load-time accessible mask, so the
     # chunks here are variant-filtered to accessible sites (matching eager).
