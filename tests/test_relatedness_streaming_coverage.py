@@ -40,22 +40,43 @@ def poly_store(tmp_path):
 
 class TestStreamingGrmDegenerate:
 
-    def test_monomorphic_source_returns_zero_grm(self, mono_store):
+    def test_monomorphic_source_returns_nan_grm(self, mono_store):
         gm = GenotypeMatrix.from_zarr(mono_store, streaming="always",
                                       chunk_bp=500)
         A = relatedness.grm(gm)
         assert A.shape == (4, 4)
-        assert np.all(A == 0.0)
+        assert np.all(np.isnan(A))
 
-    def test_empty_source_returns_zero_grm(self, poly_store):
+    def test_empty_source_returns_nan_grm(self, poly_store):
         gm = GenotypeMatrix.from_zarr(poly_store, streaming="always",
                                       chunk_bp=500, region=_EMPTY_REGION)
         A = relatedness.grm(gm)
-        # The all-zero return must keep the full (n_ind, n_ind) shape, so a
+        # The all-NaN return must keep the full (n_ind, n_ind) shape, so a
         # regression in the empty-source individual count (an unhalved or
-        # zero-size fallback) is caught, not masked by np.all(x == 0).
+        # zero-size fallback) is caught, not masked by np.all(np.isnan(x)).
         assert A.shape == (4, 4)
-        assert np.all(A == 0.0)
+        assert np.all(np.isnan(A))
+
+    def test_pair_with_no_shared_called_snp_is_nan(self, tmp_path):
+        # Same disjoint-missingness pattern as the eager-path test, through
+        # the streaming two-pass path. _write_vcz takes haplotypes, so each
+        # genotype dosage is expanded to the haplotype pair that reproduces
+        # it on read-back (-1 -> (-1, -1), 0 -> (0, 0), 1 -> (0, 1), 2 -> (1, 1)).
+        g = np.array([[0, 1, 2, -1, -1, -1],
+                     [-1, -1, -1, 2, 1, 0],
+                     [0, 1, 2, 2, 1, 0],
+                     [2, 1, 0, 0, 1, 2]], dtype=np.int8)
+        pairs = {-1: (-1, -1), 0: (0, 0), 1: (0, 1), 2: (1, 1)}
+        n_ind, n_var = g.shape
+        hap = np.empty((2 * n_ind, n_var), dtype=np.int8)
+        for i in range(n_ind):
+            for j in range(n_var):
+                hap[2 * i, j], hap[2 * i + 1, j] = pairs[int(g[i, j])]
+        store = _write_vcz(hap, str(tmp_path / "disjoint_geno.vcz"))
+        gm = GenotypeMatrix.from_zarr(store, streaming="always", chunk_bp=500)
+        A = relatedness.grm(gm)
+        assert np.isnan(A[0, 1]) and np.isnan(A[1, 0])
+        np.testing.assert_allclose(A[0, 0], A[2, 2])
 
 
 class TestStreamingIbsDegenerate:

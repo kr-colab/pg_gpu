@@ -258,6 +258,8 @@ def grm(genotype_matrix,
     ndarray, float64, shape (n_individuals, n_individuals)
         Symmetric GRM. Diagonal entries are individual inbreeding
         coefficients + 1. Off-diagonal entries are pairwise relatedness.
+        NaN for a pair with no polymorphic SNP called in both, and for the
+        whole matrix when no SNP is polymorphic.
     """
     from ._memutil import estimate_variant_chunk_size
     from .streaming_matrix import _StreamingMatrixBase, StreamingHaplotypeMatrix
@@ -299,17 +301,24 @@ def grm(genotype_matrix,
     poly_idx = cp.where(poly)[0]
     n_snps_used = len(poly_idx)
     if n_snps_used == 0:
-        return np.zeros((n_ind, n_ind), dtype=np.float64)
+        return np.full((n_ind, n_ind), np.nan, dtype=np.float64)
 
     p_poly = p[poly_idx]
     del p, dac, n_valid, poly
 
-    # Chunked GRM: accumulate (std_chunk @ std_chunk.T) over variant chunks.
+    # Chunked GRM: accumulate (std_chunk @ std_chunk.T) over variant chunks,
+    # plus the count of jointly-called SNPs per pair (N), so a pair is
+    # normalized by its own called-SNP count rather than the dataset total.
+    # A complete chunk is tracked as a scalar instead of a matmul; the
+    # validity matmul only runs for a chunk with a missing call, in float32
+    # (exact for any realistic chunk size).
     # Peak per-chunk: 1 float64 array (standardized genotypes) + matmul workspace.
     chunk_size = estimate_variant_chunk_size(n_ind, bytes_per_element=8,
-                                             n_intermediates=3,
+                                             n_intermediates=4,
                                              memory_fraction=0.25)
     A = cp.zeros((n_ind, n_ind), dtype=cp.float64)
+    N = cp.zeros((n_ind, n_ind), dtype=cp.float64)
+    n_complete = 0
 
     for start in range(0, n_snps_used, chunk_size):
         end = min(start + chunk_size, n_snps_used)
@@ -318,6 +327,7 @@ def grm(genotype_matrix,
 
         g_chunk = geno[:, idx]
         valid = (g_chunk >= 0)
+        all_valid = bool(valid.all())
         g = cp.where(valid, g_chunk, 0).astype(cp.float64)
         del g_chunk
 
@@ -326,11 +336,18 @@ def grm(genotype_matrix,
         g -= 2.0 * p_chunk
         g *= valid
         g /= scale
-        del valid, scale
         A += g @ g.T
         del g
+        if all_valid:
+            n_complete += end - start
+        else:
+            vf = valid.astype(cp.float32)
+            N += (vf @ vf.T).astype(cp.float64)
+            del vf
+        del valid, scale
 
-    A /= n_snps_used
+    N += n_complete
+    A = cp.where(N > 0, A / cp.maximum(N, 1.0), cp.nan)
     return A.get()
 
 
@@ -391,26 +408,37 @@ def ibs(genotype_matrix,
     n_var = geno.shape[1]
     # Peak per-chunk: 1 float64 indicator + matmul workspace.
     chunk_size = estimate_variant_chunk_size(n_ind, bytes_per_element=8,
-                                             n_intermediates=3,
+                                             n_intermediates=4,
                                              memory_fraction=0.25)
 
     ibs2 = cp.zeros((n_ind, n_ind), dtype=cp.float64)
     ibs1 = cp.zeros((n_ind, n_ind), dtype=cp.float64)
     n_joint = cp.zeros((n_ind, n_ind), dtype=cp.float64)
+    n_complete = 0
 
     for start in range(0, n_var, chunk_size):
         end = min(start + chunk_size, n_var)
         g_chunk = geno[:, start:end]
-        valid = (g_chunk >= 0).astype(cp.float64)
-        g = cp.where(g_chunk >= 0, g_chunk, 0).astype(cp.float64)
+        valid_b = (g_chunk >= 0)
+        g = cp.where(valid_b, g_chunk, 0).astype(cp.float64)
         del g_chunk
 
         if missing_data == 'exclude':
-            site_complete = cp.all(valid > 0, axis=0)
-            valid = valid[:, site_complete]
+            site_complete = cp.all(valid_b, axis=0)
+            valid_b = valid_b[:, site_complete]
             g = g[:, site_complete]
 
-        n_joint += valid @ valid.T
+        # A complete chunk (always true under 'exclude') is tracked as a
+        # scalar instead of a matmul; the validity matmul that remains runs
+        # in float32 (exact for any realistic chunk size).
+        if bool(valid_b.all()):
+            n_complete += g.shape[1]
+        else:
+            vf = valid_b.astype(cp.float32)
+            n_joint += (vf @ vf.T).astype(cp.float64)
+            del vf
+        valid = valid_b.astype(cp.float64)
+        del valid_b
 
         # ibs2 (both alleles shared) and ibs1 (one shared) via genotype-state
         # indicators, one at a time to avoid materializing all three together.
@@ -426,6 +454,7 @@ def ibs(genotype_matrix,
 
         del g, valid
 
+    n_joint += n_complete
     ibs_mat = cp.where(n_joint > 0,
                         (2.0 * ibs2 + ibs1) / (2.0 * n_joint),
                         cp.nan)
@@ -598,20 +627,30 @@ def _accumulate_ibs_chunk(geno, ibs2_host, ibs1_host, n_joint_host, *,
     one block's (block_size, n_ind) matmul output sits on the GPU at a time
     before it is added to the host accumulators.
     """
-    valid_full = (geno >= 0).astype(cp.float64)
-    g = cp.where(geno >= 0, geno, 0).astype(cp.float64)
+    valid_b = (geno >= 0)
+    g = cp.where(valid_b, geno, 0).astype(cp.float64)
     if missing_data == 'exclude':
-        site_complete = cp.all(valid_full > 0, axis=0)
-        valid_full = valid_full[:, site_complete]
+        site_complete = cp.all(valid_b, axis=0)
+        valid_b = valid_b[:, site_complete]
         g = g[:, site_complete]
         if g.shape[1] == 0:
             return
 
     n_ind = g.shape[0]
-    for r0 in range(0, n_ind, block_size):
-        r1 = min(r0 + block_size, n_ind)
-        n_joint_host[r0:r1] += (valid_full[r0:r1] @ valid_full.T).get()
+    # A complete chunk (always true under 'exclude') is tracked as a scalar
+    # instead of a matmul; the validity matmul that remains runs in float32
+    # (exact for any realistic chunk size).
+    if bool(valid_b.all()):
+        n_joint_host += g.shape[1]
+    else:
+        vf = valid_b.astype(cp.float32)
+        for r0 in range(0, n_ind, block_size):
+            r1 = min(r0 + block_size, n_ind)
+            n_joint_host[r0:r1] += (vf[r0:r1] @ vf.T).get()
+        del vf
 
+    valid_full = valid_b.astype(cp.float64)
+    del valid_b
     ind_curr = (g == 0) * valid_full
     for gval in (0, 1, 2):
         if gval < 2:
@@ -675,7 +714,7 @@ def _stream_grm(streaming_matrix, *, population, missing_data,
     if n_ind is None:
         # No chunks at all.
         n_ind = _stream_n_ind(streaming_matrix, population)
-        return np.zeros((n_ind, n_ind), dtype=np.float64)
+        return np.full((n_ind, n_ind), np.nan, dtype=np.float64)
 
     chunk_var_counts = [p.size for p in dac_parts]
     chunk_offsets = np.cumsum([0] + chunk_var_counts)
@@ -694,13 +733,16 @@ def _stream_grm(streaming_matrix, *, population, missing_data,
         poly_mask = (p_chrom > 0) & (p_chrom < 1)
     n_snps_used = int(poly_mask.sum())
     if n_snps_used == 0:
-        return np.zeros((n_ind, n_ind), dtype=np.float64)
+        return np.full((n_ind, n_ind), np.nan, dtype=np.float64)
 
     if block_size is None:
-        # standardized g + matmul output + slack.
-        block_size = estimate_indiv_block_size(n_ind, n_intermediates=3)
+        # standardized g + validity float + matmul output + slack.
+        block_size = estimate_indiv_block_size(n_ind, n_intermediates=4)
 
     A_host = np.zeros((n_ind, n_ind), dtype=np.float64)
+    # Count of jointly-called polymorphic SNPs per pair, so a pair is
+    # normalized by its own called-SNP count rather than the dataset total.
+    N_host = np.zeros((n_ind, n_ind), dtype=np.float64)
 
     # Pass 2: standardize each chunk and accumulate the outer product.
     # Chunk iteration order must match pass 1 so the chunk-local slice
@@ -726,18 +768,32 @@ def _stream_grm(streaming_matrix, *, population, missing_data,
                                         dtype=cp.int32)
             g = geno[:, chunk_idx_gpu]
         valid = (g >= 0)
+        all_valid = bool(valid.all())
+        n_cols = g.shape[1]
         g_std = cp.where(valid, g, 0).astype(cp.float64)
         del g
         scale = cp.sqrt(2.0 * chunk_p_gpu * (1.0 - chunk_p_gpu))
         g_std -= 2.0 * chunk_p_gpu
         g_std *= valid
         g_std /= scale
-        del valid, scale
+        del scale
+        # A complete chunk is tracked as a scalar instead of a matmul; the
+        # validity matmul that remains runs in float32 (exact for any
+        # realistic chunk size).
+        if not all_valid:
+            vf = valid.astype(cp.float32)
+        del valid
 
         for r0 in range(0, n_ind, block_size):
             r1 = min(r0 + block_size, n_ind)
             A_host[r0:r1] += (g_std[r0:r1] @ g_std.T).get()
+            if all_valid:
+                N_host[r0:r1] += n_cols
+            else:
+                N_host[r0:r1] += (vf[r0:r1] @ vf.T).get()
         del g_std, geno
+        if not all_valid:
+            del vf
 
-    A_host /= n_snps_used
+    A_host = np.where(N_host > 0, A_host / np.maximum(N_host, 1.0), np.nan)
     return A_host

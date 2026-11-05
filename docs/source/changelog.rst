@@ -351,6 +351,13 @@ Bug fixes
   with ``LinAlgError``. ``lostruct`` now raises ``ValueError`` when fewer
   than two windows can be compared, or when corners are requested and
   the MDS has fewer than two dimensions.
+* ``grm`` divided every pair by the dataset-wide count of called,
+  polymorphic SNPs instead of that pair's own jointly-called count, so an
+  individual's relatedness (including to itself) shrank with its own
+  missing-call rate. It now divides each pair by its own count, and gives
+  NaN for a pair with no jointly-called polymorphic SNP, and for the
+  whole matrix when no SNP is polymorphic (before, both were 0.0). Values
+  on data with no missing call are unchanged.
 * ``pbs`` counted a population's own diversity at a site where another
   population in the pair had no data, which pulled that pair's FST down;
   a single such site could change the sign of PBS. PBS now uses, for all
