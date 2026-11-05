@@ -240,6 +240,14 @@ Read this section if you are comparing against older pg_gpu results.
   returns 0 (after the unpaired-rows warning) where it used to fall
   back to a haploid estimate. One row is half an individual and gives
   the diploid analysis no within-population variance to estimate.
+* The ``windowed_analysis.windowed_statistics`` scatter engine is
+  removed. It was a lower-level entry point that the ``windowed_analysis``
+  dispatcher never called. Its only capability not already in
+  ``windowed_analysis`` -- expected heterozygosity -- is now the
+  ``het_expected`` statistic, the per-window mean of per-site
+  ``heterozygosity_expected`` over the sites with a defined value. Use
+  ``windowed_analysis`` (or ``windowed_statistics_fused`` for the custom
+  bin-edge interface).
 
 Bug fixes
 ~~~~~~~~~
