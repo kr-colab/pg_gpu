@@ -563,7 +563,7 @@ missing_data = ["include", "exclude"]
 span = "per engine; see [engines]"
 undefined = "per statistic and engine; the scatter and fused engines give a row for a window with no variant, the fallback gives no row"
 parallel = []
-notes = "The dispatcher. It picks one engine per request ([engines]); the streaming path runs it once per chunk. It raises ValueError for an unknown window_type or missing_data, for regions without window_type='regions' and the reverse, and NotImplementedError for window_type 'snp' or 'regions' on a StreamingHaplotypeMatrix and for names that no engine computes on those window types."
+notes = "The dispatcher. It picks one engine per request ([engines]); the streaming path runs it once per chunk. It raises TypeError for a keyword argument that no engine reads (windowed_analysis._check_windowed_kwargs), ValueError for an unknown window_type or missing_data, for regions without window_type='regions' and the reverse, and NotImplementedError for window_type 'snp' or 'regions' on a StreamingHaplotypeMatrix and for names that no engine computes on those window types."
 
 [functions."windowed_analysis.windowed_statistics_fused"]
 # signature: (haplotype_matrix, bp_bins, statistics, population, pop1, pop2, per_base, is_accessible, _win_starts, _win_stops, missing_data, chrom)

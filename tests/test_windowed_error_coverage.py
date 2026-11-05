@@ -1,6 +1,7 @@
 """Coverage for windowed_analysis error and device-handling branches:
-the unknown-statistic, unknown-population, unknown-window-type, and
-missing-regions raises, and the fused engine's CPU->GPU transfer.
+the unknown-statistic, unknown-population, unknown-window-type,
+unknown-keyword and missing-regions raises, and the fused engine's CPU->GPU
+transfer.
 """
 import numpy as np
 import pandas as pd
@@ -97,3 +98,38 @@ def test_deferred_window_type_stats_raise(window_type, stat):
     with pytest.raises(NotImplementedError):
         windowed_analysis(m, window_size=10, window_type=window_type,
                           statistics=[stat], regions=regions)
+
+
+# ── unknown keyword arguments ──────────────────────────────────────────
+# Only the fallback and the local-PCA dispatch read **kwargs, so the check
+# runs before the engine is chosen; each request below goes to a different
+# engine (scatter, fused, fallback).
+@pytest.mark.parametrize("statistics", [["pi"], ["pi", "mu_var"], ["n_variants"]])
+def test_unknown_kwarg_raises_on_every_engine(statistics):
+    m = _matrix(sample_sets={"a": [0, 1, 2, 3], "b": [4, 5, 6, 7]})
+    with pytest.raises(TypeError, match="Did you mean 'populations'"):
+        windowed_analysis(m, window_size=400, statistics=statistics,
+                          popualtions=["a"])
+
+
+def test_population_without_local_pca_raises():
+    m = _matrix(sample_sets={"a": [0, 1, 2, 3], "b": [4, 5, 6, 7]})
+    with pytest.raises(TypeError, match="apply only to the 'local_pca'"):
+        windowed_analysis(m, window_size=400, statistics=["pi"],
+                          population="a")
+
+
+def test_local_pca_kwargs_accepted_with_local_pca():
+    m = _matrix(n_var=40, sample_sets={"a": [0, 1, 2, 3], "b": [4, 5, 6, 7]})
+    result = windowed_analysis(m, window_size=1000, statistics=["local_pca"],
+                               population="a", k=2)
+    assert result.windows is not None
+
+
+def test_fallback_kwargs_accepted_on_fast_engine():
+    # Names that only the fallback uses are valid on every request.
+    m = _matrix()
+    df = windowed_analysis(m, window_size=400, statistics=["pi"],
+                           progress_bar=False, ld_bins=[0, 100],
+                           custom_stat_kwargs={})
+    assert len(df) > 0
