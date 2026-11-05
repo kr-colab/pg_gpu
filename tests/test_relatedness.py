@@ -36,6 +36,22 @@ def _reference_grm(g):
     return (std @ std.T) / poly.sum()
 
 
+def _reference_grm_missing(g):
+    """GCTA GRM reference for data with missing calls (-1): allele frequency
+    from valid calls only, each pair normalized by its own jointly-called
+    polymorphic SNP count, NaN for a pair with none."""
+    gf = g.astype(float)
+    valid = g >= 0
+    n_valid = valid.sum(axis=0)
+    freq = np.where(valid, gf, 0).sum(axis=0) / (2 * np.maximum(n_valid, 1))
+    poly = (n_valid > 0) & (freq > 0) & (freq < 1)
+    gf, valid, freq = gf[:, poly], valid[:, poly], freq[poly]
+    std = np.where(valid, gf - 2 * freq, 0.0) / np.sqrt(2 * freq * (1 - freq))
+    num = std @ std.T
+    den = valid.astype(float) @ valid.astype(float).T
+    return np.where(den > 0, num / np.maximum(den, 1), np.nan)
+
+
 def _reference_ibs(g):
     """Biallelic diploid IBS from a genotype array (0/1/2), numpy reference.
 
@@ -95,13 +111,41 @@ class TestGRM:
         with pytest.raises(TypeError, match="genetic_relatedness"):
             relatedness.grm(small_haplotype_matrix)
 
-    def test_all_monomorphic_returns_zeros(self):
+    def test_all_monomorphic_returns_nan(self):
         # No polymorphic sites -> nothing to standardize and accumulate, so
-        # the GRM is all zeros rather than a divide-by-zero.
+        # the GRM is undefined rather than a misleading all-zero matrix.
         gm = GenotypeMatrix(np.zeros((3, 5), dtype=np.int8), np.arange(5) * 100)
         grm = relatedness.grm(gm)
         assert grm.shape == (3, 3)
-        np.testing.assert_array_equal(grm, np.zeros((3, 3)))
+        assert np.all(np.isnan(grm))
+
+    def test_pair_with_no_shared_called_snp_is_nan(self):
+        # Samples 0 and 1 are each called at a disjoint half of the SNPs, so
+        # they share no called SNP and must get NaN rather than a misleading
+        # 0.0. Sample 0 carries the same genotypes as sample 2 at the SNPs it
+        # calls, so its diagonal must match sample 2's, not be diluted by the
+        # dataset-wide SNP count.
+        g = np.array([[0, 1, 2, -1, -1, -1],
+                     [-1, -1, -1, 2, 1, 0],
+                     [0, 1, 2, 2, 1, 0],
+                     [2, 1, 0, 0, 1, 2]], dtype=np.int8)
+        gm = GenotypeMatrix(g, np.arange(6) * 10 + 1, 1, 60)
+        A = relatedness.grm(gm)
+        assert np.isnan(A[0, 1]) and np.isnan(A[1, 0])
+        np.testing.assert_allclose(A[0, 0], A[2, 2])
+        ref = _reference_grm_missing(g)
+        np.testing.assert_allclose(A[~np.isnan(ref)], ref[~np.isnan(ref)])
+        np.testing.assert_array_equal(np.isnan(A), np.isnan(ref))
+
+    def test_missing_include_matches_host(self):
+        rng = np.random.RandomState(7)
+        g = rng.randint(0, 3, size=(8, 60)).astype(np.int8)
+        g[rng.random(g.shape) < 0.1] = -1
+        gm = GenotypeMatrix(g, np.arange(60) * 100)
+        A = relatedness.grm(gm)
+        ref = _reference_grm_missing(g)
+        np.testing.assert_allclose(A[~np.isnan(ref)], ref[~np.isnan(ref)], atol=1e-9)
+        np.testing.assert_array_equal(np.isnan(A), np.isnan(ref))
 
 
 class TestIBS:

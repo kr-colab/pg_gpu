@@ -258,6 +258,8 @@ def grm(genotype_matrix,
     ndarray, float64, shape (n_individuals, n_individuals)
         Symmetric GRM. Diagonal entries are individual inbreeding
         coefficients + 1. Off-diagonal entries are pairwise relatedness.
+        NaN for a pair with no polymorphic SNP called in both, and for the
+        whole matrix when no SNP is polymorphic.
     """
     from ._memutil import estimate_variant_chunk_size
     from .streaming_matrix import _StreamingMatrixBase, StreamingHaplotypeMatrix
@@ -299,17 +301,20 @@ def grm(genotype_matrix,
     poly_idx = cp.where(poly)[0]
     n_snps_used = len(poly_idx)
     if n_snps_used == 0:
-        return np.zeros((n_ind, n_ind), dtype=np.float64)
+        return np.full((n_ind, n_ind), np.nan, dtype=np.float64)
 
     p_poly = p[poly_idx]
     del p, dac, n_valid, poly
 
-    # Chunked GRM: accumulate (std_chunk @ std_chunk.T) over variant chunks.
+    # Chunked GRM: accumulate (std_chunk @ std_chunk.T) over variant chunks,
+    # plus the count of jointly-called SNPs per pair (N), so a pair is
+    # normalized by its own called-SNP count rather than the dataset total.
     # Peak per-chunk: 1 float64 array (standardized genotypes) + matmul workspace.
     chunk_size = estimate_variant_chunk_size(n_ind, bytes_per_element=8,
-                                             n_intermediates=3,
+                                             n_intermediates=4,
                                              memory_fraction=0.25)
     A = cp.zeros((n_ind, n_ind), dtype=cp.float64)
+    N = cp.zeros((n_ind, n_ind), dtype=cp.float64)
 
     for start in range(0, n_snps_used, chunk_size):
         end = min(start + chunk_size, n_snps_used)
@@ -326,11 +331,14 @@ def grm(genotype_matrix,
         g -= 2.0 * p_chunk
         g *= valid
         g /= scale
-        del valid, scale
         A += g @ g.T
         del g
+        vf = valid.astype(cp.float64)
+        del valid, scale
+        N += vf @ vf.T
+        del vf
 
-    A /= n_snps_used
+    A = cp.where(N > 0, A / cp.maximum(N, 1.0), cp.nan)
     return A.get()
 
 
@@ -675,7 +683,7 @@ def _stream_grm(streaming_matrix, *, population, missing_data,
     if n_ind is None:
         # No chunks at all.
         n_ind = _stream_n_ind(streaming_matrix, population)
-        return np.zeros((n_ind, n_ind), dtype=np.float64)
+        return np.full((n_ind, n_ind), np.nan, dtype=np.float64)
 
     chunk_var_counts = [p.size for p in dac_parts]
     chunk_offsets = np.cumsum([0] + chunk_var_counts)
@@ -694,13 +702,16 @@ def _stream_grm(streaming_matrix, *, population, missing_data,
         poly_mask = (p_chrom > 0) & (p_chrom < 1)
     n_snps_used = int(poly_mask.sum())
     if n_snps_used == 0:
-        return np.zeros((n_ind, n_ind), dtype=np.float64)
+        return np.full((n_ind, n_ind), np.nan, dtype=np.float64)
 
     if block_size is None:
-        # standardized g + matmul output + slack.
-        block_size = estimate_indiv_block_size(n_ind, n_intermediates=3)
+        # standardized g + validity float + matmul output + slack.
+        block_size = estimate_indiv_block_size(n_ind, n_intermediates=4)
 
     A_host = np.zeros((n_ind, n_ind), dtype=np.float64)
+    # Count of jointly-called polymorphic SNPs per pair, so a pair is
+    # normalized by its own called-SNP count rather than the dataset total.
+    N_host = np.zeros((n_ind, n_ind), dtype=np.float64)
 
     # Pass 2: standardize each chunk and accumulate the outer product.
     # Chunk iteration order must match pass 1 so the chunk-local slice
@@ -732,12 +743,15 @@ def _stream_grm(streaming_matrix, *, population, missing_data,
         g_std -= 2.0 * chunk_p_gpu
         g_std *= valid
         g_std /= scale
-        del valid, scale
+        del scale
+        vf = valid.astype(cp.float64)
+        del valid
 
         for r0 in range(0, n_ind, block_size):
             r1 = min(r0 + block_size, n_ind)
             A_host[r0:r1] += (g_std[r0:r1] @ g_std.T).get()
-        del g_std, geno
+            N_host[r0:r1] += (vf[r0:r1] @ vf.T).get()
+        del g_std, vf, geno
 
-    A_host /= n_snps_used
+    A_host = np.where(N_host > 0, A_host / np.maximum(N_host, 1.0), np.nan)
     return A_host

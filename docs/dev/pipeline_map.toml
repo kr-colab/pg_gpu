@@ -2089,9 +2089,9 @@ inputs = ["GenotypeMatrix", "StreamingGenotypeMatrix"]
 streaming = "native"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "all-zero matrix when no polymorphic site is left"
+undefined = "NaN for a pair with no polymorphic SNP called in both, and for the whole matrix when no SNP is polymorphic"
 parallel = ["relatedness._stream_grm", "decomposition._prepare_dosage"]
-notes = "Divides by the count of polymorphic sites, not by the sites each pair calls; rejects HaplotypeMatrix and StreamingHaplotypeMatrix with a TypeError."
+notes = "Divides each pair by its own jointly-called polymorphic SNP count; rejects HaplotypeMatrix and StreamingHaplotypeMatrix with a TypeError."
 
 [functions."relatedness.ibs"]
 # signature: (genotype_matrix, population, missing_data)
