@@ -240,14 +240,6 @@ Read this section if you are comparing against older pg_gpu results.
   returns 0 (after the unpaired-rows warning) where it used to fall
   back to a haploid estimate. One row is half an individual and gives
   the diploid analysis no within-population variance to estimate.
-* The ``windowed_analysis.windowed_statistics`` scatter engine is
-  removed. It was a lower-level entry point that the ``windowed_analysis``
-  dispatcher never called. Its only capability not already in
-  ``windowed_analysis`` -- expected heterozygosity -- is now the
-  ``het_expected`` statistic, the per-window mean of per-site
-  ``heterozygosity_expected`` over the sites with a defined value. Use
-  ``windowed_analysis`` (or ``windowed_statistics_fused`` for the custom
-  bin-edge interface).
 
 Bug fixes
 ~~~~~~~~~
@@ -540,6 +532,14 @@ New warnings
 
 Removed
 ~~~~~~~
+* The ``windowed_analysis.windowed_statistics`` scatter engine is
+  removed. It was a lower-level entry point that the ``windowed_analysis``
+  dispatcher never called. Its only capability not already in
+  ``windowed_analysis`` -- expected heterozygosity -- is now the
+  ``het_expected`` statistic, the per-window mean of per-site
+  ``heterozygosity_expected`` over the sites with a defined value. Use
+  ``windowed_analysis`` (or ``windowed_statistics_fused`` for the custom
+  bin-edge interface).
 * The ``align_bp`` argument on the streaming windowed path (unused; it
   defaulted to ``chunk_bp``). The streaming windowed path now requires
   ``window_size`` to be no larger than ``chunk_bp`` and to divide it
@@ -568,7 +568,7 @@ Removed
   first, or call ``pairwise_r2(estimator='rogers_huff')`` on the
   haplotype matrix, which converts internally.
 * The ``genotype_matrix_or_haplotype_matrix`` keyword on ``grm`` and
-  ``ibs``; the parameter is named ``genotype_matrix`` now.
+  ``ibs``; the parameter is named ``genotype_matrix`` now
 
 v0.1.0
 ------

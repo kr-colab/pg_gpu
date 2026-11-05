@@ -834,7 +834,7 @@ streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
 undefined = "per-site NaN where n_valid < 2 ('include') or where any call is missing ('exclude')"
-parallel = []
+parallel = ["windowed_analysis.windowed_statistics_fused", "windowed_analysis._window_mean_het_expected"]
 notes = "Any mode other than 'include' divides by the full n, not n_valid; an unknown string gets that branch with no NaN masking."
 
 [functions."diversity.heterozygosity_observed"]
