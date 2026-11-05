@@ -594,7 +594,7 @@ class TestWindowedFusedWithMask:
 class TestWindowedScatterAddWithMask:
     def test_scatter_add_per_base_uses_mask(self):
         """Windowed scatter-add path normalizes by accessible bases."""
-        from pg_gpu.windowed_analysis import windowed_statistics
+        from pg_gpu.windowed_analysis import windowed_analysis
 
         hm = _make_windowed_matrix()
         hm.transfer_to_gpu()
@@ -603,12 +603,13 @@ class TestWindowedScatterAddWithMask:
         mask[0:5000] = True
         hm.set_accessible_mask(mask)
 
-        bp_bins = np.array([0, 5000, 10000], dtype=float)
-        result = windowed_statistics(
-            hm, bp_bins, statistics=('pi',), per_base=True)
+        df = windowed_analysis(
+            hm, window_size=5000, step_size=5000, statistics=['pi'])
 
-        assert not np.isnan(result['pi'][0])
-        assert np.isnan(result['pi'][1])
+        # Window [0, 5000) is fully accessible -> finite; [5000, 10000) has no
+        # accessible base, so its span normalization is undefined -> NaN.
+        assert not np.isnan(df['pi'].iloc[0])
+        assert np.isnan(df['pi'].iloc[1])
 
 
 class TestWindowedAnalysisConvenience:

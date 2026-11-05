@@ -1690,7 +1690,21 @@ def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
     ndarray, float64, shape (n_variants,)
         Expected heterozygosity per variant.
     """
+    return _heterozygosity_expected_sites(
+        haplotype_matrix, population, missing_data).get()
 
+
+def _heterozygosity_expected_sites(haplotype_matrix: HaplotypeMatrix,
+                                   population: Optional[Union[str, list]] = None,
+                                   missing_data: str = 'include'):
+    """Per-site expected heterozygosity as a CuPy array (no host copy).
+
+    The computational core of ``heterozygosity_expected``: the public function
+    returns ``.get()`` of this, and GPU callers (the windowed ``het_expected``)
+    use it directly to avoid the round trip. Holds the single per-site rule
+    (NaN where n_valid < 2 under 'include', NaN at incomplete sites under
+    'exclude').
+    """
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
     else:
@@ -1716,7 +1730,7 @@ def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
         if missing_data == 'exclude':
             he = cp.where(n_valid_i < n, cp.nan, he)
 
-    return he.get()
+    return he
 
 
 def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,

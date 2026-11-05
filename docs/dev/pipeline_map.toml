@@ -95,7 +95,7 @@ check = "Names and row lists must give the same values. Two-population windowed 
 
 [axes.windowing]
 description = "How windows are formed. windowed_analysis picks one engine per request; see [engines]. Other functions make their own windows."
-values = ["bp windows (window_size, step_size)", "snp windows (window_type='snp'; the fallback and local_pca only)", "regions (window_type='regions' with a regions DataFrame of half-open [start, end) windows; the fused engines and the fallback; theta_l, zeng_e, zeng_dh, normalized_fay_wu_h, mean_nsl, daf_hist and mu_sfs raise NotImplementedError)", "bp_bins edges (windowed_statistics*, LD bins)", "moving windows in variant counts (moving_*)"]
+values = ["bp windows (window_size, step_size)", "snp windows (window_type='snp'; the fallback and local_pca only)", "regions (window_type='regions' with a regions DataFrame of half-open [start, end) windows; the fused engines and the fallback; theta_l, zeng_e, zeng_dh, normalized_fay_wu_h, mean_nsl, daf_hist and mu_sfs raise NotImplementedError)", "bp_bins edges (windowed_statistics_fused*, LD bins)", "moving windows in variant counts (moving_*)"]
 check = "windowed_analysis._bp_window_grid makes the bp grid for the scatter and fused engines; for window_type='regions' the fused engines take regions['start'] and regions['end'] as window edges; windowed_analysis.WindowIterator makes the fallback windows. The fused engines give a row for an empty region, but the fallback gives none (#356). No engine reads a chrom column in regions to select variants; the fallback copies it into the output chrom column, and the fused engines write the chrom argument."
 
 [axes.streaming]
@@ -356,6 +356,12 @@ scalar = "diversity.max_daf"
 engines = ["thetas_scatter", "fused", "fused_chunked"]
 span_normalized = false
 
+[windowed.het_expected]
+scalar = "diversity.heterozygosity_expected"
+engines = ["fused", "fallback"]
+span_normalized = false
+notes = "Per-window mean of per-site expected heterozygosity over the sites with a defined value (n_valid >= 2), NaN for a window with none; not span-normalized. Both engines reuse the per-site rule of diversity.heterozygosity_expected (its CuPy core diversity._heterozygosity_expected_sites) so it lives in one place: the fused engine takes each window's variant range [win_start, win_stop) and prefix-sums the non-NaN values and their count, which serves any window family including unordered or overlapping regions (unlike the site_win path mean_nsl uses); the chunked engine forwards the name to the fused engine; the fallback averages diversity.heterozygosity_expected over each window matrix. Under 'exclude' it is not a fused-only name, so the request falls to the fallback."
+
 [windowed.daf_hist]
 scalar = "diversity.daf_histogram"
 engines = ["fused"]
@@ -516,7 +522,7 @@ new_windowed_statistic = [
 ]
 span_rule = [
     "HaplotypeMatrix.get_span and streaming_matrix._StreamingMatrixBase.get_span.",
-    "windowed_analysis._compute_window_bases (fused, fused_chunked, windowed_statistics).",
+    "windowed_analysis._compute_window_bases (fused, fused_chunked).",
     "The inline spans in windowed_analysis._windowed_thetas_scatter and windowed_analysis._windowed_twopop_scatter.",
     "GenotypeMatrix, which has its own n_total_sites code and no get_span.",
     "Every function row with span other than \"none\".",
@@ -558,17 +564,6 @@ span = "per engine; see [engines]"
 undefined = "per statistic and engine; the scatter and fused engines give a row for a window with no variant, the fallback gives no row"
 parallel = []
 notes = "The dispatcher. It picks one engine per request ([engines]); the streaming path runs it once per chunk. It raises ValueError for an unknown window_type or missing_data, for regions without window_type='regions' and the reverse, and NotImplementedError for window_type 'snp' or 'regions' on a StreamingHaplotypeMatrix and for names that no engine computes on those window types."
-
-[functions."windowed_analysis.windowed_statistics"]
-# signature: (haplotype_matrix, bp_bins, statistics, population, pop1, pop2, per_base, is_accessible, chrom)
-axis_kwargs = ["population", "pop1", "pop2", "per_base", "is_accessible", "bp_bins"]
-inputs = ["HaplotypeMatrix"]
-streaming = "generic_error"
-missing_data = []
-span = "windowed_analysis._compute_window_bases"
-undefined = "NaN for a window with no accessible base"
-parallel = ["windowed_analysis._windowed_thetas_scatter", "windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused"]
-notes = "A separate scatter engine that windowed_analysis does not call; it takes bp_bins edges (half-open windows) and has no missing_data parameter."
 
 [functions."windowed_analysis.windowed_statistics_fused"]
 # signature: (haplotype_matrix, bp_bins, statistics, population, pop1, pop2, per_base, is_accessible, _win_starts, _win_stops, missing_data, chrom)
@@ -633,7 +628,7 @@ streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
-parallel = ["diversity.pi_components", "diversity.FrequencySpectrum.theta", "divergence._site_components_from_counts", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis.windowed_statistics"]
+parallel = ["diversity.pi_components", "diversity.FrequencySpectrum.theta", "divergence._site_components_from_counts", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
 notes = "The no-variant check runs before the span check, so a mask that removes every variant gives 0.0, not NaN; _fused_windowed_kernel_v2 has its own C copy of the per-site formula."
 
 [functions."diversity.theta_w"]
@@ -644,7 +639,7 @@ streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
-parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis.windowed_statistics"]
+parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
 notes = "Per site (alleles present - 1) * 1/a1(n_valid); FrequencySpectrum.theta sums xi instead and differs at reference-absent multiallelic sites."
 
 [functions."diversity.tajimas_d"]
@@ -655,7 +650,7 @@ streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
 undefined = "NaN with no variants, S < 3, harmonic-mean n < 3, or variance <= 0"
-parallel = ["diversity.diversity_stats", "diversity.FrequencySpectrum.neutrality_test", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_tajimas_d", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics"]
+parallel = ["diversity.diversity_stats", "diversity.FrequencySpectrum.neutrality_test", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_tajimas_d", "windowed_analysis._fused_windowed_kernel_v2"]
 notes = "diversity_stats repeats the Achaz test inline instead of calling _compute_neutrality_test."
 
 [functions."diversity.segregating_sites"]
@@ -666,7 +661,7 @@ streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
 undefined = "0 when no site has two valid haplotypes"
-parallel = ["diversity._compute_thetas", "diversity.FrequencySpectrum.__init__", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics", "haplotype_matrix.HaplotypeMatrix.n_segregating_sites", "genotype_matrix.GenotypeMatrix.n_segregating_sites"]
+parallel = ["diversity._compute_thetas", "diversity.FrequencySpectrum.__init__", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "haplotype_matrix.HaplotypeMatrix.n_segregating_sites", "genotype_matrix.GenotypeMatrix.n_segregating_sites"]
 notes = "Counts mutations (alleles present - 1, so a triallelic site counts 2); the n_segregating_sites properties use a different biallelic rule."
 
 [functions."diversity.singleton_count"]
@@ -677,7 +672,7 @@ streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
 undefined = "0 when no derived allele has count 1"
-parallel = ["windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics"]
+parallel = ["windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2"]
 notes = "Counts derived alleles only; the per-window fallback names this statistic 'n_singletons', the engines 'singletons'."
 
 [functions."diversity.diversity_stats"]
@@ -839,7 +834,7 @@ streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
 undefined = "per-site NaN where n_valid < 2 ('include') or where any call is missing ('exclude')"
-parallel = ["windowed_analysis.windowed_statistics"]
+parallel = ["windowed_analysis.windowed_statistics_fused", "windowed_analysis._window_mean_het_expected"]
 notes = "Any mode other than 'include' divides by the full n, not n_valid; an unknown string gets that branch with no NaN masking."
 
 [functions."diversity.heterozygosity_observed"]
@@ -1079,8 +1074,8 @@ streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
 undefined = "NaN when no site has den > 0 (no joint data or no between-pop difference), or when exclude leaves no site"
-parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel", "windowed_analysis.windowed_statistics", "divergence._windowed_fst"]
-notes = "Scatter and windowed_statistics reuse the per-site helpers but own the window sums and NaN gate; the CUDA kernel recomputes the per-site terms."
+parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel", "divergence._windowed_fst"]
+notes = "The scatter engine reuses the per-site helpers but owns the window sums and NaN gate; the CUDA kernel recomputes the per-site terms."
 
 [functions."divergence.fst_tskit"]
 # signature: (haplotype_matrix, pop1, pop2, missing_data)
@@ -1123,7 +1118,7 @@ streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "Under include, the sum over sites with data in both pops divided by the span: 0.0 when no site has such data, NaN when the span is 0. Under exclude, 0.0 when no complete site is left, before the span check, so also at span 0; per_site=True then gives an empty array."
-parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel", "windowed_analysis.windowed_statistics"]
+parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
 notes = "per_site=True returns raw per-site values for the kept sites only, with no span."
 
 [functions."divergence.da"]
