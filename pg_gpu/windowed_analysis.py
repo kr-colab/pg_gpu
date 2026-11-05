@@ -1311,11 +1311,14 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         so a window spans [start, end). If 'snp' is given, then `window_size` counts the
         number of variants.
     **kwargs
-        Passed to WindowedAnalyzer (``regions``, ``ld_bins``,
-        ``custom_stat_kwargs``, ``progress_bar`` and its other parameters),
-        and, for the local-PCA statistics, to the local-PCA functions
-        (``k``, ``population``, ``batch_size``, ``n_blocks``,
-        ``aggregate``). Any other name raises ``TypeError``.
+        ``regions`` (with ``window_type='regions'``) is read by whichever
+        engine serves the request. The other WindowedAnalyzer parameters (``ld_bins``,
+        ``custom_stat_kwargs``, ``progress_bar`` and the rest) take effect
+        only when the per-window fallback serves the request; the scatter
+        and fused engines accept them and do not use them. For the
+        local-PCA statistics, ``k``, ``population``, ``batch_size``,
+        ``n_blocks`` and ``aggregate`` go to the local-PCA functions. Any
+        other name raises ``TypeError``.
 
     Returns
     -------
