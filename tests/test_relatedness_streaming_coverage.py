@@ -114,7 +114,7 @@ class TestStreamingGeneticRelatednessMissingData:
                        [1, 1, 1, 0, 0, 0]], dtype=np.int8)
         store = _write_vcz(hap, str(tmp_path / "disjoint.vcz"))
         sh = HaplotypeMatrix.from_zarr(store, streaming="always", chunk_bp=500)
-        R = relatedness.genetic_relatedness(sh, centre=False,
+        R = relatedness.genetic_relatedness(sh, centre=False, proportion=False,
                                             span_normalize=False)
         assert np.isnan(R[0, 1]) and np.isnan(R[1, 0])
         # Rescaled by n_cols / J (its own jointly-called column count out of
@@ -138,6 +138,7 @@ class TestStreamingGeneticRelatednessMissingData:
         sh = HaplotypeMatrix.from_zarr(store, streaming="always", chunk_bp=500)
 
         R = relatedness.genetic_relatedness(sh, missing_data='exclude',
+                                            proportion=False,
                                             span_normalize=False)
         assert np.all(R == 0.0)
         Rp = relatedness.genetic_relatedness(sh, missing_data='exclude',

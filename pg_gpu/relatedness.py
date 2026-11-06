@@ -12,7 +12,7 @@ from typing import Optional, Union
 
 def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
                         centre: bool = True, polarised: bool = False,
-                        proportion: bool = False, span_normalize=True,
+                        proportion: bool = True, span_normalize=True,
                         missing_data: str = 'include'):
     """Site-mode genetic relatedness between sample sets.
 
@@ -39,16 +39,14 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         and the standard relatedness) or use the raw frequencies (False, the
         noncentred form).
     polarised : bool
-        Sum over all alleles including the reference (False, the default) or
-        over derived alleles only (True). tskit's own default is True, so
-        matching tskit's output (not just its formula) needs
-        ``polarised=True`` here.
+        Sum over all alleles including the reference (False, the default;
+        note tskit defaults to True) or over derived alleles only (True).
     proportion : bool
         Divide by the number of segregating sites among the analyzed samples
         (the per-site sum of ``num_alleles - 1``), giving a relatedness
-        proportion. When True, ``span_normalize`` has no effect (it cancels
-        between the covariance and the segregating-site count). NaN when no
-        site is segregating.
+        proportion (True, the default, matching tskit). When True,
+        ``span_normalize`` has no effect (it cancels between the covariance
+        and the segregating-site count). NaN when no site is segregating.
     span_normalize : bool or str
         True (default) divides by the analysis span (see ``get_span``); False
         returns the raw sum. Like tskit's ``span_normalise``, except that when
