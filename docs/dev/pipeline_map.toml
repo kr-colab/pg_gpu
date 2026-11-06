@@ -768,7 +768,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "0.0 with no derived allele; -1.0 under 'exclude' when no complete site carries a derived allele"
+undefined = "0.0 with no derived allele; under 'exclude', NaN when no site is complete"
 parallel = ["windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
 notes = "Scalar 'include' keeps sites with n_valid = 1; the windowed engines need n_valid >= 2."
 

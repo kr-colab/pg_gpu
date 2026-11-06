@@ -199,6 +199,9 @@ Read this section if you are comparing against older pg_gpu results.
   - ``mu_var``: a window length that is not positive;
   - ``haplotype_diversity``: fewer than two haplotypes.
 
+  ``max_daf(missing_data='exclude')`` returned ``-1.0``, not even a
+  plausible-looking real value, when no site was complete; it is NaN now.
+
   With the default ``sigma_d2`` estimator, ``zns`` and ``omega`` leave
   out a pair that they cannot estimate (fewer than four haplotypes
   called at both sites, or a pi2 estimate of 0). Before, ``zns`` counted
