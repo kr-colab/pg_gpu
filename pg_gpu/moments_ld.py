@@ -178,10 +178,10 @@ def compute_ld_statistics(
                 raise ValueError("pop_file is required when loading from VCF")
             if report:
                 print(f"Loading {vcf_file} (genotypes) ...")
-            gm = GenotypeMatrix.from_vcf(vcf_file)
+            # from_vcf takes the contig from the VCF, so a multi-contig
+            # BED selects the right intervals.
+            gm = GenotypeMatrix.from_vcf(vcf_file, accessible_bed=accessible_bed)
             gm.load_pop_file(pop_file, pops=pops)
-            if accessible_bed is not None and not gm.has_accessible_mask:
-                gm.set_accessible_mask(accessible_bed)
             gm.transfer_to_gpu()
         mat = gm
         if report:
@@ -205,10 +205,9 @@ def compute_ld_statistics(
                 print(f"Loading {vcf_file} ...")
             # use_genotypes=False is the user's declaration that the data are
             # phased; load accordingly so the warning does not fire.
-            hm = HaplotypeMatrix.from_vcf(vcf_file, phased=True)
+            hm = HaplotypeMatrix.from_vcf(vcf_file, phased=True,
+                                         accessible_bed=accessible_bed)
             hm.load_pop_file(pop_file, pops=pops)
-            if accessible_bed is not None and not hm.has_accessible_mask:
-                hm.set_accessible_mask(accessible_bed)
             hm.transfer_to_gpu()
         mat = hm
         if report:

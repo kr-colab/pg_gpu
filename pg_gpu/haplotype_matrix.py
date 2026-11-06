@@ -464,8 +464,9 @@ class HaplotypeMatrix:
             equal to chrom_start. If already an AccessibleMask, assigned
             directly.
         chrom : str, optional
-            Chromosome name to extract from the BED file. Required when
-            mask_or_path is a BED file path.
+            Chromosome name to extract from the BED file. Required when the
+            BED file has more than one contig (otherwise ValueError); a
+            one-contig BED needs none.
 
         Returns
         -------
@@ -826,7 +827,7 @@ class HaplotypeMatrix:
         check_diploid_encoding(gt, sample_names=sample_names,
                                source=f"zarr store '{path}'")
 
-        chrom, start, stop = parse_region(region)
+        _, start, stop = parse_region(region)
         start = start if start is not None else int(positions[0])
         stop = stop - 1 if stop is not None else int(positions[-1])
         hm = build_haplotype_matrix(
@@ -849,7 +850,7 @@ class HaplotypeMatrix:
             )
 
         if accessible_bed is not None:
-            hm.set_accessible_mask(accessible_bed, chrom=chrom)
+            hm.set_accessible_mask(accessible_bed, chrom=data['chrom'])
 
         from .zarr_io import normalize_pop_input
         try:

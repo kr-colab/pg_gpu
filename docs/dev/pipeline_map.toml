@@ -131,7 +131,7 @@ notes = "region is samtools style with an inclusive end; chrom_start and chrom_e
 [inputs."HaplotypeMatrix.from_zarr"]
 params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased"]
 returns = "HaplotypeMatrix, or StreamingHaplotypeMatrix when streaming='always', or 'auto' and the matrix does not fit"
-span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None."
+span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None. The BED contig is the region's, else the store's (eager and streaming alike)."
 notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=."
 
 [inputs."HaplotypeMatrix.from_ts"]
@@ -153,7 +153,7 @@ notes = "No region and no samples parameter, unlike HaplotypeMatrix.from_vcf."
 [inputs."GenotypeMatrix.from_zarr"]
 params = ["path", "region", "accessible_bed", "include_invariant", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields"]
 returns = "GenotypeMatrix, or StreamingGenotypeMatrix on the streaming path"
-span = "include_invariant=True sets n_total_sites to the variant count on the eager path only; the streaming path ignores it. accessible_bed sets the mask on both paths."
+span = "include_invariant=True sets n_total_sites to the variant count on the eager path only; the streaming path ignores it. accessible_bed sets the mask on both paths, on the region's contig, else the store's."
 
 [inputs."GenotypeMatrix.from_haplotype_matrix"]
 params = ["hap_matrix"]
@@ -565,7 +565,7 @@ missing_data = ["include", "exclude"]
 span = "per engine; see [engines]"
 undefined = "per statistic and engine; the scatter and fused engines give a row for a window with no variant, the fallback gives no row"
 parallel = []
-notes = "The dispatcher. It picks one engine per request ([engines]); the streaming path runs it once per chunk. It raises TypeError for a keyword argument that no engine reads (windowed_analysis._check_windowed_kwargs), ValueError for an unknown window_type or missing_data, for regions without window_type='regions' and the reverse, and NotImplementedError for window_type 'snp' or 'regions' on a StreamingHaplotypeMatrix and for names that no engine computes on those window types."
+notes = "The dispatcher. It picks one engine per request ([engines]); the streaming path runs it once per chunk. accessible_bed uses chrom, else the stream's own contig; an eager matrix needs chrom for a BED with more than one contig. It raises TypeError for a keyword argument that no engine reads (windowed_analysis._check_windowed_kwargs), ValueError for an unknown window_type or missing_data, for regions without window_type='regions' and the reverse, and NotImplementedError for window_type 'snp' or 'regions' on a StreamingHaplotypeMatrix and for names that no engine computes on those window types."
 
 [functions."windowed_analysis.windowed_statistics_fused"]
 # signature: (haplotype_matrix, bp_bins, statistics, population, pop1, pop2, per_base, is_accessible, _win_starts, _win_stops, missing_data, chrom)
@@ -1868,7 +1868,7 @@ missing_data = []
 span = "none"
 undefined = "pairs below a population's sample-size floor add 0.0; an empty bin sums to 0.0"
 parallel = ["HaplotypeMatrix.compute_ld_statistics_gpu_single_pop", "HaplotypeMatrix.compute_ld_statistics_gpu_two_pops", "haplotype_matrix._stream_ld_single_pop", "haplotype_matrix._stream_ld_two_pops"]
-notes = "'other' is a VCF path; two-pop haplotype runs use ld_statistics.dd/dz/pi2, all other cases the fused kernels."
+notes = "'other' is a VCF path, loaded with accessible_bed so the BED contig is the VCF's; two-pop haplotype runs use ld_statistics.dd/dz/pi2, all other cases the fused kernels."
 
 [functions."decomposition.pca"]
 # signature: (haplotype_matrix, n_components, population, missing_data)
@@ -2227,7 +2227,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "builds the AccessibleMask that get_span('auto') counts"
-undefined = "all-False mask, with no error, when the BED has no interval on chrom"
+undefined = "all-False mask, with no error, when the BED has no interval on chrom; ValueError for chrom=None on a BED with more than one contig"
 parallel = []
 notes = "Input is a BED path; mask index k is 1-based position offset + k."
 
@@ -2238,7 +2238,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "builds the AccessibleMask that get_span('auto') counts"
-undefined = "raises ValueError when the BED has no interval on chrom; chrom=None reads every contig"
+undefined = "raises ValueError when the BED has no interval on chrom, or for chrom=None on a BED with more than one contig (a one-contig BED needs no chrom)"
 parallel = ["windowed_analysis._compute_window_bases"]
 notes = "Takes a BED path, a numpy bool array (offset chrom_start, or 0) or an AccessibleMask; a cupy array is not caught and is opened as a path (TypeError)."
 

@@ -235,13 +235,13 @@ def read_genotypes_vcz(store, region=None):
         store when ``region`` is given (``None`` for a whole-store
         read). Auxiliary callers (e.g. QC field readers) can reuse the
         same indices to keep their slices aligned with the genotype
-        matrix.
+        matrix. Also 'chrom', the name of the contig read.
     """
     contig_arr = np.asarray(store['variant_contig'])
     chrom, start, stop = parse_region(region)
     # On a whole-store read this call is the multi-contig guard: a store
     # spanning several contigs needs a region to name one.
-    contig_idx, _ = _vcz_contig_index(store, contig_arr, chrom)
+    contig_idx, contig = _vcz_contig_index(store, contig_arr, chrom)
     if region is not None:
         pos_arr = np.asarray(store['variant_position'])
         mask = (contig_arr == contig_idx) & _region_mask(pos_arr, start, stop)
@@ -258,7 +258,7 @@ def read_genotypes_vcz(store, region=None):
 
     samples = list(np.array(store['sample_id'])) if 'sample_id' in store else None
     return {'gt': gt, 'positions': positions, 'samples': samples,
-            'variant_indices': variant_indices}
+            'variant_indices': variant_indices, 'chrom': contig}
 
 
 def read_qc_fields(zarr_path, fields, variant_indices=None, region=None):
@@ -375,8 +375,10 @@ def read_genotypes_allel(store, region=None):
         if len(positions) == 0:
             raise ValueError(f"No variants in region {region}")
 
+    # A flat store has no contig table, so only a region names the contig.
     return {'gt': gt, 'positions': positions, 'samples': samples,
-            'variant_indices': variant_indices}
+            'variant_indices': variant_indices,
+            'chrom': parse_region(region)[0]}
 
 
 def read_genotypes_allel_grouped(store, region):
@@ -416,7 +418,7 @@ def read_genotypes_allel_grouped(store, region):
         raise ValueError(f"No variants in region {region}")
 
     return {'gt': gt, 'positions': positions, 'samples': samples,
-            'variant_indices': variant_indices}
+            'variant_indices': variant_indices, 'chrom': chrom}
 
 
 def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
@@ -672,7 +674,9 @@ def read_genotypes(path, region=None):
     Returns
     -------
     dict
-        Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples'.
+        Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples',
+        'variant_indices', and 'chrom' (the contig read, or None for a flat
+        scikit-allel store read without a region).
     """
     import zarr
     store = zarr.open(path, mode='r')

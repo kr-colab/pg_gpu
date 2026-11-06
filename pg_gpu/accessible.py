@@ -167,6 +167,26 @@ def parse_bed(path, chrom=None):
     return intervals
 
 
+def _contig_intervals(path, chrom):
+    """BED intervals on ``chrom``, or on the BED's only contig when ``chrom``
+    is None.
+
+    Raises ValueError when ``chrom`` is None and the BED names more than one
+    contig: merging them would count other contigs' intervals as accessible
+    bases of the data.
+    """
+    intervals = parse_bed(path, chrom=chrom)
+    if chrom is None:
+        contigs = sorted({c for c, _, _ in intervals})
+        if len(contigs) > 1:
+            shown = contigs if len(contigs) <= 5 else contigs[:5] + ['...']
+            raise ValueError(
+                f"BED file {path} has intervals on {len(contigs)} contigs "
+                f"({', '.join(shown)}); pass chrom (or a region on a loader) "
+                "to name the contig of the data.")
+    return intervals
+
+
 def bed_to_mask(path, chrom, length, offset=0):
     """Convert BED intervals into a dense boolean AccessibleMask.
 
@@ -174,8 +194,9 @@ def bed_to_mask(path, chrom, length, offset=0):
     ----------
     path : str or path-like
         Path to a BED file defining accessible regions.
-    chrom : str
-        Chromosome name to extract from the BED file.
+    chrom : str or None
+        Chromosome name to extract from the BED file. None is allowed only
+        for a BED with one contig.
     length : int
         Total length of the mask array (number of genomic positions to cover).
     offset : int
@@ -193,7 +214,12 @@ def bed_to_mask(path, chrom, length, offset=0):
     positions s+1 through e (inclusive). Mask index k represents 1-based
     position offset + k.
     """
-    intervals = parse_bed(path, chrom=chrom)
+    return _intervals_to_mask(_contig_intervals(path, chrom), length, offset)
+
+
+def _intervals_to_mask(intervals, length, offset):
+    """AccessibleMask of ``length`` bases from ``offset`` with ``intervals``
+    (0-based half-open BED records) set True."""
     mask = np.zeros(length, dtype=bool)
     for _, s, e in intervals:
         # BED (s, e) [0-based half-open] = 1-based positions s+1..e
@@ -218,7 +244,8 @@ def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):
         silently dropping BED accessible bases that fall outside the
         matrix's variant range (relevant for variants-only VCFs).
     chrom : str, optional
-        Chromosome name (required for BED file input).
+        Chromosome name. Required for a BED file with more than one contig;
+        a one-contig BED needs none.
 
     Returns
     -------
@@ -232,7 +259,7 @@ def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):
     # Treat as file path. Build the mask over the union of [chrom_start,
     # chrom_end] and the BED's own extent so no accessible bases are lost
     # when the matrix's variant range is narrower than the BED.
-    intervals = parse_bed(mask_or_path, chrom=chrom)
+    intervals = _contig_intervals(mask_or_path, chrom)
     if not intervals:
         raise ValueError(
             f"No BED intervals found for chrom={chrom!r} in {mask_or_path}")
@@ -248,7 +275,7 @@ def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):
     if length <= 0:
         raise ValueError(
             "Could not determine mask range from BED and chromosome bounds")
-    return bed_to_mask(mask_or_path, chrom=chrom, length=length, offset=offset)
+    return _intervals_to_mask(intervals, length, offset)
 
 
 def slice_fields(fields, keep_idx, accessible_idx=None):

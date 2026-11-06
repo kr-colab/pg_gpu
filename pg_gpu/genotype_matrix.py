@@ -219,7 +219,9 @@ class GenotypeMatrix:
         mask_or_path : str, path-like, numpy.ndarray, or AccessibleMask
             BED file path, boolean array, or AccessibleMask instance.
         chrom : str, optional
-            Chromosome name (required for BED file input).
+            Chromosome name to extract from the BED file. Required when the
+            BED file has more than one contig (otherwise ValueError); a
+            one-contig BED needs none.
         """
         self.accessible_mask = resolve_accessible_mask(
             mask_or_path, self.chrom_start, self.chrom_end, chrom)
@@ -637,7 +639,7 @@ class GenotypeMatrix:
 
         n_total_sites = gt.shape[0] if include_invariant else None
 
-        chrom, start, stop = parse_region(region)
+        _, start, stop = parse_region(region)
         start = start if start is not None else int(positions[0])
         stop = stop - 1 if stop is not None else int(positions[-1])
 
@@ -659,7 +661,7 @@ class GenotypeMatrix:
                 region=region,
             )
         if accessible_bed is not None:
-            gm.set_accessible_mask(accessible_bed, chrom=chrom)
+            gm.set_accessible_mask(accessible_bed, chrom=data['chrom'])
 
         try:
             import zarr
