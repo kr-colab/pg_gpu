@@ -976,6 +976,20 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             raw[est_name] = scatter_sum(
                 _ac_contribution(est_name, ac, n_valid, n_hap))
 
+    # Without this, a site with too few calls to contribute would still
+    # count toward the span, reading as invariant rather than unmeasured.
+    rate_stats = {'pi', 'theta_w', 'theta_h', 'theta_l'}
+    needs_rescale = span_normalize is not False and bool(stats_set & rate_stats)
+    if needs_rescale:
+        if bool(all_complete):
+            rescale = np.ones(n_windows)
+        else:
+            n_sites_with_data_window = scatter_sum(has_data.astype(cp.float64)).get()
+            with np.errstate(invalid='ignore', divide='ignore'):
+                rescale = np.where(n_sites_with_data_window > 0,
+                                   n_variants_per_window / n_sites_with_data_window,
+                                   np.nan)
+
     if stats_set & {'segregating_sites', 'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}:
         seg_count = scatter_sum(mut)
     derived = ac[:, 1:]
@@ -999,7 +1013,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     for est_name, out_name in [('pi', 'pi'), ('watterson', 'theta_w'),
                                 ('theta_h', 'theta_h'), ('theta_l', 'theta_l')]:
         if out_name in stats_set and est_name in raw:
-            results[out_name] = raw[est_name].get() / spans
+            vals = raw[est_name].get()
+            if needs_rescale:
+                vals = vals * rescale
+            results[out_name] = vals / spans
 
     if 'segregating_sites' in stats_set:
         results['segregating_sites'] = seg_count.get()

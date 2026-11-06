@@ -297,6 +297,68 @@ class TestSpanNormalizedRescale:
         assert all(np.isnan(v) for v in stats.values())
 
 
+class TestWindowedSpanNormalizedRescale:
+    """The windowed scatter engine's pi/theta_w/theta_h/theta_l pick up the
+    same per-window rescale as the scalar functions above."""
+
+    def _hm(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        hm.sample_sets = {"b": list(range(hap.shape[0] - 4, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_scalar_under_missingness(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(5)
+        n_hap, n_var = 20, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:][rng.random((4, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+
+        stats = ["pi", "theta_w", "theta_h", "theta_l"]
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=stats, populations=["b"])
+        for stat, fn in zip(stats, (diversity.pi, diversity.theta_w,
+                                    diversity.theta_h, diversity.theta_l)):
+            np.testing.assert_allclose(df[stat].iloc[0], fn(hm, "b"), rtol=1e-9)
+
+    def test_raw_sum_untouched_by_rescale(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(6)
+        n_hap, n_var = 10, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["pi"], populations=["b"],
+                               span_normalize=False)
+        np.testing.assert_allclose(
+            df["pi"].iloc[0], diversity.pi(hm, "b", span_normalize=False))
+
+    def test_nan_when_population_has_no_call_in_window(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(7)
+        n_hap, n_var = 10, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:] = -1
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["pi", "theta_w"], populations=["b"])
+        assert np.isnan(df["pi"].iloc[0]) and np.isnan(df["theta_w"].iloc[0])
+
+    def test_complete_data_unaffected(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(8)
+        n_hap, n_var = 12, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["pi", "theta_w"])
+        np.testing.assert_allclose(df["pi"].iloc[0], diversity.pi(hm), rtol=1e-9)
+        np.testing.assert_allclose(df["theta_w"].iloc[0], diversity.theta_w(hm),
+                                   rtol=1e-9)
+
+
 class TestExcludeKeepsMatrixContext:
     """exclude_missing_sites keeps the parent chromosome bounds and
     accessibility mask, like the restrict_to_* filters, so exclude-mode

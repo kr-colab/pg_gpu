@@ -681,8 +681,9 @@ Bug fixes
   toward 0 under missing data. The raw sum is now rescaled to the sites
   where the population actually had two calls before the span divides it,
   and the rate is NaN when no site does (``span_normalize=False`` is
-  unaffected; it already returned the plain raw sum). ``dxy`` and ``da``
-  have the same issue and are not fixed here.
+  unaffected; it already returned the plain raw sum).
+* Windowed ``pi``, ``theta_w``, ``theta_h`` and ``theta_l`` (the scatter
+  engine) had the same per-window bias and now get the same rescale.
 
 New warnings
 ~~~~~~~~~~~~
