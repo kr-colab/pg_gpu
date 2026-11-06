@@ -94,10 +94,13 @@ def _site_components_from_counts(ac1, nv1, ac2, nv2):
       between = between-pop mean pairwise difference (Dxy) per site
 
     A site contributes to any of the three only where both populations have
-    at least one valid (non-missing) gamete, the same rule as the fused
-    kernel's per-site skip. Within that joint set, mpd1/mpd2 are also zero
-    wherever that population alone doesn't have a pair (nv < 2); between
-    needs only one gamete from each side.
+    at least two valid (non-missing) gametes -- their own pair, not just a
+    call each -- the same rule as the fused kernel's per-site skip. Hb and Hw
+    must come from the same site set: a site where one population has only
+    one call has no within-pop term to offer but would still count toward
+    the between-pop term, inflating Hb relative to Hw. This is stricter than
+    ``dxy`` alone needs (one gamete from each side), since dxy has no within
+    term to stay aligned with.
 
     Per-allele (multiallelic-correct): the same-allele pair counts sum over
     every allele column, so between equals the per-site Dxy
@@ -117,23 +120,21 @@ def _site_components_from_counts(ac1, nv1, ac2, nv2):
     n1 = nv1.astype(cp.float64)
     n2 = nv2.astype(cp.float64)
 
-    joint = (n1 > 0) & (n2 > 0)
+    joint = (n1 > 1) & (n2 > 1)
 
-    # Within-pop mean pairwise differences (same pairs summed over alleles),
-    # zero outside the joint site set even where the population alone has
-    # enough gametes for its own pair.
+    # Within-pop mean pairwise differences (same pairs summed over alleles).
     n1_pairs = n1 * (n1 - 1) / 2
     n1_same = cp.sum(ac1 * (ac1 - 1), axis=1) / 2
-    mpd1 = cp.where(joint & (n1_pairs > 0), (n1_pairs - n1_same) / n1_pairs, 0.0)
+    mpd1 = cp.where(joint, (n1_pairs - n1_same) / cp.maximum(n1_pairs, 1.0), 0.0)
 
     n2_pairs = n2 * (n2 - 1) / 2
     n2_same = cp.sum(ac2 * (ac2 - 1), axis=1) / 2
-    mpd2 = cp.where(joint & (n2_pairs > 0), (n2_pairs - n2_same) / n2_pairs, 0.0)
+    mpd2 = cp.where(joint, (n2_pairs - n2_same) / cp.maximum(n2_pairs, 1.0), 0.0)
 
     # Between-pop mean pairwise differences (per-allele cross term)
     n_between = n1 * n2
     n_between_same = cp.sum(ac1 * ac2, axis=1)
-    between = cp.where(joint, (n_between - n_between_same) / n_between, 0.0)
+    between = cp.where(joint, (n_between - n_between_same) / cp.maximum(n_between, 1.0), 0.0)
 
     return mpd1, mpd2, between
 
@@ -322,9 +323,10 @@ def fst_tskit(haplotype_matrix: HaplotypeMatrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    # Hb (between) and Hw (within), jointly gated so a site with no data in
-    # one population never contributes the other's own diversity as Hw.
-    # tskit combines them as (Hb - Hw) / (Hb + Hw), summed over sites.
+    # Hb (between) and Hw (within), jointly gated (see
+    # _site_components_from_counts) so a site never contributes to one
+    # without the other. tskit combines them as (Hb - Hw) / (Hb + Hw),
+    # summed over sites.
     mpd1, mpd2, between = _twopop_site_components(pop1_haps, pop2_haps)
     within = (mpd1 + mpd2) / 2.0
     between_sum = float(cp.sum(between).get())
@@ -699,9 +701,9 @@ def da(haplotype_matrix: HaplotypeMatrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    # dxy and the within-pop pi terms share one site set: a site counts
-    # toward any of the three only where both populations have data (see
-    # _twopop_site_components), matching fst_hudson's own convention.
+    # The between term here is not standalone Dxy: it shares one site set
+    # with the within-pop pi terms (see _site_components_from_counts),
+    # matching fst_hudson's own convention.
     mpd1, mpd2, between = _twopop_site_components(pop1_haps, pop2_haps)
     da_raw = cp.sum(between) - (cp.sum(mpd1) + cp.sum(mpd2)) / 2.0
 

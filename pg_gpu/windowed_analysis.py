@@ -2101,14 +2101,20 @@ void fused_windowed_twopop(const signed char* hap1_t,
         }
         double mpd1 = (dn1 > 1.0) ? 1.0 - same1 / (dn1 * (dn1 - 1.0)) : 0.0;
         double mpd2 = (dn2 > 1.0) ? 1.0 - same2 / (dn2 * (dn2 - 1.0)) : 0.0;
-        double within = (mpd1 + mpd2) / 2.0;
         double between = 1.0 - between_same / (dn1 * dn2);
-
-        t_fst_num += between - within;
-        t_fst_den += between;
         t_dxy += between;
-        t_pi1 += mpd1;
-        t_pi2 += mpd2;
+
+        // fst/da need Hb and Hw from the same site set (both pops >= 2
+        // calls), stricter than dxy alone; see _site_components_from_counts.
+        bool joint_pairs = (dn1 > 1.0) && (dn2 > 1.0);
+        double mpd1_j = joint_pairs ? mpd1 : 0.0;
+        double mpd2_j = joint_pairs ? mpd2 : 0.0;
+        double between_j = joint_pairs ? between : 0.0;
+
+        t_fst_num += between_j - (mpd1_j + mpd2_j) / 2.0;
+        t_fst_den += between_j;
+        t_pi1 += mpd1_j;
+        t_pi2 += mpd2_j;
     }
 
     // Block reduction (7 values)
@@ -2480,7 +2486,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 results['dxy'] = out_dxy.get()
 
         if 'da' in statistics:
-            da_sum = out_dxy - (out_pi1 + out_pi2) / 2.0
+            # da's between term is fst's (both pops >= 2 calls), not dxy's.
+            da_sum = out_fst_den - (out_pi1 + out_pi2) / 2.0
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['da'] = cp.where(wb > 0,
@@ -3055,7 +3062,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                 results['dxy'] = acc_dxy.get()
 
         if 'da' in statistics:
-            da_sum = acc_dxy - (acc_pi1 + acc_pi2) / 2.0
+            # da's between term is fst's (both pops >= 2 calls), not dxy's.
+            da_sum = acc_fst_den - (acc_pi1 + acc_pi2) / 2.0
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['da'] = cp.where(wb > 0,
