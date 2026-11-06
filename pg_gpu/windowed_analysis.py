@@ -1113,10 +1113,22 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         zero_span = np.zeros(n_windows, dtype=bool)
 
     # Compute per-site components (single pass over the data). Only needed
-    # for the gamete statistics, not a pure fst_wc request.
-    need_between = stats_set & {'fst', 'fst_hudson', 'dxy', 'da'}
-    if need_between:
-        mpd1, mpd2, between = divergence._twopop_site_components(hap1, hap2)
+    # for the gamete statistics, not a pure fst_wc request. dxy and the
+    # fst/da terms need different site sets (see _dxy_per_site_from_counts
+    # and _site_components_from_counts), so they get separate sums even
+    # though both are requested here.
+    need_fst_da = stats_set & {'fst', 'fst_hudson', 'da'}
+    need_dxy = 'dxy' in stats_set
+    if need_fst_da or need_dxy:
+        ac1, ac2, nv1, nv2 = divergence._aligned_pop_counts(hap1, hap2)
+        if need_fst_da:
+            mpd1, mpd2, between = divergence._site_components_from_counts(
+                ac1, nv1, ac2, nv2)
+            between_sum = scatter_sum(between)
+        if need_dxy:
+            dxy_per_site = divergence._dxy_per_site_from_counts(
+                ac1, nv1, ac2, nv2)
+            dxy_sum = scatter_sum(dxy_per_site)
 
     if 'fst_wc' in stats_set:
         from .divergence import _wc_site_components
@@ -1126,10 +1138,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         wc_a_sum = scatter_sum(wc_a)
         wc_abc_sum = scatter_sum(wc_abc)
 
-    # Scatter-add per-site components into windows (deduplicated)
-    between_sum = scatter_sum(between) if need_between else None
-
-    if stats_set & {'fst', 'fst_hudson', 'da'}:
+    if need_fst_da:
         within = (mpd1 + mpd2) / 2.0
         fst_num = scatter_sum(between - within)
 
@@ -1148,7 +1157,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             results['fst_hudson'] = fst_vals
 
     if 'dxy' in stats_set:
-        results['dxy'] = (between_sum / spans_gpu).get()
+        results['dxy'] = (dxy_sum / spans_gpu).get()
 
     if 'da' in stats_set:
         results['da'] = ((between_sum - (pi1_sum + pi2_sum) / 2.0) / spans_gpu).get()

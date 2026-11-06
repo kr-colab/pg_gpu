@@ -138,6 +138,24 @@ def _site_components_from_counts(ac1, nv1, ac2, nv2):
     return mpd1, mpd2, between
 
 
+def _dxy_per_site_from_counts(ac1, nv1, ac2, nv2):
+    """Per-site Dxy (``1 - sum_a p1_a * p2_a``) from per-allele counts.
+
+    Valid wherever each population has at least one call; unlike
+    ``_site_components_from_counts``, Dxy alone has no within-pop term to
+    stay aligned with, so it needs no pair within either population.
+    """
+    ac1 = ac1.astype(cp.float64)
+    ac2 = ac2.astype(cp.float64)
+    n1 = nv1.astype(cp.float64)
+    n2 = nv2.astype(cp.float64)
+
+    valid = (n1 > 0) & (n2 > 0)
+    p1 = cp.where(valid[:, None], ac1 / cp.maximum(n1[:, None], 1.0), 0.0)
+    p2 = cp.where(valid[:, None], ac2 / cp.maximum(n2[:, None], 1.0), 0.0)
+    return cp.where(valid, 1.0 - cp.sum(p1 * p2, axis=1), 0.0)
+
+
 def _twopop_site_components(hap1, hap2):
     """Per-site (mpd1, mpd2, between) from two populations' haplotypes.
 
@@ -623,20 +641,11 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     pop1_haps = haplotype_matrix.haplotypes[pop1_idx, :]
     pop2_haps = haplotype_matrix.haplotypes[pop2_idx, :]
 
-    n_filtered = pop1_haps.shape[1]
-
     # Per-allele Dxy: dxy = 1 - sum_a p1_a * p2_a, from non-missing data per
     # site. Reduces to the biallelic p1 + p2 - 2*p1*p2 when there are two
     # alleles; multiallelic-correct (matches tskit divergence).
     ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
-    nv1 = nv1.astype(cp.float64)
-    nv2 = nv2.astype(cp.float64)
-
-    valid_mask = (nv1 > 0) & (nv2 > 0)
-    p1 = cp.where(valid_mask[:, None], ac1.astype(cp.float64) / nv1[:, None], 0.0)
-    p2 = cp.where(valid_mask[:, None], ac2.astype(cp.float64) / nv2[:, None], 0.0)
-    dxy_per_site = cp.zeros(n_filtered)
-    dxy_per_site[valid_mask] = 1.0 - cp.sum(p1 * p2, axis=1)[valid_mask]
+    dxy_per_site = _dxy_per_site_from_counts(ac1, nv1, ac2, nv2)
 
     if per_site:
         return dxy_per_site.get()
