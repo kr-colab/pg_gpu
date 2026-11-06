@@ -768,9 +768,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "0.0 with no derived allele; under 'exclude', NaN when no site is complete"
+undefined = "0.0 with no derived allele or no variant; under 'exclude', NaN where a site existed but none is complete"
 parallel = ["windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "'include' needs n_valid >= 2 at a site, matching pi/theta_w and both windowed engines."
+notes = "'include' needs n_valid >= 2 at a site, matching pi/theta_w and both windowed engines; 'exclude' tracks each window's pre-filter variant count to tell the two 0.0/NaN cases apart."
 
 [functions."diversity.haplotype_count"]
 # signature: (haplotype_matrix, population, missing_data)

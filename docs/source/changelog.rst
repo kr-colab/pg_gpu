@@ -201,6 +201,11 @@ Read this section if you are comparing against older pg_gpu results.
 
   ``max_daf(missing_data='exclude')`` returned ``-1.0``, not even a
   plausible-looking real value, when no site was complete; it is NaN now.
+  The windowed engines (``windowed_analysis``, ``windowed_statistics_fused``,
+  ``windowed_statistics_fused_chunked``) had the same gap one level up: a
+  window whose sites were all excluded gave ``0.0`` rather than NaN,
+  indistinguishable from a window with no variant to begin with. Both now
+  agree with the scalar function.
 
   With the default ``sigma_d2`` estimator, ``zns`` and ``omega`` leave
   out a pair that they cannot estimate (fewer than four haplotypes

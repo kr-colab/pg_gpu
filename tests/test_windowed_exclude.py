@@ -235,6 +235,46 @@ def test_exclude_keeps_the_grid_when_an_end_site_is_incomplete():
     np.testing.assert_array_equal(inc["end"], exc["end"])
 
 
+def test_max_daf_nan_when_exclude_empties_a_window_with_data():
+    # Window 0 has two sites, each with a missing call -- 'exclude' drops
+    # both, so nothing is left to measure: NaN, not 0.0. Window 1 has no
+    # variant at all, a different case (nothing was ever there), and stays
+    # 0.0. The scatter and fused engines both filter the whole matrix before
+    # windowing, which loses the distinction unless each window's pre-filter
+    # variant count is checked too.
+    hap = np.array([[0, 1],
+                    [1, -1],
+                    [-1, 0],
+                    [1, 1]], dtype=np.int8)
+    pos = np.array([10, 20])
+    hm = HaplotypeMatrix(hap, pos, 0, 200)
+
+    scatter = windowed_analysis(hm, window_size=100, step_size=100,
+                                statistics=['max_daf'], missing_data='exclude',
+                                span_normalize=False)
+    assert scatter['n_variants'].tolist() == [0, 0]
+    assert np.isnan(scatter['max_daf'].iloc[0])
+    assert scatter['max_daf'].iloc[1] == 0.0
+
+    bp = np.array([0.0, 100.0, 200.0])
+    fused = windowed_statistics_fused(hm, bp_bins=bp, statistics=('max_daf',),
+                                      missing_data='exclude', per_base=False)
+    np.testing.assert_array_equal(fused['n_variants'], [0, 0])
+    assert np.isnan(fused['max_daf'][0])
+    assert fused['max_daf'][1] == 0.0
+
+    chunked = windowed_statistics_fused_chunked(
+        hm, bp_bins=bp, statistics=('max_daf',), missing_data='exclude',
+        per_base=False)
+    np.testing.assert_array_equal(chunked['n_variants'], [0, 0])
+    assert np.isnan(chunked['max_daf'][0])
+    assert chunked['max_daf'][1] == 0.0
+
+    # Pinned against the scalar function directly, not just a mutual check.
+    window0 = HaplotypeMatrix(hap, pos, 0, 100)
+    assert np.isnan(diversity.max_daf(window0, missing_data='exclude'))
+
+
 def test_streaming_exclude_matches_scalar(tmp_path):
     hm = simulate_hm(n_samples=20, seq_length=50_000, seed=42, mutation_model='binary')
     hap = cp.asnumpy(hm.haplotypes).astype(np.int8)
