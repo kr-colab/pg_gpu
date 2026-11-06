@@ -12,7 +12,7 @@ from typing import Optional, Union
 
 def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
                         centre: bool = True, polarised: bool = False,
-                        proportion: bool = False, span_normalize=True,
+                        proportion: bool = True, span_normalize=True,
                         missing_data: str = 'include'):
     """Site-mode genetic relatedness between sample sets.
 
@@ -39,13 +39,14 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         and the standard relatedness) or use the raw frequencies (False, the
         noncentred form).
     polarised : bool
-        Sum over all alleles including the reference (False, the default) or
-        over derived alleles only (True).
+        Sum over all alleles including the reference (False, the default;
+        note tskit defaults to True) or over derived alleles only (True).
     proportion : bool
         Divide by the number of segregating sites among the analyzed samples
         (the per-site sum of ``num_alleles - 1``), giving a relatedness
-        proportion. When True, ``span_normalize`` has no effect (it cancels
-        between the covariance and the segregating-site count).
+        proportion (True, the default, matching tskit). When True,
+        ``span_normalize`` has no effect (it cancels between the covariance
+        and the segregating-site count). NaN when no site is segregating.
     span_normalize : bool or str
         True (default) divides by the analysis span (see ``get_span``); False
         returns the raw sum. Like tskit's ``span_normalise``, except that when
@@ -62,8 +63,8 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     ndarray, float64
         The ``(D, D)`` matrix, or a 1-D array of values for the requested
         ``indexes``. NaN for a pair of sets with no column called in both.
-        0 when no column is called at all, unless ``proportion=True``, which
-        is then NaN too (0 segregating sites).
+        0 when no column is called at all and ``proportion=False``.
+        ``proportion=True`` gives NaN whenever no site segregates.
     """
     from ._memutil import estimate_variant_chunk_size
     from .streaming_matrix import StreamingHaplotypeMatrix
@@ -158,17 +159,17 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         # columns) up to the full n_cols, so a pair's value does not shrink
         # just because it called fewer of the analyzed columns.
         R = cp.where(J > 0, R * n_cols / cp.maximum(J, 1.0), cp.nan)
-    elif proportion:
-        # No column at all means no segregating site either: 0/0, undefined.
-        R = cp.full_like(R, cp.nan)
     # else: no column at all -- R stays the all-zero matrix (a sum over no
-    # sites).
+    # sites); with proportion=True this also means no segregating site, so
+    # the denom <= 0 branch below turns it into NaN.
 
     if proportion:
         # Divide by segregating sites; span_normalise cancels, so it is ignored.
         denom = float(seg_cols - seg_sites)
         if denom > 0:
             R = R / denom
+        else:
+            R = cp.full_like(R, cp.nan)
     elif span_normalize is not False:
         mode = 'auto' if span_normalize is True else span_normalize
         span = haplotype_matrix.get_span(mode)
@@ -263,16 +264,16 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
         # Project each pair's partial sum up to the full n_cols; see the
         # eager path's identical step.
         R = np.where(J > 0, R * n_cols / np.maximum(J, 1.0), np.nan)
-    elif proportion:
-        # No column at all means no segregating site either: 0/0, undefined.
-        R = np.full_like(R, np.nan)
     # else: no column at all -- R stays the all-zero matrix (a sum over no
-    # sites).
+    # sites); with proportion=True this also means no segregating site, so
+    # the denom <= 0 branch below turns it into NaN.
 
     if proportion:
         denom = seg_cols - float(seg_sites.get())
         if denom > 0:
             R = R / denom
+        else:
+            R = np.full_like(R, np.nan)
     elif span_normalize is not False:
         # Same span source as the eager path: get_span('auto') prefers the
         # accessible mask / n_total_sites (set at load via accessible_bed) over

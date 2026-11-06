@@ -340,7 +340,8 @@ class TestGeneticRelatedness:
         tsk_sets = [[s] for s in ts.samples()]
         exp = self._tskit_matrix(ts, tsk_sets, centre=True, polarised=False,
                                  span_normalise=False)
-        got = relatedness.genetic_relatedness(hm, span_normalize=False)
+        got = relatedness.genetic_relatedness(hm, proportion=False,
+                                              span_normalize=False)
         np.testing.assert_allclose(got, exp, atol=1e-9, rtol=1e-6)
 
     def test_singleton_pin_span_normalised(self, multiallelic_hm):
@@ -348,7 +349,8 @@ class TestGeneticRelatedness:
         tsk_sets = [[s] for s in ts.samples()]
         exp = self._tskit_matrix(ts, tsk_sets, centre=True, polarised=False,
                                  span_normalise=True)
-        got = relatedness.genetic_relatedness(hm, span_normalize=True)
+        got = relatedness.genetic_relatedness(hm, proportion=False,
+                                              span_normalize=True)
         np.testing.assert_allclose(got, exp, atol=1e-12, rtol=1e-6)
 
     def test_grouped_sample_sets_pin(self, multiallelic_hm):
@@ -361,6 +363,7 @@ class TestGeneticRelatedness:
         exp = self._tskit_matrix(ts, tsk_sets, centre=True, polarised=False,
                                  span_normalise=False)
         got = relatedness.genetic_relatedness(hm, sample_sets=pg_sets,
+                                              proportion=False,
                                               span_normalize=False)
         np.testing.assert_allclose(got, exp, atol=1e-9, rtol=1e-6)
 
@@ -370,6 +373,7 @@ class TestGeneticRelatedness:
         exp = self._tskit_matrix(ts, tsk_sets, centre=False, polarised=False,
                                  span_normalise=False)
         got = relatedness.genetic_relatedness(hm, centre=False,
+                                              proportion=False,
                                               span_normalize=False)
         np.testing.assert_allclose(got, exp, atol=1e-9, rtol=1e-6)
 
@@ -379,6 +383,7 @@ class TestGeneticRelatedness:
         exp = self._tskit_matrix(ts, tsk_sets, centre=True, polarised=True,
                                  span_normalise=False)
         got = relatedness.genetic_relatedness(hm, polarised=True,
+                                              proportion=False,
                                               span_normalize=False)
         np.testing.assert_allclose(got, exp, atol=1e-9, rtol=1e-6)
 
@@ -390,6 +395,13 @@ class TestGeneticRelatedness:
         got = relatedness.genetic_relatedness(hm, proportion=True)
         np.testing.assert_allclose(got, exp, atol=1e-12, rtol=1e-6)
 
+    def test_proportion_defaults_to_true(self, multiallelic_hm):
+        # proportion=True is the default, matching tskit's own default.
+        _, hm = multiallelic_hm
+        default = relatedness.genetic_relatedness(hm)
+        explicit = relatedness.genetic_relatedness(hm, proportion=True)
+        np.testing.assert_array_equal(default, explicit)
+
     def test_proportion_ignores_span_normalize(self, multiallelic_hm):
         _, hm = multiallelic_hm
         a = relatedness.genetic_relatedness(hm, proportion=True,
@@ -397,6 +409,32 @@ class TestGeneticRelatedness:
         b = relatedness.genetic_relatedness(hm, proportion=True,
                                             span_normalize=True)
         np.testing.assert_allclose(a, b)
+
+    def test_proportion_no_segregating_sites_is_nan_pin(self):
+        # A region with only monomorphic sites has zero segregating sites, so
+        # the proportion is 0/0 -- undefined, not the raw covariance (0 when
+        # centred, the raw per-site sum when not). tskit's own full-matrix
+        # computation of this is itself float-fragile at the 0/0 edge (it can
+        # land on inf instead of nan from roundoff in the numerator), so this
+        # pins to the same restricted pair selection tskit gives a clean nan
+        # for, rather than the full D x D matrix.
+        import msprime
+        tables = msprime.sim_ancestry(3, sequence_length=1000,
+                                      random_seed=1).dump_tables()
+        for x in np.arange(5) * 100 + 50:
+            tables.sites.add_row(position=x, ancestral_state="A")
+        ts = tables.tree_sequence()
+        hm = HaplotypeMatrix.from_ts(ts)
+        tsk_sets = [[s] for s in ts.samples()]
+        pairs = [(0, 0), (0, 1), (0, 2)]
+        for centre in (True, False):
+            exp = ts.genetic_relatedness(tsk_sets, indexes=pairs, mode='site',
+                                         proportion=True, centre=centre,
+                                         span_normalise=False)
+            got = relatedness.genetic_relatedness(hm, proportion=True,
+                                                  centre=centre, indexes=pairs)
+            assert np.all(np.isnan(exp))
+            assert np.all(np.isnan(got))
 
     def test_indexes_selection(self, multiallelic_hm):
         _, hm = multiallelic_hm
@@ -411,7 +449,8 @@ class TestGeneticRelatedness:
         hap = rng.randint(0, 3, size=(10, 40)).astype(np.int8)
         hap[rng.random(hap.shape) < 0.1] = -1
         hm = HaplotypeMatrix(hap, np.arange(40) * 100)
-        got = relatedness.genetic_relatedness(hm, span_normalize=False)
+        got = relatedness.genetic_relatedness(hm, proportion=False,
+                                              span_normalize=False)
         k = int(hap.max()) + 1
         Cref, _, VM = _reference_relatedness_columns(hap, None, k)
         # genetic_relatedness rescales each pair's raw sum by n_cols / J (its
@@ -430,6 +469,7 @@ class TestGeneticRelatedness:
         hap[rng.random(hap.shape) < 0.1] = -1
         hm = HaplotypeMatrix(hap, np.arange(40) * 100)
         got = relatedness.genetic_relatedness(hm, missing_data='exclude',
+                                              proportion=False,
                                               span_normalize=False)
         complete = (hap >= 0).all(axis=0)
         k = int(hap.max()) + 1
@@ -447,6 +487,7 @@ class TestGeneticRelatedness:
         hm = HaplotypeMatrix(hap, np.arange(6) * 10 + 1, 1, 60)
 
         noncentred = relatedness.genetic_relatedness(hm, centre=False,
+                                                      proportion=False,
                                                       span_normalize=False)
         assert np.isnan(noncentred[0, 1]) and np.isnan(noncentred[1, 0])
         # Every pair's raw sum is rescaled by n_cols / J (its own
@@ -461,7 +502,8 @@ class TestGeneticRelatedness:
         mask = ~np.isnan(expected)
         np.testing.assert_allclose(noncentred[mask], expected[mask])
 
-        centred = relatedness.genetic_relatedness(hm, span_normalize=False)
+        centred = relatedness.genetic_relatedness(hm, proportion=False,
+                                                  span_normalize=False)
         assert np.isnan(centred[0, 1]) and np.isnan(centred[1, 0])
         # Hand-derived from the per-site centered columns (pbar excludes the
         # one set missing a call at each site), then rescaled by n_cols / J
@@ -500,6 +542,7 @@ class TestGeneticRelatedness:
         hm = HaplotypeMatrix(hap, np.arange(n_var) + 1, 1, n_var)
 
         R = relatedness.genetic_relatedness(hm, missing_data='exclude',
+                                            proportion=False,
                                             span_normalize=False)
         assert np.all(R == 0.0)
 
@@ -528,5 +571,6 @@ class TestGeneticRelatedness:
         hm = HaplotypeMatrix(hap, np.arange(1, 11), 5, 4)
         assert hm.get_span('auto') == 0
 
-        R = relatedness.genetic_relatedness(hm, span_normalize=True)
+        R = relatedness.genetic_relatedness(hm, proportion=False,
+                                            span_normalize=True)
         assert np.all(np.isnan(R))

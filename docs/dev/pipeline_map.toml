@@ -2073,9 +2073,9 @@ inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
 streaming = "native"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "NaN for a pair with no column called in both under include; under proportion=True, NaN when no site segregates (otherwise 0.0 if no column exists at all); NaN when span is 0"
+undefined = "NaN for a pair with no column called in both under include; 0.0 when no column exists at all and proportion=False; NaN under proportion=True whenever no site segregates; NaN when span is 0"
 parallel = ["relatedness._stream_genetic_relatedness", "decomposition._centered_block"]
-notes = "Rejects GenotypeMatrix and StreamingGenotypeMatrix with a TypeError; proportion=True divides by segregating sites and ignores span_normalize."
+notes = "Rejects GenotypeMatrix and StreamingGenotypeMatrix with a TypeError; proportion defaults to True (matching tskit), dividing by segregating sites and ignoring span_normalize."
 
 [functions."relatedness.grm"]
 # signature: (genotype_matrix, population, missing_data)
