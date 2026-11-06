@@ -2572,13 +2572,14 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         for wi in range(n_windows):
             s, e = int(ws_np[wi]), int(we_np[wi])
-            if e - s < 2:
-                if e - s == 1:
-                    if per_base:
-                        mu_var_arr[wi] = (1.0 / window_bases[wi]
-                                          if window_bases[wi] > 0 else np.nan)
-                    else:
-                        mu_var_arr[wi] = 1.0
+            n_var = e - s
+            if n_var < 2:
+                # No gap to report, but mu_var is still defined.
+                if per_base:
+                    mu_var_arr[wi] = (n_var / window_bases[wi]
+                                      if window_bases[wi] > 0 else np.nan)
+                else:
+                    mu_var_arr[wi] = float(n_var)
                 continue
             win_pos = pos_cpu[s:e]
             gaps = np.diff(win_pos).astype(np.float64)

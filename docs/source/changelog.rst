@@ -530,6 +530,10 @@ Bug fixes
   name. ``population``, ``k``, ``n_blocks``, ``batch_size`` and
   ``aggregate`` are valid only with ``local_pca`` or
   ``local_pca_jackknife``.
+* Windowed ``mu_var`` gave NaN for a window with accessible bases but no
+  variants, while the scalar ``mu_var`` gives 0.0 there. The fused engine
+  (and the chunked engine, which shares its code for this statistic) now
+  give 0.0 too, keeping NaN only for a window with no accessible base.
 
 New warnings
 ~~~~~~~~~~~~
