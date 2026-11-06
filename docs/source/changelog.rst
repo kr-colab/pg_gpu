@@ -522,6 +522,12 @@ Bug fixes
   ``FrequencySpectrum.fay_wu_h`` gave 0.0. H is a difference of two thetas
   that are both 0 there, and it has no variance term, so every path now
   gives 0.0. ``normalized_fay_wus_h`` and ``zeng_dh`` stay NaN.
+* ``zns`` and ``omega`` on a ``GenotypeMatrix`` with
+  ``missing_data='exclude'`` raised ``ValueError: genotypes cannot be
+  empty`` when no site had a call for every sample, since the filtering
+  step built a zero-column ``GenotypeMatrix`` and the constructor rejects
+  that. They now give the same no-pair result (NaN) as every other
+  undefined case there, without constructing the empty matrix.
 * ``windowed_analysis`` ignored an unknown keyword argument when the
   scatter or fused engine served the request, so a misspelled name, or
   ``population=`` in place of ``populations=``, changed nothing and gave

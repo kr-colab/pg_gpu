@@ -7,7 +7,8 @@ n / (n - 1) at n = 1), so the statistic must return NaN; 0.0 would read as
 import numpy as np
 import pytest
 
-from pg_gpu import HaplotypeMatrix, distance_stats, diversity, divergence, ld_statistics
+from pg_gpu import (GenotypeMatrix, HaplotypeMatrix, distance_stats, diversity,
+                    divergence, ld_statistics)
 from pg_gpu.windowed_analysis import windowed_analysis
 
 
@@ -27,6 +28,22 @@ def test_zns_and_omega_nan_without_defined_sites(hap, estimator):
     hm = _hm(hap)
     assert np.isnan(ld_statistics.zns(hm, estimator=estimator))
     assert np.isnan(ld_statistics.omega(hm, estimator=estimator))
+
+
+def test_zns_omega_nan_missing_data_exclude_no_complete_site():
+    # One individual missing everywhere: exclude-filtering leaves no site, so
+    # the GenotypeMatrix branch of _resolve_r2_matrix used to pass an empty
+    # array to the GenotypeMatrix constructor and raise.
+    rng = np.random.default_rng(0)
+    g = rng.integers(0, 3, (10, 6)).astype(np.int8)
+    g[0, :] = -1
+    gm = GenotypeMatrix(g, np.arange(6) * 100 + 1, 1, 600)
+    assert np.isnan(ld_statistics.zns(gm, missing_data='exclude'))
+    assert np.isnan(ld_statistics.omega(gm, missing_data='exclude'))
+
+    # Same gap, reached via a HaplotypeMatrix converted to genotypes.
+    assert np.isnan(ld_statistics.zns(_hm(ALL_MISSING), estimator='rogers_huff',
+                                     missing_data='exclude'))
 
 
 def test_zns_nan_on_undefined_r2_matrix():
