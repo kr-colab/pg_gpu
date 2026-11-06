@@ -61,8 +61,9 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     -------
     ndarray, float64
         The ``(D, D)`` matrix, or a 1-D array of values for the requested
-        ``indexes``. NaN for a pair of sets with no site called in both,
-        which has no defined relatedness.
+        ``indexes``. NaN for a pair of sets with no column called in both.
+        0 when no column is called at all, unless ``proportion=True``, which
+        is then NaN too (0 segregating sites).
     """
     from ._memutil import estimate_variant_chunk_size
     from .streaming_matrix import StreamingHaplotypeMatrix
@@ -112,8 +113,11 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
 
     R = cp.zeros((D, D), dtype=cp.float64)
     # Count of (site, allele) columns where both sets of a pair have a call,
-    # so a pair with none gets NaN rather than a sum of zero contributions.
+    # the per-pair denominator the n_cols rescaling below needs.
     J = cp.zeros((D, D), dtype=cp.float64)
+    # Total (site, allele) columns summed into R, for that rescaling.
+    n_cols = 0
+    n_complete_cols = 0
     # Segregating sites among the analyzed samples: per-site sum of
     # (present alleles - 1), accumulated on device (only when needed).
     seg_cols = 0
@@ -136,11 +140,29 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
                 keep = col_allele != 0
                 cols = cols[:, keep]
                 valid_mask = valid_mask[:, keep]
+            n_cols += cols.shape[1]
             R += cols @ cols.T
-            vm = valid_mask.astype(cp.float64)
-            J += vm @ vm.T
+            # A chunk where every set has a call contributes the same count
+            # to every pair, so it is tracked as a scalar instead of a
+            # matmul; the validity matmul that remains runs in float32
+            # (exact for any realistic chunk size).
+            if bool(valid_mask.all()):
+                n_complete_cols += cols.shape[1]
+            else:
+                vm = valid_mask.astype(cp.float32)
+                J += (vm @ vm.T).astype(cp.float64)
 
-    R = cp.where(J > 0, R, cp.nan)
+    if n_cols > 0:
+        J += n_complete_cols
+        # Project each pair's partial sum (over its own J jointly-called
+        # columns) up to the full n_cols, so a pair's value does not shrink
+        # just because it called fewer of the analyzed columns.
+        R = cp.where(J > 0, R * n_cols / cp.maximum(J, 1.0), cp.nan)
+    elif proportion:
+        # No column at all means no segregating site either: 0/0, undefined.
+        R = cp.full_like(R, cp.nan)
+    # else: no column at all -- R stays the all-zero matrix (a sum over no
+    # sites).
 
     if proportion:
         # Divide by segregating sites; span_normalise cancels, so it is ignored.
@@ -190,8 +212,11 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
     # source falls through to this zero matrix (relatedness of nothing is 0).
     R = np.zeros((D, D), dtype=np.float64)
     # Count of (site, allele) columns where both sets of a pair have a call,
-    # so a pair with none gets NaN rather than a sum of zero contributions.
+    # the per-pair denominator the n_cols rescaling below needs.
     J = np.zeros((D, D), dtype=np.float64)
+    # Total (site, allele) columns summed into R, for that rescaling.
+    n_cols = 0
+    n_complete_cols = 0
     seg_cols = 0
     seg_sites = cp.zeros((), dtype=cp.float64)
     if block_size is None:
@@ -217,13 +242,32 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
             keep = col_allele != 0
             cols = cols[:, keep]
             valid_mask = valid_mask[:, keep]
-        vm = valid_mask.astype(cp.float64)
+        n_cols += cols.shape[1]
+        # A chunk where every set has a call contributes the same count to
+        # every pair, so it is tracked as a scalar instead of a matmul; the
+        # validity matmul that remains runs in float32 (exact for any
+        # realistic chunk size).
+        all_valid = bool(valid_mask.all())
+        if all_valid:
+            n_complete_cols += cols.shape[1]
+        else:
+            vm = valid_mask.astype(cp.float32)
         for r0 in range(0, D, block_size):
             r1 = min(r0 + block_size, D)
             R[r0:r1] += (cols[r0:r1] @ cols.T).get()
-            J[r0:r1] += (vm[r0:r1] @ vm.T).get()
+            if not all_valid:
+                J[r0:r1] += (vm[r0:r1] @ vm.T).get()
 
-    R = np.where(J > 0, R, np.nan)
+    if n_cols > 0:
+        J += n_complete_cols
+        # Project each pair's partial sum up to the full n_cols; see the
+        # eager path's identical step.
+        R = np.where(J > 0, R * n_cols / np.maximum(J, 1.0), np.nan)
+    elif proportion:
+        # No column at all means no segregating site either: 0/0, undefined.
+        R = np.full_like(R, np.nan)
+    # else: no column at all -- R stays the all-zero matrix (a sum over no
+    # sites).
 
     if proportion:
         denom = seg_cols - float(seg_sites.get())

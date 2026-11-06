@@ -117,9 +117,29 @@ class TestStreamingGeneticRelatednessMissingData:
         R = relatedness.genetic_relatedness(sh, centre=False,
                                             span_normalize=False)
         assert np.isnan(R[0, 1]) and np.isnan(R[1, 0])
-        expected = np.array([[3, np.nan, 3, 0],
-                             [np.nan, 3, 3, 0],
-                             [3, 3, 6, 0],
+        # Rescaled by n_cols / J (its own jointly-called column count out of
+        # 12), same as the eager-path test's hand-derivation.
+        expected = np.array([[6, np.nan, 6, 0],
+                             [np.nan, 6, 6, 0],
+                             [6, 6, 6, 0],
                              [0, 0, 0, 6]], dtype=np.float64)
         mask = ~np.isnan(expected)
         np.testing.assert_allclose(R[mask], expected[mask])
+
+    def test_no_column_at_all_zero_unless_proportion(self, tmp_path):
+        # One haplotype missing everywhere -> 'exclude' drops every site, an
+        # empty analysis: 0.0 (a sum over no sites), except under
+        # proportion=True, where the segregating-site denominator is also 0
+        # (0/0, undefined).
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, size=(8, 20)).astype(np.int8)
+        hap[0, :] = -1
+        store = _write_vcz(hap, str(tmp_path / "no_complete_site.vcz"))
+        sh = HaplotypeMatrix.from_zarr(store, streaming="always", chunk_bp=500)
+
+        R = relatedness.genetic_relatedness(sh, missing_data='exclude',
+                                            span_normalize=False)
+        assert np.all(R == 0.0)
+        Rp = relatedness.genetic_relatedness(sh, missing_data='exclude',
+                                             proportion=True)
+        assert np.all(np.isnan(Rp))

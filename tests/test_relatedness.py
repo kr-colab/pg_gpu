@@ -369,8 +369,16 @@ class TestGeneticRelatedness:
         hm = HaplotypeMatrix(hap, np.arange(40) * 100)
         got = relatedness.genetic_relatedness(hm, span_normalize=False)
         k = int(hap.max()) + 1
-        Cref, _, _ = _reference_relatedness_columns(hap, None, k)
-        np.testing.assert_allclose(got, Cref @ Cref.T, atol=1e-9)
+        Cref, _, VM = _reference_relatedness_columns(hap, None, k)
+        # genetic_relatedness rescales each pair's raw sum by n_cols / J (its
+        # own jointly-called column count), so a pair does not shrink just
+        # because it called fewer columns -- see relatedness.py's own
+        # n_cols/J step.
+        raw = Cref @ Cref.T
+        J = VM.astype(np.float64) @ VM.astype(np.float64).T
+        n_cols = Cref.shape[1]
+        expected = np.where(J > 0, raw * n_cols / np.maximum(J, 1.0), np.nan)
+        np.testing.assert_allclose(got, expected, atol=1e-9)
 
     def test_missing_exclude_matches_host(self):
         rng = np.random.RandomState(6)
@@ -397,11 +405,14 @@ class TestGeneticRelatedness:
         noncentred = relatedness.genetic_relatedness(hm, centre=False,
                                                       span_normalize=False)
         assert np.isnan(noncentred[0, 1]) and np.isnan(noncentred[1, 0])
-        # Every other entry is unaffected: a missing call still contributes a
-        # real 0 (not a fake frequency) to the noncentred raw sum.
-        expected = np.array([[3, np.nan, 3, 0],
-                             [np.nan, 3, 3, 0],
-                             [3, 3, 6, 0],
+        # Every pair's raw sum is rescaled by n_cols / J (its own
+        # jointly-called column count out of all 12), so a haplotype called
+        # everywhere is not diluted when paired with one missing half the
+        # sites: e.g. hap0-hap2 share 6 of 12 columns with 3 matches, scaled
+        # to 3 * 12/6 = 6, the same as hap2's own full-coverage count.
+        expected = np.array([[6, np.nan, 6, 0],
+                             [np.nan, 6, 6, 0],
+                             [6, 6, 6, 0],
                              [0, 0, 0, 6]], dtype=np.float64)
         mask = ~np.isnan(expected)
         np.testing.assert_allclose(noncentred[mask], expected[mask])
@@ -409,12 +420,56 @@ class TestGeneticRelatedness:
         centred = relatedness.genetic_relatedness(hm, span_normalize=False)
         assert np.isnan(centred[0, 1]) and np.isnan(centred[1, 0])
         # Hand-derived from the per-site centered columns (pbar excludes the
-        # one set missing a call at each site): self-relatedness of a
-        # haplotype called everywhere draws on both site groups, so it is not
-        # diluted by the other haplotypes' missingness.
-        expected_centred = np.array([[2/3, np.nan, 2/3, -4/3],
-                                     [np.nan, 2/3, 2/3, -4/3],
-                                     [2/3, 2/3, 4/3, -8/3],
-                                     [-4/3, -4/3, -8/3, 16/3]])
+        # one set missing a call at each site), then rescaled by n_cols / J
+        # the same way as the noncentred case above.
+        expected_centred = np.array([[4/3, np.nan, 4/3, -8/3],
+                                     [np.nan, 4/3, 4/3, -8/3],
+                                     [4/3, 4/3, 4/3, -8/3],
+                                     [-8/3, -8/3, -8/3, 16/3]])
         mask = ~np.isnan(expected_centred)
         np.testing.assert_allclose(centred[mask], expected_centred[mask])
+
+    def test_self_relatedness_not_diluted_by_own_call_rate(self):
+        # A haplotype missing half its calls must not look less related to
+        # itself than a fully-called one: each pair's raw sum is over the
+        # columns it shares, which is rescaled to the full analyzed column
+        # count (n_cols / J), not left to shrink with that pair's coverage.
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 40, 5000
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[0:20][rng.random((20, n_var)) < 0.5] = -1
+        hm = HaplotypeMatrix(hap, np.arange(n_var) + 1, 1, n_var)
+
+        R = relatedness.genetic_relatedness(hm, span_normalize=False)
+        diag = np.diag(R)
+        ratio = diag[:20].mean() / diag[20:].mean()
+        assert abs(ratio - 1.0) < 0.05
+
+    def test_no_column_at_all_is_zero_not_nan(self):
+        # 'exclude' with no site called in every analyzed sample leaves zero
+        # columns -- an empty analysis, not an undefined pair, so it is a sum
+        # over no sites (0.0), not NaN.
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 8, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[0, :] = -1  # one haplotype missing everywhere -> no complete site
+        hm = HaplotypeMatrix(hap, np.arange(n_var) + 1, 1, n_var)
+
+        R = relatedness.genetic_relatedness(hm, missing_data='exclude',
+                                            span_normalize=False)
+        assert np.all(R == 0.0)
+
+    def test_no_column_at_all_is_nan_under_proportion(self):
+        # Same empty analysis as above, but proportion=True divides by the
+        # segregating-site count, which is also 0 here -- 0/0, undefined,
+        # matching tskit's own division (out /= denominator gives nan, not
+        # 0, when both are 0).
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 8, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[0, :] = -1
+        hm = HaplotypeMatrix(hap, np.arange(n_var) + 1, 1, n_var)
+
+        Rp = relatedness.genetic_relatedness(hm, missing_data='exclude',
+                                             proportion=True)
+        assert np.all(np.isnan(Rp))
