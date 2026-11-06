@@ -118,7 +118,7 @@ check = "The fused engines drop sites above an allele cap (windowed_analysis._fi
 # ---------------------------------------------------------------------------
 
 [inputs."HaplotypeMatrix.__init__"]
-params = ["genotypes", "positions", "chrom_start", "chrom_end", "sample_sets", "n_total_sites", "samples", "accessible_mask", "fields", "allow_empty"]
+params = ["genotypes", "positions", "chrom_start", "chrom_end", "sample_sets", "n_total_sites", "samples", "accessible_mask", "fields", "allow_empty", "phased"]
 returns = "HaplotypeMatrix"
 span = "n_total_sites and accessible_mask as given; a mask with no n_total_sites sets n_total_sites to the accessible bases in [chrom_start, chrom_end]."
 
@@ -177,9 +177,10 @@ methods = [
     "has_invariant_info", "is_called", "is_missing", "load_pop_file",
     "locate_unlinked", "n_callable_sites", "n_invariant_sites",
     "n_segregating_sites", "num_haplotypes", "num_variants", "pairwise_LD_v",
-    "pairwise_r2", "positions", "remove_accessible_mask",
+    "pairwise_r2", "phased", "positions", "remove_accessible_mask",
     "restrict_to_biallelic", "restrict_to_segregating", "sample_sets",
-    "set_accessible_mask", "shape", "summarize_missing_data",
+    "set_accessible_mask", "set_phased", "set_unphased", "shape",
+    "summarize_missing_data",
     "tally_gpu_haplotypes", "tally_gpu_haplotypes_two_pops",
     "tally_gpu_haplotypes_two_pops_with_missing", "to_zarr", "transfer_to_cpu",
     "transfer_to_gpu", "vcf_to_zarr", "watersons_theta", "windowed_r_squared",
@@ -205,7 +206,8 @@ methods = [
     "chrom", "chrom_end", "chrom_start", "chunk_bp",
     "compute_ld_statistics_gpu_single_pop", "compute_ld_statistics_gpu_two_pops",
     "get_span", "haplotypes", "iter_gpu_chunks", "materialize",
-    "num_haplotypes", "num_variants", "sample_sets",
+    "num_haplotypes", "num_variants", "phased", "sample_sets", "set_phased",
+    "set_unphased",
 ]
 notes = "accessible_mask and n_total_sites are instance attributes: the loader sets accessible_mask from accessible_bed and leaves n_total_sites None. .haplotypes raises. iter_gpu_chunks yields closed chunks [s, s + chunk_bp - 1] as eager HaplotypeMatrix objects; materialize(region=) gives an eager sub-region."
 

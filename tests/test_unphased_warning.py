@@ -18,12 +18,13 @@ import pytest
 from pg_gpu import GenotypeMatrix, HaplotypeMatrix, UnphasedDataWarning
 from pg_gpu import (decomposition, distance_stats, divergence, diversity,
                     ld_statistics, moments_ld, relatedness, selection, sfs)
-# pg_gpu.windowed_analysis names the function; the module is needed here.
-wa = importlib.import_module("pg_gpu.windowed_analysis")
 from pg_gpu._warnings import (_phase_dependent, _phase_depth, _splits_individual,
                               _warn_unphased)
 
 from .conftest import simulate_hm
+
+# pg_gpu.windowed_analysis names the function; the module is needed here.
+wa = importlib.import_module("pg_gpu.windowed_analysis")
 
 POPS = ['pop1', 'pop2']
 BP_BINS = [0, 1_000, 5_000, 20_000]
@@ -337,7 +338,8 @@ def test_moments_ld_vcf_path_is_silent(vcf_and_pops):
 ])
 def test_genetic_relatedness_sets(hm, stream, sets, warns):
     for m in (hm, stream):
-        block = lambda: relatedness.genetic_relatedness(m, sample_sets=sets)
+        def block(m=m):
+            return relatedness.genetic_relatedness(m, sample_sets=sets)
         if warns:
             _warns_once(block, "genetic_relatedness")
         else:
