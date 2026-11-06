@@ -123,19 +123,19 @@ returns = "HaplotypeMatrix"
 span = "n_total_sites and accessible_mask as given; a mask with no n_total_sites sets n_total_sites to the accessible bases in [chrom_start, chrom_end]."
 
 [inputs."HaplotypeMatrix.from_vcf"]
-params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields"]
+params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields", "phased"]
 returns = "HaplotypeMatrix"
 span = "include_invariant=True sets n_total_sites to the record count. accessible_bed sets the mask and n_total_sites."
 notes = "region is samtools style with an inclusive end; chrom_start and chrom_end come from the region, else from the first and last variant."
 
 [inputs."HaplotypeMatrix.from_zarr"]
-params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields"]
+params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased"]
 returns = "HaplotypeMatrix, or StreamingHaplotypeMatrix when streaming='always', or 'auto' and the matrix does not fit"
 span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None."
 notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=."
 
 [inputs."HaplotypeMatrix.from_ts"]
-params = ["ts", "device", "include_invariant", "accessible_bed", "chrom"]
+params = ["ts", "device", "include_invariant", "accessible_bed", "chrom", "phased"]
 returns = "HaplotypeMatrix"
 span = "include_invariant=True sets n_total_sites to the sequence length. accessible_bed sets the mask."
 
