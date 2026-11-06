@@ -15,8 +15,10 @@ The ``phased`` flag records whether the rows represent true phased
 haplotypes or a pseudo-phased (arbitrary assignment of alleles within
 each individual). The loaders default to ``phased=False`` for VCF and
 Zarr, but ``from_ts`` defaults to ``phased=True`` for tree sequences. 
-You can override it at load time or flip it later with ``set_phased()``. 
-Note some analyses use genotype dosages (0, 1, 2 or -1 for missing), in which case
+You can override it at load time or change it later with ``set_phased()`` 
+or ``set_unphased()``. Phase-dependent statistics warn on an unphased matrix, 
+and haploid data should always be read with ``phased=True``; see :doc:`phasing`.
+ Note some analyses use genotype dosages (0, 1, 2 or -1 for missing), in which case
 you should use ``GenotypeMatrix`` (see "HaplotypeMatrix vs GenotypeMatrix" below).
 
 .. code-block:: python
@@ -115,8 +117,9 @@ form.
 
 .. code-block:: python
 
-   # Save to VCZ format (default)
-   h = HaplotypeMatrix.from_vcf("data.vcf.gz")
+   # Save to VCZ format (default). The flag isn't stored: pass phased=True
+   # again when reading the store back.
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz", phased=True)
    h.to_zarr("data.zarr", contig_name="chr1")
 
    # Or legacy scikit-allel format
@@ -512,10 +515,12 @@ Supported fused windowed statistics:
 
 - **Single-pop**: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``, ``theta_h``, ``fay_wu_h``, ``max_daf``
 - **Two-pop**: ``fst``, ``fst_hudson``, ``fst_wc``, ``dxy``, ``da``
-- **Selection**: ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``, ``haplotype_count``, ``mean_nsl``
-- **LD**: ``zns``, ``omega``, ``mu_ld``
-- **diploSHIC / RAiSD**: ``mu_var``, ``mu_sfs``, ``daf_hist``, ``snp_dist_mean``, ``snp_dist_var``, ``snp_dist_min``, ``snp_dist_max``, ``dist_var``, ``dist_skew``, ``dist_kurt``
-- **Structure**: ``local_pca`` (lostruct); returns a ``LocalPCAResult`` rather than a scalar-stat DataFrame. See the `Local PCA / lostruct`_ section.
+- **Selection**: ``garud_h1``†, ``garud_h12``†, ``garud_h123``†, ``garud_h2h1``†, ``haplotype_count``†, ``mean_nsl``†
+- **LD**: ``zns``†, ``omega``†, ``mu_ld``†
+- **diploSHIC / RAiSD**: ``mu_var``, ``mu_sfs``, ``daf_hist``, ``snp_dist_mean``, ``snp_dist_var``, ``snp_dist_min``, ``snp_dist_max``, ``dist_var``†, ``dist_skew``†, ``dist_kurt``†
+- **Structure**: ``local_pca``† (lostruct); returns a ``LocalPCAResult`` rather than a scalar-stat DataFrame. See the `Local PCA / lostruct`_ section.
+
+†: needs phased haplotypes, see :doc:`phasing`.
 
 The single-pass fused kernels need ``missing_data='include'``. With any
 other setting pg_gpu falls back to a slower route that computes the
@@ -564,7 +569,8 @@ call works on either a ``HaplotypeMatrix`` or a ``GenotypeMatrix``.
 
 Note that ``gm.to_haplotype_matrix()`` always produces an unphased
 (``phased=False``) matrix, because the conversion assigns heterozygous
-sites as ``(0, 1)`` arbitrarily.
+sites as ``(0, 1)`` arbitrarily. See :doc:`phasing` for which statistics
+that affects.
 
 Custom Theta via FrequencySpectrum
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

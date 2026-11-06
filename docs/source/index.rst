@@ -14,6 +14,7 @@ GPU-accelerated population genetics statistics for Python.
    api
    missing_data
    multiallelic
+   phasing
    examples
    tutorials
    workflows
@@ -55,8 +56,8 @@ Quick Example
 
    from pg_gpu import HaplotypeMatrix, diversity, selection
 
-   # Load data
-   h = HaplotypeMatrix.from_vcf("data.vcf")
+   # Load data (phased VCF)
+   h = HaplotypeMatrix.from_vcf("data.vcf", phased=True)
 
    # Diversity
    pi_val = diversity.pi(h)

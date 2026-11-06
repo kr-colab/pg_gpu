@@ -37,8 +37,10 @@ from .genotype_kernels import compute_multi_pop_statistics_batch_geno
 from .haplotype_kernels import compute_multi_pop_statistics_batch_hap
 from .genotype_matrix import GenotypeMatrix
 from . import ld_statistics
+from ._warnings import _phase_dependent, _warn_unphased
 
 
+@_phase_dependent
 def compute_ld_statistics(
     vcf_file=None, rec_map_file=None, pop_file=None, pops=None,
     r_bins=None, bp_bins=None, use_genotypes=True,
@@ -90,6 +92,9 @@ def compute_ld_statistics(
        ``use_genotypes=False`` here **and** to moments -- setting it on
        only one side silently compares two different estimators (a
        discrepancy that looks like a bug but is not).
+
+    Depends on haplotype phase with ``use_genotypes=False``; see
+    :doc:`phasing`.
 
     Parameters
     ----------
@@ -184,6 +189,10 @@ def compute_ld_statistics(
     else:
         # Haplotype (phased) path
         if haplotype_matrix is not None:
+            _warn_unphased(
+                haplotype_matrix, context="compute_ld_statistics",
+                alternative="use use_genotypes=True for the unphased "
+                "alternative (the genotype estimator)")
             hm = haplotype_matrix
             if not isinstance(hm.haplotypes, cp.ndarray):
                 hm.transfer_to_gpu()
@@ -194,7 +203,9 @@ def compute_ld_statistics(
                 raise ValueError("pop_file is required when loading from VCF")
             if report:
                 print(f"Loading {vcf_file} ...")
-            hm = HaplotypeMatrix.from_vcf(vcf_file)
+            # use_genotypes=False is the user's declaration that the data are
+            # phased; load accordingly so the warning does not fire.
+            hm = HaplotypeMatrix.from_vcf(vcf_file, phased=True)
             hm.load_pop_file(pop_file, pops=pops)
             if accessible_bed is not None and not hm.has_accessible_mask:
                 hm.set_accessible_mask(accessible_bed)

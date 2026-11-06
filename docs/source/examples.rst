@@ -17,8 +17,8 @@ one statistic from each major module.
    from pg_gpu import HaplotypeMatrix, ld_statistics, diversity, selection
    import numpy as np
 
-   # Load VCF data
-   h = HaplotypeMatrix.from_vcf("example.vcf")
+   # Load VCF data. Let's assume the VCF is phased.
+   h = HaplotypeMatrix.from_vcf("example.vcf", phased=True)
 
    # Define populations
    h.sample_sets = {
@@ -91,7 +91,7 @@ that returns the same dictionary structure.
 
    from pg_gpu import HaplotypeMatrix
 
-   h = HaplotypeMatrix.from_vcf("data.vcf")
+   h = HaplotypeMatrix.from_vcf("data.vcf", phased=True)
    h.sample_sets = {"pop1": list(range(10))}
 
    # Compute LD statistics with GPU acceleration

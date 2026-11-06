@@ -14,8 +14,11 @@ chunk geometry is known, but its class is defined here with the others.
 """
 
 import collections
+import contextvars
+import functools
 import gzip
 import os
+import sys
 import warnings
 
 import numpy as np
@@ -219,7 +222,7 @@ def check_paired_rows(rows, context, stacklevel=3):
             f"and every loader writes sample i to rows 2i and 2i + 1, so "
             f"this set gives them something other than the individuals it "
             f"describes.",
-            UnpairedRowsWarning, stacklevel=stacklevel)
+            UnpairedRowsWarning, stacklevel=_skip_phase_wrappers(stacklevel))
 
 
 def check_paired_rows_for_populations(sample_sets, pop1, pop2, context):
@@ -269,8 +272,91 @@ def _warn_biallelic_only(n_dropped, *, context, stacklevel=3, action="dropped"):
         "    import warnings\n"
         "    from pg_gpu import BiallelicOnlyWarning\n"
         "    warnings.filterwarnings('ignore', category=BiallelicOnlyWarning)",
-        BiallelicOnlyWarning, stacklevel=stacklevel,
+        BiallelicOnlyWarning, stacklevel=_skip_phase_wrappers(stacklevel),
     )
+
+
+class UnphasedDataWarning(UserWarning):
+    """Warn when a phase-dependent statistic uses data not marked phased.
+
+    Results may depend on arbitrary haplotype assignments. Mark phased data
+    with ``set_phased()`` or use a phase-independent alternative.
+    """
+
+
+# Nesting depth of ``_phase_dependent`` calls in the current context. A
+# phase-dependent function called by another one runs at depth > 1, and
+# ``_warn_unphased`` stays silent there, so one user call warns once.
+_phase_depth = contextvars.ContextVar('_phase_depth', default=0)
+
+
+def _phase_dependent(func):
+    """Track nested calls so only the outermost phase-dependent call warns.
+
+    Decorated functions must not be generators; wrap lazy work separately.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        token = _phase_depth.set(_phase_depth.get() + 1)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            _phase_depth.reset(token)
+    return wrapper
+
+
+def _outside_phase_guard(func, *args, **kwargs):
+    """Run a user callable at phase-guard depth zero."""
+    token = _phase_depth.set(0)
+    try:
+        return func(*args, **kwargs)
+    finally:
+        _phase_depth.reset(token)
+
+
+# Every ``_phase_dependent`` wrapper runs this one code object.
+_PHASE_WRAPPER_CODE = _phase_dependent(lambda: None).__code__
+
+
+def _skip_phase_wrappers(stacklevel):
+    """Adjust warning stacklevel to skip phase-decorator wrapper frames."""
+    frame = sys._getframe(1)   # the frame that calls warnings.warn: level 1
+    level = 1
+    for _ in range(stacklevel - 1):
+        frame = frame.f_back
+        level += 1
+        while frame is not None and frame.f_code is _PHASE_WRAPPER_CODE:
+            frame = frame.f_back
+            level += 1
+        if frame is None:
+            break
+    return level
+
+
+def _warn_unphased(matrix, *, context, alternative=None):
+    """Warn when an unphased matrix reaches a phase-dependent entry point."""
+    if _phase_depth.get() > 1 or getattr(matrix, 'phased', True) is not False:
+        return
+    route = f"{alternative[0].upper()}{alternative[1:]}. " if alternative else ""
+    warnings.warn(
+        # "depends on haplotype phase" is the phrase the test suite's
+        # warning filter keys on (pyproject.toml); a test pins it.
+        f"{context} depends on haplotype phase, but this "
+        f"{type(matrix).__name__} is not marked phased, so the result treats "
+        f"its rows as true haplotypes. {route}"
+        "If the data are phased or haploid, call .set_phased() (or load with "
+        "phased=True). To silence:\n"
+        "    import warnings\n"
+        "    from pg_gpu import UnphasedDataWarning\n"
+        "    warnings.filterwarnings('ignore', category=UnphasedDataWarning)",
+        UnphasedDataWarning, stacklevel=4,
+    )
+
+
+def _splits_individual(rows):
+    """Return whether any individual has only one of its two rows selected."""
+    s = set(_rows_as_numpy(rows).tolist())
+    return any((r ^ 1) not in s for r in s)
 
 
 class FewCompleteHaplotypesWarning(UserWarning):
@@ -323,7 +409,7 @@ def _warn_few_complete_haplotypes(n_complete, n_rows, *, context, stacklevel=3):
         "    from pg_gpu import FewCompleteHaplotypesWarning\n"
         "    warnings.filterwarnings('ignore', "
         "category=FewCompleteHaplotypesWarning)",
-        FewCompleteHaplotypesWarning, stacklevel=stacklevel,
+        FewCompleteHaplotypesWarning, stacklevel=_skip_phase_wrappers(stacklevel),
     )
 
 

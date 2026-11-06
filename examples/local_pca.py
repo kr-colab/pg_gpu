@@ -123,7 +123,8 @@ def main() -> None:
     n_hap, n_var = hap.shape
     print(f"  n_haplotypes={n_hap}  n_variants={n_var}")
 
-    hm = HaplotypeMatrix(hap, positions, 0, SEQ_LEN)
+    # Simulated haplotypes are phased by construction.
+    hm = HaplotypeMatrix(hap, positions, 0, SEQ_LEN, phased=True)
     # Li & Ralph's lostruct pipeline: local PCA, window distance, MDS, corners.
     # this is the core of the example, and the only call to lostruct. All other
     # analyses are downstream of this.

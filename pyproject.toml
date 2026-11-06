@@ -127,6 +127,9 @@ filterwarnings = [
     # warnings plugin does not import pg_gpu before pytest-cov starts measuring
     # (which would drop module-level coverage); a test pins the phrase.
     "error:.* is defined on biallelic sites:UserWarning",
+    # Fixtures load VCFs as unphased; tests that check the warning catch it
+    # with simplefilter("always"). Matched by message for the same reason.
+    "ignore:.* depends on haplotype phase:UserWarning",
 ]
 
 [tool.coverage.run]

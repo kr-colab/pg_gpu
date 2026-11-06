@@ -9,6 +9,7 @@ from collections import Counter, OrderedDict
 
 from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask, slice_fields
 from .zarr_io import parse_region
+from ._warnings import _phase_dependent, _warn_unphased
 
 
 def _classify_vcf_qc_tags(path, tags):
@@ -221,8 +222,11 @@ class HaplotypeMatrix:
     The ``phased`` flag records whether the haplotype rows represent true
     phased haplotypes or not.  It defaults to ``False`` on the raw
     constructor and on ``from_vcf`` / ``from_zarr``, and to ``True`` on
-    ``from_ts`` (tree-sequence haplotypes are phased by definition). Use
-    ``set_phased()`` to change it to phased after construction.
+    ``from_ts`` (tree-sequence haplotypes are phased by definition). No
+    loader inspects the input's phase. Use ``set_phased()`` or
+    ``set_unphased()`` to change it after construction. Phase-dependent statistics emit
+    ``UnphasedDataWarning`` on an unphased matrix; see the "Phasing" page
+    of the documentation.
 
     Row order
     ---------
@@ -435,9 +439,14 @@ class HaplotypeMatrix:
         """Whether the haplotype rows represent true phased haplotypes."""
         return self._phased
 
-    def set_phased(self, phased: bool = True):
-        """Mark this matrix as phased or unphased.  Returns ``self``."""
-        self._phased = bool(phased)
+    def set_phased(self):
+        """Mark this matrix as phased.  Returns ``self``."""
+        self._phased = True
+        return self
+
+    def set_unphased(self):
+        """Mark this matrix as unphased.  Returns ``self``."""
+        self._phased = False
         return self
 
     def set_accessible_mask(self, mask_or_path, chrom=None):
@@ -1862,12 +1871,16 @@ class HaplotypeMatrix:
         D = p_AB - p_i * p_j
         return D, p_i, p_j
 
+    @_phase_dependent
     def pairwise_LD_v(self) -> cp.ndarray:
         """Pairwise linkage disequilibrium (D statistic) via matrix multiply.
+
+        Depends on haplotype phase; see :doc:`phasing`.
 
         NaN for any pair involving a multiallelic (>2 distinct present alleles)
         site; D is computed on biallelic sites only.
         """
+        _warn_unphased(self, context="pairwise_LD_v")
         from ._warnings import _warn_biallelic_only
         bmask = self._biallelic_mask()
         _warn_biallelic_only(int((~bmask).sum()), context="pairwise_LD_v")
@@ -1878,8 +1891,12 @@ class HaplotypeMatrix:
         cp.fill_diagonal(D, 0)
         return D
 
+    @_phase_dependent
     def pairwise_r2(self, estimator: str = 'r2') -> cp.ndarray:
         """Pairwise r-squared for all variant pairs.
+
+        Depends on haplotype phase with ``estimator='r2'``
+        (``'rogers_huff'`` is the unphased alternative); see :doc:`phasing`.
 
         Parameters
         ----------
@@ -1922,6 +1939,9 @@ class HaplotypeMatrix:
                 r2[cp.ix_(idx, idx)] = r2_kept
             cp.fill_diagonal(r2, 0)
             return r2
+        _warn_unphased(self, context="pairwise_r2",
+                       alternative="use estimator='rogers_huff' for the unphased "
+                       "alternative (dosage r squared, requires no missing calls)")
         from ._warnings import _warn_biallelic_only
         bmask = self._biallelic_mask()
         _warn_biallelic_only(int((~bmask).sum()), context="pairwise_r2")
@@ -1940,11 +1960,14 @@ class HaplotypeMatrix:
         cp.fill_diagonal(r2, 0)
         return r2
 
+    @_phase_dependent
     def locate_unlinked(self, size=100, step=20, threshold=0.1):
         """Locate variants in approximate linkage equilibrium.
 
         Uses a sliding window approach to identify variants whose r-squared
         with all other variants in the window is below the threshold.
+
+        Depends on haplotype phase; see :doc:`phasing`.
 
         Parameters
         ----------
@@ -1962,6 +1985,7 @@ class HaplotypeMatrix:
             (>2 distinct present alleles) sites are returned False and excluded
             from the r^2 computation, which is restricted to biallelic sites.
         """
+        _warn_unphased(self, context="locate_unlinked")
         if self.device == 'CPU':
             self.transfer_to_gpu()
 
@@ -2010,9 +2034,13 @@ class HaplotypeMatrix:
 
         return loc
 
+    @_phase_dependent
     def windowed_r_squared(self, bp_bins, percentile=50, pop=None,
                            estimator: str = 'r2'):
         """Compute percentiles of r-squared in genomic distance bins.
+
+        Depends on haplotype phase with ``estimator='r2'``
+        (``'rogers_huff'`` is the unphased alternative); see :doc:`phasing`.
 
         Parameters
         ----------
@@ -2063,6 +2091,9 @@ class HaplotypeMatrix:
             iu = cp.triu_indices(m, k=1)
             r2_vals = (r_full[iu]) ** 2
         elif estimator == 'r2':
+            _warn_unphased(self, context="windowed_r_squared",
+                           alternative="use estimator='rogers_huff' for the unphased "
+                           "alternative (dosage r squared, requires no missing calls)")
             # Biallelic-restrict (drop >=3-allele, warn once) and tally on the
             # 0/1 indicator so {0,2}/{1,2} codings are handled; per-bin output
             # makes the site drop invisible.
@@ -2135,6 +2166,7 @@ class HaplotypeMatrix:
             raise KeyError(f"Population key(s) {missing} must exist in sample_sets")
         return [self._sample_sets[p] for p in pops]
 
+    @_phase_dependent
     def tally_gpu_haplotypes(self, pop=None):
         """
         GPU implementation of computing pairwise haplotype tallies.
@@ -2143,6 +2175,8 @@ class HaplotypeMatrix:
         Alleles are recoded to a 0/1 indicator first, so {0,1}, {0,2} and
         {1,2} codings give the same counts. At a site with three or more
         alleles the highest allele counts as 1 and all others as 0.
+
+        Depends on haplotype phase; see :doc:`phasing`.
 
         Parameters:
             pop (str, optional): Population key from sample_sets to use. If None, uses all samples.
@@ -2153,6 +2187,9 @@ class HaplotypeMatrix:
                 - n_valid: int32 array of shape (#pairs,) containing the number of valid haplotypes for each pair
                           or None if no missing data is present
         """
+        _warn_unphased(self, context="tally_gpu_haplotypes",
+                       alternative="use moments_ld.compute_ld_statistics"
+                       "(use_genotypes=True) for the unphased alternative (the genotype estimator)")
         rows = slice(None) if pop is None else self._pop_indices(pop)[0]
         return self._tally_pairs_impl(self._tally_indicator("tally_gpu_haplotypes")[rows, :])
 
@@ -2230,6 +2267,7 @@ class HaplotypeMatrix:
         _, v2 = HaplotypeMatrix._tally_pairs_impl(X2, missing, out[:, 4:])
         return out, v1, v2
 
+    @_phase_dependent
     def tally_gpu_haplotypes_two_pops_with_missing(self, pop1: str, pop2: str):
         """
         GPU implementation of computing pairwise haplotype tallies for two populations with missing data support.
@@ -2237,6 +2275,8 @@ class HaplotypeMatrix:
         For each variant pair and population, only haplotypes non-missing at both variants are counted.
         Missing data is encoded as -1 in the haplotype matrix. Alleles are recoded as in
         :meth:`tally_gpu_haplotypes`.
+
+        Depends on haplotype phase; see :doc:`phasing`.
 
         Parameters:
             pop1 (str): First population key from sample_sets
@@ -2249,15 +2289,21 @@ class HaplotypeMatrix:
                 - n_valid1: int32 array of shape (#pairs,) with valid haplotypes for pop1
                 - n_valid2: int32 array of shape (#pairs,) with valid haplotypes for pop2
         """
+        _warn_unphased(self, context="tally_gpu_haplotypes_two_pops_with_missing",
+                       alternative="use moments_ld.compute_ld_statistics"
+                       "(use_genotypes=True) for the unphased alternative (the genotype estimator)")
         idx1, idx2 = self._pop_indices(pop1, pop2)
         ind = self._tally_indicator("tally_gpu_haplotypes_two_pops_with_missing")
         return self._tally_two_pops_impl(ind[idx1, :], ind[idx2, :], missing=True)
 
+    @_phase_dependent
     def tally_gpu_haplotypes_two_pops(self, pop1: str, pop2: str):
         """
         GPU version of tallying haplotype counts between all pairs of variants for two populations.
         Automatically detects and handles missing data if present. Alleles are recoded as in
         :meth:`tally_gpu_haplotypes`.
+
+        Depends on haplotype phase; see :doc:`phasing`.
 
         Returns:
             tuple: (counts, n_valid1, n_valid2) where:
@@ -2265,11 +2311,15 @@ class HaplotypeMatrix:
                 - n_valid1: Array of shape (#pairs,) with valid haplotypes for pop1 (or None if no missing data)
                 - n_valid2: Array of shape (#pairs,) with valid haplotypes for pop2 (or None if no missing data)
         """
+        _warn_unphased(self, context="tally_gpu_haplotypes_two_pops",
+                       alternative="use moments_ld.compute_ld_statistics"
+                       "(use_genotypes=True) for the unphased alternative (the genotype estimator)")
         idx1, idx2 = self._pop_indices(pop1, pop2)
         ind = self._tally_indicator("tally_gpu_haplotypes_two_pops")
         return self._tally_two_pops_impl(ind[idx1, :], ind[idx2, :])
 
     # TODO: this is not correct
+    @_phase_dependent
     def compute_ld_statistics_gpu_single_pop(
         self,
         bp_bins,
@@ -2281,6 +2331,8 @@ class HaplotypeMatrix:
 
         Computes DD, Dz, and pi2 statistics for variant pairs binned by distance.
         Only processes pairs within max(bp_bins) distance for memory efficiency.
+
+        Depends on haplotype phase; see :doc:`phasing`.
 
         Parameters
         ----------
@@ -2308,6 +2360,9 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_single_pop(bp_bins)
         >>> stats[(0.0, 10000.0)]  # (DD, Dz, pi2) for first bin
         """
+        _warn_unphased(self, context="compute_ld_statistics_gpu_single_pop",
+                       alternative="use moments_ld.compute_ld_statistics"
+                       "(use_genotypes=True) for the unphased alternative (the genotype estimator)")
         if self.device == 'CPU':
             self.transfer_to_gpu()
         biallelic = self.restrict_to_biallelic(
@@ -2336,6 +2391,7 @@ class HaplotypeMatrix:
         return _format_ld_single_pop(bp_bins_arr, bin_sums, bin_counts, raw)
 
 
+    @_phase_dependent
     def compute_ld_statistics_gpu_two_pops(
         self,
         bp_bins,
@@ -2349,6 +2405,8 @@ class HaplotypeMatrix:
 
         Computes DD, Dz, and pi2 statistics for variant pairs binned by distance.
         Only processes pairs within max(bp_bins) distance for memory efficiency.
+
+        Depends on haplotype phase; see :doc:`phasing`.
 
         Parameters
         ----------
@@ -2383,6 +2441,9 @@ class HaplotypeMatrix:
         >>> stats = hm.compute_ld_statistics_gpu_two_pops(bp_bins, 'pop1', 'pop2')
         >>> stats[(0.0, 10000.0)]['DD_0_0']  # D^2 for pop1 in first bin
         """
+        _warn_unphased(self, context="compute_ld_statistics_gpu_two_pops",
+                       alternative="use moments_ld.compute_ld_statistics"
+                       "(use_genotypes=True) for the unphased alternative (the genotype estimator)")
         if self.device == 'CPU':
             self.transfer_to_gpu()
         biallelic = self.restrict_to_biallelic(

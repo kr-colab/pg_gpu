@@ -17,6 +17,7 @@ from cupy import cublas
 from .haplotype_matrix import HaplotypeMatrix
 from ._memutil import allele_counts, estimate_variant_chunk_size
 from ._utils import population_rows
+from ._warnings import _phase_dependent, _warn_unphased
 
 _GPU_MEM_BUDGET = 0.3
 
@@ -137,6 +138,7 @@ def _pca_from_gram(C, n_samples, n_components):
     return coords.get(), explained_variance_ratio.get()
 
 
+@_phase_dependent
 def pca(haplotype_matrix: HaplotypeMatrix,
         n_components: int = 10,
         population: Optional[Union[str, list]] = None,
@@ -152,6 +154,8 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     not fit in GPU memory, the Gram is accumulated over variant chunks
     instead, so exact PCA runs at any matrix size. For the diploid dosage PCA standardized by
     binomial variance, use pca_dosage on a GenotypeMatrix.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -179,6 +183,10 @@ def pca(haplotype_matrix: HaplotypeMatrix,
             "for the diploid dosage PCA standardized by binomial variance use "
             "pca_dosage on a GenotypeMatrix.")
 
+    _warn_unphased(haplotype_matrix, context="pca",
+                   alternative="use pca_dosage on a GenotypeMatrix for the "
+                   "unphased diploid dosage PCA")
+
     hap, K = _gpu_hap(haplotype_matrix, population)
     n_samples, n_var = hap.shape
 
@@ -197,6 +205,7 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     return _pca_from_gram(C, n_samples, n_components)
 
 
+@_phase_dependent
 def randomized_pca(haplotype_matrix: HaplotypeMatrix,
                    n_components: int = 10,
                    population: Optional[Union[str, list]] = None,
@@ -211,6 +220,8 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
     segregating sites. Faster than full pca when only a few components are needed.
     For the diploid dosage PCA standardized by binomial variance use
     randomized_pca_dosage on a GenotypeMatrix.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -241,6 +252,10 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
             "randomized_pca is the multi-allele haploid PCA and requires a "
             "HaplotypeMatrix; for the diploid dosage PCA standardized by binomial "
             "variance use randomized_pca_dosage on a GenotypeMatrix.")
+
+    _warn_unphased(haplotype_matrix, context="randomized_pca",
+                   alternative="use randomized_pca_dosage on a GenotypeMatrix "
+                   "for the unphased diploid dosage PCA")
 
     X, n_segregating = _prepare_centered(haplotype_matrix, population, missing_data)
     n_samples, n_variants = X.shape
@@ -438,6 +453,7 @@ def randomized_pca_dosage(genotype_matrix,
     return coords.get(), explained_variance_ratio.get()
 
 
+@_phase_dependent
 def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
                       metric: str = 'euclidean',
                       population: Optional[Union[str, list]] = None,
@@ -451,6 +467,8 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     euclidean is sqrt(m). On categorical data these coincide up to that transform,
     and on biallelic data m equals the usual per-site difference count, so the
     values match the standard distances there.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -479,8 +497,12 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
             "pairwise_distance is an allele-mismatch distance over haplotypes and "
             "requires a HaplotypeMatrix; a GenotypeMatrix holds 0/1/2 dosages, for "
             "which allele mismatch is not the right distance. Use "
-            "distance_stats.pairwise_diffs_diploid for a diploid genotype distance, "
-            "or to_haplotype_matrix() first.")
+            "distance_stats.pairwise_diffs_diploid or relatedness.ibs for a "
+            "diploid genotype distance.")
+
+    _warn_unphased(haplotype_matrix, context="pairwise_distance",
+                   alternative="use pairwise_diffs_diploid or ibs for "
+                   "individual-level distances")
 
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
@@ -1056,6 +1078,7 @@ def _sign_align_windows(eigvecs):
     return eigvecs
 
 
+@_phase_dependent
 def local_pca(haplotype_matrix: "HaplotypeMatrix",
               window_params=None,
               k: int = 2,
@@ -1077,6 +1100,8 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     sample-sample covariance matrix. The covariance matches R's
     `cov(sweep(x, 1, rowMeans(x), "-"))` so outputs are directly comparable to
     `lostruct::eigen_windows()`.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -1110,6 +1135,8 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     LocalPCAResult
     """
     from .windowed_analysis import WindowIterator
+
+    _warn_unphased(haplotype_matrix, context="local_pca")
 
     valid_engines = ('auto', 'dense-eigh', 'streaming-dense', 'streaming-rsvd')
     if engine not in valid_engines:
@@ -1664,6 +1691,7 @@ class LostructResult:
         return self.local_pca.jackknife_se
 
 
+@_phase_dependent
 def lostruct(haplotype_matrix: "HaplotypeMatrix",
              *,
              # local_pca params
@@ -1716,6 +1744,8 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
     and coordinate scale do not. Because all alleles are kept and only the
     variant axis is centered, the per-window covariance differs from a
     dosage-per-site, doubly-centered local PCA on biallelic data.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -1788,6 +1818,8 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
     ----------
     Li & Ralph (2019), Genetics. https://doi.org/10.1534/genetics.118.301747
     """
+    _warn_unphased(haplotype_matrix, context="lostruct")
+
     if jackknife:
         pca = _local_pca_with_jackknife(
             haplotype_matrix,
@@ -1871,6 +1903,7 @@ def _sign_align_replicates(vecs: "cp.ndarray") -> "cp.ndarray":
     return vecs * sign
 
 
+@_phase_dependent
 def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
                         window_params=None,
                         k: int = 2,
@@ -1890,6 +1923,8 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
     removed, eigendecomposes it, takes the top-k eigenvectors, sign-aligns
     across replicates, and computes the jackknife SE per sample.
 
+    Depends on haplotype phase; see :doc:`phasing`.
+
     Parameters
     ----------
     n_blocks : int
@@ -1904,6 +1939,8 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
     numpy.ndarray
         NaN rows for windows with fewer than `max(k, n_blocks+1)` variants.
     """
+    _warn_unphased(haplotype_matrix, context="local_pca_jackknife")
+
     from .windowed_analysis import WindowIterator
 
     window_params = _resolve_window_params(

@@ -69,14 +69,22 @@ class TestSetPhased:
         assert hm.phased is True
         assert ret is hm
 
-    def test_set_phased_explicit_false(self):
+    def test_set_unphased_flips_to_false(self):
         hm = _small_hm(phased=True)
-        hm.set_phased(False)
+        ret = hm.set_unphased()
         assert hm.phased is False
+        assert ret is hm
 
-    def test_set_phased_returns_self(self):
+    def test_setters_are_idempotent(self):
+        hm = _small_hm(phased=True)
+        assert hm.set_phased().phased is True
+        hm = _small_hm(phased=False)
+        assert hm.set_unphased().phased is False
+
+    def test_set_phased_takes_no_argument(self):
         hm = _small_hm()
-        assert hm.set_phased(True) is hm
+        with pytest.raises(TypeError):
+            hm.set_phased(False)
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +235,15 @@ class TestZarrPhased:
         stream = HaplotypeMatrix.from_zarr(zarr_store, streaming="always",
                                            phased=False)
         assert stream.phased is False
-        stream.set_phased(True)
+        stream.set_phased()
         assert stream.phased is True
         for _left, _right, chunk in stream.iter_gpu_chunks():
             assert chunk.phased is True
+
+    def test_streaming_set_unphased_propagates_to_chunks(self, zarr_store):
+        stream = HaplotypeMatrix.from_zarr(zarr_store, streaming="always",
+                                           phased=True)
+        assert stream.set_unphased() is stream
+        assert stream.phased is False
+        for _left, _right, chunk in stream.iter_gpu_chunks():
+            assert chunk.phased is False

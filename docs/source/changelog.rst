@@ -4,18 +4,36 @@ Changelog
 Unreleased
 ----------
 
-HaplotypeMatrix now tracks phasing
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Phase-dependent statistics warn on unphased data
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Added ``phased`` attribute to ``HaplotypeMatrix`` (which defaults to 
 ``False``). This tracks whether the haplotypes in the matrix 
 represent true phased haplotypes or not. Each loader exposes a 
 ``phased`` keyword argument: ``from_vcf`` and ``from_zarr`` default 
-to ``False``; ``from_ts`` defaults to ``True``. It is necessary to
-call ``set_phased()`` to change it after construction.
+to ``False``; ``from_ts`` defaults to ``True``. It is possible to
+call ``set_phased()`` or ``set_unphased()`` to change it after
+construction.
 
-A future release will use this flag to warn when an unphased matrix 
-is passed to a phase-dependent statistic.
+Statistics that depend on phased haplotypes emit an
+``UnphasedDataWarning`` when given a ``HaplotypeMatrix`` with 
+``phased=False``. These include Garud's H, iHS, XP-EHH, nSL, 
+haplotype counts and diversity, haplotype r² and D, distance 
+statistics between haplotypes, PCA and local PCA on haplotypes, and the
+windowed scans that request any of these. Each call warns once and it 
+names an unphased alternative where one exists. For
+``garud_h``, ``pairwise_diffs``, the ``dist_*`` moments, ``zns`` and
+``omega``, the unphased alternative is to pass a ``GenotypeMatrix``.
+One small wrinkle: ``moments_ld.compute_ld_statistics`` with
+``vcf_file=`` and ``use_genotypes=False`` now loads the VCF as phased, 
+just to avoid the unphased data warning. See :doc:`phasing` for the full
+list  of statistics and how to silence the warning.
+
+Because ``from_vcf``, ``from_zarr``, the raw ``HaplotypeMatrix(...)``
+constructor, and ``GenotypeMatrix.to_haplotype_matrix`` all give
+``phased=False``, going forward all code that uses phased data without 
+explicitly marking it as phased will start to see this warning. Load 
+with ``phased=True`` or call ``set_phased()`` after loading.
 
 Sites with more than two alleles are now handled correctly
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

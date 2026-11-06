@@ -44,7 +44,7 @@ diploid genotypes; haploid and polyploid stores are rejected.
 .. autoclass:: pg_gpu.streaming_matrix.StreamingHaplotypeMatrix
    :members: iter_gpu_chunks, materialize, num_haplotypes, num_variants,
              chrom, chrom_start, chrom_end, sample_sets, align_bp,
-             phased, set_phased,
+             phased, set_phased, set_unphased,
              compute_ld_statistics_gpu_single_pop,
              compute_ld_statistics_gpu_two_pops
    :show-inheritance:
@@ -85,6 +85,12 @@ you have already understood and leave the rest on::
 
 .. autoclass:: pg_gpu.FewCompleteHaplotypesWarning
    :show-inheritance:
+
+.. autoclass:: pg_gpu.UnphasedDataWarning
+   :show-inheritance:
+
+   See :doc:`phasing` for which functions emit it and their unphased
+   alternatives.
 
 .. autoclass:: pg_gpu.MultiallelicCapWarning
    :show-inheritance:

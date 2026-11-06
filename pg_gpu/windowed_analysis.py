@@ -23,10 +23,27 @@ from . import selection
 from ._utils import population_rows
 from ._haplotype_groups import column_has_missing
 from ._haplotype_hash import garud_h_windows
+from ._warnings import _outside_phase_guard, _phase_dependent, _warn_unphased
 
 # Column order of the Garud H family, as garud_h_windows returns it.
 _FUSED_GARUD_STATS = ('garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
                       'haplotype_count')
+
+_PHASE_DEPENDENT_STATS = frozenset(
+    _FUSED_GARUD_STATS
+) | frozenset({
+    'zns', 'omega', 'mu_ld', 'ld_decay', 'mean_r2',
+    'dist_var', 'dist_skew', 'dist_kurt',
+    'mean_nsl',
+    'local_pca', 'local_pca_jackknife',
+})
+
+
+def _phase_scan_context(name, statistics):
+    """Warning context naming the phase-dependent stats a scan requests, or
+    None when it requests none."""
+    requested = sorted(str(s) for s in set(statistics) & _PHASE_DEPENDENT_STATS)
+    return f"{name} ({', '.join(requested)})" if requested else None
 
 # Statistics that read the rows of two populations.
 _TWO_POP_STATS = frozenset({'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'})
@@ -343,7 +360,7 @@ class StatisticsComputer:
         # Custom statistics
         for stat in self.custom_stats:
             kwargs = self.custom_stat_kwargs.get(stat.__name__, {})
-            results[stat.__name__] = stat(window, **kwargs)
+            results[stat.__name__] = _outside_phase_guard(stat, window, **kwargs)
 
         return results
 
@@ -620,9 +637,13 @@ class WindowedAnalyzer:
             missing_data=missing_data, span_normalize=span_normalize
         )
 
+    @_phase_dependent
     def compute(self, haplotype_matrix: HaplotypeMatrix) -> pd.DataFrame:
         """
         Compute windowed statistics for entire haplotype matrix.
+
+        Depends on haplotype phase when a phase-dependent statistic is
+        requested; see :doc:`phasing`.
 
         Parameters
         ----------
@@ -634,6 +655,9 @@ class WindowedAnalyzer:
         pd.DataFrame
             Results with statistics for each window
         """
+        phase_ctx = _phase_scan_context("WindowedAnalyzer.compute", self.statistics)
+        if phase_ctx:
+            _warn_unphased(haplotype_matrix, context=phase_ctx)
         # Set population info if needed
         if self.populations and not haplotype_matrix.sample_sets:
             warnings.warn("Populations specified but haplotype_matrix has no sample_sets")
@@ -653,12 +677,16 @@ class WindowedAnalyzer:
 
         return pd.DataFrame(results)
 
+    @_phase_dependent
     def compute_region(self, haplotype_matrix: HaplotypeMatrix,
                       chrom: Union[str, int],
                       start: int,
                       end: int) -> pd.DataFrame:
         """
         Compute statistics for a specific genomic region.
+
+        Depends on haplotype phase when a phase-dependent statistic is
+        requested; see :doc:`phasing`.
 
         Parameters
         ----------
@@ -676,16 +704,23 @@ class WindowedAnalyzer:
         pd.DataFrame
             Results for windows in the specified region
         """
+        phase_ctx = _phase_scan_context("WindowedAnalyzer.compute_region", self.statistics)
+        if phase_ctx:
+            _warn_unphased(haplotype_matrix, context=phase_ctx)
         # Extract region from matrix
         region_matrix = haplotype_matrix.get_subset_from_range(start, end)
 
         # Compute statistics
         return self.compute(region_matrix)
 
+    @_phase_dependent
     def compute_streaming(self, haplotype_matrix: HaplotypeMatrix,
                          batch_size: int = 100) -> Iterator[pd.DataFrame]:
         """
         Compute statistics in batches for memory efficiency.
+
+        Depends on haplotype phase when a phase-dependent statistic is
+        requested; see :doc:`phasing`.
 
         Parameters
         ----------
@@ -699,6 +734,16 @@ class WindowedAnalyzer:
         pd.DataFrame
             Batch of results
         """
+        phase_ctx = _phase_scan_context("WindowedAnalyzer.compute_streaming", self.statistics)
+        if phase_ctx:
+            _warn_unphased(haplotype_matrix, context=phase_ctx)
+        return self._iter_batches(haplotype_matrix, batch_size)
+
+    def _iter_batches(self, haplotype_matrix, batch_size):
+        # Iteration runs after compute_streaming has returned and reset the
+        # phase depth, so each window runs inside its own phase-dependent
+        # frame; the statistics it reaches then stay silent.
+        compute_window = _phase_dependent(self.stats_computer.compute)
         window_iter = WindowIterator(haplotype_matrix, self.window_params)
         total_windows = window_iter.count_windows()
 
@@ -706,7 +751,7 @@ class WindowedAnalyzer:
         with tqdm(total=total_windows, disable=not self.progress_bar,
                  desc="Computing windows") as pbar:
             for window in window_iter:
-                window_results = self.stats_computer.compute(window)
+                window_results = compute_window(window)
                 batch_results.append(window_results)
                 pbar.update(1)
 
@@ -1283,6 +1328,7 @@ def _check_windowed_kwargs(kwargs, statistics):
     raise TypeError(" ".join(lines))
 
 
+@_phase_dependent
 def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      window_size: int = 50000,
                      step_size: Optional[int] = None,
@@ -1297,6 +1343,9 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      **kwargs) -> pd.DataFrame:
     """
     Convenience function for windowed analysis.
+
+    Depends on haplotype phase when a phase-dependent statistic is requested;
+    see :doc:`phasing`.
 
     Parameters
     ----------
@@ -1363,6 +1412,9 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         raise ValueError("`regions` kwarg must be provided for `window_type='regions'`.")
     if missing_data not in ('include', 'exclude'):
         raise ValueError("Unknown value for `missing_data`. Please use 'include' or 'exclude'.")
+    phase_ctx = _phase_scan_context("windowed_analysis", statistics)
+    if phase_ctx:
+        _warn_unphased(haplotype_matrix, context=phase_ctx)
     result = _windowed_analysis(
         haplotype_matrix, window_size=window_size, step_size=step_size,
         statistics=statistics, populations=populations,
@@ -2203,6 +2255,7 @@ def _apply_exclude(haplotype_matrix, missing_data, statistics, population,
     return haplotype_matrix.exclude_missing_sites(populations=pops), 'include'
 
 
+@_phase_dependent
 def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                               bp_bins=None,
                               statistics=('pi', 'theta_w', 'tajimas_d',
@@ -2221,6 +2274,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     One kernel launch processes ALL windows in parallel. Each thread block
     handles one window, with threads cooperatively reducing over variants.
     Reads the haplotype matrix once and computes all statistics simultaneously.
+
+    Depends on haplotype phase when a phase-dependent statistic is requested;
+    see :doc:`phasing`.
 
     Parameters
     ----------
@@ -2261,6 +2317,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         with few complete haplotypes nor applies a cutoff; check that
         column yourself.
     """
+    phase_ctx = _phase_scan_context("windowed_statistics_fused", statistics)
+    if phase_ctx:
+        _warn_unphased(haplotype_matrix, context=phase_ctx)
 
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
@@ -2716,6 +2775,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     return results
 
 
+@_phase_dependent
 def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                                       bp_bins=None,
                                       statistics=('pi', 'theta_w', 'tajimas_d'),
@@ -2730,6 +2790,9 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                                       chrom=None):
     """Chunked fused windowed statistics for data too large for a single pass.
 
+    Depends on haplotype phase when a phase-dependent statistic is requested;
+    see :doc:`phasing`.
+
     Same interface and results as windowed_statistics_fused(), but splits the
     variant axis into memory-safe chunks. Each chunk is transposed and fed to
     the existing fused CUDA kernels. Partial results are accumulated across
@@ -2737,6 +2800,10 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     element-wise max).
     """
     from ._memutil import estimate_fused_chunk_size, free_gpu_pool
+
+    phase_ctx = _phase_scan_context("windowed_statistics_fused_chunked", statistics)
+    if phase_ctx:
+        _warn_unphased(haplotype_matrix, context=phase_ctx)
 
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()

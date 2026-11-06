@@ -15,6 +15,7 @@ from ._utils import population_rows
 from ._memutil import allele_counts
 from ._haplotype_groups import complete_sites, frequencies
 from ._haplotype_hash import garud_from_moments, garud_h_windows
+from ._warnings import _phase_dependent, _warn_unphased
 
 
 # ---------------------------------------------------------------------------
@@ -102,12 +103,16 @@ def standardize_by_allele_count(score, aac, bins=None, n_bins=None):
 # Public API: Garud's H statistics
 # ---------------------------------------------------------------------------
 
+@_phase_dependent
 def garud_h(matrix, population=None, missing_data='include'):
     """Compute Garud's H1, H12, H123, and H2/H1 statistics.
 
     Accepts either HaplotypeMatrix (uses haplotype frequencies) or
     GenotypeMatrix (uses diplotype frequencies) and dispatches
     automatically.
+
+    Depends on haplotype phase on a HaplotypeMatrix (a GenotypeMatrix uses
+    diplotype frequencies); see :doc:`phasing`.
 
     Parameters
     ----------
@@ -151,6 +156,10 @@ def garud_h(matrix, population=None, missing_data='include'):
     if isinstance(matrix, GenotypeMatrix):
         return _garud_h_diploid(matrix, population, missing_data)
 
+    _warn_unphased(matrix, context="garud_h",
+                   alternative="use a GenotypeMatrix for the unphased "
+                   "alternative (diplotype frequencies; garud_h dispatches automatically)")
+
     haplotype_matrix = matrix
     if population is not None:
         haplotype_matrix = population_rows(haplotype_matrix, population)
@@ -165,6 +174,7 @@ def garud_h(matrix, population=None, missing_data='include'):
     return _garud_from_freqs(frequencies(hap).get())
 
 
+@_phase_dependent
 def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
                    size: int,
                    start: int = 0,
@@ -173,6 +183,8 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
                    population: Optional[Union[str, list]] = None,
                    missing_data: str = 'include'):
     """Compute Garud's H statistics in moving windows of variants.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -212,6 +224,8 @@ def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
         If ``start`` is negative, ``stop`` exceeds the variant count, or
         ``size`` or ``step`` is below 1.
     """
+    _warn_unphased(haplotype_matrix, context="moving_garud_h")
+
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
     else:
@@ -271,6 +285,7 @@ garud_h_diploid = _garud_h_diploid
 # Public API: nSL / XP-nSL
 # ---------------------------------------------------------------------------
 
+@_phase_dependent
 def nsl(haplotype_matrix: HaplotypeMatrix,
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include'):
@@ -280,6 +295,8 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
     derived allele at a site, one-vs-ancestral. On a biallelic site this is the
     classic nSL. On a multiallelic focal site each derived allele gets its own
     score.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -311,6 +328,8 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
     truncates the scan and changes the scores; materialize the region eagerly
     for a chromosome-wide result.
     """
+    _warn_unphased(haplotype_matrix, context="nsl")
+
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
     else:
@@ -351,11 +370,14 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
     return scores.get()
 
 
+@_phase_dependent
 def xpnsl(haplotype_matrix: HaplotypeMatrix,
           pop1: Union[str, list],
           pop2: Union[str, list],
           missing_data: str = 'include'):
     """Compute the unstandardized cross-population nSL statistic.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -374,6 +396,8 @@ def xpnsl(haplotype_matrix: HaplotypeMatrix,
     score : ndarray, float, shape (n_variants,)
         Unstandardized XP-nSL scores: log(nSL_pop1 / nSL_pop2).
     """
+    _warn_unphased(haplotype_matrix, context="xpnsl")
+
     if missing_data == 'exclude':
         if haplotype_matrix.device == 'CPU':
             haplotype_matrix.transfer_to_gpu()
@@ -413,6 +437,7 @@ def xpnsl(haplotype_matrix: HaplotypeMatrix,
 # Public API: IHS / XP-EHH
 # ---------------------------------------------------------------------------
 
+@_phase_dependent
 def ihs(haplotype_matrix: HaplotypeMatrix,
         pos=None,
         map_pos=None,
@@ -430,6 +455,8 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     a site, one-vs-ancestral. On a biallelic site this is the classic iHS. On a
     multiallelic focal site each derived allele gets its own score, and
     ``min_maf`` is applied per derived allele.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -477,6 +504,8 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     windowing, or a StreamingHaplotypeMatrix) truncates the scan and changes the
     scores; materialize the region eagerly for a chromosome-wide result.
     """
+    _warn_unphased(haplotype_matrix, context="ihs")
+
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
     else:
@@ -547,6 +576,7 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     return scores.get()
 
 
+@_phase_dependent
 def xpehh(haplotype_matrix: HaplotypeMatrix,
           pop1: Union[str, list],
           pop2: Union[str, list],
@@ -559,6 +589,8 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
           is_accessible=None,
           missing_data: str = 'include'):
     """Compute the unstandardized cross-population EHH (XP-EHH) statistic.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -591,6 +623,8 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
     score : ndarray, float, shape (n_variants,)
         Unstandardized XP-EHH scores: log(IHH_pop1 / IHH_pop2).
     """
+    _warn_unphased(haplotype_matrix, context="xpehh")
+
     if missing_data == 'exclude':
         if haplotype_matrix.device == 'CPU':
             haplotype_matrix.transfer_to_gpu()
@@ -645,11 +679,14 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
 # Public API: EHH decay
 # ---------------------------------------------------------------------------
 
+@_phase_dependent
 def ehh_decay(haplotype_matrix: HaplotypeMatrix,
               truncate: bool = False,
               population: Optional[Union[str, list]] = None,
               missing_data: str = 'include'):
     """Compute EHH decay from the first variant.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -668,6 +705,8 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
     ehh : ndarray, float, shape (n_variants,)
         EHH values at each variant position from the first.
     """
+    _warn_unphased(haplotype_matrix, context="ehh_decay")
+
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
     else:

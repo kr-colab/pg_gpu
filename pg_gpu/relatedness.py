@@ -9,7 +9,10 @@ import numpy as np
 import cupy as cp
 from typing import Optional, Union
 
+from ._warnings import _phase_dependent, _warn_unphased, _splits_individual
 
+
+@_phase_dependent
 def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
                         centre: bool = True, polarised: bool = False,
                         proportion: bool = True, span_normalize=True,
@@ -22,6 +25,9 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     ``(p_i(a) - pbar(a)) * (p_j(a) - pbar(a))``, where ``p_k(a)`` is allele
     ``a``'s frequency in set ``k`` and ``pbar(a)`` the unweighted mean of
     ``p_k(a)`` across the sample sets. There is no variance standardization.
+
+    Depends on haplotype phase when ``sample_sets`` is left at its default or a
+    set holds one copy of an individual without the other; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -81,6 +87,15 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         for k, rows in enumerate(sample_sets):
             check_sample_set_rows(f"sample_sets[{k}]", list(rows),
                                   haplotype_matrix.num_haplotypes)
+
+    if isinstance(haplotype_matrix, (StreamingHaplotypeMatrix, HaplotypeMatrix)):
+        if sample_sets is None or any(
+                _splits_individual(rows) for rows in sample_sets):
+            _warn_unphased(
+                haplotype_matrix, context="genetic_relatedness",
+                alternative="pass sample_sets that group whole individuals "
+                "(both haplotypes of each individual in the same set), or "
+                "use grm on a GenotypeMatrix for a diploid GRM")
 
     # Only the haplotype stream has the row semantics this statistic
     # needs; a genotype stream must fall through to the TypeError below,

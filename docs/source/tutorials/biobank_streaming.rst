@@ -128,6 +128,7 @@ functions:
    stream = HaplotypeMatrix.from_zarr(
        "biobank/chr15.vcz",
        streaming="always",
+       phased=True,                        # statistically phased panel
        chunk_bp=500_000,                   # genomic chunk size
        pop_assignment="biobank/chr15.pops.tsv",  # optional sample -> pop
    )
