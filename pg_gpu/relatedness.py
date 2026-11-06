@@ -40,7 +40,9 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         noncentred form).
     polarised : bool
         Sum over all alleles including the reference (False, the default) or
-        over derived alleles only (True).
+        over derived alleles only (True). tskit's own default is True, so
+        matching tskit's output (not just its formula) needs
+        ``polarised=True`` here.
     proportion : bool
         Divide by the number of segregating sites among the analyzed samples
         (the per-site sum of ``num_alleles - 1``), giving a relatedness
@@ -159,11 +161,9 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         # columns) up to the full n_cols, so a pair's value does not shrink
         # just because it called fewer of the analyzed columns.
         R = cp.where(J > 0, R * n_cols / cp.maximum(J, 1.0), cp.nan)
-    elif proportion:
-        # No column at all means no segregating site either: 0/0, undefined.
-        R = cp.full_like(R, cp.nan)
     # else: no column at all -- R stays the all-zero matrix (a sum over no
-    # sites).
+    # sites); with proportion=True this also means no segregating site, so
+    # the denom <= 0 branch below turns it into NaN.
 
     if proportion:
         # Divide by segregating sites; span_normalise cancels, so it is ignored.
@@ -266,11 +266,9 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
         # Project each pair's partial sum up to the full n_cols; see the
         # eager path's identical step.
         R = np.where(J > 0, R * n_cols / np.maximum(J, 1.0), np.nan)
-    elif proportion:
-        # No column at all means no segregating site either: 0/0, undefined.
-        R = np.full_like(R, np.nan)
     # else: no column at all -- R stays the all-zero matrix (a sum over no
-    # sites).
+    # sites); with proportion=True this also means no segregating site, so
+    # the denom <= 0 branch below turns it into NaN.
 
     if proportion:
         denom = seg_cols - float(seg_sites.get())
