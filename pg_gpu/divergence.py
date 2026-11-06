@@ -959,11 +959,11 @@ def pbs(haplotype_matrix: HaplotypeMatrix,
     ac3, nv3 = allele_counts(h3, n_alleles=k)
 
     # PBS turns the three FSTs into the branch lengths of one tree, so all
-    # three use the same sites: those where every population has data. A
-    # site that only one pair can see would enter some branches and not
-    # others. A zero valid count removes a site from every pair, because a
-    # site counts only where both populations of the pair have data.
-    all_three = (nv1 > 0) & (nv2 > 0) & (nv3 > 0)
+    # three use the same sites: those where every population has its own
+    # pair (>=2 calls), the same per-pair requirement _hudson_num_den
+    # enforces internally for each branch. A site that only one pair can
+    # see would enter some branches and not others.
+    all_three = (nv1 > 1) & (nv2 > 1) & (nv3 > 1)
     nv1, nv2, nv3 = (cp.where(all_three, nv, 0) for nv in (nv1, nv2, nv3))
 
     num12, den12 = _hudson_num_den(ac1, nv1, ac2, nv2)

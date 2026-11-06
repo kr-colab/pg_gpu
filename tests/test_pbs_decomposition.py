@@ -126,6 +126,29 @@ class TestPBS:
         got = divergence.pbs(gapped, 'pop1', 'pop2', 'pop3', window_size=n_var)
         np.testing.assert_allclose(got, ref, rtol=1e-12)
 
+    @pytest.mark.parametrize("gap_pop", [0, 1, 2])
+    def test_pbs_ignores_a_site_one_population_has_only_one_call(
+            self, three_pop_matrix, gap_pop):
+        # A site where one population has only one call, not zero, still
+        # can't support that population's own-pair term: _hudson_num_den
+        # drops it from every pairwise FST touching that population. PBS
+        # must drop it from the third (unaffected) pair too, to keep all
+        # three branches on the same site set, matching the wholly-missing
+        # case above -- not just where the prefilter already agreed before
+        # the one-call-pair gate was tightened.
+        matrix, _ = three_pop_matrix
+        hap = cp.asnumpy(matrix.haplotypes)
+        extra = np.random.RandomState(7).randint(0, 2, size=(30, 1)).astype(np.int8)
+        extra[gap_pop * 10 + 1:(gap_pop + 1) * 10] = -1
+        hap_gap = np.hstack([hap, extra])
+        n_var = hap_gap.shape[1]
+        gapped = HaplotypeMatrix(hap_gap, np.arange(n_var) * 1000, 0,
+                                 n_var * 1000, sample_sets=matrix.sample_sets)
+        ref = divergence.pbs(matrix, 'pop1', 'pop2', 'pop3',
+                             window_size=matrix.num_variants)
+        got = divergence.pbs(gapped, 'pop1', 'pop2', 'pop3', window_size=n_var)
+        np.testing.assert_allclose(got, ref, rtol=1e-12)
+
 
 # ---------------------------------------------------------------------------
 # PCA tests
