@@ -44,9 +44,10 @@ results**, except where the next section says so.
   ``tskit``'s function of the same name. Under missing data, a pair's sum
   is rescaled to the full analyzed column count from the columns it
   actually shares, so it does not shrink with that pair's own call rate;
-  a pair with no column called in both is NaN. An analysis with no
-  column at all is 0.0, unless ``proportion=True`` (0 segregating sites)
-  or the span is unmeasurable, either of which gives NaN.
+  a pair with no column called in both is NaN. With ``proportion=False``:
+  an analysis with no column at all is 0.0, and NaN when the span is
+  unmeasurable. With ``proportion=True``: NaN whenever no site segregates,
+  whether or not any column exists.
 * Windowed analysis: every windowed statistic now gives the same answer
   as running the plain function on that window's variants.
 * LD statistics operate on only sites with two present alleles, but allow
