@@ -530,6 +530,16 @@ Bug fixes
   name. ``population``, ``k``, ``n_blocks``, ``batch_size`` and
   ``aggregate`` are valid only with ``local_pca`` or
   ``local_pca_jackknife``.
+* ``pi``, ``theta_w``, ``theta_h``, ``theta_l`` and the Achaz eta-family
+  (``diversity_stats``'s ``eta1``, ``eta1_star``, ``minus_eta1``,
+  ``minus_eta1_star``) silently treated a site where the population has
+  fewer than two calls as invariant: the site added 0 to the raw sum but
+  stayed in the span denominator, biasing the default per-base rate
+  toward 0 under missing data. The raw sum is now rescaled to the sites
+  where the population actually had two calls before the span divides it,
+  and the rate is NaN when no site does (``span_normalize=False`` is
+  unaffected; it already returned the plain raw sum). ``dxy`` and ``da``
+  have the same issue and are not fixed here.
 
 New warnings
 ~~~~~~~~~~~~
