@@ -744,7 +744,8 @@ def test_diversity_stats_key_order_matches_request():
 
 
 def test_fay_wus_h_no_variants_is_zero():
-    # H = pi - theta_H is 0 with no variants on every path; the
+    # H = pi - theta_H is 0 with no variants on every path (it has no
+    # span_normalize, so is unaffected by the no-site rescale below); the
     # variance-normalized H stays NaN.
     rng = np.random.default_rng(1)
     hap = rng.integers(0, 2, (8, 10)).astype(np.int8)
@@ -753,7 +754,11 @@ def test_fay_wus_h_no_variants_is_zero():
     assert diversity.fay_wus_h(empty) == 0.0
     stats = diversity.diversity_stats(
         empty, statistics=["fay_wus_h", "normalized_fay_wus_h", "pi"])
-    assert stats["fay_wus_h"] == 0.0 and stats["pi"] == 0.0
+    assert stats["fay_wus_h"] == 0.0
+    # pi has no site with data at all, so the default span-normalized pi
+    # is NaN (no information), while its raw sum stays the 0.0 empty sum.
+    assert np.isnan(stats["pi"])
+    assert diversity.pi(empty, span_normalize=False) == 0.0
     assert np.isnan(stats["normalized_fay_wus_h"])
     assert np.isnan(diversity.normalized_fay_wus_h(empty))
     assert diversity.FrequencySpectrum(empty).fay_wu_h() == 0.0

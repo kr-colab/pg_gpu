@@ -673,6 +673,16 @@ Bug fixes
   variants, while the scalar ``mu_var`` gives 0.0 there. The fused engine
   (and the chunked engine, which shares its code for this statistic) now
   give 0.0 too, keeping NaN only for a window with no accessible base.
+* ``pi``, ``theta_w``, ``theta_h``, ``theta_l`` and the Achaz eta-family
+  (``diversity_stats``'s ``eta1``, ``eta1_star``, ``minus_eta1``,
+  ``minus_eta1_star``) silently treated a site where the population has
+  fewer than two calls as invariant: the site added 0 to the raw sum but
+  stayed in the span denominator, biasing the default per-base rate
+  toward 0 under missing data. The raw sum is now rescaled to the sites
+  where the population actually had two calls before the span divides it,
+  and the rate is NaN when no site does (``span_normalize=False`` is
+  unaffected; it already returned the plain raw sum). ``dxy`` and ``da``
+  have the same issue and are not fixed here.
 
 New warnings
 ~~~~~~~~~~~~

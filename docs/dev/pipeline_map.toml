@@ -629,9 +629,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
+undefined = "NaN when no site has two valid haplotypes (including no variants at all) or when span <= 0; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.pi_components", "diversity.FrequencySpectrum.theta", "divergence._site_components_from_counts", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "The no-variant check runs before the span check, so a mask that removes every variant gives 0.0, not NaN; _fused_windowed_kernel_v2 has its own C copy of the per-site formula."
+notes = "span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span, correcting for sites the population's own missing calls dropped from the sum; _fused_windowed_kernel_v2 has its own C copy of the per-site formula and is not yet rescaled."
 
 [functions."diversity.theta_w"]
 # signature: (haplotype_matrix, population, span_normalize, missing_data)
@@ -640,9 +640,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
+undefined = "NaN when no site has two valid haplotypes (including no variants at all) or when span <= 0; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "Per site (alleles present - 1) * 1/a1(n_valid); FrequencySpectrum.theta sums xi instead and differs at reference-absent multiallelic sites."
+notes = "Per site (alleles present - 1) * 1/a1(n_valid); FrequencySpectrum.theta sums xi instead and differs at reference-absent multiallelic sites. span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 has its own C copy and is not yet rescaled, and separately ignores missing data in its divisor (a pre-existing, separate bug)."
 
 [functions."diversity.tajimas_d"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -684,9 +684,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "with no variants, theta keys and fay_wus_h 0.0, the other test keys NaN; tests NaN when S < 3 or n < 3; fay_wus_h has no minimum"
+undefined = "theta keys (pi, theta_w, theta_h, theta_l, eta1, eta1_star, minus_eta1, minus_eta1_star) are NaN when no site has two valid haplotypes, including with no variants at all; fay_wus_h is 0.0 with no variants; the other test keys are NaN when S < 3 or n < 3"
 parallel = ["diversity._compute_neutrality_test", "diversity.fay_wus_h"]
-notes = "Only theta keys are span-normalized; span_normalize also passes a get_span mode string through; the tests and fay_wus_h are computed inline, not by calling the scalar functions."
+notes = "Only theta keys are span-normalized, and rescaled by num_variants / n_sites_with_data first when span_normalize is not False; span_normalize also passes a get_span mode string through; the tests and fay_wus_h are computed inline, not by calling the scalar functions."
 
 [functions."diversity.fay_wus_h"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -717,8 +717,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
+undefined = "NaN when no site has two valid haplotypes (including no variants at all) or when span <= 0; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
+notes = "span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 has its own C copy and is not yet rescaled."
 
 [functions."diversity.theta_l"]
 # signature: (haplotype_matrix, population, span_normalize, missing_data)
@@ -727,9 +728,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "0.0 with no variants or fewer than two haplotypes; NaN when span <= 0 with variants present"
+undefined = "NaN when no site has two valid haplotypes (including no variants at all) or when span <= 0; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter"]
-notes = "Only the scatter engine computes it windowed; a request that adds a fused-only statistic (e.g. mu_var) falls to the per-window fallback and raises 'Unknown statistic'."
+notes = "Only the scatter engine computes it windowed; a request that adds a fused-only statistic (e.g. mu_var) falls to the per-window fallback and raises 'Unknown statistic'. span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span."
 
 [functions."diversity.normalized_fay_wus_h"]
 # signature: (haplotype_matrix, population, missing_data)
