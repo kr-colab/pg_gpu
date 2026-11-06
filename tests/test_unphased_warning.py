@@ -338,8 +338,9 @@ def test_moments_ld_vcf_path_is_silent(vcf_and_pops):
 ])
 def test_genetic_relatedness_sets(hm, stream, sets, warns):
     for m in (hm, stream):
-        def block(m=m):
-            return relatedness.genetic_relatedness(m, sample_sets=sets)
+        # A lambda, not a def: _warns_once checks the warning's line against
+        # the block's first line, which must be the line that makes the call.
+        block = lambda: relatedness.genetic_relatedness(m, sample_sets=sets)  # noqa: E731
         if warns:
             _warns_once(block, "genetic_relatedness")
         else:
