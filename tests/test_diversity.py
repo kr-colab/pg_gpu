@@ -668,6 +668,68 @@ class TestHaplotypeDiversity:
         assert abs(h_div_all - h_div_allel_all) < 1e-10
 
 
+class TestMaxDafExclude:
+    """max_daf(missing_data='exclude') must give NaN, not a sentinel value
+    outside [0, 1], when no site is complete."""
+
+    def test_no_complete_site_is_nan(self):
+        # Every site has exactly one missing call, so none is complete.
+        h = np.array([[0, 1, -1], [1, -1, 0], [-1, 0, 1], [1, 1, 0]],
+                     dtype=np.int8)
+        hm = HaplotypeMatrix(h, np.array([1, 11, 21]), 1, 30)
+        assert np.isnan(diversity.max_daf(hm, missing_data='exclude'))
+
+    def test_complete_but_monomorphic_site_is_zero_not_nan(self):
+        # One complete site, but it carries no derived allele -- there is
+        # data to measure, unlike the no-complete-site case above, so the
+        # correct max DAF is 0.0.
+        h = np.array([[0, 0, -1], [0, 1, 0], [0, -1, 1], [0, 1, 0]],
+                     dtype=np.int8)
+        hm = HaplotypeMatrix(h, np.array([1, 11, 21]), 1, 30)
+        assert diversity.max_daf(hm, missing_data='exclude') == 0.0
+
+
+class TestMaxDafIncludeNeedsOwnPair:
+    """max_daf(missing_data='include') must ignore a site with only one
+    call, matching pi/theta_w/heterozygosity_expected and both windowed
+    engines, instead of letting a single stray call set the whole-region
+    max to that call's own frequency."""
+
+    def _matrix(self):
+        # Site 0: every haplotype called, DAF 3/6 = 0.5. Site 1: one call
+        # (derived), n_valid=1 -- must be ignored, not read as DAF 1.0.
+        # Site 2: 5 calls, DAF 1/5 = 0.2 -- the best of the eligible sites.
+        h = np.array([[1, 1, 1],
+                      [-1, 1, 0],
+                      [-1, 0, 0],
+                      [-1, 0, 0],
+                      [-1, 0, 0],
+                      [-1, 0, 0]], dtype=np.int8)
+        return HaplotypeMatrix(h, np.array([1, 11, 21]), 1, 30)
+
+    def test_single_call_site_ignored(self):
+        hm = self._matrix()
+        np.testing.assert_allclose(diversity.max_daf(hm), 1.0 / 3.0,
+                                   rtol=1e-12)
+
+    def test_matches_scatter_and_fused_engines(self):
+        from pg_gpu.windowed_analysis import (
+            windowed_analysis, windowed_statistics_fused,
+        )
+        hm = self._matrix()
+        ref = diversity.max_daf(hm)
+
+        scatter = windowed_analysis(hm, window_size=30,
+                                    statistics=['max_daf'])
+        np.testing.assert_allclose(scatter['max_daf'].iloc[0], ref, rtol=1e-12)
+
+        hm.transfer_to_gpu()
+        bp_bins = np.array([0.0, 30.0])
+        fused = windowed_statistics_fused(hm, bp_bins=bp_bins,
+                                          statistics=('max_daf',))
+        np.testing.assert_allclose(fused['max_daf'][0], ref, rtol=1e-12)
+
+
 def test_diversity_stats_key_order_matches_request():
     """The result dict lists keys in the caller's order, whatever the
     process hash seed, so DataFrame columns built from it are stable."""

@@ -1430,13 +1430,16 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     missing_data : str
-        'include' - per-site n_valid for frequency
+        'include' - a site needs at least two calls to contribute, same as
+        ``pi``/``theta_w``/``heterozygosity_expected``; fewer contribute
+        nothing, since a frequency from one call is not a useful estimate.
         'exclude' - only sites with no missing data
 
     Returns
     -------
     float
-        Maximum DAF in [0, 1].
+        Maximum DAF in [0, 1], or NaN when ``'exclude'`` leaves no complete
+        site.
     """
 
     if population is not None:
@@ -1457,10 +1460,12 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     freq = ac[:, 1:].astype(cp.float64) / cp.maximum(n_valid[:, None], 1.0)
     present = ac[:, 1:] > 0
     if missing_data == 'exclude':
-        keep = present & (n_valid_i[:, None] == matrix.haplotypes.shape[0])
-        freq = cp.where(keep, freq, -1.0)
+        complete = n_valid_i == matrix.haplotypes.shape[0]
+        if not bool(cp.any(complete)):
+            return float('nan')
+        freq = cp.where(present & complete[:, None], freq, 0.0)
     else:
-        freq = cp.where(present & (n_valid_i[:, None] > 0), freq, 0.0)
+        freq = cp.where(present & (n_valid_i[:, None] >= 2), freq, 0.0)
     return float(cp.max(freq).get())
 
 

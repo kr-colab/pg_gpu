@@ -202,6 +202,14 @@ Read this section if you are comparing against older pg_gpu results.
   - ``mu_var``: a window length that is not positive;
   - ``haplotype_diversity``: fewer than two haplotypes.
 
+  ``max_daf(missing_data='exclude')`` returned ``-1.0``, not even a
+  plausible-looking real value, when no site was complete; it is NaN now.
+  The windowed engines (``windowed_analysis``, ``windowed_statistics_fused``,
+  ``windowed_statistics_fused_chunked``) had the same gap one level up: a
+  window whose sites were all excluded gave ``0.0`` rather than NaN,
+  indistinguishable from a window with no variant to begin with. Both now
+  agree with the scalar function.
+
   With the default ``sigma_d2`` estimator, ``zns`` and ``omega`` leave
   out a pair that they cannot estimate (fewer than four haplotypes
   called at both sites, or a pi2 estimate of 0). Before, ``zns`` counted
@@ -215,6 +223,13 @@ Read this section if you are comparing against older pg_gpu results.
   ``omega``, ``mu_ld`` and ``dist_*`` columns skipped every window with
   fewer than four variants. Now a window with one to three variants
   gets the value that the scalar function gives for its variants.
+* The scalar ``max_daf(missing_data='include')`` now needs at least two
+  calls at a site to count it, matching ``pi``, ``theta_w``, and both
+  windowed engines, which already worked this way. A single stray call
+  of the derived allele used to be enough to set the whole-region value
+  to that call's own frequency, as high as 1.0; it now takes the best
+  value among sites with their own pair, the same answer the windowed
+  path already gave.
 * In ``windowed_statistics``, ``singletons`` now counts only alternate
   alleles seen once (it used to also count reference alleles seen
   once), and ``segregating_sites`` counts mutations.
