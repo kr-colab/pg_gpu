@@ -207,8 +207,10 @@ class TestIBS:
 def _reference_relatedness_columns(hap, sample_sets, n_alleles):
     """Independent host reference for _relatedness_columns (complete or missing).
 
-    Returns (C, col_site): per-set per-allele frequencies centered by the
-    unweighted across-set mean, columns ordered site-major then allele-minor.
+    Returns (C, col_site, valid_mask): per-set per-allele frequencies centered
+    by the across-set mean of the sets with a call at that site (a set with no
+    call there is excluded from the mean and forced to 0, not a fake 0
+    frequency), columns ordered site-major then allele-minor.
     """
     n_hap, n_var = hap.shape
     valid = hap >= 0
@@ -217,21 +219,25 @@ def _reference_relatedness_columns(hap, sample_sets, n_alleles):
     covered = np.zeros(n_hap, dtype=bool)
     for s in sets:
         covered[s] = True
-    p_cols, site_cols = [], []
+    p_cols, valid_cols, site_cols = [], [], []
     for s_idx in range(n_var):
         for a in range(n_alleles):
             if np.any(covered & (hap[:, s_idx] == a) & valid[:, s_idx]):
-                col = []
+                col, col_valid = [], []
                 for st in sets:
                     nv = int(valid[st, s_idx].sum())
                     cnt = int(((hap[st, s_idx] == a) & valid[st, s_idx]).sum())
-                    col.append(cnt / nv if nv > 0 else 0.0)
+                    col.append(cnt / nv if nv > 0 else np.nan)
+                    col_valid.append(nv > 0)
                 p_cols.append(np.array(col))
+                valid_cols.append(np.array(col_valid))
                 site_cols.append(s_idx)
     D = len(sets)
     P = np.stack(p_cols, axis=1) if p_cols else np.zeros((D, 0))
-    C = P - P.mean(axis=0, keepdims=True)
-    return C, np.array(site_cols, dtype=np.int64)
+    VM = np.stack(valid_cols, axis=1) if valid_cols else np.zeros((D, 0), dtype=bool)
+    pbar = np.nanmean(P, axis=0, keepdims=True) if P.shape[1] else P
+    C = np.where(VM, P - pbar, 0.0)
+    return C, np.array(site_cols, dtype=np.int64), VM
 
 
 class TestRelatednessColumns:
@@ -240,9 +246,9 @@ class TestRelatednessColumns:
     def _run(self, hap, sample_sets):
         import cupy as cp
         k = int(hap.max()) + 1 if hap.size else 1
-        C, col_site, _ = relatedness._relatedness_columns(
+        C, col_site, _, _ = relatedness._relatedness_columns(
             cp.asarray(hap), sample_sets, k)
-        ref_C, ref_site = _reference_relatedness_columns(hap, sample_sets, k)
+        ref_C, ref_site, _ = _reference_relatedness_columns(hap, sample_sets, k)
         return C.get(), col_site.get(), ref_C, ref_site
 
     def test_singleton_biallelic(self):
@@ -297,6 +303,24 @@ class TestRelatednessColumns:
         R = C @ C.T
         np.testing.assert_allclose(R, R.T, atol=1e-9)
         assert bool((np.diag(R) >= -1e-9).all())
+
+    def test_missing_set_forced_to_zero_and_excluded_from_mean(self):
+        # Set 1 has no call at this site: its column entry must be exactly 0
+        # (not a disguised frequency), and the centering mean must exclude it
+        # rather than average it in as 0.
+        import cupy as cp
+        hap = np.array([[0], [-1], [0], [1]], dtype=np.int8)  # 4 singleton sets
+        C, col_site, col_allele, valid_mask = relatedness._relatedness_columns(
+            cp.asarray(hap), None, 2)
+        C, col_allele, valid_mask = C.get(), col_allele.get(), valid_mask.get()
+        a0 = int(np.where(col_allele == 0)[0][0])
+        assert not valid_mask[1, a0]
+        assert C[1, a0] == 0.0
+        # pbar(allele 0) over the valid sets {0, 2, 3} only: (1 + 1 + 0) / 3.
+        pbar = 2 / 3
+        np.testing.assert_allclose(C[0, a0], 1 - pbar)
+        np.testing.assert_allclose(C[2, a0], 1 - pbar)
+        np.testing.assert_allclose(C[3, a0], 0 - pbar)
 
 
 class TestGeneticRelatedness:
@@ -389,8 +413,16 @@ class TestGeneticRelatedness:
         hm = HaplotypeMatrix(hap, np.arange(40) * 100)
         got = relatedness.genetic_relatedness(hm, span_normalize=False)
         k = int(hap.max()) + 1
-        Cref, _ = _reference_relatedness_columns(hap, None, k)
-        np.testing.assert_allclose(got, Cref @ Cref.T, atol=1e-9)
+        Cref, _, VM = _reference_relatedness_columns(hap, None, k)
+        # genetic_relatedness rescales each pair's raw sum by n_cols / J (its
+        # own jointly-called column count), so a pair does not shrink just
+        # because it called fewer columns -- see relatedness.py's own
+        # n_cols/J step.
+        raw = Cref @ Cref.T
+        J = VM.astype(np.float64) @ VM.astype(np.float64).T
+        n_cols = Cref.shape[1]
+        expected = np.where(J > 0, raw * n_cols / np.maximum(J, 1.0), np.nan)
+        np.testing.assert_allclose(got, expected, atol=1e-9)
 
     def test_missing_exclude_matches_host(self):
         rng = np.random.RandomState(6)
@@ -401,5 +433,100 @@ class TestGeneticRelatedness:
                                               span_normalize=False)
         complete = (hap >= 0).all(axis=0)
         k = int(hap.max()) + 1
-        Cref, _ = _reference_relatedness_columns(hap[:, complete], None, k)
+        Cref, _, _ = _reference_relatedness_columns(hap[:, complete], None, k)
         np.testing.assert_allclose(got, Cref @ Cref.T, atol=1e-9)
+
+    def test_pair_with_no_shared_called_site_is_nan(self):
+        # Haplotypes 0 and 1 are each called at a disjoint half of the sites,
+        # so they share no called site and must get NaN rather than a
+        # coincidental 0.0. Haplotypes 2 and 3 are called everywhere.
+        hap = np.array([[0, 0, 0, -1, -1, -1],
+                        [-1, -1, -1, 1, 1, 1],
+                        [0, 0, 0, 1, 1, 1],
+                        [1, 1, 1, 0, 0, 0]], dtype=np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(6) * 10 + 1, 1, 60)
+
+        noncentred = relatedness.genetic_relatedness(hm, centre=False,
+                                                      span_normalize=False)
+        assert np.isnan(noncentred[0, 1]) and np.isnan(noncentred[1, 0])
+        # Every pair's raw sum is rescaled by n_cols / J (its own
+        # jointly-called column count out of all 12), so a haplotype called
+        # everywhere is not diluted when paired with one missing half the
+        # sites: e.g. hap0-hap2 share 6 of 12 columns with 3 matches, scaled
+        # to 3 * 12/6 = 6, the same as hap2's own full-coverage count.
+        expected = np.array([[6, np.nan, 6, 0],
+                             [np.nan, 6, 6, 0],
+                             [6, 6, 6, 0],
+                             [0, 0, 0, 6]], dtype=np.float64)
+        mask = ~np.isnan(expected)
+        np.testing.assert_allclose(noncentred[mask], expected[mask])
+
+        centred = relatedness.genetic_relatedness(hm, span_normalize=False)
+        assert np.isnan(centred[0, 1]) and np.isnan(centred[1, 0])
+        # Hand-derived from the per-site centered columns (pbar excludes the
+        # one set missing a call at each site), then rescaled by n_cols / J
+        # the same way as the noncentred case above.
+        expected_centred = np.array([[4/3, np.nan, 4/3, -8/3],
+                                     [np.nan, 4/3, 4/3, -8/3],
+                                     [4/3, 4/3, 4/3, -8/3],
+                                     [-8/3, -8/3, -8/3, 16/3]])
+        mask = ~np.isnan(expected_centred)
+        np.testing.assert_allclose(centred[mask], expected_centred[mask])
+
+    def test_self_relatedness_not_diluted_by_own_call_rate(self):
+        # A haplotype missing half its calls must not look less related to
+        # itself than a fully-called one: each pair's raw sum is over the
+        # columns it shares, which is rescaled to the full analyzed column
+        # count (n_cols / J), not left to shrink with that pair's coverage.
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 40, 5000
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[0:20][rng.random((20, n_var)) < 0.5] = -1
+        hm = HaplotypeMatrix(hap, np.arange(n_var) + 1, 1, n_var)
+
+        R = relatedness.genetic_relatedness(hm, span_normalize=False)
+        diag = np.diag(R)
+        ratio = diag[:20].mean() / diag[20:].mean()
+        assert abs(ratio - 1.0) < 0.05
+
+    def test_no_column_at_all_is_zero_not_nan(self):
+        # 'exclude' with no site called in every analyzed sample leaves zero
+        # columns -- an empty analysis, not an undefined pair, so it is a sum
+        # over no sites (0.0), not NaN.
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 8, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[0, :] = -1  # one haplotype missing everywhere -> no complete site
+        hm = HaplotypeMatrix(hap, np.arange(n_var) + 1, 1, n_var)
+
+        R = relatedness.genetic_relatedness(hm, missing_data='exclude',
+                                            span_normalize=False)
+        assert np.all(R == 0.0)
+
+    def test_no_column_at_all_is_nan_under_proportion(self):
+        # Same empty analysis as above, but proportion=True divides by the
+        # segregating-site count, which is also 0 here -- 0/0, undefined,
+        # matching tskit's own division (out /= denominator gives nan, not
+        # 0, when both are 0).
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 8, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[0, :] = -1
+        hm = HaplotypeMatrix(hap, np.arange(n_var) + 1, 1, n_var)
+
+        Rp = relatedness.genetic_relatedness(hm, missing_data='exclude',
+                                             proportion=True)
+        assert np.all(np.isnan(Rp))
+
+    def test_unmeasurable_span_is_nan_not_raw_sum(self):
+        # chrom_end < chrom_start makes get_span('auto') return 0 even though
+        # real variant columns exist; span_normalize=True must give NaN here
+        # (matching _apply_span_normalize's convention elsewhere), not
+        # silently hand back the un-normalized raw sum.
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (6, 10)).astype(np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(1, 11), 5, 4)
+        assert hm.get_span('auto') == 0
+
+        R = relatedness.genetic_relatedness(hm, span_normalize=True)
+        assert np.all(np.isnan(R))

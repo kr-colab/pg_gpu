@@ -61,7 +61,9 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     -------
     ndarray, float64
         The ``(D, D)`` matrix, or a 1-D array of values for the requested
-        ``indexes``.
+        ``indexes``. NaN for a pair of sets with no column called in both.
+        0 when no column is called at all, unless ``proportion=True``, which
+        is then NaN too (0 segregating sites).
     """
     from ._memutil import estimate_variant_chunk_size
     from .streaming_matrix import StreamingHaplotypeMatrix
@@ -110,26 +112,57 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
         hap = hap[:, complete]
 
     R = cp.zeros((D, D), dtype=cp.float64)
+    # Count of (site, allele) columns where both sets of a pair have a call,
+    # the per-pair denominator the n_cols rescaling below needs.
+    J = cp.zeros((D, D), dtype=cp.float64)
+    # Total (site, allele) columns summed into R, for that rescaling.
+    n_cols = 0
+    n_complete_cols = 0
     # Segregating sites among the analyzed samples: per-site sum of
     # (present alleles - 1), accumulated on device (only when needed).
     seg_cols = 0
     seg_sites = cp.zeros((), dtype=cp.float64)
     if hap.shape[1] > 0:
         K = int(hap.max()) + 1
+        # cols + valid_mask (as float) + the two matmul outputs, per chunk.
         chunk = estimate_variant_chunk_size(n_hap, bytes_per_element=8,
-                                            n_intermediates=3,
+                                            n_intermediates=4,
                                             memory_fraction=0.25)
         for start in range(0, hap.shape[1], chunk):
             end = min(start + chunk, hap.shape[1])
-            cols, col_site, col_allele = _relatedness_columns(
+            cols, col_site, col_allele, valid_mask = _relatedness_columns(
                 hap[:, start:end], sample_sets, K, centre=centre)
             if proportion and col_site.size:
                 # col_site is site-major sorted; distinct sites = jumps + 1.
                 seg_cols += col_site.size
                 seg_sites += 1 + (cp.diff(col_site) != 0).sum()
             if polarised:
-                cols = cols[:, col_allele != 0]
+                keep = col_allele != 0
+                cols = cols[:, keep]
+                valid_mask = valid_mask[:, keep]
+            n_cols += cols.shape[1]
             R += cols @ cols.T
+            # A chunk where every set has a call contributes the same count
+            # to every pair, so it is tracked as a scalar instead of a
+            # matmul; the validity matmul that remains runs in float32
+            # (exact for any realistic chunk size).
+            if bool(valid_mask.all()):
+                n_complete_cols += cols.shape[1]
+            else:
+                vm = valid_mask.astype(cp.float32)
+                J += (vm @ vm.T).astype(cp.float64)
+
+    if n_cols > 0:
+        J += n_complete_cols
+        # Project each pair's partial sum (over its own J jointly-called
+        # columns) up to the full n_cols, so a pair's value does not shrink
+        # just because it called fewer of the analyzed columns.
+        R = cp.where(J > 0, R * n_cols / cp.maximum(J, 1.0), cp.nan)
+    elif proportion:
+        # No column at all means no segregating site either: 0/0, undefined.
+        R = cp.full_like(R, cp.nan)
+    # else: no column at all -- R stays the all-zero matrix (a sum over no
+    # sites).
 
     if proportion:
         # Divide by segregating sites; span_normalise cancels, so it is ignored.
@@ -139,8 +172,8 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     elif span_normalize is not False:
         mode = 'auto' if span_normalize is True else span_normalize
         span = haplotype_matrix.get_span(mode)
-        if span > 0:
-            R = R / span
+        # NaN, not the raw sum, when the span is unmeasurable.
+        R = R / span if span > 0 else cp.full_like(R, cp.nan)
 
     if indexes is None:
         return R.get()
@@ -178,10 +211,17 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
     # D is known from the sample sets without peeking a chunk, so an empty
     # source falls through to this zero matrix (relatedness of nothing is 0).
     R = np.zeros((D, D), dtype=np.float64)
+    # Count of (site, allele) columns where both sets of a pair have a call,
+    # the per-pair denominator the n_cols rescaling below needs.
+    J = np.zeros((D, D), dtype=np.float64)
+    # Total (site, allele) columns summed into R, for that rescaling.
+    n_cols = 0
+    n_complete_cols = 0
     seg_cols = 0
     seg_sites = cp.zeros((), dtype=cp.float64)
     if block_size is None:
-        block_size = estimate_indiv_block_size(D, n_intermediates=3)
+        # cols + valid_mask (as float) + the two matmul outputs, per block.
+        block_size = estimate_indiv_block_size(D, n_intermediates=4)
 
     # iter_gpu_chunks already attaches any load-time accessible mask, so the
     # chunks here are variant-filtered to accessible sites (matching eager).
@@ -193,16 +233,41 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
         if hap.shape[1] == 0:
             continue
         K = int(hap.max()) + 1
-        cols, col_site, col_allele = _relatedness_columns(
+        cols, col_site, col_allele, valid_mask = _relatedness_columns(
             hap, sample_sets, K, centre=centre)
         if proportion and col_site.size:
             seg_cols += col_site.size
             seg_sites += 1 + (cp.diff(col_site) != 0).sum()
         if polarised:
-            cols = cols[:, col_allele != 0]
+            keep = col_allele != 0
+            cols = cols[:, keep]
+            valid_mask = valid_mask[:, keep]
+        n_cols += cols.shape[1]
+        # A chunk where every set has a call contributes the same count to
+        # every pair, so it is tracked as a scalar instead of a matmul; the
+        # validity matmul that remains runs in float32 (exact for any
+        # realistic chunk size).
+        all_valid = bool(valid_mask.all())
+        if all_valid:
+            n_complete_cols += cols.shape[1]
+        else:
+            vm = valid_mask.astype(cp.float32)
         for r0 in range(0, D, block_size):
             r1 = min(r0 + block_size, D)
             R[r0:r1] += (cols[r0:r1] @ cols.T).get()
+            if not all_valid:
+                J[r0:r1] += (vm[r0:r1] @ vm.T).get()
+
+    if n_cols > 0:
+        J += n_complete_cols
+        # Project each pair's partial sum up to the full n_cols; see the
+        # eager path's identical step.
+        R = np.where(J > 0, R * n_cols / np.maximum(J, 1.0), np.nan)
+    elif proportion:
+        # No column at all means no segregating site either: 0/0, undefined.
+        R = np.full_like(R, np.nan)
+    # else: no column at all -- R stays the all-zero matrix (a sum over no
+    # sites).
 
     if proportion:
         denom = seg_cols - float(seg_sites.get())
@@ -215,8 +280,8 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
         # the eager matrix built from the same store.
         mode = 'auto' if span_normalize is True else span_normalize
         span = streaming_matrix.get_span(mode)
-        if span > 0:
-            R = R / span
+        # NaN, not the raw sum, when the span is unmeasurable.
+        R = R / span if span > 0 else np.full_like(R, np.nan)
 
     if indexes is None:
         return R
@@ -471,14 +536,21 @@ def _relatedness_columns(hap, sample_sets, n_alleles, centre=True):
 
     Builds a matrix whose row ``k`` is sample set ``k``'s per-allele frequency.
     Writing ``p_k(a)`` for the frequency of allele ``a`` in set ``k`` and
-    ``pbar(a)`` for the mean of ``p_k(a)`` over the ``D`` sets, with ``centre``
-    the columns are ``p_k(a) - pbar(a)`` and the relatedness of a set pair
-    ``(i, j)`` is the sum over every allele and site of
-    ``(p_i(a) - pbar(a)) * (p_j(a) - pbar(a))``, i.e. ``(C @ C.T)[i, j]`` (the
-    product is formed in a later step); without ``centre`` the columns are the
-    raw ``p_k(a)`` and ``C @ C.T`` is the noncentred form. All alleles including
-    the reference are represented, and there is no variance standardization; a
-    caller wanting derived alleles only drops the ``col_allele == 0`` columns.
+    ``pbar(a)`` for the mean of ``p_k(a)`` over the sets that have a call at
+    that site, with ``centre`` the columns are ``p_k(a) - pbar(a)`` and the
+    relatedness of a set pair ``(i, j)`` is the sum over every allele and site
+    of ``(p_i(a) - pbar(a)) * (p_j(a) - pbar(a))``, i.e. ``(C @ C.T)[i, j]``
+    (the product is formed in a later step); without ``centre`` the columns
+    are the raw ``p_k(a)`` and ``C @ C.T`` is the noncentred form. All alleles
+    including the reference are represented, and there is no variance
+    standardization; a caller wanting derived alleles only drops the
+    ``col_allele == 0`` columns.
+
+    A set with no call at a site has an undefined ``p_k(a)``, so it is
+    excluded from the ``pbar(a)`` mean and its own column entry is forced to
+    0 (contributing nothing to any product), rather than entering either as a
+    fake 0 frequency; ``valid_mask`` names which sets are defined at each
+    column so a caller can tell, per pair, whether any column counted at all.
 
     Each present ``(site, allele)`` pair among the analyzed samples is one
     column; columns are ordered site-major, allele-minor. "Present" is relative
@@ -505,6 +577,8 @@ def _relatedness_columns(hap, sample_sets, n_alleles, centre=True):
         Site index each column belongs to.
     col_allele : cupy.ndarray, int64, shape (n_cols,)
         Allele index each column represents (0 is the reference).
+    valid_mask : cupy.ndarray, bool, shape (D, n_cols)
+        Whether set k has a call at that column's site.
 
     Notes
     -----
@@ -547,9 +621,14 @@ def _relatedness_columns(hap, sample_sets, n_alleles, centre=True):
         cnt = M @ carries                                # (D, n_cols)
         nvalid = M @ valid_cols
 
-    p = cp.where(nvalid > 0, cnt / nvalid, 0.0)          # per-set frequency
-    cols = p - p.mean(axis=0, keepdims=True) if centre else p
-    return cols, col_site, col_allele
+    valid_mask = nvalid > 0
+    p = cnt / cp.maximum(nvalid, 1.0)                    # per-set frequency, safe where invalid
+    if centre:
+        pbar = cp.nanmean(cp.where(valid_mask, p, cp.nan), axis=0, keepdims=True)
+        cols = cp.where(valid_mask, p - pbar, 0.0)
+    else:
+        cols = cp.where(valid_mask, p, 0.0)
+    return cols, col_site, col_allele, valid_mask
 
 
 # ---------------------------------------------------------------------------

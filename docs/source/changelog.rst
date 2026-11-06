@@ -41,7 +41,12 @@ results**, except where the next section says so.
   differ at, instead of doing arithmetic on the allele numbers.
   ``decomposition.pairwise_distance`` uses the same count.
 * Relatedness: added ``genetic_relatedness``, which matches
-  ``tskit``'s function of the same name.
+  ``tskit``'s function of the same name. Under missing data, a pair's sum
+  is rescaled to the full analyzed column count from the columns it
+  actually shares, so it does not shrink with that pair's own call rate;
+  a pair with no column called in both is NaN. An analysis with no
+  column at all is 0.0, unless ``proportion=True`` (0 segregating sites)
+  or the span is unmeasurable, either of which gives NaN.
 * Windowed analysis: every windowed statistic now gives the same answer
   as running the plain function on that window's variants.
 * LD statistics operate on only sites with two present alleles, but allow
