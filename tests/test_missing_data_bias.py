@@ -98,6 +98,15 @@ def simulation_results():
         "theta_w": _pop1(diversity.theta_w, span_normalize=False),
         "theta_h": _pop1(diversity.theta_h, span_normalize=False),
         "theta_l": _pop1(diversity.theta_l, span_normalize=False),
+        # Same four estimators, span-normalized (the default): exercises the
+        # missing-data rescale, since the physical span is the same at every
+        # missing rate (missingness never moves chrom_start/chrom_end) while
+        # the raw sum above was already shown unbiased, so any bias here is
+        # from the rescale alone.
+        "pi_rate": _pop1(diversity.pi),
+        "theta_w_rate": _pop1(diversity.theta_w),
+        "theta_h_rate": _pop1(diversity.theta_h),
+        "theta_l_rate": _pop1(diversity.theta_l),
         "tajd": _pop1(diversity.tajimas_d),
         "fay_wus_h": _pop1(diversity.fay_wus_h),
         "zeng_e": _pop1(diversity.zeng_e),
@@ -162,6 +171,7 @@ NEAR_ZERO = {"tajd", "fay_wus_h", "zeng_e", "achaz_tajd", "achaz_zeng_e"}
 # All stats that should be unbiased under MCAR
 ALL_UNBIASED = [
     "pi", "theta_w", "theta_h", "theta_l",
+    "pi_rate", "theta_w_rate", "theta_h_rate", "theta_l_rate",
     "tajd", "fay_wus_h", "zeng_e",
     "dxy", "fst_hudson", "fst_wc", "da",
     "achaz_pi", "achaz_watterson", "achaz_theta_h", "achaz_theta_l",
@@ -201,6 +211,152 @@ class TestExcludeConsistency:
         dxy_inc = divergence.dxy(hm, "pop1", "pop2", missing_data='include')
         dxy_exc = divergence.dxy(hm, "pop1", "pop2", missing_data='exclude')
         assert abs(dxy_inc - dxy_exc) < 1e-10
+
+
+class TestSpanNormalizedRescale:
+    """pi/theta_w/theta_h/theta_l rescale their raw sum to the sites where
+    the population has at least two calls before dividing by the span:
+    without it, a site a population's own missing calls dropped from the
+    sum stayed in the span denominator, reading as invariant rather than
+    unmeasured, and silently pulling the per-base rate down."""
+
+    def _pop_b(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var) * 10 + 1, 1, n_var * 10)
+        hm.sample_sets = {"b": list(range(hap.shape[0] - 4, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_complete_data_under_heavy_missingness(self):
+        # Half of population b's calls are missing at random; the fixed
+        # per-base pi must stay close to the complete-data value instead of
+        # shrinking toward it the way the raw sum alone would (unrescaled,
+        # it would be cut roughly in half).
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 20, 4000
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        pi_complete = diversity.pi(self._pop_b(hap.copy(), n_var), "b")
+
+        miss = hap.copy()
+        miss[-4:][rng.random((4, n_var)) < 0.5] = -1
+        pi_missing = diversity.pi(self._pop_b(miss, n_var), "b")
+
+        assert abs(pi_missing / pi_complete - 1) < 0.1
+
+    def test_raw_sum_untouched_by_rescale(self):
+        # span_normalize=False is explicitly out of scope for the rescale:
+        # the raw sum (and so the 0.0 it gives over an empty analysis) is
+        # unchanged, matching every other raw-sum statistic in the package.
+        rng = np.random.default_rng(1)
+        n_hap, n_var = 10, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._pop_b(hap, n_var)
+        for fn in (diversity.pi, diversity.theta_w, diversity.theta_h,
+                  diversity.theta_l):
+            assert np.isfinite(fn(hm, "b", span_normalize=False))
+
+    def test_nan_when_population_has_no_call_anywhere(self):
+        # Population b has zero calls at every site: no information at all,
+        # so the span-normalized rate is NaN, not the old silent 0.0; the
+        # raw sum stays the empty-sum 0.0.
+        rng = np.random.default_rng(2)
+        n_hap, n_var = 10, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:] = -1
+        hm = self._pop_b(hap, n_var)
+        for fn in (diversity.pi, diversity.theta_w, diversity.theta_h,
+                  diversity.theta_l):
+            assert np.isnan(fn(hm, "b"))
+            assert fn(hm, "b", span_normalize=False) == 0.0
+
+    def test_complete_data_unaffected(self):
+        # No missing data: n_sites_with_data == num_variants, so the
+        # rescale factor is exactly 1 and every value matches what the
+        # function returned before this fix.
+        rng = np.random.default_rng(3)
+        n_hap, n_var = 12, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._pop_b(hap, n_var)
+        for fn in (diversity.pi, diversity.theta_w, diversity.theta_h,
+                  diversity.theta_l):
+            rescaled = fn(hm, "b")
+            raw = fn(hm, "b", span_normalize=False)
+            np.testing.assert_allclose(rescaled, raw / hm.get_span(), rtol=1e-12)
+
+    def test_diversity_stats_eta_family_shares_the_rescale(self):
+        # eta1/eta1_star/minus_eta1/minus_eta1_star share _compute_thetas'
+        # has_data gate with pi/theta_w/theta_h/theta_l, so they pick up
+        # the same fix through diversity_stats' one _apply_span_normalize
+        # call site.
+        rng = np.random.default_rng(4)
+        n_hap, n_var = 10, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:] = -1
+        hm = self._pop_b(hap, n_var)
+        stats = diversity.diversity_stats(
+            hm, "b", statistics=["eta1", "eta1_star", "minus_eta1",
+                                 "minus_eta1_star"])
+        assert all(np.isnan(v) for v in stats.values())
+
+
+class TestWindowedSpanNormalizedRescale:
+    """The windowed scatter engine's pi/theta_w/theta_h/theta_l pick up the
+    same per-window rescale as the scalar functions above."""
+
+    def _hm(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        hm.sample_sets = {"b": list(range(hap.shape[0] - 4, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_scalar_under_missingness(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(5)
+        n_hap, n_var = 20, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:][rng.random((4, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+
+        stats = ["pi", "theta_w", "theta_h", "theta_l"]
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=stats, populations=["b"])
+        for stat, fn in zip(stats, (diversity.pi, diversity.theta_w,
+                                    diversity.theta_h, diversity.theta_l)):
+            np.testing.assert_allclose(df[stat].iloc[0], fn(hm, "b"), rtol=1e-9)
+
+    def test_raw_sum_untouched_by_rescale(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(6)
+        n_hap, n_var = 10, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["pi"], populations=["b"],
+                               span_normalize=False)
+        np.testing.assert_allclose(
+            df["pi"].iloc[0], diversity.pi(hm, "b", span_normalize=False))
+
+    def test_nan_when_population_has_no_call_in_window(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(7)
+        n_hap, n_var = 10, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:] = -1
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["pi", "theta_w"], populations=["b"])
+        assert np.isnan(df["pi"].iloc[0]) and np.isnan(df["theta_w"].iloc[0])
+
+    def test_complete_data_unaffected(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(8)
+        n_hap, n_var = 12, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["pi", "theta_w"])
+        np.testing.assert_allclose(df["pi"].iloc[0], diversity.pi(hm), rtol=1e-9)
+        np.testing.assert_allclose(df["theta_w"].iloc[0], diversity.theta_w(hm),
+                                   rtol=1e-9)
 
 
 class TestExcludeKeepsMatrixContext:
