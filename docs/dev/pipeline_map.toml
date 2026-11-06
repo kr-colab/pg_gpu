@@ -682,7 +682,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "with no variants, theta keys 0.0 and test keys NaN; tests NaN when S < 3 or n < 3; fay_wus_h has no minimum"
+undefined = "with no variants, theta keys and fay_wus_h 0.0, the other test keys NaN; tests NaN when S < 3 or n < 3; fay_wus_h has no minimum"
 parallel = ["diversity._compute_neutrality_test", "diversity.fay_wus_h"]
 notes = "Only theta keys are span-normalized; span_normalize also passes a get_span mode string through; the tests and fay_wus_h are computed inline, not by calling the scalar functions."
 
@@ -693,7 +693,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN with no variants; 0.0 with fewer than two haplotypes"
+undefined = "0.0 with no variants or fewer than two haplotypes"
 parallel = ["diversity.diversity_stats", "diversity.FrequencySpectrum.fay_wu_h", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
 notes = "Returns the raw pi - theta_H sum, but the windowed 'fay_wu_h' column divides by the window span."
 
@@ -757,7 +757,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN when Tajima's D or Fay-Wu H is NaN; 0.0 unless both are negative"
+undefined = "NaN when Tajima's D is NaN (Fay-Wu H is always defined); 0.0 unless both are negative"
 parallel = ["windowed_analysis._windowed_thetas_scatter"]
 notes = "Scalar multiplies D by the raw H; the scatter engine multiplies D by the span-normalized H."
 

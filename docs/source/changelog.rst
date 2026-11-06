@@ -509,6 +509,11 @@ Bug fixes
   ``regions`` is not passed alongside ``window_type='regions'`` and vice-versa.
   An error is raised when ``window_type='snp'`` or ``'regions'`` for a
   ``StreamingHaplotypeMatrix``.
+* ``fay_wus_h`` and the ``fay_wus_h`` key of ``diversity_stats`` gave
+  NaN for a region with no variants, while windowed ``fay_wu_h`` and
+  ``FrequencySpectrum.fay_wu_h`` gave 0.0. H is a difference of two thetas
+  that are both 0 there, and it has no variance term, so every path now
+  gives 0.0. ``normalized_fay_wus_h`` and ``zeng_dh`` stay NaN.
 * ``windowed_analysis`` ignored an unknown keyword argument when the
   scatter or fused engine served the request, so a misspelled name, or
   ``population=`` in place of ``populations=``, changed nothing and gave
