@@ -1090,14 +1090,17 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                    'theta_l': 'theta_l', 'eta1': 'eta1',
                    'eta1_star': 'eta1_star', 'minus_eta1': 'minus_eta1',
                    'minus_eta1_star': 'minus_eta1_star'}
-    # Neutrality tests: (w1, w2) weight pairs
+    # Neutrality tests that divide a theta difference by its variance:
+    # (w1, w2) weight pairs. They need a minimum S and n.
     test_specs = {
         'tajimas_d': ('pi', 'watterson'),
-        'fay_wus_h': ('pi', 'theta_h'),
         'normalized_fay_wus_h': ('pi', 'theta_h'),
         'zeng_e': ('theta_l', 'watterson'),
     }
-    needs_thetas = {s for s in statistics if s in theta_stats or s in test_specs}
+    # Plain theta differences: no variance term, so no minimum S or n.
+    difference_stats = {'fay_wus_h': ('pi', 'theta_h')}
+    needs_thetas = {s for s in statistics
+                    if s in theta_stats or s in test_specs or s in difference_stats}
 
     results = {}
 
@@ -1105,29 +1108,29 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
         matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
         if matrix.num_variants == 0:
             for s in needs_thetas:
-                results[s] = 0.0 if s in theta_stats else float('nan')
+                results[s] = float('nan') if s in test_specs else 0.0
         else:
             # Collect all needed estimators for a single _compute_thetas call
             estimators = set()
             for s in needs_thetas:
                 if s in theta_stats:
                     estimators.add(theta_stats[s])
-                elif s in test_specs:
-                    estimators.update(test_specs[s])
+                else:
+                    estimators.update(test_specs.get(s) or difference_stats[s])
             ct = _compute_thetas(matrix, tuple(estimators))
 
             for s in needs_thetas:
                 if s in theta_stats:
                     results[s] = _apply_span_normalize(
                         ct['thetas'][theta_stats[s]], matrix, span_normalize)
-                elif s in test_specs:
+                elif s in difference_stats:
+                    w1, w2 = difference_stats[s]
+                    results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
+                else:
                     w1, w2 = test_specs[s]
                     S = ct['S']
                     n = ct['n_harmonic_mean']
-                    if s == 'fay_wus_h':
-                        # No variance term, so no minimum S or n.
-                        results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
-                    elif S < 3 or n < 3:
+                    if S < 3 or n < 3:
                         results[s] = float('nan')
                     else:
                         var = _achaz_variance(w1, w2, n, S)
@@ -1181,8 +1184,6 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
         Fay and Wu's H value
     """
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
-    if matrix.num_variants == 0:
-        return float("nan")
     result = _compute_thetas(matrix, ('pi', 'theta_h'))
     return result['thetas']['pi'] - result['thetas']['theta_h']
 

@@ -679,3 +679,19 @@ def test_diversity_stats_key_order_matches_request():
                   ['theta_h', 'pi']):
         res = diversity.diversity_stats(hm, statistics=order)
         assert list(res) == order
+
+
+def test_fay_wus_h_no_variants_is_zero():
+    # H = pi - theta_H is 0 with no variants on every path; the
+    # variance-normalized H stays NaN.
+    rng = np.random.default_rng(1)
+    hap = rng.integers(0, 2, (8, 10)).astype(np.int8)
+    empty = HaplotypeMatrix(hap, np.arange(10) * 100 + 1, 1, 3000
+                            ).get_subset_from_range(1001, 2001)
+    assert diversity.fay_wus_h(empty) == 0.0
+    stats = diversity.diversity_stats(
+        empty, statistics=["fay_wus_h", "normalized_fay_wus_h", "pi"])
+    assert stats["fay_wus_h"] == 0.0 and stats["pi"] == 0.0
+    assert np.isnan(stats["normalized_fay_wus_h"])
+    assert np.isnan(diversity.normalized_fay_wus_h(empty))
+    assert diversity.FrequencySpectrum(empty).fay_wu_h() == 0.0

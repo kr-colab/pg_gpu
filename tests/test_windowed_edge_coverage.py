@@ -1,8 +1,8 @@
 """Edge-case coverage for windowed_analysis.py: zero-span and all-missing
 matrices, the SNP window-count edge, the populations-without-sample_sets
 warning, the empty-window callable name fallback, the less-common single-pop
-stat outputs, multiallelic max_daf, and the two-population exclude /
-normalization paths.
+stat outputs, multiallelic max_daf, the two-population exclude /
+normalization paths, and Fay & Wu's H on a window with no variants.
 """
 import warnings
 
@@ -201,3 +201,23 @@ def test_fused_two_pop_fst_wc():
                            statistics=["fst_wc"], populations=["p1", "p2"])
     assert any("fst_wc" in c for c in df.columns)
     assert len(df) >= 2
+
+
+
+# ── Fay & Wu's H on a window with no variants ──────────────────────────
+@pytest.mark.parametrize("missing_data", ["include", "exclude"])
+@pytest.mark.parametrize("statistics", [["fay_wu_h"], ["fay_wu_h", "zns"]])
+def test_fay_wu_h_empty_window_matches_scalar(statistics, missing_data):
+    # Variants only in [1, 1000]; the windows [1001, 2001) and [2001, 3000]
+    # are empty. ["fay_wu_h"] runs the scatter engine, the zns pair the
+    # fused. The one missing call makes 'exclude' drop a site.
+    rng = np.random.default_rng(1)
+    hap = rng.integers(0, 2, (8, 10)).astype(np.int8)
+    hap[0, 3] = -1
+    hm = HaplotypeMatrix(hap, np.arange(10) * 100 + 1, 1, 3000)
+    df = windowed_analysis(hm, 1000, statistics=statistics,
+                           missing_data=missing_data, span_normalize=False)
+    for start, end, value in zip(df["start"], df["end"], df["fay_wu_h"]):
+        sub = hm.get_subset_from_range(int(start), int(end))
+        assert value == pytest.approx(
+            diversity.fay_wus_h(sub, missing_data=missing_data))
