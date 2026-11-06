@@ -473,3 +473,16 @@ class TestGeneticRelatedness:
         Rp = relatedness.genetic_relatedness(hm, missing_data='exclude',
                                              proportion=True)
         assert np.all(np.isnan(Rp))
+
+    def test_unmeasurable_span_is_nan_not_raw_sum(self):
+        # chrom_end < chrom_start makes get_span('auto') return 0 even though
+        # real variant columns exist; span_normalize=True must give NaN here
+        # (matching _apply_span_normalize's convention elsewhere), not
+        # silently hand back the un-normalized raw sum.
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (6, 10)).astype(np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(1, 11), 5, 4)
+        assert hm.get_span('auto') == 0
+
+        R = relatedness.genetic_relatedness(hm, span_normalize=True)
+        assert np.all(np.isnan(R))

@@ -2078,7 +2078,7 @@ inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
 streaming = "native"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "NaN for a pair with no column called in both under include; under proportion=True, NaN when no site segregates (otherwise 0.0 if no column exists at all); the raw sum when span is 0"
+undefined = "NaN for a pair with no column called in both under include; under proportion=True, NaN when no site segregates (otherwise 0.0 if no column exists at all); NaN when span is 0"
 parallel = ["relatedness._stream_genetic_relatedness", "decomposition._centered_block"]
 notes = "Rejects GenotypeMatrix and StreamingGenotypeMatrix with a TypeError; proportion=True divides by segregating sites and ignores span_normalize."
 

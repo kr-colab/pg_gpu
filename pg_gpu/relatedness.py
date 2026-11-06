@@ -172,8 +172,8 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     elif span_normalize is not False:
         mode = 'auto' if span_normalize is True else span_normalize
         span = haplotype_matrix.get_span(mode)
-        if span > 0:
-            R = R / span
+        # NaN, not the raw sum, when the span is unmeasurable.
+        R = R / span if span > 0 else cp.full_like(R, cp.nan)
 
     if indexes is None:
         return R.get()
@@ -280,8 +280,8 @@ def _stream_genetic_relatedness(streaming_matrix, *, sample_sets, indexes,
         # the eager matrix built from the same store.
         mode = 'auto' if span_normalize is True else span_normalize
         span = streaming_matrix.get_span(mode)
-        if span > 0:
-            R = R / span
+        # NaN, not the raw sum, when the span is unmeasurable.
+        R = R / span if span > 0 else np.full_like(R, np.nan)
 
     if indexes is None:
         return R
