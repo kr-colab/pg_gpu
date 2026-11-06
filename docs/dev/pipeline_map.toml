@@ -2216,7 +2216,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "source intervals for the accessible mask that get_span('auto') counts"
-undefined = "skips comment, track, browser and short lines; chrom=None returns every contig"
+undefined = "skips comment, track, browser and short lines; chrom=None returns every contig; a chrom the BED lacks matches a BED contig by name without chr and case, with a ContigNameWarning"
 parallel = []
 notes = "Input is a plain-text BED path (open() with no gzip support); coordinates stay 0-based half-open."
 
@@ -2227,7 +2227,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "builds the AccessibleMask that get_span('auto') counts"
-undefined = "all-False mask, with no error, when the BED has no interval on chrom; ValueError for chrom=None on a BED with more than one contig"
+undefined = "all-False mask, with no error, when the BED has no interval on chrom; ValueError for chrom=None on a BED with more than one contig; chrom matches by name as in resolve_accessible_mask"
 parallel = []
 notes = "Input is a BED path; mask index k is 1-based position offset + k."
 
@@ -2238,7 +2238,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "builds the AccessibleMask that get_span('auto') counts"
-undefined = "raises ValueError when the BED has no interval on chrom, or for chrom=None on a BED with more than one contig (a one-contig BED needs no chrom)"
+undefined = "raises ValueError, listing the BED contigs, when the BED has no interval on chrom, or for chrom=None on a BED with more than one contig (a one-contig BED needs no chrom); a chrom the BED lacks matches a BED contig by name without chr and case, with a ContigNameWarning"
 parallel = ["windowed_analysis._compute_window_bases"]
 notes = "Takes a BED path, a numpy bool array (offset chrom_start, or 0) or an AccessibleMask; a cupy array is not caught and is opened as a path (TypeError)."
 

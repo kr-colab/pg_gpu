@@ -2,28 +2,40 @@
 
 Each path that resolves a BED takes the data's own contig (the zarr loaders,
 the streaming windowed path, the VCF loaders), or raises when it cannot know
-it and the BED has more than one contig.
+it and the BED has more than one contig. A BED that names the contig
+differently ('chr1' for '1') is matched by name with a ContigNameWarning.
 """
 import numpy as np
 import pytest
 
-from pg_gpu import GenotypeMatrix, HaplotypeMatrix
-from pg_gpu.accessible import resolve_accessible_mask
+from pg_gpu import ContigNameWarning, GenotypeMatrix, HaplotypeMatrix
+from pg_gpu.accessible import parse_bed, resolve_accessible_mask
 from pg_gpu.moments_ld import compute_ld_statistics
 from pg_gpu.windowed_analysis import windowed_analysis
 
 from .conftest import simulate_hm
 
 
+def _write_beds(tmp_path, prefix):
+    """One- and two-contig BEDs. The data's contig "1" is callable on
+    25001..75000; the second contig's intervals are what a merge would count
+    as contig 1's. ``prefix`` gives the contig names ("" or UCSC "chr")."""
+    one = tmp_path / f"{prefix}one.bed"
+    one.write_text(f"{prefix}1\t25000\t75000\n")
+    two = tmp_path / f"{prefix}two.bed"
+    two.write_text(f"{prefix}1\t25000\t75000\n{prefix}2\t0\t25000\n"
+                   f"{prefix}2\t75000\t100000\n")
+    return str(one), str(two)
+
+
 @pytest.fixture
 def beds(tmp_path):
-    """The data's contig "1" is callable on 25001..75000. The two-contig BED
-    adds contig "2" intervals that a merge would count as contig 1's."""
-    one = tmp_path / "one.bed"
-    one.write_text("1\t25000\t75000\n")
-    two = tmp_path / "two.bed"
-    two.write_text("1\t25000\t75000\n2\t0\t25000\n2\t75000\t100000\n")
-    return str(one), str(two)
+    return _write_beds(tmp_path, "")
+
+
+@pytest.fixture
+def chr_beds(tmp_path):
+    return _write_beds(tmp_path, "chr")
 
 
 @pytest.fixture
@@ -70,7 +82,7 @@ def test_windowed_analysis_eager_needs_chrom(vcz_store, beds):
     def eager():
         return HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
 
-    with pytest.raises(ValueError, match="pass chrom"):
+    with pytest.raises(ValueError, match="name the contig of the data with chrom="):
         _pi(eager(), two)
     got, want = _pi(eager(), two, chrom="1"), _pi(eager(), one)
     np.testing.assert_allclose(got["pi"], want["pi"], equal_nan=True)
@@ -108,3 +120,61 @@ def test_moments_ld_vcf_path_uses_vcf_contig(sample_vcf, tmp_path,
     want = compute_ld_statistics(accessible_bed=str(one), **kw)
     for g, w in zip(got["sums"], want["sums"]):
         np.testing.assert_allclose(g, w)
+    # UCSC contig names in the BED ('chr1' for the VCF's '1') match by name.
+    chr_bed = tmp_path / "chr.bed"
+    chr_bed.write_text("chr1\t0\t500\nchr2\t500\t1000\n")
+    with pytest.warns(ContigNameWarning):
+        got = compute_ld_statistics(accessible_bed=str(chr_bed), **kw)
+    for g, w in zip(got["sums"], want["sums"]):
+        np.testing.assert_allclose(g, w)
+
+
+def test_resolve_matches_contig_names_without_chr(chr_beds):
+    _, chr_two = chr_beds
+    # parse_bed applies the same name rule as the mask builders.
+    with pytest.warns(ContigNameWarning):
+        assert parse_bed(chr_two, chrom="1") == [("chr1", 25000, 75000)]
+    with pytest.warns(ContigNameWarning, match="'chr1'.*'1'"):
+        mask = resolve_accessible_mask(chr_two, 1, 100_000, chrom="1")
+    assert mask.total_accessible == 50_000
+    # No contig of that name, even without 'chr': the error lists the BED's.
+    with pytest.raises(ValueError, match="its contigs are: chr1, chr2"):
+        resolve_accessible_mask(chr_two, 1, 100_000, chrom="3")
+
+
+@pytest.mark.parametrize("which", [0, 1], ids=["one_contig", "two_contigs"])
+@pytest.mark.parametrize("cls", [HaplotypeMatrix, GenotypeMatrix])
+@pytest.mark.parametrize("streaming", ["never", "always"])
+def test_from_zarr_matches_chr_named_bed(vcz_store, chr_beds, cls, streaming,
+                                         which):
+    with pytest.warns(ContigNameWarning):
+        m = cls.from_zarr(vcz_store, streaming=streaming, chunk_bp=10_000,
+                          accessible_bed=chr_beds[which])
+    assert m.accessible_mask.count_accessible(1, 100_001) == 50_000
+
+
+def test_windowed_analysis_matches_chr_named_bed(vcz_store, beds, chr_beds):
+    want = _pi(HaplotypeMatrix.from_zarr(vcz_store, streaming="never"), beds[0])
+    stream = HaplotypeMatrix.from_zarr(vcz_store, streaming="always",
+                                       chunk_bp=10_000)
+    with pytest.warns(ContigNameWarning):
+        got = _pi(stream, chr_beds[1])
+    np.testing.assert_allclose(got["pi"], want["pi"], rtol=1e-6, equal_nan=True)
+    with pytest.warns(ContigNameWarning):
+        got = _pi(HaplotypeMatrix.from_zarr(vcz_store, streaming="never"),
+                  chr_beds[1], chrom="1")
+    np.testing.assert_allclose(got["pi"], want["pi"], equal_nan=True)
+
+
+def test_flat_allel_store_uses_its_chrom_column(tmp_path, beds):
+    # A flat scikit-allel store has no contig table; with one value in its
+    # CHROM column, that value names the contig.
+    import zarr
+    hm = simulate_hm(n_samples=20, seq_length=100_000, seed=42,
+                     mutation_model='binary')
+    path = str(tmp_path / "flat.allel.zarr")
+    hm.to_zarr(path, format="scikit-allel")
+    zarr.open(path, mode="a").create_array(
+        "variants/CHROM", data=np.full(hm.num_variants, "1", dtype="<U1"))
+    m = HaplotypeMatrix.from_zarr(path, accessible_bed=beds[1])
+    assert m.n_total_sites == 50_000

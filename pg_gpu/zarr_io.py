@@ -375,10 +375,15 @@ def read_genotypes_allel(store, region=None):
         if len(positions) == 0:
             raise ValueError(f"No variants in region {region}")
 
-    # A flat store has no contig table, so only a region names the contig.
+    # A region names the contig; without one, use the store's CHROM column
+    # when it holds a single contig.
+    chrom = parse_region(region)[0]
+    if chrom is None and 'variants/CHROM' in store:
+        names = np.asarray(store['variants/CHROM'])
+        if len(names) and (names == names[0]).all():
+            chrom = str(names[0])
     return {'gt': gt, 'positions': positions, 'samples': samples,
-            'variant_indices': variant_indices,
-            'chrom': parse_region(region)[0]}
+            'variant_indices': variant_indices, 'chrom': chrom}
 
 
 def read_genotypes_allel_grouped(store, region):
@@ -675,8 +680,9 @@ def read_genotypes(path, region=None):
     -------
     dict
         Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples',
-        'variant_indices', and 'chrom' (the contig read, or None for a flat
-        scikit-allel store read without a region).
+        'variant_indices', and 'chrom' (the contig read; None for a flat
+        scikit-allel store read without a region whose CHROM column holds
+        more than one contig, or none).
     """
     import zarr
     store = zarr.open(path, mode='r')

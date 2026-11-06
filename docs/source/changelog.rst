@@ -565,7 +565,9 @@ Bug fixes
   streaming does), streaming ``windowed_analysis`` the stream's, and
   ``compute_ld_statistics`` the VCF's. Elsewhere (``set_accessible_mask``,
   eager ``windowed_analysis``), a multi-contig BED with no ``chrom`` raises
-  ``ValueError``.
+  ``ValueError``. A BED that names the contig differently, such as ``chr1``
+  for the data's ``1``, is matched by name without ``chr`` and case, with a
+  ``ContigNameWarning``.
 * ``windowed_analysis`` ignored an unknown keyword argument when the
   scatter or fused engine served the request, so a misspelled name, or
   ``population=`` in place of ``populations=``, changed nothing and gave

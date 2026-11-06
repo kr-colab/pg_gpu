@@ -4,9 +4,12 @@ Provides BED file parsing and an AccessibleMask class that wraps a dense
 boolean array with offset-aware, O(1) range queries via prefix sums.
 """
 
+import warnings
+
 import cupy as cp
 import numpy as np
 
+from ._warnings import ContigNameWarning, _format_sample_list
 from .zarr_io import parse_region
 
 
@@ -141,7 +144,9 @@ def parse_bed(path, chrom=None):
         Path to a BED file (tab-delimited: chrom, start, end, ...).
         Lines starting with '#', 'track', or 'browser' are skipped.
     chrom : str, optional
-        If provided, only return intervals on this chromosome.
+        If provided, only return intervals on this chromosome. A name the
+        BED lacks matches a BED contig by name without a leading 'chr' and
+        case ('1' and 'chr1'), with a ContigNameWarning.
 
     Returns
     -------
@@ -149,7 +154,24 @@ def parse_bed(path, chrom=None):
         Parsed intervals as (chromosome, start, end) with 0-based half-open
         coordinates.
     """
-    intervals = []
+    return _read_bed(path, chrom)[0]
+
+
+def _contig_key(name):
+    """A contig name without a leading 'chr' and without case, so the UCSC
+    name ('chr1') and the Ensembl or NCBI name ('1') of a contig match."""
+    key = str(name).lower()
+    return key[3:] if key.startswith('chr') else key
+
+
+def _read_bed(path, chrom=None):
+    """``(intervals, contigs)`` from one pass over a BED file: the intervals
+    on ``chrom`` (every interval when it is None), and every contig the BED
+    names, in file order. ``chrom`` matches by name as ``parse_bed`` says."""
+    key = None if chrom is None else _contig_key(chrom)
+    contigs = {}
+    kept = []
+    last, keep = None, False
     with open(path) as f:
         for line in f:
             line = line.strip()
@@ -161,30 +183,39 @@ def parse_bed(path, chrom=None):
                 fields = line.split()
             if len(fields) < 3:
                 continue
-            c, s, e = fields[0], int(fields[1]), int(fields[2])
-            if chrom is None or c == chrom:
-                intervals.append((c, s, e))
-    return intervals
+            c = fields[0]
+            # BED lines come grouped by contig, so the name test runs once
+            # per contig, not once per line.
+            if c != last:
+                last = c
+                contigs[c] = None
+                keep = key is None or _contig_key(c) == key
+            if keep:
+                kept.append((c, int(fields[1]), int(fields[2])))
+    if chrom is not None:
+        chrom = str(chrom)
+        names = list(dict.fromkeys(c for c, _, _ in kept))
+        if chrom not in names and len(names) == 1:
+            warnings.warn(
+                f"BED contig {names[0]!r} does not match data contig "
+                f"{chrom!r} exactly; inferring that they are the same contig.",
+                ContigNameWarning, stacklevel=3)
+            chrom = names[0]
+        kept = [iv for iv in kept if iv[0] == chrom]
+    return kept, list(contigs)
 
 
 def _contig_intervals(path, chrom):
-    """BED intervals on ``chrom``, or on the BED's only contig when ``chrom``
-    is None.
-
-    Raises ValueError when ``chrom`` is None and the BED names more than one
-    contig: merging them would count other contigs' intervals as accessible
-    bases of the data.
-    """
-    intervals = parse_bed(path, chrom=chrom)
-    if chrom is None:
-        contigs = sorted({c for c, _, _ in intervals})
-        if len(contigs) > 1:
-            shown = contigs if len(contigs) <= 5 else contigs[:5] + ['...']
-            raise ValueError(
-                f"BED file {path} has intervals on {len(contigs)} contigs "
-                f"({', '.join(shown)}); pass chrom (or a region on a loader) "
-                "to name the contig of the data.")
-    return intervals
+    """``_read_bed(path, chrom)``, but a BED with more than one contig raises
+    ValueError when ``chrom`` is None: merging them would count other
+    contigs' intervals as accessible bases of the data."""
+    intervals, contigs = _read_bed(path, chrom)
+    if chrom is None and len(contigs) > 1:
+        raise ValueError(
+            f"BED file {path} has intervals on {len(contigs)} contigs "
+            f"({_format_sample_list(contigs, range(len(contigs)), limit=5)}); "
+            "name the contig of the data with chrom= or region=.")
+    return intervals, contigs
 
 
 def bed_to_mask(path, chrom, length, offset=0):
@@ -214,7 +245,7 @@ def bed_to_mask(path, chrom, length, offset=0):
     positions s+1 through e (inclusive). Mask index k represents 1-based
     position offset + k.
     """
-    return _intervals_to_mask(_contig_intervals(path, chrom), length, offset)
+    return _intervals_to_mask(_contig_intervals(path, chrom)[0], length, offset)
 
 
 def _intervals_to_mask(intervals, length, offset):
@@ -259,10 +290,12 @@ def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):
     # Treat as file path. Build the mask over the union of [chrom_start,
     # chrom_end] and the BED's own extent so no accessible bases are lost
     # when the matrix's variant range is narrower than the BED.
-    intervals = _contig_intervals(mask_or_path, chrom)
+    intervals, contigs = _contig_intervals(mask_or_path, chrom)
     if not intervals:
+        where = "" if chrom is None else f" for contig {str(chrom)!r}"
         raise ValueError(
-            f"No BED intervals found for chrom={chrom!r} in {mask_or_path}")
+            f"No BED intervals found{where} in {mask_or_path}; its contigs "
+            f"are: {_format_sample_list(contigs, range(len(contigs)), limit=5) or 'none'}.")
     # 1-based inclusive bounds of the BED (BED is 0-based half-open: a record
     # (s, e) covers 1-based positions s+1..e).
     bed_min = min(s + 1 for _, s, _ in intervals)
