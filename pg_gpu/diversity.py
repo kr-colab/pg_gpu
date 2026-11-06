@@ -30,15 +30,9 @@ def _apply_span_normalize(value, matrix, span_normalize, n_sites_with_data=None)
         True: auto-detect best span. False: return raw value.
         String: explicit mode passed to get_span() (internal use).
     n_sites_with_data : int, optional
-        Count of sites that actually contributed to ``value`` (the rest
-        contributed 0, indistinguishable from a true invariant site). When
-        given and ``span_normalize`` is not False, ``value`` is first
-        rescaled by ``matrix.num_variants / n_sites_with_data``, correcting
-        for sites a population's own missing calls silently dropped from
-        the sum, before it is divided by the span -- the same sites stay in
-        that denominator either way. NaN when zero sites had data. Omitted
-        by callers (``dxy``, ``da``) that have not had this correction
-        applied yet.
+        When given, rescales ``value`` by
+        ``matrix.num_variants / n_sites_with_data`` before the span divide
+        (NaN when zero).
     """
     if span_normalize is False:
         return float(value.get() if hasattr(value, 'get') else value)
@@ -293,9 +287,7 @@ def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')
         'thetas': dict of estimator name -> float (raw sum)
         'S': int, number of segregating sites
         'n_harmonic_mean': int, harmonic mean of per-site sample sizes
-        'n_sites_with_data': int, count of sites with n_valid >= 2 -- every
-            estimator above is 0 at the rest, so this is the one count that
-            rescales any of them (see _apply_span_normalize)
+        'n_sites_with_data': int, count of sites with n_valid >= 2
     """
     ac, n_valid, n_hap = _prepare_allele_counts(matrix)
 
@@ -887,13 +879,10 @@ def pi(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator (accessible
-        bases if mask set, else genomic span). The raw sum is also
-        rescaled to the sites where the population has at least two calls,
-        before dividing by the span, since the rest contribute 0 to the
-        sum indistinguishably from a true invariant site; NaN when no site
-        has two calls.
-        ``False``: return the raw sum, unrescaled.
+        ``True`` (default): per-base nucleotide diversity, from sites
+        where the population has at least two calls; NaN when no site
+        does.
+        ``False``: the raw sum.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
@@ -926,10 +915,9 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator. The raw sum is
-        also rescaled to the sites where the population has at least two
-        calls before dividing by the span; NaN when no site has two calls.
-        ``False``: return the raw sum, unrescaled.
+        ``True`` (default): per-base Watterson's theta, from sites where
+        the population has at least two calls; NaN when no site does.
+        ``False``: the raw sum.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
@@ -1097,11 +1085,10 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
         ``normalized_fay_wus_h``, ``zeng_e``. Also ``segregating_sites``,
         ``singletons``, ``n_variants``, ``haplotype_diversity``.
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator. ``pi``,
-        ``theta_w``, ``theta_h``, ``theta_l`` and the eta-family are also
-        rescaled to the sites where the population has at least two calls
-        before dividing by the span; NaN when no site has two calls.
-        ``False``: return the raw sums, unrescaled.
+        ``True`` (default): per-base rates for ``pi``, ``theta_w``,
+        ``theta_h``, ``theta_l`` and the eta-family, from sites where the
+        population has at least two calls; NaN when no site does.
+        ``False``: the raw sums.
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
@@ -1133,10 +1120,8 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     if needs_thetas:
         matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
         # Collect all needed estimators for a single _compute_thetas call.
-        # _compute_thetas tolerates a 0-variant matrix (every sum is 0, S and
-        # n_sites_with_data are 0), so one path covers both degenerate and
-        # ordinary matrices: theta_stats then rescale to NaN, test_specs
-        # already gate on S < 3, and difference_stats stays 0 - 0 = 0.
+        # _compute_thetas tolerates a 0-variant matrix, so this also covers
+        # the empty case.
         estimators = set()
         for s in needs_thetas:
             if s in theta_stats:
@@ -1289,10 +1274,9 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator. The raw sum is
-        also rescaled to the sites where the population has at least two
-        calls before dividing by the span; NaN when no site has two calls.
-        ``False``: return the raw sum, unrescaled.
+        ``True`` (default): per-base theta_H, from sites where the
+        population has at least two calls; NaN when no site does.
+        ``False``: the raw sum.
     missing_data : str
         'include' - per-site sample sizes
         'exclude' - only sites with no missing data
@@ -1324,10 +1308,9 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator. The raw sum is
-        also rescaled to the sites where the population has at least two
-        calls before dividing by the span; NaN when no site has two calls.
-        ``False``: return the raw sum, unrescaled.
+        ``True`` (default): per-base theta_L, from sites where the
+        population has at least two calls; NaN when no site does.
+        ``False``: the raw sum.
     missing_data : str
         'include' - per-site sample sizes
         'exclude' - only sites with no missing data
