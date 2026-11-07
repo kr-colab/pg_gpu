@@ -60,6 +60,12 @@ A population with no called gametes at a site has no allele frequency
 there, so ``patterson_d`` excludes such sites entirely (both terms zero)
 rather than treating the frequency as 0.
 
+``fst_hudson``, ``fst_tskit``, ``da`` and ``pbs`` include sites where each
+population has at least two copies, because both involve a within-population
+term (and are NaN if an involved population has a single haplotype in the
+matrix). Note that ``dxy`` has no within-population term and only needs one
+copy per population.
+
 Supported Statistics
 --------------------
 

@@ -71,14 +71,13 @@ def dxy_components(pop1_haps, pop2_haps):
         Number of sites with data in both populations.
     """
     ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
+    dxy_per_site = _dxy_per_site_from_counts(ac1, nv1, ac2, nv2)
     nv1 = nv1.astype(cp.float64)
     nv2 = nv2.astype(cp.float64)
-    same = cp.sum(ac1.astype(cp.float64) * ac2.astype(cp.float64), axis=1)
     site_comps = nv1 * nv2
-    site_diffs = site_comps - same
 
     usable = (nv1 > 0) & (nv2 > 0)
-    total_diffs = float(cp.sum(site_diffs[usable]).get())
+    total_diffs = float(cp.sum((dxy_per_site * site_comps)[usable]).get())
     total_comps = float(cp.sum(site_comps[usable]).get())
     n_sites = int(cp.sum(usable).get())
 
