@@ -2,11 +2,11 @@
 every call site that raises it.
 
 Every warned case checks that the warning is emitted exactly once and that it
-points at the line that made the call: same file and same line. The file check
-catches a public function that reaches a warned function without being
-decorated itself (the inner warning would point inside pg_gpu); the line check
-catches a stacklevel that is too large, which would land on a helper in this
-file.
+points at the line that made the call: same file and same line. Warnings are
+attributed with ``skip_file_prefixes`` to the first frame outside pg_gpu, so
+these checks pin that attribution; the exactly-once check catches a public
+function that reaches more than one warned function without being decorated
+itself.
 """
 import importlib
 import warnings
@@ -102,16 +102,22 @@ def _caught(block):
     return [w for w in caught if issubclass(w.category, UnphasedDataWarning)]
 
 
+def _one_warning(block, context):
+    """Return the one warning ``block`` emits, checking its context prefix."""
+    got = _caught(block)
+    assert len(got) == 1, [str(w.message) for w in got]
+    assert str(got[0].message).startswith(context), str(got[0].message)
+    return got[0]
+
+
 def _warns_once(block, context, origin=None):
     """``origin`` is the lambda whose body makes the warned call; it defaults
     to ``block``. The warning must point at that lambda's (first) line."""
-    got = _caught(block)
-    assert len(got) == 1, [str(w.message) for w in got]
-    msg = str(got[0].message)
-    assert msg.startswith(context), msg
+    w = _one_warning(block, context)
+    msg = str(w.message)
     line = (origin or block).__code__.co_firstlineno
-    assert (got[0].filename, got[0].lineno) == (__file__, line), (
-        got[0].filename, got[0].lineno, line, msg)
+    assert (w.filename, w.lineno) == (__file__, line), (
+        w.filename, w.lineno, line, msg)
     return msg
 
 
@@ -128,15 +134,20 @@ def test_is_userwarning_subclass():
     assert issubclass(UnphasedDataWarning, UserWarning)
 
 
+# The stand-ins below live in this file, outside pg_gpu, so the warning is
+# attributed to their own ``_warn_unphased`` line rather than their caller;
+# these tests check the message and count only.
+
 def test_message_carries_filter_phrase_and_class_name(hm, stream):
     # pyproject.toml's filter keys on this phrase.
     @_phase_dependent
     def f(m):
         _warn_unphased(m, context="f", alternative="use g")
-    msg = _warns_once(lambda: f(hm), "f")
+    msg = str(_one_warning(lambda: f(hm), "f").message)
     assert "depends on haplotype phase" in msg
     assert "this HaplotypeMatrix" in msg and "Use g." in msg
-    assert "this StreamingHaplotypeMatrix" in _warns_once(lambda: f(stream), "f")
+    assert "this StreamingHaplotypeMatrix" in str(
+        _one_warning(lambda: f(stream), "f").message)
 
 
 def test_helper_silent_for_phased_gm_and_array(phased, gm):
@@ -180,7 +191,7 @@ def test_nested_decorated_warns_once_from_outer(hm):
         _warn_unphased(m, context="outer")
         inner(m)
 
-    _warns_once(lambda: outer(hm), "outer")
+    _one_warning(lambda: outer(hm), "outer")
 
 
 @pytest.mark.parametrize("rows, splits", [

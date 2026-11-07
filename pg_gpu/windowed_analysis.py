@@ -1451,11 +1451,8 @@ def _check_complete_haplotypes(df, matrix, populations, min_complete):
         pop = pop_of[suffix]
         n_rows = (len(divergence._get_population_indices(matrix, pop))
                   if pop is not None else matrix.num_haplotypes)
-        # One frame each for the helper and this function, so the warning
-        # points at the caller of windowed_analysis.
         _warn_few_complete_haplotypes(n_complete, n_rows,
-                                      context="windowed_analysis",
-                                      stacklevel=4)
+                                      context="windowed_analysis")
 
 
 def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
@@ -3013,12 +3010,9 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             if need_wc:
                 # The kernel pairs consecutive rows into individuals for
                 # Weir-Cockerham; the gamete statistics take any row list.
-                # stacklevel 4: this closure adds a frame over the direct
-                # call sites the default points past.
                 from ._warnings import check_paired_rows
                 label = pop if isinstance(pop, str) else "row list"
-                check_paired_rows(rows, f"windowed fst_wc({label})",
-                                  stacklevel=4)
+                check_paired_rows(rows, f"windowed fst_wc({label})")
             return cp.asarray(rows, dtype=cp.int64)
 
         orig_hap = haplotype_matrix.haplotypes

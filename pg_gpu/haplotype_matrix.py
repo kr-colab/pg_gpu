@@ -1374,10 +1374,8 @@ class HaplotypeMatrix:
         out = self._keep_sites(cp.where(biallelic)[0])
         if warn_context is not None:
             from ._warnings import _warn_biallelic_only
-            # One frame deeper than a direct caller, so the warning points at
-            # whoever called the biallelic-only operation.
             _warn_biallelic_only(self.num_variants - out.num_variants,
-                                 context=warn_context, stacklevel=4)
+                                 context=warn_context)
         return out
 
     def restrict_to_segregating(self) -> "HaplotypeMatrix":
@@ -2150,9 +2148,8 @@ class HaplotypeMatrix:
         reports how many such sites were tallied this way.
         """
         from ._warnings import _warn_biallelic_only
-        # Two frames above this helper: the public method, then its caller.
         _warn_biallelic_only(int((~self._biallelic_mask()).sum()), context=context,
-                             stacklevel=4, action="tallied as highest allele vs. the rest")
+                             action="tallied as highest allele vs. the rest")
         return self._biallelic_indicator()
 
     def _pop_indices(self, *pops):
