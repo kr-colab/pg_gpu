@@ -559,6 +559,18 @@ Bug fixes
   step built a zero-column ``GenotypeMatrix`` and the constructor rejects
   that. They now give the same no-pair result (NaN) as every other
   undefined case there, without constructing the empty matrix.
+* A BED file with more than one contig was merged into one mask when no
+  contig was named, so other contigs' intervals counted as accessible
+  bases of the data. Eager ``from_zarr`` now takes the store's contig (as
+  streaming does), streaming ``windowed_analysis`` the stream's, and
+  ``compute_ld_statistics`` the VCF's. Elsewhere (``set_accessible_mask``,
+  eager ``windowed_analysis``), a multi-contig BED with no ``chrom`` raises
+  ``ValueError``. A BED that names the contig differently, such as ``chr1``
+  for the data's ``1``, is matched by name without ``chr`` and case, with a
+  ``ContigNameWarning``. ``from_vcf`` and ``from_zarr`` with
+  ``accessible_bed`` on data with more than one contig and no ``region``
+  raise ``ValueError``; ``from_vcf`` used to take the first variant's
+  contig and drop the other contigs' intervals.
 * ``windowed_analysis`` ignored an unknown keyword argument when the
   scatter or fused engine served the request, so a misspelled name, or
   ``population=`` in place of ``populations=``, changed nothing and gave
