@@ -15,6 +15,7 @@ from typing import Union, Optional, Dict, Callable
 from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import population_rows
+from ._warnings import _phase_dependent, _warn_unphased
 
 
 def _apply_span_normalize(value, matrix, span_normalize):
@@ -1052,6 +1053,7 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
     return int(cp.sum((derived == 1) & (derived < n_valid[:, None])).get())
 
 
+@_phase_dependent
 def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                    population: Optional[Union[str, list]] = None,
                    statistics: list = ['pi', 'theta_w', 'tajimas_d'],
@@ -1059,6 +1061,9 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                    missing_data: str = 'include') -> Dict[str, float]:
     """
     Compute multiple diversity statistics at once.
+
+    Depends on haplotype phase when ``'haplotype_diversity'`` is requested; see
+    :doc:`phasing`.
 
     Parameters
     ----------
@@ -1149,6 +1154,8 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
             m = _prepare_matrix(haplotype_matrix, population, missing_data)
             results['n_variants'] = m.num_variants
         elif stat == 'haplotype_diversity':
+            _warn_unphased(haplotype_matrix,
+                           context="diversity_stats (haplotype_diversity)")
             results['haplotype_diversity'] = haplotype_diversity(haplotype_matrix, population, missing_data)
         else:
             raise ValueError(f"Unknown statistic: {stat}")
@@ -1188,6 +1195,7 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
     return result['thetas']['pi'] - result['thetas']['theta_h']
 
 
+@_phase_dependent
 def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
                        population: Optional[Union[str, list]] = None,
                        missing_data: str = 'include') -> float:
@@ -1196,6 +1204,8 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
 
     Haplotype diversity is defined as n / (n - 1) * (1 - sum(p_i^2)), where
     p_i is the frequency of the i-th distinct haplotype among n haplotypes.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -1217,6 +1227,8 @@ def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
         Haplotype diversity value. NaN for fewer than two haplotypes,
         where n / (n - 1) is undefined.
     """
+    _warn_unphased(haplotype_matrix, context="haplotype_diversity")
+
     from ._haplotype_groups import frequencies
 
     haplotypes = _haplotypes_for_grouping(haplotype_matrix, population,
@@ -1465,10 +1477,13 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     return float(cp.max(freq).get())
 
 
+@_phase_dependent
 def haplotype_count(haplotype_matrix: HaplotypeMatrix,
                     population: Optional[Union[str, list]] = None,
                     missing_data: str = 'include'):
     """Count distinct haplotypes.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -1484,6 +1499,8 @@ def haplotype_count(haplotype_matrix: HaplotypeMatrix,
     -------
     int, or float NaN when ``'include'`` finds no complete haplotype
     """
+    _warn_unphased(haplotype_matrix, context="haplotype_count")
+
     from ._haplotype_groups import haplotype_groups
 
     haplotypes = _haplotypes_for_grouping(haplotype_matrix, population,

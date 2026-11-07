@@ -110,7 +110,9 @@ def _load_data(small):
             f"this file.")
     print(f"Loading {path.name} ...", flush=True)
     t0 = time.perf_counter()
-    hm = HaplotypeMatrix.from_zarr(str(path))
+    # The Ag1000G haplotypes are phased; Garud's H, iHS and haplotype r^2
+    # below need that.
+    hm = HaplotypeMatrix.from_zarr(str(path), phased=True)
     print(f"  loaded in {time.perf_counter() - t0:.2f}s; "
           f"{hm.haplotypes.shape[0]} haplotypes, "
           f"{hm.haplotypes.shape[1]:,} variants, "
@@ -209,7 +211,7 @@ def _subsample_for_ld(hm, pos, gn, n_snps, mac_min):
     else:
         hap_sub = hap[:, idx]
     hm_sub = HaplotypeMatrix(
-        hap_sub, pos_blk, hm.chrom_start, hm.chrom_end)
+        hap_sub, pos_blk, hm.chrom_start, hm.chrom_end, phased=hm.phased)
     return hm_sub, pos_blk, gn_blk
 
 

@@ -374,7 +374,7 @@ class TestProducerThreadErrorPropagation:
         flaky = FlakySource(source)
         fetcher = HostChunkFetcher(flaky)
         smatrix = StreamingHaplotypeMatrix(flaky, fetcher, chunk_bp=5_000,
-                                           prefetch=1)
+                                           prefetch=1, phased=False)
         with pytest.raises(RuntimeError, match="synthetic producer error"):
             for _ in smatrix.iter_gpu_chunks():
                 pass

@@ -30,6 +30,7 @@ import cupy as cp
 
 
 def build_haplotype_matrix(gt, pos, *,
+                           phased,
                            chrom_start=None, chrom_end=None,
                            sample_sets=None, n_total_sites=None,
                            samples=None, accessible_mask=None,
@@ -83,7 +84,7 @@ def build_haplotype_matrix(gt, pos, *,
         chrom_start=chrom_start, chrom_end=chrom_end,
         sample_sets=sample_sets, n_total_sites=n_total_sites,
         samples=samples, accessible_mask=accessible_mask,
-        allow_empty=allow_empty
+        allow_empty=allow_empty, phased=phased,
     )
 
 

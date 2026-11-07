@@ -7,21 +7,33 @@ Basic Usage
 Loading Data
 ~~~~~~~~~~~~
 
-The primary container, ``HaplotypeMatrix``, holds *phased* haplotypes
-(one row per haplotype, two rows per diploid sample). When loaded from a
-diploid VCF, the two haploid copies of each sample become two rows; the
-loader does not check whether your data are actually phased, so if the
-VCF contains unphased calls the resulting matrix is best thought of as a
-random-phasing of the genotypes. For unphased / diploid-aware analyses,
-use ``GenotypeMatrix`` (see "Phased to Unphased" below).
+The primary data structure, ``HaplotypeMatrix``, holds haplotypes (one row
+per haplotype, with variants as columns). When loaded from a diploid
+VCF, the two haploid copies of each sample become two adjacent rows.
+
+The ``phased`` flag records whether the rows represent true phased
+haplotypes or a pseudo-phased (arbitrary assignment of alleles within
+each individual). The loaders default to ``phased=False`` for VCF and
+Zarr, but ``from_ts`` defaults to ``phased=True`` for tree sequences. 
+You can override it at load time or change it later with ``set_phased()`` 
+or ``set_unphased()``. Phase-dependent statistics warn on an unphased matrix, 
+and haploid data should always be read with ``phased=True``; see :doc:`phasing`.
+ Note some analyses use genotype dosages (0, 1, 2 or -1 for missing), in which case
+you should use ``GenotypeMatrix`` (see "HaplotypeMatrix vs GenotypeMatrix" below).
 
 .. code-block:: python
 
    from pg_gpu import HaplotypeMatrix
 
    # From VCF file (sample names are stored automatically). Diploid VCFs
-   # are loaded as 2*n_samples haplotypes -- treated as phased.
+   # are loaded as 2*n_samples haplotypes -- treated as unphased by default..
    h = HaplotypeMatrix.from_vcf("data.vcf.gz")
+
+   # If the VCF is phased, you can set it at load time:
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz", phased=True)
+
+   # Or change it after loading:
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz").set_phased()
 
    # Load a region; both ends are inclusive, as in samtools
    # (requires tabix index)
@@ -105,8 +117,9 @@ form.
 
 .. code-block:: python
 
-   # Save to VCZ format (default)
-   h = HaplotypeMatrix.from_vcf("data.vcf.gz")
+   # Save to VCZ format (default). The flag isn't stored: pass phased=True
+   # again when reading the store back.
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz", phased=True)
    h.to_zarr("data.zarr", contig_name="chr1")
 
    # Or legacy scikit-allel format
@@ -502,10 +515,12 @@ Supported fused windowed statistics:
 
 - **Single-pop**: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``, ``theta_h``, ``fay_wu_h``, ``max_daf``
 - **Two-pop**: ``fst``, ``fst_hudson``, ``fst_wc``, ``dxy``, ``da``
-- **Selection**: ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``, ``haplotype_count``, ``mean_nsl``
-- **LD**: ``zns``, ``omega``, ``mu_ld``
-- **diploSHIC / RAiSD**: ``mu_var``, ``mu_sfs``, ``daf_hist``, ``snp_dist_mean``, ``snp_dist_var``, ``snp_dist_min``, ``snp_dist_max``, ``dist_var``, ``dist_skew``, ``dist_kurt``
-- **Structure**: ``local_pca`` (lostruct); returns a ``LocalPCAResult`` rather than a scalar-stat DataFrame. See the `Local PCA / lostruct`_ section.
+- **Selection**: ``garud_h1``†, ``garud_h12``†, ``garud_h123``†, ``garud_h2h1``†, ``haplotype_count``†, ``mean_nsl``†
+- **LD**: ``zns``†, ``omega``†, ``mu_ld``†
+- **diploSHIC / RAiSD**: ``mu_var``, ``mu_sfs``, ``daf_hist``, ``snp_dist_mean``, ``snp_dist_var``, ``snp_dist_min``, ``snp_dist_max``, ``dist_var``†, ``dist_skew``†, ``dist_kurt``†
+- **Structure**: ``local_pca``† (lostruct); returns a ``LocalPCAResult`` rather than a scalar-stat DataFrame. See the `Local PCA / lostruct`_ section.
+
+†: needs phased haplotypes, see :doc:`phasing`.
 
 The single-pass fused kernels need ``missing_data='include'``. With any
 other setting pg_gpu falls back to a slower route that computes the
@@ -527,18 +542,21 @@ directly:
        statistics=('pi', 'theta_w', 'tajimas_d'),
    )
 
-Phased to Unphased
-~~~~~~~~~~~~~~~~~~
+HaplotypeMatrix vs GenotypeMatrix
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Use ``GenotypeMatrix`` for unphased diploid genotypes (entries 0 / 1 / 2
-counting alt alleles). Many functions auto-dispatch on input type, so
-the same call works on either container:
+In ``HaplotypeMatrix``, rows are haplotypes (0/1 per allele, two rows 
+per diploid individual). In ``GenotypeMatrix``, rows are individuals 
+(0/1/2 dosage). Use ``GenotypeMatrix`` only for statistics which need
+dosage encoding. Many functions auto-dispatch on input type, so the same
+call works on either a ``HaplotypeMatrix`` or a ``GenotypeMatrix``.
 
 .. code-block:: python
 
    from pg_gpu import GenotypeMatrix, distance_stats
 
-   # Convert from haploid (pairs consecutive haplotypes)
+   # Convert to dosages: each pair of consecutive haplotype rows is
+   # summed into one individual's 0/1/2 alternate-allele count.
    gm = GenotypeMatrix.from_haplotype_matrix(h)
 
    # Same functions work on both types
@@ -548,6 +566,11 @@ the same call works on either container:
 
    # Distance distribution moments
    var, skew, kurt = distance_stats.dist_moments(gm)
+
+Note that ``gm.to_haplotype_matrix()`` always produces an unphased
+(``phased=False``) matrix, because the conversion assigns heterozygous
+sites as ``(0, 1)`` arbitrarily. See :doc:`phasing` for which statistics
+that affects.
 
 Custom Theta via FrequencySpectrum
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -14,6 +14,8 @@ chunk geometry is known, but its class is defined here with the others.
 """
 
 import collections
+import contextvars
+import functools
 import gzip
 import os
 import warnings
@@ -21,6 +23,11 @@ import warnings
 import numpy as np
 
 ISSUE_URL = "https://github.com/kr-colab/pg_gpu/issues/121"
+
+# Passed as ``skip_file_prefixes`` so a warning is attributed to the first
+# frame outside the pg_gpu package (the user's call), however many internal
+# frames (helpers, ``_phase_dependent`` wrappers, closures) sit between.
+_PKG_PREFIXES = (os.path.dirname(os.path.abspath(__file__)) + os.sep,)
 
 
 # ── Warning categories ──────────────────────────────────────────────────────
@@ -204,12 +211,11 @@ def paired_rows_problem(rows):
     return None
 
 
-def check_paired_rows(rows, context, stacklevel=3):
+def check_paired_rows(rows, context):
     """Warn when a population row list cannot pair into diploid individuals.
 
-    See ``paired_rows_problem`` for the rule. ``stacklevel`` points the
-    warning at the caller's caller by default; call sites nested one deeper
-    pass 4.
+    See ``paired_rows_problem`` for the rule. The warning points at the
+    first frame outside pg_gpu.
     """
     problem = paired_rows_problem(rows)
     if problem is not None:
@@ -219,7 +225,7 @@ def check_paired_rows(rows, context, stacklevel=3):
             f"and every loader writes sample i to rows 2i and 2i + 1, so "
             f"this set gives them something other than the individuals it "
             f"describes.",
-            UnpairedRowsWarning, stacklevel=stacklevel)
+            UnpairedRowsWarning, skip_file_prefixes=_PKG_PREFIXES)
 
 
 def check_paired_rows_for_populations(sample_sets, pop1, pop2, context):
@@ -248,7 +254,7 @@ class BiallelicOnlyWarning(UserWarning):
     """
 
 
-def _warn_biallelic_only(n_dropped, *, context, stacklevel=3, action="dropped"):
+def _warn_biallelic_only(n_dropped, *, context, action="dropped"):
     """Emit ``BiallelicOnlyWarning`` that ``context`` handled ``n_dropped`` sites.
 
     A no-op when ``n_dropped`` is 0, so callers can pass a raw count
@@ -269,8 +275,72 @@ def _warn_biallelic_only(n_dropped, *, context, stacklevel=3, action="dropped"):
         "    import warnings\n"
         "    from pg_gpu import BiallelicOnlyWarning\n"
         "    warnings.filterwarnings('ignore', category=BiallelicOnlyWarning)",
-        BiallelicOnlyWarning, stacklevel=stacklevel,
+        BiallelicOnlyWarning, skip_file_prefixes=_PKG_PREFIXES,
     )
+
+
+class UnphasedDataWarning(UserWarning):
+    """Warn when a phase-dependent statistic uses data not marked phased.
+
+    Results may depend on arbitrary haplotype assignments. Mark phased data
+    with ``set_phased()`` or use a phase-independent alternative.
+    """
+
+
+# Nesting depth of ``_phase_dependent`` calls in the current context. A
+# phase-dependent function called by another one runs at depth > 1, and
+# ``_warn_unphased`` stays silent there, so one user call warns once.
+_phase_depth = contextvars.ContextVar('_phase_depth', default=0)
+
+
+def _phase_dependent(func):
+    """Track nested calls so only the outermost phase-dependent call warns.
+
+    Decorated functions must not be generators; wrap lazy work separately.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        token = _phase_depth.set(_phase_depth.get() + 1)
+        try:
+            return func(*args, **kwargs)
+        finally:
+            _phase_depth.reset(token)
+    return wrapper
+
+
+def _outside_phase_guard(func, *args, **kwargs):
+    """Run a user callable at phase-guard depth zero."""
+    token = _phase_depth.set(0)
+    try:
+        return func(*args, **kwargs)
+    finally:
+        _phase_depth.reset(token)
+
+
+def _warn_unphased(matrix, *, context, alternative=None):
+    """Warn when an unphased matrix reaches a phase-dependent entry point."""
+    if _phase_depth.get() > 1 or getattr(matrix, 'phased', True) is not False:
+        return
+    route = f"{alternative[0].upper()}{alternative[1:]}. " if alternative else ""
+    warnings.warn(
+        # "depends on haplotype phase" is the phrase the test suite's
+        # warning filter keys on (pyproject.toml); a test pins it.
+        f"{context} depends on haplotype phase, but this "
+        f"{type(matrix).__name__} is not marked phased, so the result treats "
+        f"its rows as true haplotypes. {route}"
+        "If the data are phased or haploid, call .set_phased() (or load with "
+        "phased=True). To silence:\n"
+        "    import warnings\n"
+        "    from pg_gpu import UnphasedDataWarning\n"
+        "    warnings.filterwarnings('ignore', category=UnphasedDataWarning)",
+        UnphasedDataWarning, skip_file_prefixes=_PKG_PREFIXES,
+    )
+
+
+def _splits_individual(rows):
+    """Return whether any individual has only one of its two rows selected."""
+    s = set(_rows_as_numpy(rows).tolist())
+    return any((r ^ 1) not in s for r in s)
 
 
 class FewCompleteHaplotypesWarning(UserWarning):
@@ -297,7 +367,7 @@ THIN_WINDOW_COMPLETE = 25
 THIN_WINDOW_FRACTION = 0.10
 
 
-def _warn_few_complete_haplotypes(n_complete, n_rows, *, context, stacklevel=3):
+def _warn_few_complete_haplotypes(n_complete, n_rows, *, context):
     """Emit ``FewCompleteHaplotypesWarning`` when many windows are thin.
 
     ``n_complete`` holds the complete-haplotype count of each window and
@@ -323,7 +393,7 @@ def _warn_few_complete_haplotypes(n_complete, n_rows, *, context, stacklevel=3):
         "    from pg_gpu import FewCompleteHaplotypesWarning\n"
         "    warnings.filterwarnings('ignore', "
         "category=FewCompleteHaplotypesWarning)",
-        FewCompleteHaplotypesWarning, stacklevel=stacklevel,
+        FewCompleteHaplotypesWarning, skip_file_prefixes=_PKG_PREFIXES,
     )
 
 
@@ -424,8 +494,7 @@ def _format_warning_text(path, size_bytes, n_samples):
 def _maybe_memory_warn(path, *, region=None,
                        warn_bytes=VCF_WARN_BYTES,
                        warn_samples=VCF_WARN_SAMPLES,
-                       warn_region_bp=VCF_WARN_REGION_BP,
-                       stacklevel=3):
+                       warn_region_bp=VCF_WARN_REGION_BP):
     """Emit ``MemoryLimitedWarning`` if loading ``path`` will be slow.
 
     Triggers when either:
@@ -473,7 +542,7 @@ def _maybe_memory_warn(path, *, region=None,
         warnings.warn(
             _format_warning_text(canonical, size, n_samples),
             MemoryLimitedWarning,
-            stacklevel=stacklevel,
+            skip_file_prefixes=_PKG_PREFIXES,
         )
         _warned_paths[canonical] = None
         while len(_warned_paths) > _WARN_CACHE_MAX:
@@ -598,5 +667,5 @@ def check_diploid_encoding(gt, sample_names=None, source="input"):
             f"diploid doubles their haplotype count and biases pi, the SFS, "
             f"and Tajima's D; if they are an inbred panel this is expected "
             f"(see {ISSUE_URL}).",
-            HaploidDataWarning, stacklevel=3,
+            HaploidDataWarning, skip_file_prefixes=_PKG_PREFIXES,
         )

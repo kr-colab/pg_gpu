@@ -13,6 +13,7 @@ import cupy as cp
 from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
 from .diversity import _apply_span_normalize, pi as _diversity_pi
+from ._warnings import _phase_dependent, _warn_unphased
 
 
 def _aligned_pop_counts(pop1_haps, pop2_haps):
@@ -1095,6 +1096,7 @@ def _resolve_distance_matrices(haplotype_matrix, pop1, pop2,
     return pairwise_distance_matrix(haplotype_matrix, pop1, pop2, missing_data)
 
 
+@_phase_dependent
 def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
                               missing_data='include'):
     """Compute pairwise distance matrices between and within two populations.
@@ -1103,6 +1105,8 @@ def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     within-pop1, and within-pop2. Pre-compute once and pass to
     individual stats via the ``distance_matrices`` parameter to
     avoid redundant GPU work.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -1132,6 +1136,10 @@ def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     a haplotype with very few calls also reduces the set of complete
     sites to those few sites.
     """
+    _warn_unphased(haplotype_matrix, context="pairwise_distance_matrix",
+                   alternative="use pairwise_diffs_diploid for individual-"
+                   "level distances on a GenotypeMatrix")
+
     from .distance_stats import _pairwise_diffs_matrix_gpu
 
     if missing_data == 'exclude':
@@ -1155,6 +1163,7 @@ def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     return dist[:n1, n1:], dist[:n1, :n1], dist[n1:, n1:]
 
 
+@_phase_dependent
 def snn(haplotype_matrix: HaplotypeMatrix,
         pop1: Union[str, list],
         pop2: Union[str, list],
@@ -1166,6 +1175,9 @@ def snn(haplotype_matrix: HaplotypeMatrix,
     the same population. Snn is the fraction of haplotypes whose nearest
     neighbor is conspecific. Under panmixia Snn ~ 0.5; under population
     structure Snn -> 1.
+
+    Depends on haplotype phase unless ``distance_matrices`` is passed in; see
+    :doc:`phasing`.
 
     Parameters
     ----------
@@ -1187,6 +1199,8 @@ def snn(haplotype_matrix: HaplotypeMatrix,
     Hudson, R.R. (2000). A New Statistic for Detecting Genetic
     Differentiation. Genetics, 155(4), 2011-2014.
     """
+    if distance_matrices is None:
+        _warn_unphased(haplotype_matrix, context="snn")
     dist_between, dist_within1, dist_within2 = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     score1, n_scored1 = _snn_one_pop(dist_within1, dist_between)
@@ -1194,6 +1208,7 @@ def snn(haplotype_matrix: HaplotypeMatrix,
     return _ratio(score1 + score2, n_scored1 + n_scored2)
 
 
+@_phase_dependent
 def dxy_min(haplotype_matrix: HaplotypeMatrix,
             pop1: Union[str, list],
             pop2: Union[str, list],
@@ -1206,6 +1221,9 @@ def dxy_min(haplotype_matrix: HaplotypeMatrix,
     in Gmin (Geneva et al.) and dd (Schrider et al.) statistics. Under
     missing data, a pair that shares few sites can set the minimum by
     chance; see the Notes of ``pairwise_distance_matrix``.
+
+    Depends on haplotype phase unless ``distance_matrices`` is passed in; see
+    :doc:`phasing`.
 
     Parameters
     ----------
@@ -1225,11 +1243,14 @@ def dxy_min(haplotype_matrix: HaplotypeMatrix,
     Geneva, A.J. et al. (2015). A new method to scan genomes for
     introgression in a secondary contact model. PLoS ONE, 10(4).
     """
+    if distance_matrices is None:
+        _warn_unphased(haplotype_matrix, context="dxy_min")
     dist_between, _, _ = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     return _min_or_nan(_finite(dist_between))
 
 
+@_phase_dependent
 def gmin(haplotype_matrix: HaplotypeMatrix,
          pop1: Union[str, list],
          pop2: Union[str, list],
@@ -1240,6 +1261,9 @@ def gmin(haplotype_matrix: HaplotypeMatrix,
     Gmin = Dxy_min / Dxy_mean. Low values indicate unusually similar
     haplotypes across populations relative to average divergence,
     suggesting recent gene flow or shared ancestral variation.
+
+    Depends on haplotype phase unless ``distance_matrices`` is passed in; see
+    :doc:`phasing`.
 
     Parameters
     ----------
@@ -1259,12 +1283,15 @@ def gmin(haplotype_matrix: HaplotypeMatrix,
     Geneva, A.J. et al. (2015). A new method to scan genomes for
     introgression in a secondary contact model. PLoS ONE, 10(4).
     """
+    if distance_matrices is None:
+        _warn_unphased(haplotype_matrix, context="gmin")
     dist_between, _, _ = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     between = _finite(dist_between)
     return _ratio(_min_or_nan(between), _mean_or_nan(between))
 
 
+@_phase_dependent
 def dd(haplotype_matrix: HaplotypeMatrix,
        pop1: Union[str, list],
        pop2: Union[str, list],
@@ -1282,6 +1309,9 @@ def dd(haplotype_matrix: HaplotypeMatrix,
     calls as a site with no diversity, while here each pair is scaled to
     all sites. A haplotype that shares no site with any other member of
     its population adds nothing to pi here.
+
+    Depends on haplotype phase unless ``distance_matrices`` is passed in; see
+    :doc:`phasing`.
 
     Parameters
     ----------
@@ -1305,6 +1335,8 @@ def dd(haplotype_matrix: HaplotypeMatrix,
     of Drosophila simulans and D. sechellia. PLoS Genetics, 14(4),
     e1007341. https://doi.org/10.1371/journal.pgen.1007341
     """
+    if distance_matrices is None:
+        _warn_unphased(haplotype_matrix, context="dd")
     dist_between, dist_within1, dist_within2 = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     min_dxy = _min_or_nan(_finite(dist_between))
@@ -1312,6 +1344,7 @@ def dd(haplotype_matrix: HaplotypeMatrix,
             _ratio(min_dxy, _mean_or_nan(_within_pairs(dist_within2))))
 
 
+@_phase_dependent
 def dd_rank(haplotype_matrix: HaplotypeMatrix,
             pop1: Union[str, list],
             pop2: Union[str, list],
@@ -1323,6 +1356,9 @@ def dd_rank(haplotype_matrix: HaplotypeMatrix,
     pairwise distances that are <= Dxy_min. Low values indicate the
     closest between-population pair is more similar than most
     within-population pairs, suggesting introgression.
+
+    Depends on haplotype phase unless ``distance_matrices`` is passed in; see
+    :doc:`phasing`.
 
     Parameters
     ----------
@@ -1346,6 +1382,8 @@ def dd_rank(haplotype_matrix: HaplotypeMatrix,
     of Drosophila simulans and D. sechellia. PLoS Genetics, 14(4),
     e1007341. https://doi.org/10.1371/journal.pgen.1007341
     """
+    if distance_matrices is None:
+        _warn_unphased(haplotype_matrix, context="dd_rank")
     dist_between, dist_within1, dist_within2 = _resolve_distance_matrices(
         haplotype_matrix, pop1, pop2, missing_data, distance_matrices)
     min_dxy = _min_or_nan(_finite(dist_between))
@@ -1353,6 +1391,7 @@ def dd_rank(haplotype_matrix: HaplotypeMatrix,
             _rank_below(_within_pairs(dist_within2), min_dxy))
 
 
+@_phase_dependent
 def zx(haplotype_matrix: HaplotypeMatrix,
        pop1: Union[str, list],
        pop2: Union[str, list],
@@ -1366,6 +1405,8 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     All three ZnS values are computed on one site set: sites with more
     than two alleles across the whole sample are dropped first, and a
     ``BiallelicOnlyWarning`` reports how many.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -1386,6 +1427,8 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     of Drosophila simulans and D. sechellia. PLoS Genetics, 14(4),
     e1007341. https://doi.org/10.1371/journal.pgen.1007341
     """
+    _warn_unphased(haplotype_matrix, context="zx")
+
     from . import ld_statistics
     from ._utils import population_rows
 
@@ -1403,6 +1446,7 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     return (z1 + z2) / (2 * z_total)
 
 
+@_phase_dependent
 def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
                           pop1: Union[str, list],
                           pop2: Union[str, list],
@@ -1412,6 +1456,8 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
     Computes the pairwise distance matrices once and passes them to
     ``snn``, ``dxy_min``, ``gmin``, ``dd`` and ``dd_rank``, so each value
     equals the standalone function's.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -1424,6 +1470,8 @@ def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
     dict
         Keys: snn, dxy_min, gmin, dd1, dd2, dd_rank1, dd_rank2.
     """
+    _warn_unphased(haplotype_matrix, context="distance_based_stats")
+
     dm = pairwise_distance_matrix(haplotype_matrix, pop1, pop2, missing_data)
     args = (haplotype_matrix, pop1, pop2, missing_data, dm)
     dd1, dd2 = dd(*args)

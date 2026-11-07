@@ -5,6 +5,16 @@ pg_gpu provides GPU-accelerated computation of population genetics statistics
 using CuPy. All statistics return NumPy arrays and handle missing data
 automatically. Below is a comprehensive catalog of every implemented statistic.
 
+Two marks flag statistics that depend on haplotype phase (see
+:doc:`phasing`):
+
+* :sup:`†` reads the rows as true haplotypes, so it emits an
+  ``UnphasedDataWarning`` on a ``HaplotypeMatrix`` with ``phased=False``.
+  A few depend on phase only with certain arguments; :doc:`phasing` gives
+  the conditions.
+* :sup:`‡` depends on phase only on a ``HaplotypeMatrix``, and on a 
+  ``GenotypeMatrix`` it uses a diploid version.
+
 Diversity Statistics
 --------------------
 
@@ -49,10 +59,10 @@ Diversity Statistics
      - Count of singletons
      -
    * - ``haplotype_diversity``
-     - Haplotype diversity (1 - sum of squared frequencies)
+     - Haplotype diversity (1 - sum of squared frequencies) :sup:`†`
      -
    * - ``haplotype_count``
-     - Number of distinct haplotypes
+     - Number of distinct haplotypes :sup:`†`
      -
    * - ``heterozygosity_expected``
      - Expected heterozygosity (gene diversity) per variant
@@ -74,7 +84,7 @@ Diversity Statistics
      - Diplotype (multi-locus genotype) frequency spectrum
      -
    * - ``diversity_stats``
-     - All core diversity statistics in one call
+     - All core diversity statistics in one call :sup:`†`
      -
 
 Divergence Statistics
@@ -124,22 +134,22 @@ Distance-Based Two-Population Statistics
      - Description
      - Reference
    * - ``snn``
-     - Nearest-neighbor statistic
+     - Nearest-neighbor statistic :sup:`†`
      - Hudson (2000)
    * - ``dxy_min``
-     - Minimum pairwise distance between populations
+     - Minimum pairwise distance between populations :sup:`†`
      - Geneva et al. (2015)
    * - ``gmin``
-     - Gmin ratio (Dxy_min / Dxy_mean)
+     - Gmin ratio (Dxy_min / Dxy_mean) :sup:`†`
      - Geneva et al. (2015)
    * - ``dd``
-     - Relative minimum divergence (dd1, dd2)
+     - Relative minimum divergence (dd1, dd2) :sup:`†`
      - Schrider et al. (2018)
    * - ``dd_rank``
-     - Rank of minimum between-pop distance in within-pop distribution
+     - Rank of minimum between-pop distance in within-pop distribution :sup:`†`
      - Schrider et al. (2018)
    * - ``zx``
-     - ZnS ratio (within-pop LD / total LD)
+     - ZnS ratio (within-pop LD / total LD) :sup:`†`
      - Schrider et al. (2018)
 
 Linkage Disequilibrium
@@ -170,15 +180,15 @@ Linkage Disequilibrium
    * - ``zns``
      - Kelly's ZnS (mean pairwise LD); defaults to the unbiased
        :math:`\sigma_D^2` estimator on ``HaplotypeMatrix`` inputs,
-       falls back to naive :math:`r^2` for pre-computed arrays.
+       falls back to naive :math:`r^2` for pre-computed arrays. :sup:`‡`
      - Kelly (1997); Ragsdale & Gravel (2019)
    * - ``omega``
      - Kim & Nielsen's Omega (partitioned LD); same default policy
-       as ``zns``.
+       as ``zns``. :sup:`‡`
      - Kim & Nielsen (2004); Ragsdale & Gravel (2019)
    * - ``mu_ld``
      - Haplotype pattern exclusivity (RAiSD LD component), on the
-       segregating sites only
+       segregating sites only :sup:`†`
      - Alachiotis & Pavlidis (2018)
 
 Selection Scans
@@ -193,26 +203,26 @@ Selection Scans
      - Reference
    * - ``ihs``
      - Integrated Haplotype Score. Each alternate allele is scored against
-       the reference separately -- see the note below.
+       the reference separately -- see the note below. :sup:`†`
      - Voight et al. (2006)
    * - ``nsl``
      - Number of Segregating Sites by Length. Scores each alternate allele
-       separately, same as ``ihs``.
+       separately, same as ``ihs``. :sup:`†`
      - Ferrer-Admetlla et al. (2014)
    * - ``xpehh``
-     - Cross-population Extended Haplotype Homozygosity
+     - Cross-population Extended Haplotype Homozygosity :sup:`†`
      - Sabeti et al. (2007)
    * - ``xpnsl``
-     - Cross-population nSL
+     - Cross-population nSL :sup:`†`
      - Szpiech et al. (2021)
    * - ``garud_h``
-     - Garud's H1, H12, H123, H2/H1
+     - Garud's H1, H12, H123, H2/H1 :sup:`‡`
      - Garud et al. (2015)
    * - ``moving_garud_h``
-     - Garud's H in moving windows
+     - Garud's H in moving windows :sup:`†`
      - Garud et al. (2015)
    * - ``ehh_decay``
-     - Extended Haplotype Homozygosity decay
+     - Extended Haplotype Homozygosity decay :sup:`†`
      - Sabeti et al. (2002)
 
 ``ihs`` and ``nsl`` ask whether one allele sits on unusually long
@@ -384,10 +394,10 @@ Dimensionality Reduction and Distance
    * - ``pca``
      - PCA with one point per haplotype. Gives every allele its own
        column, so it works with any number of alleles. Takes a
-       ``HaplotypeMatrix``.
+       ``HaplotypeMatrix``. :sup:`†`
      -
    * - ``randomized_pca``
-     - Faster approximate version of ``pca``
+     - Faster approximate version of ``pca`` :sup:`†`
      - Halko et al. (2011)
    * - ``pca_dosage``
      - PCA with one point per individual, counting alternate alleles as
@@ -400,16 +410,16 @@ Dimensionality Reduction and Distance
    * - ``pairwise_distance``
      - Genetic distance between each pair of haplotypes, based on how
        many sites they differ at (``euclidean``, ``sqeuclidean``,
-       ``cityblock``)
+       ``cityblock``) :sup:`†`
      -
    * - ``pcoa``
      - Principal Coordinate Analysis (classical MDS)
      -
    * - ``local_pca``
-     - Per-window PCA (lostruct); GPU-batched ``eigh`` over stacked per-window Gram matrices
+     - Per-window PCA (lostruct); GPU-batched ``eigh`` over stacked per-window Gram matrices :sup:`†`
      - Li & Ralph (2019)
    * - ``local_pca_jackknife``
-     - Delete-1 block jackknife standard error of local PCs (batched)
+     - Delete-1 block jackknife standard error of local PCs (batched) :sup:`†`
      - Li & Ralph (2019)
    * - ``pc_dist``
      - Frobenius distance between per-window low-rank covariance reps
@@ -465,7 +475,7 @@ Relatedness and Kinship
    * - ``genetic_relatedness``
      - How much two groups of samples share alleles, relative to the
        average across groups. Matches
-       ``TreeSequence.genetic_relatedness``. Takes a ``HaplotypeMatrix``.
+       ``TreeSequence.genetic_relatedness``. Takes a ``HaplotypeMatrix``. :sup:`†`
      -
    * - ``grm``
      - Genetic Relationship Matrix (GCTA). Takes a ``GenotypeMatrix``.
@@ -511,19 +521,19 @@ Distance Distribution Statistics
        both samples call. The haplotype version compares alleles
        directly, so it works with any number of alleles; the diploid
        version works on two-allele sites only. NaN for a pair with no
-       site called in both; the distance moments skip such pairs.
+       site called in both; the distance moments skip such pairs. :sup:`‡`
      -
    * - ``dist_var``
-     - Variance of pairwise distance distribution
+     - Variance of pairwise distance distribution :sup:`‡`
      - Schrider et al. (2018)
    * - ``dist_skew``
-     - Skewness of pairwise distance distribution
+     - Skewness of pairwise distance distribution :sup:`‡`
      - Schrider et al. (2018)
    * - ``dist_kurt``
-     - Excess kurtosis of pairwise distance distribution
+     - Excess kurtosis of pairwise distance distribution :sup:`‡`
      - Schrider et al. (2018)
    * - ``dist_moments``
-     - Variance, skewness, and kurtosis in one call
+     - Variance, skewness, and kurtosis in one call :sup:`‡`
      - Schrider et al. (2018)
 
 Biobank-Scale Streaming
@@ -608,13 +618,13 @@ falls back to a slower route that produces the same numbers.
    * - ``da``
      - Net divergence per window
    * - ``garud_h1``, ``garud_h12``, ``garud_h123``, ``garud_h2h1``
-     - Garud's H statistics per window
+     - Garud's H statistics per window :sup:`†`
    * - ``haplotype_count``
-     - Number of distinct haplotypes per window
+     - Number of distinct haplotypes per window :sup:`†`
    * - ``mean_nsl``
-     - Mean nSL per window, averaged over every finite (site, allele) score
+     - Mean nSL per window, averaged over every finite (site, allele) score :sup:`†`
    * - ``zns``, ``omega``, ``mu_ld``
-     - Per-window LD summaries
+     - Per-window LD summaries :sup:`†`
    * - ``mu_var``, ``mu_sfs``, ``daf_hist``
      - Features used by RAiSD and diploSHIC. ``daf_hist`` is a histogram
        of alternate-allele frequencies in the window, scaled to sum to 1.
@@ -625,9 +635,9 @@ falls back to a slower route that produces the same numbers.
    * - ``snp_dist_mean``, ``snp_dist_var``, ``snp_dist_min``, ``snp_dist_max``
      - Inter-SNP spacing summaries per window
    * - ``dist_var``, ``dist_skew``, ``dist_kurt``
-     - Moments of the pairwise-distance distribution per window
+     - Moments of the pairwise-distance distribution per window :sup:`†`
    * - ``local_pca``
-     - Per-window local PCA (lostruct); returns a ``LocalPCAResult`` with eigvals, eigvecs, and window metadata
+     - Per-window local PCA (lostruct); returns a ``LocalPCAResult`` with eigvals, eigvecs, and window metadata :sup:`†`
 
 The rule to expect is that a windowed statistic gives the same answer
 as calling the plain function on just that window's variants. Alleles

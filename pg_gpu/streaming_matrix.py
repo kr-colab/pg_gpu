@@ -32,7 +32,8 @@ import zarr
 from kvikio.zarr import GDSStore
 
 from ._gpu_genotype_prep import build_genotype_matrix, build_haplotype_matrix
-from ._warnings import BadlyChunkedWarning, KvikioUnavailableWarning
+from ._warnings import (BadlyChunkedWarning, KvikioUnavailableWarning,
+                        _phase_dependent, _warn_unphased)
 
 
 def _pad_to(arr, shape):
@@ -723,6 +724,28 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
     ``materialize`` a sub-region for repeated calls on the same data.
     """
 
+    def __init__(self, source, fetcher, chunk_bp, prefetch, *,
+                 phased=False, accessible_mask=None, n_total_sites=None):
+        super().__init__(source, fetcher, chunk_bp, prefetch,
+                         accessible_mask=accessible_mask,
+                         n_total_sites=n_total_sites)
+        self._phased = bool(phased)
+
+    @property
+    def phased(self):
+        """Whether the haplotype rows represent true phased haplotypes."""
+        return self._phased
+
+    def set_phased(self):
+        """Mark this stream as phased.  Returns ``self``."""
+        self._phased = True
+        return self
+
+    def set_unphased(self):
+        """Mark this stream as unphased.  Returns ``self``."""
+        self._phased = False
+        return self
+
     @property
     def num_haplotypes(self):
         return self._source.num_haplotypes
@@ -749,23 +772,40 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
         # re-validation -- np.unique per population per chunk adds up to
         # minutes over a biobank-scale walk.
         sets = kwargs.pop('sample_sets', None)
-        m = build_haplotype_matrix(gt, pos, allow_empty = True, **kwargs)
+        m = build_haplotype_matrix(gt, pos, allow_empty=True,
+                                   phased=self._phased, **kwargs)
         if sets is not None:
             m._sample_sets = sets
         return m
 
     def _repr_sample_axis(self):
-        return f"num_haplotypes={self.num_haplotypes}"
+        return f"num_haplotypes={self.num_haplotypes}, phased={self._phased}"
 
+    @_phase_dependent
     def compute_ld_statistics_gpu_single_pop(self, bp_bins, raw=False,
                                               chunk_size='auto'):
+        """Streaming ``HaplotypeMatrix.compute_ld_statistics_gpu_single_pop``.
+
+        Depends on haplotype phase; see :doc:`phasing`.
+        """
+        _warn_unphased(self, context="compute_ld_statistics_gpu_single_pop",
+                       alternative="use moments_ld.compute_ld_statistics"
+                       "(use_genotypes=True) for the unphased alternative (the genotype estimator)")
         from .haplotype_matrix import _stream_ld_single_pop
         return _stream_ld_single_pop(
             self, bp_bins=bp_bins, raw=raw, chunk_size=chunk_size,
         )
 
+    @_phase_dependent
     def compute_ld_statistics_gpu_two_pops(self, bp_bins, pop1, pop2,
                                             raw=False, chunk_size='auto'):
+        """Streaming ``HaplotypeMatrix.compute_ld_statistics_gpu_two_pops``.
+
+        Depends on haplotype phase; see :doc:`phasing`.
+        """
+        _warn_unphased(self, context="compute_ld_statistics_gpu_two_pops",
+                       alternative="use moments_ld.compute_ld_statistics"
+                       "(use_genotypes=True) for the unphased alternative (the genotype estimator)")
         from .haplotype_matrix import _stream_ld_two_pops
         return _stream_ld_two_pops(
             self, bp_bins=bp_bins, pop1=pop1, pop2=pop2, raw=raw,

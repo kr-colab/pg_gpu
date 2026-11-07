@@ -91,6 +91,12 @@ def parse_args():
     p.add_argument("--garud-subsample", type=int, default=1_000,
                    help="haplotypes drawn per population for Garud's H "
                         "(a speed knob; any count works)")
+    p.add_argument("--phased", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="treat the store as phased (default). Biobank VCZs "
+                        "are usually statistically phased; pass --no-phased "
+                        "for unphased data. Garud's H and the r^2 heatmap "
+                        "need phased haplotypes.")
     return p.parse_args()
 
 
@@ -100,7 +106,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     stream = HaplotypeMatrix.from_zarr(
-        args.vcz, streaming="always",
+        args.vcz, streaming="always", phased=args.phased,
         chunk_bp=args.chunk_bp,
         pop_assignment=args.pop_assignment,  # None -> autoload <vcz>.pops.tsv
     )

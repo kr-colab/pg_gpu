@@ -115,7 +115,8 @@ def main() -> None:
     # base of a SEQ_LEN simulation is SEQ_LEN - 1 (as from_ts records it).
     # For real data, prefer the loader class methods:
     # HaplotypeMatrix.from_vcf / from_zarr / from_ts.
-    hm = HaplotypeMatrix(hap, positions, 0, SEQ_LEN - 1)
+    # Simulated haplotypes are phased by construction
+    hm = HaplotypeMatrix(hap, positions, 0, SEQ_LEN - 1, phased=True)
 
     # windowed_analysis runs one fused GPU kernel across all windows and
     # returns a pandas DataFrame with one row per window. Columns include

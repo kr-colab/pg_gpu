@@ -11,6 +11,7 @@ import cupy as cp
 from .haplotype_matrix import HaplotypeMatrix
 from .genotype_matrix import GenotypeMatrix
 from ._utils import population_rows
+from ._warnings import _phase_dependent, _warn_unphased
 
 
 def _extract_upper_triangle(mat):
@@ -96,6 +97,7 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     return diffs_mat
 
 
+@_phase_dependent
 def pairwise_diffs_haploid(haplotype_matrix, population=None,
                            missing_data='include'):
     """Compute pairwise Hamming distances between haplotypes on GPU.
@@ -103,6 +105,8 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
     Per-site average allele differences over jointly non-missing sites,
     multiallelic-correct (one-hot indicators per allele value; see
     ``_pairwise_diffs_matrix_gpu``).
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -119,6 +123,9 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
         Per-site average differences. NaN for a pair with no site called
         in both haplotypes.
     """
+    _warn_unphased(haplotype_matrix, context="pairwise_diffs_haploid",
+                   alternative="use pairwise_diffs_diploid for individual-"
+                   "level distances on a GenotypeMatrix")
 
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
@@ -184,12 +191,16 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
         _pairwise_diffs_matrix_gpu(geno, missing_data='normalize'))
 
 
+@_phase_dependent
 def dist_moments(matrix, population=None, missing_data='include'):
     """Compute variance, skewness, and kurtosis of pairwise distances.
 
     Computes the distance matrix once and derives all three moments,
     avoiding redundant matrix multiplies. A pair with no site called in
     both samples has no distance, so the moments skip it.
+
+    Depends on haplotype phase on a HaplotypeMatrix (a GenotypeMatrix is
+    the unphased alternative); see :doc:`phasing`.
 
     Parameters
     ----------
@@ -206,6 +217,9 @@ def dist_moments(matrix, population=None, missing_data='include'):
         fewer, it is NaN when some pair has no distance, else 0.0. Skew
         and kurt are also 0.0 when every defined distance is the same.
     """
+    _warn_unphased(matrix, context="dist_moments",
+                   alternative="pass a GenotypeMatrix for individual-level "
+                   "distances")
     diffs = np.asarray(_get_diffs(matrix, population, missing_data))
     finite = np.isfinite(diffs)
     fill = 0.0 if finite.all() else np.nan
@@ -239,27 +253,55 @@ def dist_moments(matrix, population=None, missing_data='include'):
     return var_val, skew_val, kurt_val
 
 
+@_phase_dependent
 def dist_var(matrix, population=None, missing_data='include'):
-    """Variance of pairwise distance distribution."""
+    """Variance of pairwise distance distribution.
+
+    Depends on haplotype phase on a HaplotypeMatrix (a GenotypeMatrix is
+    the unphased alternative); see :doc:`phasing`.
+    """
+    _warn_unphased(matrix, context="dist_var",
+                   alternative="pass a GenotypeMatrix for individual-level "
+                   "distances")
     return dist_moments(matrix, population, missing_data)[0]
 
 
+@_phase_dependent
 def dist_skew(matrix, population=None, missing_data='include'):
-    """Skewness of pairwise distance distribution."""
+    """Skewness of pairwise distance distribution.
+
+    Depends on haplotype phase on a HaplotypeMatrix (a GenotypeMatrix is
+    the unphased alternative); see :doc:`phasing`.
+    """
+    _warn_unphased(matrix, context="dist_skew",
+                   alternative="pass a GenotypeMatrix for individual-level "
+                   "distances")
     return dist_moments(matrix, population, missing_data)[1]
 
 
+@_phase_dependent
 def dist_kurt(matrix, population=None, missing_data='include'):
-    """Excess kurtosis of pairwise distance distribution."""
+    """Excess kurtosis of pairwise distance distribution.
+
+    Depends on haplotype phase on a HaplotypeMatrix (a GenotypeMatrix is
+    the unphased alternative); see :doc:`phasing`.
+    """
+    _warn_unphased(matrix, context="dist_kurt",
+                   alternative="pass a GenotypeMatrix for individual-level "
+                   "distances")
     return dist_moments(matrix, population, missing_data)[2]
 
 
+@_phase_dependent
 def pairwise_diffs(matrix, population=None, missing_data='include'):
     """Compute pairwise Hamming distances on GPU.
 
     Accepts HaplotypeMatrix (allele indices) or GenotypeMatrix (0/1/2
     genotypes); both count differing values with one-hot indicators.
     Dispatches automatically.
+
+    Depends on haplotype phase on a HaplotypeMatrix (a GenotypeMatrix is
+    the unphased alternative); see :doc:`phasing`.
 
     Parameters
     ----------
@@ -274,8 +316,11 @@ def pairwise_diffs(matrix, population=None, missing_data='include'):
     """
     if isinstance(matrix, GenotypeMatrix):
         return pairwise_diffs_diploid(matrix, population, missing_data)
-    else:
-        return pairwise_diffs_haploid(matrix, population, missing_data)
+
+    _warn_unphased(matrix, context="pairwise_diffs",
+                   alternative="pass a GenotypeMatrix for individual-level "
+                   "distances")
+    return pairwise_diffs_haploid(matrix, population, missing_data)
 
 
 # internal alias

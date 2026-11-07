@@ -8,6 +8,7 @@ on GPUs with automatic missing data handling.
 import numpy as np
 import cupy as cp
 from typing import Optional, Union, Tuple, List, Dict
+from ._warnings import _phase_dependent, _warn_unphased
 
 
 def dd(counts: cp.ndarray,
@@ -721,8 +722,13 @@ def _drop_undefined_sites(r2_matrix):
     return r2_matrix[cp.ix_(good, good)]
 
 
+@_phase_dependent
 def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     """Kelly's ZnS: mean pairwise r-squared across all SNP pairs.
+
+    Depends on haplotype phase with a haplotype estimator on a HaplotypeMatrix
+    (``estimator='rogers_huff'`` and a GenotypeMatrix are the unphased alternatives); see
+    :doc:`phasing`.
 
     Parameters
     ----------
@@ -774,6 +780,9 @@ def zns(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     if kind == 'haplotype':
         biallelic = r2_matrix_or_matrix.restrict_to_biallelic(warn_context="zns")
         if estimator != 'rogers_huff':
+            _warn_unphased(r2_matrix_or_matrix, context="zns",
+                           alternative="use estimator='rogers_huff' or pass "
+                           "a GenotypeMatrix for an unphased alternative")
             # Tiled path: O(B²) memory instead of O(m²).
             return _zns_biallelic(biallelic, missing_data, estimator)
         # Rogers-Huff r is a diploid dosage correlation, so take the genotype
@@ -823,6 +832,7 @@ def _build_sigma_d2_matrix(mat, missing_data='include'):
     return result
 
 
+@_phase_dependent
 def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     """Kim and Nielsen's Omega: max ratio of within-partition to
     cross-partition mean LD.
@@ -834,6 +844,10 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     Uses GPU prefix sums on the upper triangle to evaluate all
     partition points without a Python loop. Matches diploSHIC's
     convention of using upper-triangle pairs only.
+
+    Depends on haplotype phase with a haplotype estimator on a HaplotypeMatrix
+    (``estimator='rogers_huff'`` and a GenotypeMatrix are the unphased alternatives); see
+    :doc:`phasing`.
 
     Parameters
     ----------
@@ -879,6 +893,10 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     estimator = _resolve_ld_estimator(estimator, kind)
 
     if kind == 'haplotype':
+        if estimator != 'rogers_huff':
+            _warn_unphased(r2_matrix_or_matrix, context="omega",
+                           alternative="use estimator='rogers_huff' or pass "
+                           "a GenotypeMatrix for an unphased alternative")
         r2_matrix_or_matrix = r2_matrix_or_matrix.restrict_to_biallelic(
             warn_context="omega")
         if estimator == 'rogers_huff':
@@ -953,6 +971,7 @@ def omega(r2_matrix_or_matrix, missing_data='include', estimator='auto'):
     return float('nan') if best == -np.inf else best
 
 
+@_phase_dependent
 def mu_ld(haplotype_matrix, missing_data='include'):
     """mu_LD: haplotype pattern exclusivity between left/right halves (RAiSD).
 
@@ -961,6 +980,8 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     sweep boundaries where LD structure changes abruptly. As in RAiSD,
     which takes SNPs only, monomorphic sites are dropped first: they
     carry no pattern, and they would move the midpoint.
+
+    Depends on haplotype phase; see :doc:`phasing`.
 
     Parameters
     ----------
@@ -977,6 +998,8 @@ def mu_ld(haplotype_matrix, missing_data='include'):
     float
         NaN when there are fewer than two segregating sites or no haplotype.
     """
+    _warn_unphased(haplotype_matrix, context="mu_ld")
+
     from ._haplotype_groups import complete_sites, window_labels
     from ._haplotype_hash import hash_weights
 
