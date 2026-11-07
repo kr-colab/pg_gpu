@@ -388,14 +388,17 @@ def read_genotypes_allel(store, region=None):
         if len(positions) == 0:
             raise ValueError(f"No variants in region {region}")
 
-    # A region names the contig; without one, the store's CHROM column does.
-    chrom = parse_region(region)[0]
-    if chrom is not None:
-        contigs = [chrom]
-    elif 'variants/CHROM' in store:
-        contigs = _distinct_contigs(store['variants/CHROM'])
+    # The contigs of the variants read come from their CHROM values: the
+    # region filter above reads positions only, so a region's contig name
+    # need not match them. Without a CHROM column, the region names it.
+    if 'variants/CHROM' in store:
+        chrom_col = np.asarray(store['variants/CHROM'])
+        if variant_indices is not None:
+            chrom_col = chrom_col[variant_indices]
+        contigs = _distinct_contigs(chrom_col)
     else:
-        contigs = []
+        chrom = parse_region(region)[0]
+        contigs = [] if chrom is None else [chrom]
     return {'gt': gt, 'positions': positions, 'samples': samples,
             'variant_indices': variant_indices, 'contigs': contigs}
 

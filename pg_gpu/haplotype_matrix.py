@@ -7,8 +7,8 @@ import tskit
 import warnings
 from collections import Counter, OrderedDict
 
-from .accessible import (AccessibleMask, _data_contig, bed_to_mask,
-                         resolve_accessible_mask, slice_fields)
+from .accessible import (AccessibleMask, _data_contig, resolve_accessible_mask,
+                         slice_fields)
 from .zarr_io import _distinct_contigs, parse_region
 from ._warnings import _phase_dependent, _warn_unphased
 

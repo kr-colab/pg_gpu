@@ -244,3 +244,19 @@ def test_contig_name_warning_points_at_caller(vcz_store, chr_beds):
             call()
         assert all(w.filename == __file__ for w in record
                    if issubclass(w.category, ContigNameWarning))
+
+
+@pytest.mark.parametrize("region, want", [
+    ("1-5", ["1"]),        # positions only: contig 1's variants
+    ("2:1-5", ["1"]),      # the flat filter reads positions, so still contig 1
+    (None, ["1", "2"]),
+])
+def test_flat_allel_contigs_follow_the_variants_read(region, want):
+    import zarr
+    from pg_gpu.zarr_io import read_genotypes_allel
+    store = zarr.group()
+    store["variants/POS"] = np.array([1, 2, 3, 4, 5, 1000, 1001, 1002, 1003, 1004])
+    store["variants/CHROM"] = np.array(["1"] * 5 + ["2"] * 5)
+    store["calldata/GT"] = np.zeros((10, 2, 2), dtype=np.int8)
+    store["samples"] = np.array(["s1", "s2"])
+    assert read_genotypes_allel(store, region=region)["contigs"] == want
