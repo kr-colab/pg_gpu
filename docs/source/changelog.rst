@@ -567,7 +567,10 @@ Bug fixes
   eager ``windowed_analysis``), a multi-contig BED with no ``chrom`` raises
   ``ValueError``. A BED that names the contig differently, such as ``chr1``
   for the data's ``1``, is matched by name without ``chr`` and case, with a
-  ``ContigNameWarning``.
+  ``ContigNameWarning``. ``from_vcf`` and ``from_zarr`` with
+  ``accessible_bed`` on data with more than one contig and no ``region``
+  raise ``ValueError``; ``from_vcf`` used to take the first variant's
+  contig and drop the other contigs' intervals.
 * ``windowed_analysis`` ignored an unknown keyword argument when the
   scatter or fused engine served the request, so a misspelled name, or
   ``population=`` in place of ``populations=``, changed nothing and gave

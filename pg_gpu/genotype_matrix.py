@@ -11,8 +11,9 @@ import numpy as np
 import cupy as cp
 from typing import Optional
 
-from .accessible import AccessibleMask, resolve_accessible_mask, slice_fields
-from .zarr_io import parse_region
+from .accessible import (AccessibleMask, _data_contig, resolve_accessible_mask,
+                         slice_fields)
+from .zarr_io import _distinct_contigs, parse_region
 
 
 def _biallelic_and_alt(ac):
@@ -534,7 +535,10 @@ class GenotypeMatrix:
         if accessible_bed is not None:
             chrom = None
             if 'variants/CHROM' in callset:
-                chrom = callset['variants/CHROM'][0]
+                chrom = _data_contig(
+                    _distinct_contigs(callset['variants/CHROM']), f"VCF {path}",
+                    "load one contig per GenotypeMatrix, e.g. from a VCF "
+                    "subset with bcftools view -r")
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
         return gm
 
@@ -661,7 +665,9 @@ class GenotypeMatrix:
                 region=region,
             )
         if accessible_bed is not None:
-            gm.set_accessible_mask(accessible_bed, chrom=data['chrom'])
+            chrom = _data_contig(data['contigs'], f"zarr store {path}",
+                                 "load one contig with region=")
+            gm.set_accessible_mask(accessible_bed, chrom=chrom)
 
         try:
             import zarr

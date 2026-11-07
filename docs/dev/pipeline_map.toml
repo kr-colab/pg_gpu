@@ -125,13 +125,13 @@ span = "n_total_sites and accessible_mask as given; a mask with no n_total_sites
 [inputs."HaplotypeMatrix.from_vcf"]
 params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields", "phased"]
 returns = "HaplotypeMatrix"
-span = "include_invariant=True sets n_total_sites to the record count. accessible_bed sets the mask and n_total_sites."
+span = "include_invariant=True sets n_total_sites to the record count. accessible_bed sets the mask and n_total_sites, on the region's contig, else the VCF's; a VCF with several contigs needs region= (ValueError)."
 notes = "region is samtools style with an inclusive end; chrom_start and chrom_end come from the region, else from the first and last variant."
 
 [inputs."HaplotypeMatrix.from_zarr"]
 params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased"]
 returns = "HaplotypeMatrix, or StreamingHaplotypeMatrix when streaming='always', or 'auto' and the matrix does not fit"
-span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None. The BED contig is the region's, else the store's (eager and streaming alike)."
+span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None. The BED contig is the region's, else the store's (eager and streaming alike); data on several contigs need region= (ValueError)."
 notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=."
 
 [inputs."HaplotypeMatrix.from_ts"]
@@ -147,13 +147,13 @@ span = "Same rule as HaplotypeMatrix.__init__, in its own code."
 [inputs."GenotypeMatrix.from_vcf"]
 params = ["path", "include_invariant", "accessible_bed", "fields"]
 returns = "GenotypeMatrix"
-span = "include_invariant=True sets n_total_sites to the record count. accessible_bed sets the mask."
+span = "include_invariant=True sets n_total_sites to the record count. accessible_bed sets the mask on the VCF's contig; a VCF with several contigs raises ValueError, since there is no region= here."
 notes = "No region and no samples parameter, unlike HaplotypeMatrix.from_vcf."
 
 [inputs."GenotypeMatrix.from_zarr"]
 params = ["path", "region", "accessible_bed", "include_invariant", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields"]
 returns = "GenotypeMatrix, or StreamingGenotypeMatrix on the streaming path"
-span = "include_invariant=True sets n_total_sites to the variant count on the eager path only; the streaming path ignores it. accessible_bed sets the mask on both paths, on the region's contig, else the store's."
+span = "include_invariant=True sets n_total_sites to the variant count on the eager path only; the streaming path ignores it. accessible_bed sets the mask on both paths, on the region's contig, else the store's; data on several contigs need region= (ValueError)."
 
 [inputs."GenotypeMatrix.from_haplotype_matrix"]
 params = ["hap_matrix"]

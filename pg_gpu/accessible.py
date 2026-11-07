@@ -9,7 +9,7 @@ import warnings
 import cupy as cp
 import numpy as np
 
-from ._warnings import ContigNameWarning, _format_sample_list
+from ._warnings import _PKG_PREFIXES, ContigNameWarning, _format_sample_list
 from .zarr_io import parse_region
 
 
@@ -199,10 +199,27 @@ def _read_bed(path, chrom=None):
             warnings.warn(
                 f"BED contig {names[0]!r} does not match data contig "
                 f"{chrom!r} exactly; inferring that they are the same contig.",
-                ContigNameWarning, stacklevel=3)
+                ContigNameWarning, skip_file_prefixes=_PKG_PREFIXES)
             chrom = names[0]
         kept = [iv for iv in kept if iv[0] == chrom]
     return kept, list(contigs)
+
+
+def _show_contigs(contigs):
+    return _format_sample_list(contigs, range(len(contigs)), limit=5)
+
+
+def _data_contig(contigs, source, remedy):
+    """The contig of data whose variants lie on ``contigs``, or None when the
+    data name none. An accessible mask covers one contig, so data on several
+    raise ValueError with ``remedy``: one contig's intervals applied to all
+    of them would be wrong."""
+    if len(contigs) > 1:
+        raise ValueError(
+            f"{source} has variants on {len(contigs)} contigs "
+            f"({_show_contigs(contigs)}), but an accessible mask covers one "
+            f"contig; {remedy}.")
+    return contigs[0] if contigs else None
 
 
 def _contig_intervals(path, chrom):
@@ -213,8 +230,9 @@ def _contig_intervals(path, chrom):
     if chrom is None and len(contigs) > 1:
         raise ValueError(
             f"BED file {path} has intervals on {len(contigs)} contigs "
-            f"({_format_sample_list(contigs, range(len(contigs)), limit=5)}); "
-            "name the contig of the data with chrom= or region=.")
+            f"({_show_contigs(contigs)}); "
+            "name the contig of the data with chrom= (set_accessible_mask, "
+            "windowed_analysis, from_ts) or region= (from_zarr, from_vcf).")
     return intervals, contigs
 
 
@@ -295,7 +313,7 @@ def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):
         where = "" if chrom is None else f" for contig {str(chrom)!r}"
         raise ValueError(
             f"No BED intervals found{where} in {mask_or_path}; its contigs "
-            f"are: {_format_sample_list(contigs, range(len(contigs)), limit=5) or 'none'}.")
+            f"are: {_show_contigs(contigs) or 'none'}.")
     # 1-based inclusive bounds of the BED (BED is 0-based half-open: a record
     # (s, e) covers 1-based positions s+1..e).
     bed_min = min(s + 1 for _, s, _ in intervals)

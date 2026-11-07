@@ -7,8 +7,9 @@ import tskit
 import warnings
 from collections import Counter, OrderedDict
 
-from .accessible import AccessibleMask, bed_to_mask, resolve_accessible_mask, slice_fields
-from .zarr_io import parse_region
+from .accessible import (AccessibleMask, _data_contig, bed_to_mask,
+                         resolve_accessible_mask, slice_fields)
+from .zarr_io import _distinct_contigs, parse_region
 from ._warnings import _phase_dependent, _warn_unphased
 
 
@@ -653,8 +654,9 @@ class HaplotypeMatrix:
                 chrom_start = start
             if stop is not None:
                 chrom_end = stop - 1
-        elif 'variants/CHROM' in vcf:
-            chrom = vcf['variants/CHROM'][0]
+        elif accessible_bed is not None and 'variants/CHROM' in vcf:
+            chrom = _data_contig(_distinct_contigs(vcf['variants/CHROM']),
+                                 f"VCF {path}", "load one contig with region=")
 
         qc_fields = (_resolve_qc_fields_vcf(vcf, tag_to_path, unknown_tags)
                      if fields else {})
@@ -850,7 +852,9 @@ class HaplotypeMatrix:
             )
 
         if accessible_bed is not None:
-            hm.set_accessible_mask(accessible_bed, chrom=data['chrom'])
+            chrom = _data_contig(data['contigs'], f"zarr store {path}",
+                                 "load one contig with region=")
+            hm.set_accessible_mask(accessible_bed, chrom=chrom)
 
         from .zarr_io import normalize_pop_input
         try:

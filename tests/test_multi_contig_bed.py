@@ -82,7 +82,7 @@ def test_windowed_analysis_eager_needs_chrom(vcz_store, beds):
     def eager():
         return HaplotypeMatrix.from_zarr(vcz_store, streaming="never")
 
-    with pytest.raises(ValueError, match="name the contig of the data with chrom="):
+    with pytest.raises(ValueError, match=r"region= \(from_zarr, from_vcf\)"):
         _pi(eager(), two)
     got, want = _pi(eager(), two, chrom="1"), _pi(eager(), one)
     np.testing.assert_allclose(got["pi"], want["pi"], equal_nan=True)
@@ -178,3 +178,69 @@ def test_flat_allel_store_uses_its_chrom_column(tmp_path, beds):
         "variants/CHROM", data=np.full(hm.num_variants, "1", dtype="<U1"))
     m = HaplotypeMatrix.from_zarr(path, accessible_bed=beds[1])
     assert m.n_total_sites == 50_000
+
+
+_TWO_CONTIG_VCF = """##fileformat=VCFv4.2
+##contig=<ID=1,length=1000>
+##contig=<ID=2,length=1000>
+##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2\ts3\ts4
+1\t100\t.\tA\tT\t.\tPASS\t.\tGT\t0|1\t0|0\t1|1\t0|1
+1\t200\t.\tA\tT\t.\tPASS\t.\tGT\t0|0\t0|1\t0|1\t1|1
+2\t600\t.\tA\tT\t.\tPASS\t.\tGT\t1|1\t0|1\t0|0\t0|1
+2\t700\t.\tA\tT\t.\tPASS\t.\tGT\t0|1\t1|1\t0|1\t0|0
+"""
+
+
+@pytest.fixture
+def two_contig_vcf(tmp_path):
+    """A VCF with variants on contigs 1 and 2, and a BED for both."""
+    vcf = tmp_path / "two.vcf"
+    vcf.write_text(_TWO_CONTIG_VCF)
+    bed = tmp_path / "two.bed"
+    bed.write_text("1\t0\t150\n2\t0\t650\n")
+    return str(vcf), str(bed)
+
+
+@pytest.mark.parametrize("cls", [HaplotypeMatrix, GenotypeMatrix])
+def test_from_vcf_with_several_contigs_raises(two_contig_vcf, cls):
+    vcf, bed = two_contig_vcf
+    with pytest.raises(ValueError, match="variants on 2 contigs"):
+        cls.from_vcf(vcf, accessible_bed=bed)
+
+
+def test_from_vcf_region_selects_one_contig(two_contig_vcf):
+    vcf, bed = two_contig_vcf
+    hm = HaplotypeMatrix.from_vcf(vcf, region="2", accessible_bed=bed)
+    assert hm.positions.tolist() == [600]
+
+
+def test_flat_allel_store_with_several_contigs_raises(tmp_path, beds):
+    # A flat scikit-allel store has no contig table; its CHROM column holds
+    # both contigs, so no single contig names the mask.
+    import zarr
+    hm = simulate_hm(n_samples=20, seq_length=100_000, seed=42,
+                     mutation_model='binary')
+    path = str(tmp_path / "flat2.allel.zarr")
+    hm.to_zarr(path, format="scikit-allel")
+    chrom = np.where(np.arange(hm.num_variants) < hm.num_variants // 2, "1", "2")
+    zarr.open(path, mode="a").create_array("variants/CHROM", data=chrom)
+    with pytest.raises(ValueError, match="variants on 2 contigs"):
+        HaplotypeMatrix.from_zarr(path, accessible_bed=beds[0])
+
+
+def test_contig_name_warning_points_at_caller(vcz_store, chr_beds):
+    # Each entry point reaches the warning through a different number of
+    # pg_gpu frames; the warning must name this file every time.
+    _, chr_two = chr_beds
+    calls = [
+        lambda: parse_bed(chr_two, chrom="1"),
+        lambda: resolve_accessible_mask(chr_two, 1, 100_000, chrom="1"),
+        lambda: HaplotypeMatrix.from_zarr(vcz_store, streaming="never",
+                                          accessible_bed=chr_two),
+    ]
+    for call in calls:
+        with pytest.warns(ContigNameWarning) as record:
+            call()
+        assert all(w.filename == __file__ for w in record
+                   if issubclass(w.category, ContigNameWarning))
