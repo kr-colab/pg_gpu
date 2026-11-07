@@ -1401,6 +1401,107 @@ class TestMultiallelicTwoPop:
                     assert np.isclose(got, ref, rtol=1e-9, atol=1e-12)
 
 
+class TestWindowedOneCallSiteBias:
+    """The one-call-pair gate fixed in divergence._site_components_from_counts
+    (see divergence.TestOneCallSiteBias) must hold wherever an engine
+    recomputes its own per-site components, not just in the scalar
+    functions: the host scatter engine and both fused kernels. dxy keeps
+    its own looser one-call gate throughout, so this also checks it hasn't
+    been dragged along by the fst/da fix."""
+
+    @pytest.fixture(scope="class")
+    def hm(self):
+        rng = np.random.default_rng(1)
+        n_sites = 4000
+        hap = rng.integers(0, 2, (14, n_sites)).astype(np.int8)
+        # pop2 is small with heavy random missingness, so many sites land it
+        # at exactly one call -- the case the fix must drop.
+        hap[12:14][rng.random((2, n_sites)) < 0.5] = -1
+        pos = np.arange(n_sites) * 25 + 1
+        matrix = HaplotypeMatrix(hap, pos, 1, n_sites * 25)
+        matrix.sample_sets = {'p1': list(range(12)), 'p2': [12, 13]}
+        return matrix
+
+    def _window_subset(self, hm, start, stop):
+        import cupy as cp
+        pos = hm.positions.get() if isinstance(hm.positions, cp.ndarray) else np.asarray(hm.positions)
+        hap = hm.haplotypes.get() if isinstance(hm.haplotypes, cp.ndarray) else np.asarray(hm.haplotypes)
+        mask = (pos >= start) & (pos < stop)
+        sub = HaplotypeMatrix(hap[:, mask], pos[mask],
+                              chrom_start=int(start), chrom_end=int(stop))
+        sub.sample_sets = hm.sample_sets
+        return sub
+
+    def _check_windows(self, hm, starts, window_size, dxy_vals, fst_vals,
+                       da_vals=None):
+        checked = 0
+        for i, start in enumerate(starts):
+            stop = start + window_size
+            if stop > hm.chrom_end:
+                continue
+            sub = self._window_subset(hm, start, stop)
+            if sub.num_variants == 0:
+                continue
+            assert np.isclose(
+                dxy_vals[i], divergence.dxy(sub, 'p1', 'p2', span_normalize=False),
+                rtol=1e-9, atol=1e-12)
+            if da_vals is not None:
+                assert np.isclose(
+                    da_vals[i], divergence.da(sub, 'p1', 'p2', span_normalize=False),
+                    rtol=1e-9, atol=1e-12)
+            fst_w, fst_ref = fst_vals[i], divergence.fst_hudson(sub, 'p1', 'p2')
+            if np.isnan(fst_w) or np.isnan(fst_ref):
+                assert np.isnan(fst_w) and np.isnan(fst_ref)
+            else:
+                assert np.isclose(fst_w, fst_ref, rtol=1e-9, atol=1e-12)
+            checked += 1
+        # Would pass vacuously on an empty window set; make sure it didn't.
+        assert checked > 5
+
+    def test_scatter_matches_scalar(self, hm):
+        window_size = 500
+        df = windowed_analysis(hm, window_size=window_size, step_size=window_size,
+                               statistics=['dxy', 'fst_hudson', 'da'],
+                               populations=['p1', 'p2'], span_normalize=False)
+        self._check_windows(hm, df['start'].to_numpy(), window_size,
+                            df['dxy'].to_numpy(), df['fst_hudson'].to_numpy(),
+                            df['da'].to_numpy())
+
+    def test_fused_matches_scalar(self, hm):
+        from pg_gpu.windowed_analysis import windowed_statistics_fused
+        hm.transfer_to_gpu()
+        window_size = 500
+        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        r = windowed_statistics_fused(
+            hm, bp_bins=bp, statistics=('dxy', 'fst_hudson', 'da'),
+            pop1='p1', pop2='p2', per_base=False, chrom='1')
+        self._check_windows(hm, r['start'], window_size, r['dxy'],
+                            r['fst_hudson'], r['da'])
+
+    def test_fused_chunked_matches_scalar(self, hm):
+        """Same as the non-chunked fused kernel, but forced into several
+        small chunks, so the fix's fst/da-vs-dxy accumulator split (acc_fst_den
+        vs acc_dxy) is also checked across chunk boundaries, not just within
+        one kernel launch."""
+        from pg_gpu.windowed_analysis import windowed_statistics_fused_chunked
+        from pg_gpu import _memutil
+        hm.transfer_to_gpu()
+        window_size = 500
+        bp = np.arange(0, int(hm.chrom_end) + window_size, window_size,
+                       dtype=float)
+        orig = _memutil.estimate_fused_chunk_size
+        _memutil.estimate_fused_chunk_size = lambda n, memory_fraction=0.35: 50
+        try:
+            r = windowed_statistics_fused_chunked(
+                hm, bp_bins=bp, statistics=('dxy', 'fst_hudson', 'da'),
+                pop1='p1', pop2='p2', per_base=False, chrom='1')
+        finally:
+            _memutil.estimate_fused_chunk_size = orig
+        self._check_windows(hm, r['start'], window_size, r['dxy'],
+                            r['fst_hudson'], r['da'])
+
+
 class TestMultiallelicCap:
     """The fused windowed kernels can't represent an allele index at/above the
     per-allele cap (``_FUSED_MAX_ALLELES``); such sites are dropped before launch

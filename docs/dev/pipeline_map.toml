@@ -1075,7 +1075,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN when no site has den > 0 (no joint data or no between-pop difference), or when exclude leaves no site"
+undefined = "NaN when no site has den > 0 (no site where both pops have their own pair, or no between-pop difference), or when exclude leaves no site"
 parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel", "divergence._windowed_fst"]
 notes = "The scatter engine reuses the per-site helpers but owns the window sums and NaN gate; the CUDA kernel recomputes the per-site terms."
 
@@ -1130,9 +1130,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "get_span"
-undefined = "Under include, the raw value divided by the span: 0.0 when no site has data in both pops, NaN when the span is 0. Under exclude, 0.0 when no complete site is left, before the span check, so also at span 0."
+undefined = "Under include, the raw value divided by the span: 0.0 when no site has both pops' own pair, NaN when the span is 0. Under exclude, 0.0 when no complete site is left, before the span check, so also at span 0."
 parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
-notes = "Within-pop pi terms count only sites where both pops have data, so they differ from diversity.pi on the same population."
+notes = "Within-pop pi terms (and the between term they're combined with) count only sites where both pops have their own pair (>=2 calls each), stricter than dxy's one-call-each and so different from diversity.pi on the same population."
 
 [functions."divergence.pi_within_population"]
 # signature: (haplotype_matrix, pop, missing_data, span_normalize)
@@ -1176,7 +1176,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "NaN for a window where any pairwise Hudson denominator sum is 0; empty array when no window fits"
 parallel = []
-notes = "window_size counts variants, not bp, and all three pairs use only sites where every population has data."
+notes = "window_size counts variants, not bp; all three pairs use only sites where every population has data, and each pair further needs both its own populations to have their own pair (>=2 calls) at a site."
 
 [functions."divergence.pairwise_distance_matrix"]
 # signature: (haplotype_matrix, pop1, pop2, missing_data)
