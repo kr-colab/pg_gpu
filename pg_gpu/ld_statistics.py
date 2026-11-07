@@ -1057,6 +1057,11 @@ def _resolve_r2_matrix(r2_matrix_or_matrix, missing_data='include'):
             valid = cp.where(missing_per_var == 0)[0]
             if isinstance(mat, HaplotypeMatrix):
                 mat = mat.get_subset(valid)
+            elif valid.size == 0:
+                # The GenotypeMatrix constructor rejects an empty array, so
+                # short-circuit with the same no-pair (0, 0) result
+                # _build_sigma_d2_matrix gives for fewer than 2 sites.
+                return cp.zeros((0, 0), dtype=cp.float64)
             else:
                 geno = mat.genotypes[:, valid]
                 pos = mat.positions[valid]
