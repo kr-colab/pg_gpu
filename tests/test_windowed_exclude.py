@@ -94,6 +94,24 @@ def test_exclude_matches_scalar_on_complete_sites(case, stat):
                                    rtol=1e-9, atol=1e-12)
 
 
+def test_mu_var_zero_for_accessible_window_with_no_variants():
+    # SCALAR["mu_var"] (sub.num_variants / WIN) is 0.0 for a window with
+    # accessible bases but no complete sites; windowed mu_var must agree
+    # rather than carry over the initial NaN fill used for the snp_dist_*
+    # columns, which do need at least one gap.
+    rng = np.random.default_rng(0)
+    hap = rng.integers(0, 2, (20, 10)).astype(np.int8)
+    hm = HaplotypeMatrix(hap, np.arange(10, dtype=np.int64) * 100 + 1, 1, 3000)
+
+    df = windowed_analysis(hm, window_size=1000, step_size=1000, statistics=["mu_var"])
+    assert list(df["n_variants"]) == [10, 0, 0]
+    np.testing.assert_array_equal(df["mu_var"], [0.01, 0.0, 0.0])
+
+    raw = windowed_analysis(hm, window_size=1000, step_size=1000,
+                            statistics=["mu_var"], span_normalize=False)
+    np.testing.assert_array_equal(raw["mu_var"], [10.0, 0.0, 0.0])
+
+
 def test_mixed_exclude_request_matches_single_requests(case):
     # A request mixing these statistics with pi gives each column the value
     # it has alone, and pi the value from the complete sites.
