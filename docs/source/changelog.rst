@@ -252,6 +252,18 @@ Read this section if you are comparing against older pg_gpu results.
 * ``dxy(span_normalize=False)`` and ``da(span_normalize=False)`` return
   the raw sum, matching every other statistic. They used to divide by
   the number of sites.
+* ``fst_hudson``, ``fst_tskit``, ``da``, and ``pbs`` were biased upward
+  under missing data when a population had only one call at a site: the
+  site counted toward the between-population term without counting
+  toward that population's own within-population term, inflating Hb
+  relative to Hw. A site now needs its own pair (at least two calls) in
+  both populations to count toward any of these, in every engine
+  (scalar, windowed, and the fused kernels). ``dxy`` is unaffected -- it
+  has no within term to stay aligned with, so it keeps needing only one
+  call per side. A population with a single haplotype can no longer
+  produce a defined ``fst_hudson``/``da``/``pbs`` value against anything,
+  since it never has its own pair; NaN where data allowed a number
+  before.
 * The biallelic and segregating filters keep the parent matrix's
   chromosome bounds. The old filter moved the bounds to the first and
   last surviving variant, which quietly changed the denominator of any

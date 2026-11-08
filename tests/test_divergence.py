@@ -391,9 +391,10 @@ class TestEdgeCases:
         pi_single = divergence.pi_within_population(matrix, 'single')
         assert pi_single == 0.0  # No diversity in single sample
 
-        # FST should still work
+        # Hudson FST needs its own pair in each population at a site; a
+        # single-haplotype population never has one, so it is undefined.
         fst_val = divergence.fst(matrix, 'single', 'multi')
-        assert 0 <= fst_val <= 1
+        assert np.isnan(fst_val)
 
     def test_missing_population(self):
         """Test error handling for missing population."""
@@ -488,3 +489,62 @@ class TestEdgeCases:
             matrix, 'pop1', 'pop2', missing_data='exclude'))
         assert np.isnan(divergence.fst_nei(
             matrix, 'pop1', 'pop2', missing_data='exclude'))
+
+
+class TestOneCallSiteBias:
+    """fst_hudson and da must drop a site where a population has only one
+    call, not just zero calls -- Hb and Hw need the same site set, or a
+    site with no own-pair still inflates Hb relative to Hw."""
+
+    def test_one_call_site_excluded_pinned(self):
+        """Three sites, hand-verified by the per-site Hudson formula.
+
+        Site 0: pop1 = [0, 0] (mpd1 = 0), pop2 = [1, missing] (one call).
+        Site 1: pop1 = [0, 1], pop2 = [0, 1] (both populations polymorphic).
+        Site 2: pop1 = [0, 0], pop2 = [0, 0] (both monomorphic, same allele).
+
+        Fixed: site 0 drops out entirely (its one-call population has no
+        own pair), leaving num = -0.5, den = 0.5 -> fst_hudson = -1.0 and
+        raw da = -0.5. The previous bug kept site 0's between term (1.0)
+        while zeroing only its missing side's within term, giving
+        num = 0.5, den = 1.5 -> fst_hudson = 1/3 and raw da = 0.5.
+        """
+        haplotypes = np.array([
+            [0, 0, 0],
+            [0, 1, 0],
+            [1, 0, 0],
+            [-1, 1, 0],
+        ], dtype=np.int8)
+        positions = np.array([100, 200, 300])
+        matrix = HaplotypeMatrix(haplotypes, positions)
+        matrix.sample_sets = {'pop1': [0, 1], 'pop2': [2, 3]}
+
+        fst_val = divergence.fst_hudson(matrix, 'pop1', 'pop2')
+        da_val = divergence.da(matrix, 'pop1', 'pop2', span_normalize=False)
+        assert np.isclose(fst_val, -1.0, atol=1e-12)
+        assert np.isclose(da_val, -0.5, atol=1e-12)
+
+    def test_fst_hudson_da_unbiased_under_missing_data(self):
+        """Reproduces the reported bias: a small population with random
+        missing calls should not pull fst_hudson/da far from their
+        complete-data value (MCAR should leave both roughly unbiased)."""
+        rng = np.random.default_rng(0)
+        n = 20000
+        h = rng.integers(0, 2, (12, n)).astype(np.int8)
+        positions = np.arange(n) * 5 + 1
+        missing = h.copy()
+        missing[10:12][rng.random((2, n)) < 0.5] = -1
+
+        results = {}
+        for name, x in (('complete', h), ('missing', missing)):
+            hm = HaplotypeMatrix(x, positions, 1, n * 5)
+            hm.sample_sets = {'a': list(range(10)), 'b': [10, 11]}
+            results[name] = (divergence.fst_hudson(hm, 'a', 'b'),
+                             divergence.da(hm, 'a', 'b'))
+
+        fst_complete, da_complete = results['complete']
+        fst_missing, da_missing = results['missing']
+        # The previous bug put fst_hudson at 0.336 here, 0.34 away from the
+        # complete-data value; an unbiased estimator should stay close.
+        assert abs(fst_missing - fst_complete) < 0.05
+        assert abs(da_missing - da_complete) < 0.002
