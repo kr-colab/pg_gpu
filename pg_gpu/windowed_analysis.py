@@ -985,10 +985,8 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             rescale = np.ones(n_windows)
         else:
             n_sites_with_data_window = scatter_sum(has_data.astype(cp.float64)).get()
-            with np.errstate(invalid='ignore', divide='ignore'):
-                rescale = np.where(n_sites_with_data_window > 0,
-                                   n_variants_per_window / n_sites_with_data_window,
-                                   np.nan)
+            rescale = _windowed_rescale(n_variants_per_window,
+                                        n_sites_with_data_window)
 
     if stats_set & {'segregating_sites', 'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}:
         seg_count = scatter_sum(mut)
@@ -1211,16 +1209,12 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     dxy_rescale = da_rescale = None
     if needs_dxy_rescale and not bool(dxy_all_complete):
         n_sites_dxy_window = scatter_sum(((nv1 > 0) & (nv2 > 0)).astype(cp.float64)).get()
-        with np.errstate(invalid='ignore', divide='ignore'):
-            dxy_rescale = cp.asarray(np.where(
-                n_sites_dxy_window > 0,
-                n_variants_per_window / n_sites_dxy_window, np.nan))
+        dxy_rescale = cp.asarray(
+            _windowed_rescale(n_variants_per_window, n_sites_dxy_window))
     if needs_da_rescale and not bool(da_all_complete):
         n_sites_da_window = scatter_sum(((nv1 > 1) & (nv2 > 1)).astype(cp.float64)).get()
-        with np.errstate(invalid='ignore', divide='ignore'):
-            da_rescale = cp.asarray(np.where(
-                n_sites_da_window > 0,
-                n_variants_per_window / n_sites_da_window, np.nan))
+        da_rescale = cp.asarray(
+            _windowed_rescale(n_variants_per_window, n_sites_da_window))
 
     # Build output — stay on GPU, single .get() per result
     spans_gpu = cp.asarray(spans)
@@ -1885,17 +1879,16 @@ def _fused_tajimas_d(mpd_sum, seg_count, sum_inv_w, count_valid_w,
     return tajd
 
 
-def _fused_single_pop_rescale(var_count, count_valid_w):
-    """Per-window num_variants / n_sites_with_data for the fused engine's
-    pi/theta_w/theta_h, correcting for sites a population's own missing
-    calls dropped from the sum (the same gate as ``count_valid_w`` itself:
-    ``n_valid >= 2``). 1 for an empty window, NaN when it has variants but
-    none with enough calls.
+def _windowed_rescale(n_variants, n_sites_with_data):
+    """Per-window num_variants / n_sites_with_data, correcting for sites a
+    population's own missing calls dropped from a raw sum. 1 for a window
+    with no variants, since there is nothing to rescale; NaN for a window
+    that has variants but none meeting the site's own call-count gate.
     """
     with np.errstate(invalid='ignore', divide='ignore'):
-        return np.where(var_count == 0, 1.0,
-                        np.where(count_valid_w > 0,
-                                var_count / count_valid_w, np.nan))
+        return np.where(n_variants == 0, 1.0,
+                        np.where(n_sites_with_data > 0,
+                                n_variants / n_sites_with_data, np.nan))
 
 
 _fused_windowed_kernel_v2 = cp.RawKernel(r'''
@@ -2513,7 +2506,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
-        rescale = (_fused_single_pop_rescale(var_count, count_valid_w)
+        rescale = (_windowed_rescale(var_count, count_valid_w)
                   if per_base else None)
 
         if 'pi' in statistics:
@@ -3058,7 +3051,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
-        rescale = (_fused_single_pop_rescale(var_count, count_valid_w)
+        rescale = (_windowed_rescale(var_count, count_valid_w)
                   if per_base else None)
 
         if 'pi' in statistics:

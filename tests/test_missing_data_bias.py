@@ -451,6 +451,23 @@ class TestWindowedSpanNormalizedRescale:
         np.testing.assert_allclose(df["theta_w"].iloc[0], diversity.theta_w(hm),
                                    rtol=1e-9)
 
+    def test_zero_variant_window_is_zero_not_nan_amid_missing_data(self):
+        # A window with no variants at all gives 0, even when some other
+        # window's missing data forces the real per-window rescale path
+        # (not the trivial all-complete shortcut).
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(27)
+        pos = np.array([10, 20, 30, 210, 220, 230], dtype=np.int64)
+        hap = rng.integers(0, 2, (10, len(pos))).astype(np.int8)
+        hap[-4:, 0] = -1  # missing data in window 0, window 1 has no variants
+        hm = HaplotypeMatrix(hap, pos, 1, 300)
+        hm.sample_sets = {"b": list(range(6, 10))}
+        df = windowed_analysis(hm, window_size=100, step_size=100,
+                               statistics=["pi", "theta_w"], populations=["b"])
+        assert df["n_variants"].iloc[1] == 0
+        assert df["pi"].iloc[1] == 0.0
+        assert df["theta_w"].iloc[1] == 0.0
+
 
 class TestWindowedDivergenceSpanNormalizedRescale:
     """The windowed scatter engine's dxy/da pick up the same per-window
@@ -542,6 +559,23 @@ class TestWindowedDivergenceSpanNormalizedRescale:
                                missing_data='exclude')
         assert (df["n_variants"] == 0).all()
         assert (df["dxy"] == 0).all() and (df["da"] == 0).all()
+
+    def test_zero_variant_window_is_zero_not_nan_amid_missing_data(self):
+        # A window with no variants at all gives 0, even when some other
+        # window's missing data forces the real per-window rescale path
+        # (not the trivial all-complete shortcut).
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(28)
+        pos = np.array([10, 20, 30, 210, 220, 230], dtype=np.int64)
+        hap = rng.integers(0, 2, (16, len(pos))).astype(np.int8)
+        hap[0:8, 0] = -1  # population a has no call in window 0; window 1 is empty
+        hm = HaplotypeMatrix(hap, pos, 1, 300)
+        hm.sample_sets = {"a": list(range(8)), "b": list(range(8, 16))}
+        df = windowed_analysis(hm, window_size=100, step_size=100,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        assert df["n_variants"].iloc[1] == 0
+        assert df["dxy"].iloc[1] == 0.0
+        assert df["da"].iloc[1] == 0.0
 
 
 class TestFusedSinglePopSpanNormalizedRescale:
