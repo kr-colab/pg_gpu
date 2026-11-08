@@ -32,12 +32,14 @@ def _apply_span_normalize(value, matrix, span_normalize, n_sites_with_data=None)
         String: explicit mode passed to get_span() (internal use).
     n_sites_with_data : int, optional
         When given, rescales ``value`` by
-        ``matrix.num_variants / n_sites_with_data`` before the span divide
-        (NaN when zero).
+        ``matrix.num_variants / n_sites_with_data`` before the span divide.
+        NaN when the matrix has variants but none qualifies; with no
+        variants at all, the rescale is skipped (the raw sum is 0 by
+        definition there, not undefined).
     """
     if span_normalize is False:
         return float(value.get() if hasattr(value, 'get') else value)
-    if n_sites_with_data is not None:
+    if n_sites_with_data is not None and matrix.num_variants > 0:
         if n_sites_with_data <= 0:
             return float('nan')
         value = value * (matrix.num_variants / n_sites_with_data)
@@ -881,8 +883,8 @@ def pi(haplotype_matrix: HaplotypeMatrix,
         Population name or list of sample indices. If None, uses all samples
     span_normalize : bool
         ``True`` (default): per-base nucleotide diversity, from sites
-        where the population has at least two calls; NaN when no site
-        does.
+        where the population has at least two calls; NaN with variants
+        but none qualifying, 0.0 with no variants at all.
         ``False``: the raw sum.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
@@ -917,7 +919,8 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
         Population name or list of sample indices. If None, uses all samples
     span_normalize : bool
         ``True`` (default): per-base Watterson's theta, from sites where
-        the population has at least two calls; NaN when no site does.
+        the population has at least two calls; NaN with variants but
+        none qualifying, 0.0 with no variants at all.
         ``False``: the raw sum.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
@@ -1092,7 +1095,8 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     span_normalize : bool
         ``True`` (default): per-base rates for ``pi``, ``theta_w``,
         ``theta_h``, ``theta_l`` and the eta-family, from sites where the
-        population has at least two calls; NaN when no site does.
+        population has at least two calls; NaN with variants but none
+        qualifying, 0.0 with no variants at all.
         ``False``: the raw sums.
     missing_data : str
         'include' - Use all sites, calculate from available data per site
@@ -1287,7 +1291,8 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
     span_normalize : bool
         ``True`` (default): per-base theta_H, from sites where the
-        population has at least two calls; NaN when no site does.
+        population has at least two calls; NaN with variants but none
+        qualifying, 0.0 with no variants at all.
         ``False``: the raw sum.
     missing_data : str
         'include' - per-site sample sizes
@@ -1321,7 +1326,8 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
     span_normalize : bool
         ``True`` (default): per-base theta_L, from sites where the
-        population has at least two calls; NaN when no site does.
+        population has at least two calls; NaN with variants but none
+        qualifying, 0.0 with no variants at all.
         ``False``: the raw sum.
     missing_data : str
         'include' - per-site sample sizes

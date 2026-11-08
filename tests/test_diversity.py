@@ -755,9 +755,9 @@ def test_fay_wus_h_no_variants_is_zero():
     stats = diversity.diversity_stats(
         empty, statistics=["fay_wus_h", "normalized_fay_wus_h", "pi"])
     assert stats["fay_wus_h"] == 0.0
-    # pi has no site with data at all, so the default span-normalized pi
-    # is NaN (no information), while its raw sum stays the 0.0 empty sum.
-    assert np.isnan(stats["pi"])
+    # No variants at all, so pi is 0 by definition (not undefined) on both
+    # the raw sum and the default span-normalized path.
+    assert stats["pi"] == 0.0
     assert diversity.pi(empty, span_normalize=False) == 0.0
     assert np.isnan(stats["normalized_fay_wus_h"])
     assert np.isnan(diversity.normalized_fay_wus_h(empty))

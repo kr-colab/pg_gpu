@@ -620,7 +620,8 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         ``'exclude'`` filters to sites with no missing data.
     span_normalize : bool
         ``True`` (default): per-base Dxy, from sites where each population
-        has at least one call; NaN when no site does.
+        has at least one call; NaN with variants but none qualifying, 0.0
+        with no variants at all.
         ``False``: the raw sum.
 
     Returns
@@ -681,7 +682,8 @@ def da(haplotype_matrix: HaplotypeMatrix,
         'exclude' - Only use sites with no missing data
     span_normalize : bool
         ``True`` (default): per-base Da, from sites where each population
-        has at least two calls; NaN when no site does.
+        has at least two calls; NaN with variants but none qualifying, 0.0
+        with no variants at all.
         ``False``: the raw sum.
 
     Returns

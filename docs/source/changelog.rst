@@ -679,8 +679,9 @@ Bug fixes
   fewer than two calls as invariant: the site added 0 to the raw sum but
   stayed in the span denominator, biasing the default per-base rate
   toward 0 under missing data. The raw sum is now rescaled to the sites
-  where the population actually had two calls before the span divides it,
-  and the rate is NaN when no site does (``span_normalize=False`` is
+  where the population actually had two calls before the span divides it;
+  the rate is NaN when variants exist but none qualifies, and 0.0 (as
+  before) with no variants at all (``span_normalize=False`` is
   unaffected; it already returned the plain raw sum).
 * Windowed ``pi``, ``theta_w``, ``theta_h`` and ``theta_l`` (the scatter
   engine) had the same per-window bias and now get the same rescale.
@@ -695,6 +696,11 @@ Bug fixes
   when a request mixes one of these with a Garud's H statistic, a diploSHIC
   statistic, or ``mean_nsl``) had the same per-window bias and now get the
   same rescale.
+* Windowed ``fay_wu_h`` keeps using the raw, unrescaled ``pi``/``theta_h``
+  sums in both engines, so it no longer equals their difference now that
+  those are rescaled; the scatter engine's ``zeng_dh`` reuses the same raw
+  values and has the same gap. The fused engine's two-population path
+  (``dxy``, ``da``) is also not rescaled. All three are left for follow-up.
 
 New warnings
 ~~~~~~~~~~~~

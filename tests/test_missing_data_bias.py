@@ -378,14 +378,16 @@ class TestDivergenceSpanNormalizedRescale:
         np.testing.assert_allclose(divergence.da(hm, "a", "b"),
                                    da_raw / hm.get_span(), rtol=1e-12)
 
-    def test_exclude_to_empty_is_nan(self):
+    def test_exclude_to_empty_is_zero_not_nan(self):
+        # No variants at all survive exclude, so dxy/da are 0 by definition
+        # (not undefined), matching the windowed engines' convention.
         rng = np.random.default_rng(16)
         n_hap, n_var = 16, 30
         hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
         hap[0, :] = -1  # population a missing at every site
         hm = self._hm(hap, n_var)
-        assert np.isnan(divergence.dxy(hm, "a", "b", missing_data='exclude'))
-        assert np.isnan(divergence.da(hm, "a", "b", missing_data='exclude'))
+        assert divergence.dxy(hm, "a", "b", missing_data='exclude') == 0.0
+        assert divergence.da(hm, "a", "b", missing_data='exclude') == 0.0
 
 
 class TestWindowedSpanNormalizedRescale:
