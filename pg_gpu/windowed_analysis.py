@@ -783,14 +783,13 @@ def _bp_grid_bounds(matrix, positions):
 def _bp_window_grid(chrom_start, chrom_end, window_size, step_size):
     """Start/stop arrays of the bp window grid.
 
-    Starts run from chrom_start in steps of step_size while strictly below
-    chrom_end; each window spans window_size, and the trailing partial
-    window is clipped at chrom_end + 1: chrom_end is a base (the bounds
-    are inclusive), so the right-open trailing window keeps a variant
-    sitting exactly there and its span counts the bases that exist.
-    Shared by every windowed engine so the grids agree by construction.
+    Starts run from chrom_start to chrom_end inclusive in steps of
+    step_size; stops clip at chrom_end + 1. Both bounds are bases, so a
+    variant at chrom_end is in a window and each span counts only bases
+    that exist. Shared by every windowed engine so the grids agree by
+    construction.
     """
-    win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
+    win_starts = np.arange(int(chrom_start), int(chrom_end) + 1, step_size,
                            dtype=np.float64)
     return win_starts, np.minimum(win_starts + window_size,
                                   int(chrom_end) + 1)
@@ -889,7 +888,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     # in a mixed request its own grid.
     pos_cpu = cp.asnumpy(matrix.positions)
     chrom_start, chrom_end = _bp_grid_bounds(matrix, pos_cpu)
-    if chrom_end <= chrom_start:
+    if chrom_end < chrom_start:
         return pd.DataFrame()
 
     pos_cpu_pre_exclude = pos_cpu
@@ -1110,7 +1109,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     # engine tiles the same grid as every other statistic in the request.
     pos_cpu = cp.asnumpy(haplotype_matrix.positions)
     chrom_start, chrom_end = _bp_grid_bounds(haplotype_matrix, pos_cpu)
-    if chrom_end <= chrom_start:
+    if chrom_end < chrom_start:
         return pd.DataFrame()
 
     if missing_data == 'exclude':
@@ -1667,8 +1666,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             # Build window start/stop arrays (supports overlapping windows)
             win_starts, win_stops = _bp_window_grid(
                 chrom_start, chrom_end, window_size, step_size)
-            # A zero-span matrix (one variant, no bounds) tiles no windows.
-            bp_bins = np.concatenate([win_starts, [win_stops[-1]]])
+            bp_bins = np.concatenate([win_starts, win_stops[-1:]])
 
         if len(win_starts) == 0:
             return pd.DataFrame()

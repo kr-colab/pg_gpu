@@ -37,7 +37,7 @@ def _data(seed=0, rate=0.004):
 
 def _hm(hap, sample_sets=None):
     return HaplotypeMatrix(hap.copy(), np.arange(N_VAR, dtype=np.int64) * SPACING,
-                           0, N_VAR * SPACING, sample_sets=sample_sets)
+                           0, N_VAR * SPACING - 1, sample_sets=sample_sets)
 
 
 def _gaps(sub):
@@ -265,7 +265,7 @@ def test_max_daf_nan_when_exclude_empties_a_window_with_data():
                     [-1, 0],
                     [1, 1]], dtype=np.int8)
     pos = np.array([10, 20])
-    hm = HaplotypeMatrix(hap, pos, 0, 200)
+    hm = HaplotypeMatrix(hap, pos, 0, 199)
 
     scatter = windowed_analysis(hm, window_size=100, step_size=100,
                                 statistics=['max_daf'], missing_data='exclude',

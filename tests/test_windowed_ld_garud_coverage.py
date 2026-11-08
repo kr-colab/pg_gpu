@@ -166,10 +166,10 @@ def _assert_rows_match_reference(df, hap, pos):
 
 
 @pytest.mark.parametrize("pos,bounds,window,step,n_empty", [
-    ([10, 210], (0, 300), 100, 100, 1),    # variant-free middle tile
-    ([10, 20], (0, 400), 100, 100, 3),     # grid runs on past the variants
-    ([10, 20], (0, 400), 100, 50, 7),      # sliding grid, variant-free overlaps
-    ([10, 20], (200, 400), 100, 100, 2),   # every window empty
+    ([10, 210], (0, 299), 100, 100, 1),    # variant-free middle tile
+    ([10, 20], (0, 399), 100, 100, 3),     # grid runs on past the variants
+    ([10, 20], (0, 399), 100, 50, 7),      # sliding grid, variant-free overlaps
+    ([10, 20], (200, 399), 100, 100, 2),   # every window empty
 ])
 def test_garud_windows_without_variants(pos, bounds, window, step, n_empty):
     # A window with no variants has no differentiating sites: one distinct

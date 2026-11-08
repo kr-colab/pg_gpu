@@ -32,17 +32,18 @@ def _matrix(n_hap=8, n_var=12, seed=0, multiallelic=False, sample_sets=None,
 _TWO_POP = {"p1": [0, 1, 2, 3], "p2": [4, 5, 6, 7]}
 
 
-# ── zero-span (chrom_end <= chrom_start) -> empty DataFrame ─────────────
-def test_zero_span_single_pop_returns_empty():
+# ── one-base region (chrom_start == chrom_end) -> one 1-bp window ───────
+def test_one_base_region_single_pop_one_window():
     m = _matrix(n_var=5, same_position=True)
-    assert windowed_analysis(m, window_size=100, statistics=["pi"]).empty
+    df = windowed_analysis(m, window_size=100, statistics=["pi"])
+    assert df[["start", "end", "n_variants"]].values.tolist() == [[500, 501, 5]]
 
 
-def test_zero_span_two_pop_returns_empty():
+def test_one_base_region_two_pop_one_window():
     m = _matrix(n_var=5, same_position=True, sample_sets=_TWO_POP)
     df = windowed_analysis(m, window_size=100, statistics=["dxy"],
                            populations=["p1", "p2"])
-    assert df.empty
+    assert df[["start", "end", "n_variants"]].values.tolist() == [[500, 501, 5]]
 
 
 # ── WindowIterator.count_windows edges ─────────────────────────────────
