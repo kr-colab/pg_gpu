@@ -892,6 +892,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     if chrom_end <= chrom_start:
         return pd.DataFrame()
 
+    pos_cpu_pre_exclude = pos_cpu
     if missing_data == 'exclude':
         # Keep the already-anchored window grid even when exclusion removes
         # every site: the scatter machinery renders empty windows as 0/NaN
@@ -928,6 +929,13 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     # Compute requested per-variant contributions and scatter
     n_variants_per_window = np.bincount(
         k_safe[contains], minlength=n_windows)
+    # A window that lost every site to 'exclude' is undefined for max_daf
+    # (NaN); one with no variant to begin with stays 0.0.
+    excluded_to_empty = None
+    if missing_data == 'exclude' and 'max_daf' in statistics:
+        lo = np.searchsorted(pos_cpu_pre_exclude, win_starts, side='left')
+        hi = np.searchsorted(pos_cpu_pre_exclude, win_stops, side='left')
+        excluded_to_empty = (hi > lo) & (n_variants_per_window == 0)
     results = _init_window_results(
         chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
@@ -1000,6 +1008,8 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     if 'singletons' in stats_set:
         results['singletons'] = sing_count.get()
     if 'max_daf' in stats_set:
+        if excluded_to_empty is not None:
+            max_daf_arr = np.where(excluded_to_empty, np.nan, max_daf_arr)
         results['max_daf'] = max_daf_arr
 
     # Composite stats from raw theta sums
@@ -2341,6 +2351,14 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
+    # Pre-filter positions: a window exclusion emptied (NaN for max_daf)
+    # looks identical to one with no variant to begin with (0.0) once
+    # filtering below removes the distinction.
+    orig_missing_data = missing_data
+    orig_positions_gpu = haplotype_matrix.positions
+    if not isinstance(orig_positions_gpu, cp.ndarray):
+        orig_positions_gpu = cp.asarray(orig_positions_gpu)
+
     haplotype_matrix, missing_data = _apply_exclude(
         haplotype_matrix, missing_data, statistics, population, pop1, pop2)
 
@@ -2392,6 +2410,12 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         we_gpu = bp_bins_gpu[1:]
     else:
         raise ValueError('bp_bins and _win_starts/_win_stops must not both be None.')
+
+    excluded_to_empty = None
+    if orig_missing_data == 'exclude' and 'max_daf' in statistics:
+        orig_lo = cp.searchsorted(orig_positions_gpu, ws_gpu, side='left')
+        orig_hi = cp.searchsorted(orig_positions_gpu, we_gpu, side='left')
+        excluded_to_empty = ((orig_hi > orig_lo) & (win_stop == win_start)).get()
 
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
@@ -2475,6 +2499,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                                         per_base)
 
         if 'max_daf' in statistics:
+            if excluded_to_empty is not None:
+                max_daf = np.where(excluded_to_empty, np.nan, max_daf)
             results['max_daf'] = max_daf
 
     # two-pop stats via fused kernel
@@ -2826,6 +2852,14 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
+    # Pre-filter positions: a window exclusion emptied (NaN for max_daf)
+    # looks identical to one with no variant to begin with (0.0) once
+    # filtering below removes the distinction.
+    orig_missing_data = missing_data
+    orig_positions_gpu = haplotype_matrix.positions
+    if not isinstance(orig_positions_gpu, cp.ndarray):
+        orig_positions_gpu = cp.asarray(orig_positions_gpu)
+
     haplotype_matrix, missing_data = _apply_exclude(
         haplotype_matrix, missing_data, statistics, population, pop1, pop2)
 
@@ -2870,6 +2904,12 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         we_gpu = bp_bins_gpu[1:]
     else:
         raise ValueError('bp_bins and _win_starts/_win_stops must not both be None.')
+
+    excluded_to_empty = None
+    if orig_missing_data == 'exclude' and 'max_daf' in statistics:
+        orig_lo = cp.searchsorted(orig_positions_gpu, ws_gpu, side='left')
+        orig_hi = cp.searchsorted(orig_positions_gpu, we_gpu, side='left')
+        excluded_to_empty = ((orig_hi > orig_lo) & (win_stop == win_start)).get()
 
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
@@ -2996,6 +3036,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                                         per_base)
 
         if 'max_daf' in statistics:
+            if excluded_to_empty is not None:
+                max_daf_arr = np.where(excluded_to_empty, np.nan, max_daf_arr)
             results['max_daf'] = max_daf_arr
 
     # ── Two-pop stats via chunked fused kernel ───────────────────────────
