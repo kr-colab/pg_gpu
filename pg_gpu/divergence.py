@@ -619,14 +619,14 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator (per-base rate).
-        ``False``: return the raw sum of per-site Dxy over sites with data
-        (consistent with ``diversity.pi`` and the other raw-sum statistics).
+        ``True`` (default): per-base Dxy, from sites where each population
+        has at least one call; NaN when no site does.
+        ``False``: the raw sum.
 
     Returns
     -------
     float or cp.ndarray
-        Mean Dxy or per-site Dxy values
+        Mean Dxy, or per-site Dxy (NaN where either population has no call).
     """
     # Ensure data is on GPU if available
     if haplotype_matrix.device == 'CPU':
@@ -635,8 +635,6 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     if missing_data == 'exclude':
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
-        if haplotype_matrix.num_variants == 0:
-            return 0.0 if not per_site else np.array([])
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -648,12 +646,15 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     # alleles; multiallelic-correct (matches tskit divergence).
     ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
     dxy_per_site = _dxy_per_site_from_counts(ac1, nv1, ac2, nv2)
+    valid = (nv1 > 0) & (nv2 > 0)
 
     if per_site:
-        return dxy_per_site.get()
+        return cp.where(valid, dxy_per_site, cp.nan).get()
     else:
+        n_sites_with_data = int(cp.sum(valid).get())
         dxy_sum = cp.sum(dxy_per_site)
-        return _apply_span_normalize(dxy_sum, haplotype_matrix, span_normalize)
+        return _apply_span_normalize(dxy_sum, haplotype_matrix, span_normalize,
+                                     n_sites_with_data)
 
 
 def da(haplotype_matrix: HaplotypeMatrix,
@@ -679,8 +680,9 @@ def da(haplotype_matrix: HaplotypeMatrix,
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator.
-        ``False``: return raw sum / sites-with-data average.
+        ``True`` (default): per-base Da, from sites where each population
+        has at least two calls; NaN when no site does.
+        ``False``: the raw sum.
 
     Returns
     -------
@@ -693,8 +695,6 @@ def da(haplotype_matrix: HaplotypeMatrix,
     if missing_data == 'exclude':
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
-        if haplotype_matrix.num_variants == 0:
-            return 0.0
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)
@@ -704,10 +704,13 @@ def da(haplotype_matrix: HaplotypeMatrix,
     # The between term here is not standalone Dxy: it shares one site set
     # with the within-pop pi terms (see _site_components_from_counts),
     # matching fst_hudson's own convention.
-    mpd1, mpd2, between = _twopop_site_components(pop1_haps, pop2_haps)
+    ac1, ac2, nv1, nv2 = _aligned_pop_counts(pop1_haps, pop2_haps)
+    mpd1, mpd2, between = _site_components_from_counts(ac1, nv1, ac2, nv2)
     da_raw = cp.sum(between) - (cp.sum(mpd1) + cp.sum(mpd2)) / 2.0
+    n_sites_with_data = int(cp.sum((nv1 > 1) & (nv2 > 1)).get())
 
-    return _apply_span_normalize(da_raw, haplotype_matrix, span_normalize)
+    return _apply_span_normalize(da_raw, haplotype_matrix, span_normalize,
+                                 n_sites_with_data)
 
 
 def pi_within_population(haplotype_matrix: HaplotypeMatrix,

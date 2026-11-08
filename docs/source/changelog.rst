@@ -684,6 +684,11 @@ Bug fixes
   unaffected; it already returned the plain raw sum).
 * Windowed ``pi``, ``theta_w``, ``theta_h`` and ``theta_l`` (the scatter
   engine) had the same per-window bias and now get the same rescale.
+* ``dxy`` and ``da`` had the same bias: a site where a population lacked
+  enough calls (one call each for ``dxy``, two for ``da``) added 0 to the
+  raw sum but stayed in the span denominator. Both are now rescaled the
+  same way, and ``dxy(per_site=True)`` gives NaN rather than 0.0 at a site
+  where either population has no call.
 
 New warnings
 ~~~~~~~~~~~~

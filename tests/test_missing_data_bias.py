@@ -297,6 +297,97 @@ class TestSpanNormalizedRescale:
         assert all(np.isnan(v) for v in stats.values())
 
 
+class TestDivergenceSpanNormalizedRescale:
+    """dxy/da rescale their raw sum to the sites where each population has
+    enough calls (one each for dxy, two each for da) before dividing by the
+    span, the same fix as pi/theta_w/theta_h/theta_l but for the two-pop
+    site gates in _dxy_per_site_from_counts / _site_components_from_counts."""
+
+    def _hm(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var) * 10 + 1, 1, n_var * 10)
+        hm.sample_sets = {"a": list(range(hap.shape[0] - 8)),
+                          "b": list(range(hap.shape[0] - 8, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_complete_data_under_heavy_missingness(self):
+        rng = np.random.default_rng(10)
+        n_hap, n_var = 24, 4000
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm_complete = self._hm(hap.copy(), n_var)
+        dxy_complete = divergence.dxy(hm_complete, "a", "b")
+        da_complete = divergence.da(hm_complete, "a", "b")
+
+        miss = hap.copy()
+        miss[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm_missing = self._hm(miss, n_var)
+        dxy_missing = divergence.dxy(hm_missing, "a", "b")
+        da_missing = divergence.da(hm_missing, "a", "b")
+
+        assert abs(dxy_missing / dxy_complete - 1) < 0.1
+        assert abs(da_missing - da_complete) < 0.01
+
+    def test_raw_sum_untouched_by_rescale(self):
+        rng = np.random.default_rng(11)
+        n_hap, n_var = 16, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        assert np.isfinite(divergence.dxy(hm, "a", "b", span_normalize=False))
+        assert np.isfinite(divergence.da(hm, "a", "b", span_normalize=False))
+
+    def test_nan_when_population_has_no_call_anywhere(self):
+        rng = np.random.default_rng(12)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:] = -1
+        hm = self._hm(hap, n_var)
+        assert np.isnan(divergence.dxy(hm, "a", "b"))
+        assert np.isnan(divergence.da(hm, "a", "b"))
+        assert divergence.dxy(hm, "a", "b", span_normalize=False) == 0.0
+        assert divergence.da(hm, "a", "b", span_normalize=False) == 0.0
+
+    def test_nan_when_population_has_a_single_call(self):
+        # da needs its own pair (two calls) in each population at a site;
+        # exactly one call everywhere is enough for dxy but not for da.
+        rng = np.random.default_rng(13)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:-1] = -1  # population b keeps exactly one haplotype with calls
+        hm = self._hm(hap, n_var)
+        assert np.isfinite(divergence.dxy(hm, "a", "b"))
+        assert np.isnan(divergence.da(hm, "a", "b"))
+
+    def test_per_site_dxy_nan_where_either_population_has_no_call(self):
+        rng = np.random.default_rng(14)
+        n_hap, n_var = 16, 20
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:, 5] = -1  # population b missing entirely at site 5
+        hm = self._hm(hap, n_var)
+        per_site = divergence.dxy(hm, "a", "b", per_site=True)
+        assert np.isnan(per_site[5])
+        assert np.isfinite(per_site[:5]).all() and np.isfinite(per_site[6:]).all()
+
+    def test_complete_data_unaffected(self):
+        rng = np.random.default_rng(15)
+        n_hap, n_var = 20, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        dxy_raw = divergence.dxy(hm, "a", "b", span_normalize=False)
+        da_raw = divergence.da(hm, "a", "b", span_normalize=False)
+        np.testing.assert_allclose(divergence.dxy(hm, "a", "b"),
+                                   dxy_raw / hm.get_span(), rtol=1e-12)
+        np.testing.assert_allclose(divergence.da(hm, "a", "b"),
+                                   da_raw / hm.get_span(), rtol=1e-12)
+
+    def test_exclude_to_empty_is_nan(self):
+        rng = np.random.default_rng(16)
+        n_hap, n_var = 16, 30
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[0, :] = -1  # population a missing at every site
+        hm = self._hm(hap, n_var)
+        assert np.isnan(divergence.dxy(hm, "a", "b", missing_data='exclude'))
+        assert np.isnan(divergence.da(hm, "a", "b", missing_data='exclude'))
+
+
 class TestWindowedSpanNormalizedRescale:
     """The windowed scatter engine's pi/theta_w/theta_h/theta_l pick up the
     same per-window rescale as the scalar functions above."""
