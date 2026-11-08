@@ -450,6 +450,98 @@ class TestWindowedSpanNormalizedRescale:
                                    rtol=1e-9)
 
 
+class TestWindowedDivergenceSpanNormalizedRescale:
+    """The windowed scatter engine's dxy/da pick up the same per-window
+    rescale as the scalar functions above, each against its own site gate."""
+
+    def _hm(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        hm.sample_sets = {"a": list(range(hap.shape[0] - 8)),
+                          "b": list(range(hap.shape[0] - 8, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_scalar_under_missingness(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(18)
+        n_hap, n_var = 24, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        np.testing.assert_allclose(df["dxy"].iloc[0], divergence.dxy(hm, "a", "b"),
+                                   rtol=1e-9)
+        np.testing.assert_allclose(df["da"].iloc[0], divergence.da(hm, "a", "b"),
+                                   rtol=1e-9)
+
+    def test_raw_sum_untouched_by_rescale(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(19)
+        n_hap, n_var = 16, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"],
+                               span_normalize=False)
+        np.testing.assert_allclose(
+            df["dxy"].iloc[0], divergence.dxy(hm, "a", "b", span_normalize=False))
+        np.testing.assert_allclose(
+            df["da"].iloc[0], divergence.da(hm, "a", "b", span_normalize=False))
+
+    def test_nan_when_population_has_no_call_in_window(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(20)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:] = -1
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        assert np.isnan(df["dxy"].iloc[0]) and np.isnan(df["da"].iloc[0])
+
+    def test_nan_when_population_has_a_single_call_in_window(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(21)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:-1] = -1  # population b keeps exactly one haplotype with calls
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        assert np.isfinite(df["dxy"].iloc[0])
+        assert np.isnan(df["da"].iloc[0])
+
+    def test_complete_data_unaffected(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(22)
+        n_hap, n_var = 20, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        np.testing.assert_allclose(df["dxy"].iloc[0], divergence.dxy(hm, "a", "b"),
+                                   rtol=1e-9)
+        np.testing.assert_allclose(df["da"].iloc[0], divergence.da(hm, "a", "b"),
+                                   rtol=1e-9)
+
+    def test_exclude_to_empty_is_zero_not_nan(self):
+        # Mirrors the single-pop windowed convention: a window with literally
+        # zero variants (the whole matrix excluded to empty) gives 0, not
+        # NaN -- NaN is reserved for a window that has variants but no
+        # population-pair overlap among them.
+        from pg_gpu.windowed_analysis import windowed_analysis
+        n_hap, n_var = 16, 6
+        hap = np.full((n_hap, n_var), -1, dtype=np.int8)
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"],
+                               missing_data='exclude')
+        assert (df["n_variants"] == 0).all()
+        assert (df["dxy"] == 0).all() and (df["da"] == 0).all()
+
+
 class TestExcludeKeepsMatrixContext:
     """exclude_missing_sites keeps the parent chromosome bounds and
     accessibility mask, like the restrict_to_* filters, so exclude-mode

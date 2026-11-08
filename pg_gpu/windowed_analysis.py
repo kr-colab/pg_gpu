@@ -1174,6 +1174,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     need_dxy = 'dxy' in stats_set
     if need_fst_da or need_dxy:
         ac1, ac2, nv1, nv2 = divergence._aligned_pop_counts(hap1, hap2)
+        dxy_all_complete = cp.all((nv1 > 0) & (nv2 > 0))
+        da_all_complete = cp.all((nv1 > 1) & (nv2 > 1))
         if need_fst_da:
             mpd1, mpd2, between = divergence._site_components_from_counts(
                 ac1, nv1, ac2, nv2)
@@ -1199,6 +1201,27 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         pi1_sum = scatter_sum(mpd1)
         pi2_sum = scatter_sum(mpd2)
 
+    # Without this, a site with too few calls to contribute would still
+    # count toward the span, reading as invariant rather than unmeasured.
+    # dxy and da need their own count, since they use different site gates.
+    # A fully-complete population pair skips the extra scatter pass
+    # entirely (rescale is trivially 1), matching the single-pop fast path.
+    needs_dxy_rescale = span_normalize is not False and need_dxy
+    needs_da_rescale = span_normalize is not False and 'da' in stats_set
+    dxy_rescale = da_rescale = None
+    if needs_dxy_rescale and not bool(dxy_all_complete):
+        n_sites_dxy_window = scatter_sum(((nv1 > 0) & (nv2 > 0)).astype(cp.float64)).get()
+        with np.errstate(invalid='ignore', divide='ignore'):
+            dxy_rescale = cp.asarray(np.where(
+                n_sites_dxy_window > 0,
+                n_variants_per_window / n_sites_dxy_window, np.nan))
+    if needs_da_rescale and not bool(da_all_complete):
+        n_sites_da_window = scatter_sum(((nv1 > 1) & (nv2 > 1)).astype(cp.float64)).get()
+        with np.errstate(invalid='ignore', divide='ignore'):
+            da_rescale = cp.asarray(np.where(
+                n_sites_da_window > 0,
+                n_variants_per_window / n_sites_da_window, np.nan))
+
     # Build output — stay on GPU, single .get() per result
     spans_gpu = cp.asarray(spans)
 
@@ -1210,10 +1233,14 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             results['fst_hudson'] = fst_vals
 
     if 'dxy' in stats_set:
-        results['dxy'] = (dxy_sum / spans_gpu).get()
+        vals = dxy_sum * dxy_rescale if dxy_rescale is not None else dxy_sum
+        results['dxy'] = (vals / spans_gpu).get()
 
     if 'da' in stats_set:
-        results['da'] = ((between_sum - (pi1_sum + pi2_sum) / 2.0) / spans_gpu).get()
+        vals = between_sum - (pi1_sum + pi2_sum) / 2.0
+        if da_rescale is not None:
+            vals = vals * da_rescale
+        results['da'] = (vals / spans_gpu).get()
 
     if 'fst_wc' in stats_set:
         results['fst_wc'] = cp.where(wc_abc_sum > 0, wc_a_sum / wc_abc_sum,

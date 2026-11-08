@@ -689,6 +689,8 @@ Bug fixes
   raw sum but stayed in the span denominator. Both are now rescaled the
   same way, and ``dxy(per_site=True)`` gives NaN rather than 0.0 at a site
   where either population has no call.
+* Windowed ``dxy``/``da`` (the scatter engine) had the same per-window
+  bias and now get the same rescale.
 
 New warnings
 ~~~~~~~~~~~~

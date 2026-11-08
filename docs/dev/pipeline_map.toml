@@ -631,7 +631,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when no site has two valid haplotypes (including no variants at all) or when span <= 0; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.pi_components", "diversity.FrequencySpectrum.theta", "divergence._site_components_from_counts", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span, correcting for sites the population's own missing calls dropped from the sum; _fused_windowed_kernel_v2 has its own C copy of the per-site formula and is not yet rescaled."
+notes = "span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span, correcting for sites the population's own missing calls dropped from the sum; _fused_windowed_kernel_v2 has its own C copy of the per-site formula, without this rescale."
 
 [functions."diversity.theta_w"]
 # signature: (haplotype_matrix, population, span_normalize, missing_data)
@@ -642,7 +642,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when no site has two valid haplotypes (including no variants at all) or when span <= 0; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "Per site (alleles present - 1) * 1/a1(n_valid); FrequencySpectrum.theta sums xi instead and differs at reference-absent multiallelic sites. span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 has its own C copy and is not yet rescaled, and separately ignores missing data in its divisor (a pre-existing, separate bug)."
+notes = "Per site (alleles present - 1) * 1/a1(n_valid); FrequencySpectrum.theta sums xi instead and differs at reference-absent multiallelic sites. span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 computes the same per-site a1(n_valid) contribution, without this rescale."
 
 [functions."diversity.tajimas_d"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -719,7 +719,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when no site has two valid haplotypes (including no variants at all) or when span <= 0; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 has its own C copy and is not yet rescaled."
+notes = "span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 has its own C copy of the per-site formula, without this rescale."
 
 [functions."diversity.theta_l"]
 # signature: (haplotype_matrix, population, span_normalize, missing_data)
@@ -1122,7 +1122,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when no site has a call in both pops (including no variants at all) or when span <= 0; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes). per_site=True gives NaN at a site where either pop has no call."
 parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
-notes = "span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span, correcting for sites one population's own missing calls dropped from the sum; the fused engines have their own C copy of the per-site formula and are not yet rescaled."
+notes = "span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span, correcting for sites one population's own missing calls dropped from the sum; the fused engines have their own C copy of the per-site formula, without this rescale."
 
 [functions."divergence.da"]
 # signature: (haplotype_matrix, pop1, pop2, missing_data, span_normalize)
@@ -1133,7 +1133,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when no site has both pops' own pair (including no variants at all) or when span <= 0; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)."
 parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
-notes = "Within-pop pi terms (and the between term they're combined with) count only sites where both pops have their own pair (>=2 calls each), stricter than dxy's one-call-each and so different from diversity.pi on the same population. span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span; the fused engines have their own C copy of the per-site formula and are not yet rescaled."
+notes = "Within-pop pi terms (and the between term they're combined with) count only sites where both pops have their own pair (>=2 calls each), stricter than dxy's one-call-each and so different from diversity.pi on the same population. span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span; the fused engines have their own C copy of the per-site formula, without this rescale."
 
 [functions."divergence.pi_within_population"]
 # signature: (haplotype_matrix, pop, missing_data, span_normalize)
