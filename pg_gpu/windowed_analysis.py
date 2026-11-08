@@ -1885,6 +1885,19 @@ def _fused_tajimas_d(mpd_sum, seg_count, sum_inv_w, count_valid_w,
     return tajd
 
 
+def _fused_single_pop_rescale(var_count, count_valid_w):
+    """Per-window num_variants / n_sites_with_data for the fused engine's
+    pi/theta_w/theta_h, correcting for sites a population's own missing
+    calls dropped from the sum (the same gate as ``count_valid_w`` itself:
+    ``n_valid >= 2``). 1 for an empty window, NaN when it has variants but
+    none with enough calls.
+    """
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return np.where(var_count == 0, 1.0,
+                        np.where(count_valid_w > 0,
+                                var_count / count_valid_w, np.nan))
+
+
 _fused_windowed_kernel_v2 = cp.RawKernel(r'''
 #define MAX_ALLELES 8   /* keep in sync with _FUSED_MAX_ALLELES (host guard) */
 extern "C" __global__
@@ -2500,11 +2513,17 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
+        rescale = (_fused_single_pop_rescale(var_count, count_valid_w)
+                  if per_base else None)
+
         if 'pi' in statistics:
-            results['pi'] = _rate(mpd_sum, window_bases, per_base)
+            vals = mpd_sum * rescale if rescale is not None else mpd_sum
+            results['pi'] = _rate(vals, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
+            vals = (watterson_num_w * rescale if rescale is not None
+                    else watterson_num_w)
+            results['theta_w'] = _rate(vals, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -2518,7 +2537,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
+            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
+            results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
             results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
@@ -3038,11 +3058,17 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
+        rescale = (_fused_single_pop_rescale(var_count, count_valid_w)
+                  if per_base else None)
+
         if 'pi' in statistics:
-            results['pi'] = _rate(mpd_sum, window_bases, per_base)
+            vals = mpd_sum * rescale if rescale is not None else mpd_sum
+            results['pi'] = _rate(vals, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
+            vals = (watterson_num_w * rescale if rescale is not None
+                    else watterson_num_w)
+            results['theta_w'] = _rate(vals, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -3056,7 +3082,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
+            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
+            results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
             results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,

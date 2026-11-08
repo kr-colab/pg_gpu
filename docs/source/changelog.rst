@@ -691,6 +691,10 @@ Bug fixes
   where either population has no call.
 * Windowed ``dxy``/``da`` (the scatter engine) had the same per-window
   bias and now get the same rescale.
+* Windowed ``pi``, ``theta_w`` and ``theta_h`` (the fused CUDA engine, used
+  when a request mixes one of these with a Garud's H statistic, a diploSHIC
+  statistic, or ``mean_nsl``) had the same per-window bias and now get the
+  same rescale.
 
 New warnings
 ~~~~~~~~~~~~

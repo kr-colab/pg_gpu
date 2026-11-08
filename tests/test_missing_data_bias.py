@@ -542,6 +542,116 @@ class TestWindowedDivergenceSpanNormalizedRescale:
         assert (df["dxy"] == 0).all() and (df["da"] == 0).all()
 
 
+class TestFusedSinglePopSpanNormalizedRescale:
+    """windowed_statistics_fused/_chunked's pi/theta_w/theta_h pick up the
+    same per-window rescale as the scatter engine, from the per-window
+    counts (var_count, count_valid_w) the kernel already returns."""
+
+    def _engines(self):
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused, windowed_statistics_fused_chunked)
+        return [windowed_statistics_fused, windowed_statistics_fused_chunked]
+
+    def _hm(self, hap, n_var):
+        return HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                               1, n_var * 10)
+
+    def test_rate_matches_scalar_under_missingness(self):
+        rng = np.random.default_rng(23)
+        n_hap, n_var = 10, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[rng.random((n_hap, n_var)) < 0.85] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h'))
+            np.testing.assert_allclose(out['pi'][0], diversity.pi(hm), rtol=1e-9)
+            np.testing.assert_allclose(out['theta_w'][0], diversity.theta_w(hm),
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['theta_h'][0], diversity.theta_h(hm),
+                                       rtol=1e-9)
+
+    def test_raw_sum_untouched_by_rescale(self):
+        rng = np.random.default_rng(24)
+        n_hap, n_var = 10, 100
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[rng.random((n_hap, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h'),
+                         per_base=False)
+            np.testing.assert_allclose(
+                out['pi'][0], diversity.pi(hm, span_normalize=False))
+            np.testing.assert_allclose(
+                out['theta_w'][0], diversity.theta_w(hm, span_normalize=False))
+            np.testing.assert_allclose(
+                out['theta_h'][0], diversity.theta_h(hm, span_normalize=False))
+
+    def test_tajimas_d_and_fay_wu_h_unaffected(self):
+        # tajimas_d and fay_wu_h must keep reading the raw, unrescaled sums.
+        rng = np.random.default_rng(25)
+        n_hap, n_var = 20, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[rng.random((n_hap, n_var)) < 0.3] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h', 'tajimas_d',
+                                     'fay_wu_h'))
+            np.testing.assert_allclose(out['tajimas_d'][0],
+                                       diversity.tajimas_d(hm), rtol=1e-6)
+            np.testing.assert_allclose(out['fay_wu_h'][0],
+                                       diversity.fay_wus_h(hm) / hm.get_span(),
+                                       rtol=1e-6)
+
+    def test_nan_when_no_site_has_two_calls(self):
+        n_hap, n_var = 6, 20
+        hap = np.zeros((n_hap, n_var), dtype=np.int8)
+        hap[1:, :] = -1  # only one haplotype called anywhere
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h'))
+            assert np.isnan(out['pi'][0])
+            assert np.isnan(out['theta_w'][0])
+            assert np.isnan(out['theta_h'][0])
+
+    def test_zero_variant_window_is_zero_not_nan(self):
+        # Mirrors the scatter engine's convention: a window with literally
+        # no variants gives 0, not NaN.
+        n_hap, n_var = 6, 10
+        hap = np.zeros((n_hap, n_var), dtype=np.int8)
+        hap[:, :] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('pi', 'theta_w'),
+                         missing_data='exclude')
+            assert out['n_variants'][0] == 0
+            assert out['pi'][0] == 0.0
+            assert out['theta_w'][0] == 0.0
+
+    def test_complete_data_unaffected(self):
+        rng = np.random.default_rng(26)
+        n_hap, n_var = 12, 150
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h'))
+            np.testing.assert_allclose(out['pi'][0], diversity.pi(hm), rtol=1e-9)
+            np.testing.assert_allclose(out['theta_w'][0], diversity.theta_w(hm),
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['theta_h'][0], diversity.theta_h(hm),
+                                       rtol=1e-9)
+
+
 class TestExcludeKeepsMatrixContext:
     """exclude_missing_sites keeps the parent chromosome bounds and
     accessibility mask, like the restrict_to_* filters, so exclude-mode
