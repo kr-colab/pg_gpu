@@ -343,6 +343,21 @@ def _splits_individual(rows):
     return any((r ^ 1) not in s for r in s)
 
 
+class ContigNameWarning(UserWarning):
+    """Emitted when a BED contig is matched to the data's contig by name.
+
+    BED files from UCSC name contigs ``chr1``, ``chr2``, ..., while many VCFs
+    and stores name them ``1``, ``2``, .... When the data's contig is not in
+    the BED, pg_gpu compares the names without a leading ``chr`` and without
+    case; if exactly one BED contig matches, it uses that contig and emits
+    this warning. Silence with::
+
+        import warnings
+        from pg_gpu import ContigNameWarning
+        warnings.filterwarnings("ignore", category=ContigNameWarning)
+    """
+
+
 class FewCompleteHaplotypesWarning(UserWarning):
     """Emitted when many windows have few haplotypes with no missing call.
 

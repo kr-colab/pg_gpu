@@ -1269,9 +1269,10 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
     shared_mask = None
     if accessible_bed is not None:
         from .accessible import resolve_accessible_mask
+        # The stream knows its contig, so a multi-contig BED needs no chrom.
         shared_mask = resolve_accessible_mask(
             accessible_bed, streaming_hm.chrom_start, streaming_hm.chrom_end,
-            chrom=chrom,
+            chrom=chrom or streaming_hm.chrom,
         )
 
     parts = []
@@ -1369,6 +1370,10 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     accessible_bed : str, optional
         Path to a BED file defining accessible/callable regions.
         If provided and the matrix has no mask, loads the mask.
+    chrom : str, optional
+        Contig of the data, used to select its intervals from
+        ``accessible_bed``. Required when the BED has more than one contig
+        and the matrix is eager; a streaming matrix uses its own contig.
     min_complete_haplotypes : int, optional
         With a Garud statistic or ``haplotype_count``, set those statistics
         to NaN in every window with fewer than this many haplotypes with no

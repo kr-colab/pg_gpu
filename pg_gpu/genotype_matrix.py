@@ -11,8 +11,9 @@ import numpy as np
 import cupy as cp
 from typing import Optional
 
-from .accessible import AccessibleMask, resolve_accessible_mask, slice_fields
-from .zarr_io import parse_region
+from .accessible import (AccessibleMask, _data_contig, resolve_accessible_mask,
+                         slice_fields)
+from .zarr_io import _distinct_contigs, parse_region
 
 
 def _biallelic_and_alt(ac):
@@ -219,7 +220,9 @@ class GenotypeMatrix:
         mask_or_path : str, path-like, numpy.ndarray, or AccessibleMask
             BED file path, boolean array, or AccessibleMask instance.
         chrom : str, optional
-            Chromosome name (required for BED file input).
+            Chromosome name to extract from the BED file. Required when the
+            BED file has more than one contig (otherwise ValueError); a
+            one-contig BED needs none.
         """
         self.accessible_mask = resolve_accessible_mask(
             mask_or_path, self.chrom_start, self.chrom_end, chrom)
@@ -532,7 +535,10 @@ class GenotypeMatrix:
         if accessible_bed is not None:
             chrom = None
             if 'variants/CHROM' in callset:
-                chrom = callset['variants/CHROM'][0]
+                chrom = _data_contig(
+                    _distinct_contigs(callset['variants/CHROM']), f"VCF {path}",
+                    "load one contig per GenotypeMatrix, e.g. from a VCF "
+                    "subset with bcftools view -r")
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
         return gm
 
@@ -637,7 +643,7 @@ class GenotypeMatrix:
 
         n_total_sites = gt.shape[0] if include_invariant else None
 
-        chrom, start, stop = parse_region(region)
+        _, start, stop = parse_region(region)
         start = start if start is not None else int(positions[0])
         stop = stop - 1 if stop is not None else int(positions[-1])
 
@@ -659,6 +665,8 @@ class GenotypeMatrix:
                 region=region,
             )
         if accessible_bed is not None:
+            chrom = _data_contig(data['contigs'], f"zarr store {path}",
+                                 "load one contig with region=")
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
 
         try:

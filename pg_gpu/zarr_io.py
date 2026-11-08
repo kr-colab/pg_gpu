@@ -59,6 +59,18 @@ def _region_mask(positions, start, stop):
     return (positions >= start) & (positions < stop)
 
 
+def _distinct_contigs(names):
+    """The distinct contig names in a per-variant CHROM column, in order."""
+    names = np.asarray(names)
+    if not len(names):
+        return []
+    # One contig is the usual case; the elementwise test avoids a Python
+    # pass over every variant.
+    if (names == names[0]).all():
+        return [str(names[0])]
+    return list(dict.fromkeys(str(c) for c in names))
+
+
 def _vcz_contig_index(store, contig_arr, chrom):
     """``(index, name)`` of ``chrom`` in a VCZ store's contig table, or of
     the only contig with variants when ``chrom`` is ``None``.
@@ -235,13 +247,13 @@ def read_genotypes_vcz(store, region=None):
         store when ``region`` is given (``None`` for a whole-store
         read). Auxiliary callers (e.g. QC field readers) can reuse the
         same indices to keep their slices aligned with the genotype
-        matrix.
+        matrix. Also 'contigs', the list holding the contig read.
     """
     contig_arr = np.asarray(store['variant_contig'])
     chrom, start, stop = parse_region(region)
     # On a whole-store read this call is the multi-contig guard: a store
     # spanning several contigs needs a region to name one.
-    contig_idx, _ = _vcz_contig_index(store, contig_arr, chrom)
+    contig_idx, contig = _vcz_contig_index(store, contig_arr, chrom)
     if region is not None:
         pos_arr = np.asarray(store['variant_position'])
         mask = (contig_arr == contig_idx) & _region_mask(pos_arr, start, stop)
@@ -258,7 +270,8 @@ def read_genotypes_vcz(store, region=None):
 
     samples = list(np.array(store['sample_id'])) if 'sample_id' in store else None
     return {'gt': gt, 'positions': positions, 'samples': samples,
-            'variant_indices': variant_indices}
+            'variant_indices': variant_indices,
+            'contigs': [] if contig is None else [contig]}
 
 
 def read_qc_fields(zarr_path, fields, variant_indices=None, region=None):
@@ -375,8 +388,19 @@ def read_genotypes_allel(store, region=None):
         if len(positions) == 0:
             raise ValueError(f"No variants in region {region}")
 
+    # The contigs of the variants read come from their CHROM values: the
+    # region filter above reads positions only, so a region's contig name
+    # need not match them. Without a CHROM column, the region names it.
+    if 'variants/CHROM' in store:
+        chrom_col = np.asarray(store['variants/CHROM'])
+        if variant_indices is not None:
+            chrom_col = chrom_col[variant_indices]
+        contigs = _distinct_contigs(chrom_col)
+    else:
+        chrom = parse_region(region)[0]
+        contigs = [] if chrom is None else [chrom]
     return {'gt': gt, 'positions': positions, 'samples': samples,
-            'variant_indices': variant_indices}
+            'variant_indices': variant_indices, 'contigs': contigs}
 
 
 def read_genotypes_allel_grouped(store, region):
@@ -416,7 +440,7 @@ def read_genotypes_allel_grouped(store, region):
         raise ValueError(f"No variants in region {region}")
 
     return {'gt': gt, 'positions': positions, 'samples': samples,
-            'variant_indices': variant_indices}
+            'variant_indices': variant_indices, 'contigs': [chrom]}
 
 
 def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
@@ -672,7 +696,9 @@ def read_genotypes(path, region=None):
     Returns
     -------
     dict
-        Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples'.
+        Keys: 'gt' (n_var, n_samples, ploidy), 'positions', 'samples',
+        'variant_indices', and 'contigs' (the distinct contigs of the variants
+        read; empty when the store names none).
     """
     import zarr
     store = zarr.open(path, mode='r')
