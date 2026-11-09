@@ -1524,7 +1524,8 @@ def daf_histogram(matrix, n_bins: int = 20,
     """Normalized histogram of derived allele frequencies.
 
     Accepts HaplotypeMatrix or GenotypeMatrix. For diploid data,
-    DAF = sum(genotypes) / (2 * n_individuals).
+    DAF = sum(genotypes) / (2 * n_valid individuals); a monomorphic or
+    no-call site contributes nothing.
 
     Parameters
     ----------
@@ -1546,7 +1547,7 @@ def daf_histogram(matrix, n_bins: int = 20,
     from .genotype_matrix import GenotypeMatrix
 
     if isinstance(matrix, GenotypeMatrix):
-        return _daf_histogram_diploid(matrix, n_bins, population)
+        return _daf_histogram_diploid(matrix, n_bins, population, missing_data)
 
     if population is not None:
         matrix = population_rows(matrix, population)
@@ -1562,10 +1563,8 @@ def daf_histogram(matrix, n_bins: int = 20,
     # from monomorphic sites).
     freq = ac[:, 1:].astype(cp.float64) / cp.maximum(n_valid[:, None], 1.0)
     present = ac[:, 1:] > 0
-    if missing_data == 'exclude':
-        keep = present & (n_valid_i[:, None] == matrix.haplotypes.shape[0])
-    else:
-        keep = present & (n_valid_i[:, None] > 0)
+    keep = _daf_keep_mask(present, n_valid_i[:, None],
+                          matrix.haplotypes.shape[0], missing_data)
     return _histogram_from_dafs(freq[keep], n_bins)
 
 
@@ -1607,6 +1606,16 @@ def diplotype_frequency_spectrum(genotype_matrix,
     return (cp.sort(counts)[::-1] / geno.shape[0]).get(), n_distinct
 
 
+def _daf_keep_mask(present, n_valid, n_samples, missing_data):
+    """Boolean keep-mask for a DAF histogram: a present derived allele at a
+    site with data; under 'exclude', also no missing call anywhere at that
+    site.
+    """
+    if missing_data == 'exclude':
+        return present & (n_valid == n_samples)
+    return present & (n_valid > 0)
+
+
 def _daf_bin_index(dafs, n_bins):
     """Bin index in [0, n_bins - 1] for derived-allele frequencies in [0, 1].
 
@@ -1633,7 +1642,8 @@ def _histogram_from_dafs(dafs, n_bins):
     return hist.get(), bin_edges.get()
 
 
-def _daf_histogram_diploid(genotype_matrix, n_bins=20, population=None):
+def _daf_histogram_diploid(genotype_matrix, n_bins=20, population=None,
+                           missing_data='include'):
     """DAF histogram from diploid genotypes (internal)."""
     if population is not None:
         genotype_matrix = population_rows(genotype_matrix, population)
@@ -1645,8 +1655,10 @@ def _daf_histogram_diploid(genotype_matrix, n_bins=20, population=None):
     valid_mask = geno >= 0
     geno_clean = cp.where(valid_mask, geno, 0).astype(cp.float64)
     n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
-    usable = n_valid > 0
-    dafs = cp.where(usable, cp.sum(geno_clean, axis=0) / (2.0 * n_valid), 0.0)
+    derived = cp.sum(geno_clean, axis=0)
+    present = derived > 0
+    keep = _daf_keep_mask(present, n_valid, geno.shape[0], missing_data)
+    dafs = derived[keep] / (2.0 * n_valid[keep])
 
     return _histogram_from_dafs(dafs, n_bins)
 

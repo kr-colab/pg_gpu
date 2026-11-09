@@ -730,6 +730,66 @@ class TestMaxDafIncludeNeedsOwnPair:
         np.testing.assert_allclose(fused['max_daf'][0], ref, rtol=1e-12)
 
 
+class TestDafHistogramDiploidMatchesHaplotype:
+    """daf_histogram on a GenotypeMatrix must follow the same site rule as
+    on a HaplotypeMatrix: drop monomorphic and no-call sites instead of
+    binning them at frequency 0, and respect missing_data."""
+
+    def _matrices(self):
+        from pg_gpu import GenotypeMatrix
+        # Two monomorphic sites, two segregating (DAF 2/8), one with one
+        # sample missing (DAF 3/6), one with no valid call.
+        geno = np.array([[0, 0, 1, 2,  2, -1],
+                         [0, 0, 0, 0,  1, -1],
+                         [0, 0, 0, 0, -1, -1],
+                         [0, 0, 1, 0,  0, -1]], dtype=np.int8)
+        pos = np.array([100, 200, 300, 400, 500, 600])
+        gm = GenotypeMatrix(geno, pos, 1, 1000)
+        hap = np.array([[0, 0, 1, 1,  1, -1], [0, 0, 0, 1,  1, -1],
+                        [0, 0, 0, 0,  1, -1], [0, 0, 0, 0,  0, -1],
+                        [0, 0, 0, 0, -1, -1], [0, 0, 0, 0, -1, -1],
+                        [0, 0, 1, 0,  0, -1], [0, 0, 0, 0,  0, -1]],
+                       dtype=np.int8)
+        hm = HaplotypeMatrix(hap, pos, 1, 1000)
+        return gm, hm
+
+    @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+    def test_matches_haplotype_result(self, missing_data):
+        gm, hm = self._matrices()
+        gm_hist, gm_edges = diversity.daf_histogram(gm, n_bins=8,
+                                                     missing_data=missing_data)
+        hm_hist, hm_edges = diversity.daf_histogram(hm, n_bins=8,
+                                                     missing_data=missing_data)
+        np.testing.assert_allclose(gm_hist, hm_hist, rtol=1e-12)
+        np.testing.assert_allclose(gm_edges, hm_edges, rtol=1e-12)
+
+    def test_no_call_site_contributes_nothing(self):
+        # A site with no valid call must not land in bin 0.
+        gm, _ = self._matrices()
+        hist, _ = diversity.daf_histogram(gm, n_bins=8)
+        assert hist.sum() == pytest.approx(1.0)
+        assert hist[0] == 0.0
+
+    @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+    def test_fixed_derived_incomplete_site(self, missing_data):
+        # A site where every called individual carries the derived allele
+        # (DAF 1.0) but one individual is missing: kept at DAF 1.0 under
+        # 'include', dropped under 'exclude' since it isn't complete.
+        from pg_gpu import GenotypeMatrix
+        geno = np.array([[2, 2, 0, 1],
+                         [2, 2, 0, 1],
+                         [2, -1, 0, 0],
+                         [2, 2, 0, 0]], dtype=np.int8)
+        pos = np.array([100, 200, 300, 400])
+        gm = GenotypeMatrix(geno, pos, 1, 500)
+        hm = gm.to_haplotype_matrix()
+        gm_hist, _ = diversity.daf_histogram(gm, n_bins=4,
+                                             missing_data=missing_data)
+        hm_hist, _ = diversity.daf_histogram(hm, n_bins=4,
+                                             missing_data=missing_data)
+        np.testing.assert_allclose(gm_hist, hm_hist, rtol=1e-12)
+
+
 def test_diversity_stats_key_order_matches_request():
     """The result dict lists keys in the caller's order, whatever the
     process hash seed, so DataFrame columns built from it are stable."""

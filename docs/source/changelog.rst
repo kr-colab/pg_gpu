@@ -610,6 +610,10 @@ Bug fixes
   variants, while the scalar ``mu_var`` gives 0.0 there. The fused engine
   (and the chunked engine, which shares its code for this statistic) now
   give 0.0 too, keeping NaN only for a window with no accessible base.
+* ``daf_histogram`` on a ``GenotypeMatrix`` put monomorphic sites and
+  sites with no valid call in bin 0, and ignored ``missing_data``, so
+  ``'exclude'`` gave the same result as ``'include'``. A site with no
+  present derived allele, or no call at all, now contributes nothing.
 
 New warnings
 ~~~~~~~~~~~~
