@@ -282,9 +282,8 @@ Read this section if you are comparing against older pg_gpu results.
 * Scalar ``mu_var`` divides by ``get_span()``, the length that ``pi``
   uses. It used to divide by ``chrom_end - chrom_start``, one base short
   of the inclusive region, and it ignored an accessible mask. With or
-  without a mask it now agrees with windowed ``mu_var``; with
-  ``n_total_sites`` set and no mask, windowed ``mu_var`` still divides by
-  the window length (see #360).
+  without a mask, or with ``n_total_sites``, it now agrees with windowed
+  ``mu_var``.
 * The bp window grid now covers the base at ``chrom_end``. When
   ``chrom_end - chrom_start`` was a multiple of ``step_size``, a variant at
   ``chrom_end`` was in no window; a 1-bp trailing window now holds it, and
@@ -296,6 +295,53 @@ Read this section if you are comparing against older pg_gpu results.
   bases, one short of the inclusive region. They now divide by
   ``chrom_end - chrom_start + 1``, so the shares add up to
   ``n_total_sites``.
+* With ``n_total_sites`` set and no mask, each windowed engine divided a
+  window by a different number: the scatter engines by the window's
+  share of ``n_total_sites``, the fused and chunked engines by the window
+  length, and the per-window fallback by the ``n_total_sites`` of the
+  whole region (so its per-base values were too low by about the number
+  of windows). Every engine now uses the share, in proportion to the
+  window length, for ``bp``, ``snp`` and ``regions`` windows. The shares
+  of windows that tile the region add up to ``n_total_sites``, the
+  denominator of the scalar function. Windowed values from the fused,
+  chunked and fallback engines change for such a matrix.
+* ``include_invariant=True`` (``HaplotypeMatrix.from_vcf``,
+  ``GenotypeMatrix.from_vcf``, ``GenotypeMatrix.from_zarr``) now makes
+  the record positions the accessible mask, so each window divides by
+  its own called bases. The streaming ``GenotypeMatrix.from_zarr`` path
+  used to ignore the flag, so ``streaming='auto'`` gave a different
+  denominator when the data did not fit in memory; both paths now build
+  the same mask. ``n_total_sites`` is the count of distinct
+  called positions (a split multiallelic site counts once), and only
+  those inside ``accessible_bed`` when one is given. With the mask,
+  ``ihs`` and ``xpehh`` scale gaps by their called fraction, not by
+  ``gap_scale``.
+* ``GenotypeMatrix.from_vcf`` set its region bounds from the records it
+  kept after dropping multiallelic ones, so a multiallelic first or last
+  record shortened the region. The bounds now span every loaded record,
+  as in ``HaplotypeMatrix.from_vcf``.
+* ``ihs`` and ``xpehh`` read a matrix's accessible mask as if it
+  started at position 1. A mask that starts elsewhere (a region load, or
+  a BED that does not start at the first base) gave each gap the
+  accessible count of the wrong bases. They now use the mask's offset.
+* ``get_subset_from_range`` with a range that starts before the
+  accessible mask does shifted the subset's mask, so it marked the wrong
+  bases accessible. The subset's mask now keeps its own start.
+* ``get_subset_from_range`` on a matrix with ``n_total_sites`` and no
+  mask dropped ``n_total_sites``, so the subset divided by its length.
+  It now gets its share of ``n_total_sites``, by the rule the windowed
+  engines use, so a windowed value equals the plain function on the
+  window's range.
+* Streaming chunks and ``materialize`` slices got neither the stream's
+  accessible mask (``materialize``) nor its ``n_total_sites`` (both).
+  Each now gets the mask, or else its share of ``n_total_sites``, so a
+  streamed value equals the eager one. ``windowed_analysis`` on a stream
+  that has a mask now ignores ``accessible_bed``, as it does on an eager
+  matrix; it used to put the BED over the stream's mask.
+* A bool ``is_accessible`` array has element 0 at position 1, as in
+  scikit-allel, for ``ihs``, ``xpehh``, ``windowed_statistics_fused`` and
+  ``windowed_statistics_fused_chunked``. The windowed functions read
+  element 0 as position 0, one base off from ``ihs`` and ``xpehh``.
 * The biallelic and segregating filters keep the parent matrix's
   chromosome bounds. The old filter moved the bounds to the first and
   last surviving variant, which quietly changed the denominator of any

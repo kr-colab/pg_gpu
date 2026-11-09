@@ -10,6 +10,7 @@ using CuPy for GPU acceleration.
 import numpy as np
 import cupy as cp
 from typing import Union, Optional, Tuple
+from .accessible import _as_accessible_mask
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import population_rows
 from ._memutil import allele_counts
@@ -476,8 +477,9 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
         Rescale gaps larger than this value.
     max_gap : int, optional
         Mark gaps larger than this as invalid.
-    is_accessible : array_like, optional
-        Genome accessibility mask.
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Genome accessibility, as in scikit-allel: element 0 is position 1.
+        Defaults to the matrix's accessible mask.
     population : str or list, optional
         Population name or sample indices.
     missing_data : str
@@ -534,7 +536,7 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
 
     # Fall back to matrix's accessible mask if not provided explicitly
     if is_accessible is None and haplotype_matrix.has_accessible_mask:
-        is_accessible = haplotype_matrix.accessible_mask.mask
+        is_accessible = haplotype_matrix.accessible_mask
     gaps = _compute_gaps(pos, map_pos, gap_scale, max_gap, is_accessible)
     gaps_gpu = cp.asarray(gaps)
 
@@ -612,8 +614,9 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
         Rescale gaps larger than this value.
     max_gap : int, optional
         Mark gaps larger than this as invalid.
-    is_accessible : array_like, optional
-        Genome accessibility mask.
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Genome accessibility, as in scikit-allel: element 0 is position 1.
+        Defaults to the matrix's accessible mask.
     missing_data : str
         'include' - missing extends shared suffix length (default)
         'exclude' - filter to sites with no missing data before scan
@@ -654,7 +657,7 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
 
     # Fall back to matrix's accessible mask if not provided explicitly
     if is_accessible is None and haplotype_matrix.has_accessible_mask:
-        is_accessible = haplotype_matrix.accessible_mask.mask
+        is_accessible = haplotype_matrix.accessible_mask
     gaps = _compute_gaps(pos, map_pos, gap_scale, max_gap, is_accessible)
     gaps_gpu = cp.asarray(gaps)
 
@@ -975,8 +978,8 @@ def _compute_gaps(pos, map_pos=None, gap_scale=20000, max_gap=200000,
         Rescale gaps larger than this.
     max_gap : int
         Mark gaps larger than this as -1 (invalid).
-    is_accessible : ndarray, bool, optional
-        Genome accessibility array.
+    is_accessible : ndarray, bool, or AccessibleMask, optional
+        Genome accessibility; see ``accessible._as_accessible_mask``.
 
     Returns
     -------
@@ -995,13 +998,10 @@ def _compute_gaps(pos, map_pos=None, gap_scale=20000, max_gap=200000,
     physical_gaps = np.diff(pos)
 
     if is_accessible is not None:
-        is_accessible = np.asarray(is_accessible, dtype=bool)
-        accessible_gaps = np.zeros(len(gaps), dtype='f8')
-        for i in range(len(gaps)):
-            n_access = np.count_nonzero(is_accessible[pos[i]-1:pos[i+1]-1])
-            accessible_gaps[i] = n_access
-        scaling = accessible_gaps / physical_gaps
-        gaps = gaps * scaling
+        is_accessible = _as_accessible_mask(is_accessible)
+        # Accessible bases in [pos[i], pos[i+1]) for each gap.
+        accessible_gaps = is_accessible.count_accessible_windows(pos[:-1], pos[1:])
+        gaps = gaps * (accessible_gaps / physical_gaps)
 
     elif gap_scale is not None and gap_scale > 0:
         scaling = np.ones(gaps.shape, dtype='f8')

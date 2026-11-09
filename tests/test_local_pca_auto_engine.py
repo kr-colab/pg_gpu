@@ -25,7 +25,7 @@ def small_hm():
     n_var = 600
     hap = rng.integers(0, 2, (n_hap, n_var), dtype=np.int8)
     pos = np.arange(n_var, dtype=np.int64) * 1000
-    return HaplotypeMatrix(hap, pos, 0, n_var * 1000)
+    return HaplotypeMatrix(hap, pos, 0, n_var * 1000 - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -49,15 +49,20 @@ class TestEstimateNWindows:
         params = WindowParams(window_type='snp', window_size=10_000, step_size=10_000)
         assert _estimate_n_windows(small_hm, params) == 0
 
-    def test_bp_windows_upper_bound(self, small_hm):
-        # positions span 0..599_000 with step_size=100_000 -> ceil-ish bound.
+    def test_bp_windows_count_the_grid(self, small_hm):
+        # The bounds 0..599_999 tile into 6 windows of 100_000.
         params = WindowParams(window_type='bp', window_size=100_000, step_size=100_000)
-        n = _estimate_n_windows(small_hm, params)
-        # The bound is span // step + 1 = 599_000 // 100_000 + 1 = 6.
-        assert n == 6
-        # The span is read from whichever device holds the positions.
+        assert _estimate_n_windows(small_hm, params) == 6
+        # The positions are read from whichever device holds them.
         small_hm.transfer_to_gpu()
         assert _estimate_n_windows(small_hm, params) == 6
+
+    def test_bp_windows_follow_the_bounds_not_the_variants(self, small_hm):
+        # Bounds wider than the variants (0..999_999) give 10 windows, the
+        # count WindowIterator yields, not 6 from the variant span.
+        small_hm.chrom_end = 999_999
+        params = WindowParams(window_type='bp', window_size=100_000, step_size=100_000)
+        assert _estimate_n_windows(small_hm, params) == 10
 
     @pytest.mark.parametrize('regions, expected', [
         (pd.DataFrame({'chrom': [1, 1], 'start': [0, 300_000],
