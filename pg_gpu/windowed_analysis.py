@@ -946,8 +946,9 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             spans = am.count_accessible_windows(
                 results['start'], results['end'])
         elif matrix.n_total_sites is not None:
-            # Proportional from n_total_sites
-            total_span = chrom_end - chrom_start
+            # Proportional from n_total_sites. Both bounds are bases, so the
+            # region has chrom_end - chrom_start + 1 of them.
+            total_span = chrom_end - chrom_start + 1
             spans = (win_stops - win_starts) * matrix.n_total_sites / total_span
         else:
             spans = win_stops - win_starts
@@ -1153,7 +1154,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             spans = am.count_accessible_windows(
                 results['start'], results['end'])
         elif haplotype_matrix.n_total_sites is not None:
-            total_span = chrom_end - chrom_start
+            total_span = chrom_end - chrom_start + 1
             spans = (win_stops - win_starts) * haplotype_matrix.n_total_sites / total_span
         else:
             spans = win_stops - win_starts

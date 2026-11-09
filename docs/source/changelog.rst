@@ -291,6 +291,11 @@ Read this section if you are comparing against older pg_gpu results.
   a one-variant matrix with no bounds gets one window on every engine.
   Bounds are inclusive, so a half-open ``chrom_end`` (one past the last
   base) now adds an empty 1-bp window.
+* With ``n_total_sites`` set and no mask, the scatter engines gave each
+  window a share of ``n_total_sites`` over ``chrom_end - chrom_start``
+  bases, one short of the inclusive region. They now divide by
+  ``chrom_end - chrom_start + 1``, so the shares add up to
+  ``n_total_sites``.
 * The biallelic and segregating filters keep the parent matrix's
   chromosome bounds. The old filter moved the bounds to the first and
   last surviving variant, which quietly changed the denominator of any

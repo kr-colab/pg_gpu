@@ -9,7 +9,7 @@ import warnings
 import numpy as np
 import pytest
 
-from pg_gpu import HaplotypeMatrix, diversity
+from pg_gpu import HaplotypeMatrix, divergence, diversity
 from pg_gpu.windowed_analysis import (
     StatisticsComputer, WindowData, WindowedAnalyzer, WindowIterator,
     WindowParams, windowed_analysis,
@@ -23,7 +23,7 @@ def _matrix(n_hap=8, n_var=12, seed=0, multiallelic=False, sample_sets=None,
     if multiallelic:
         hap[0, 0] = 2
     if same_position:
-        pos = np.full(n_var, 500, dtype=np.int64)      # zero-span
+        pos = np.full(n_var, 500, dtype=np.int64)      # one-base region
     else:
         pos = (np.arange(1, n_var + 1) * 100).astype(np.int64)
     return HaplotypeMatrix(hap, pos, sample_sets=sample_sets, **kw)
@@ -44,6 +44,22 @@ def test_one_base_region_two_pop_one_window():
     df = windowed_analysis(m, window_size=100, statistics=["dxy"],
                            populations=["p1", "p2"])
     assert df[["start", "end", "n_variants"]].values.tolist() == [[500, 501, 5]]
+
+
+@pytest.mark.parametrize("stat", ["pi", "dxy"])
+def test_n_total_sites_share_counts_both_bounds(stat):
+    # A scatter window's share of n_total_sites divides by the region's
+    # base count, chrom_end - chrom_start + 1. For a one-base region that
+    # count is 1, not 0, and the window gets all of n_total_sites.
+    m = _matrix(n_var=5, same_position=True, sample_sets=_TWO_POP,
+                n_total_sites=1000)
+    kw = {"populations": ["p1", "p2"]} if stat == "dxy" else {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        df = windowed_analysis(m, window_size=100, statistics=[stat], **kw)
+    scalar = (divergence.dxy(m, "p1", "p2") if stat == "dxy"
+              else diversity.pi(m))
+    assert df[stat].iloc[0] == pytest.approx(scalar)
 
 
 # ── WindowIterator.count_windows edges ─────────────────────────────────
