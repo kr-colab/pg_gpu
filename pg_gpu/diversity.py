@@ -1558,11 +1558,11 @@ def daf_histogram(matrix, n_bins: int = 20,
     from ._memutil import allele_counts
     ac, n_valid_i = allele_counts(matrix.haplotypes)
     n_valid = n_valid_i.astype(cp.float64)
-    # Per-allele DAF: each derived allele contributes its own frequency,
-    # and only present derived alleles are binned (no 0-frequency spike
-    # from monomorphic sites).
+    # Per-allele DAF: each derived allele contributes its own frequency.
+    # A site where it's absent or fixed does not vary, so it's left out,
+    # matching sfs.
     freq = ac[:, 1:].astype(cp.float64) / cp.maximum(n_valid[:, None], 1.0)
-    present = ac[:, 1:] > 0
+    present = (ac[:, 1:] > 0) & (ac[:, 1:] < n_valid_i[:, None])
     keep = _daf_keep_mask(present, n_valid_i[:, None],
                           matrix.haplotypes.shape[0], missing_data)
     return _histogram_from_dafs(freq[keep], n_bins)
@@ -1656,7 +1656,7 @@ def _daf_histogram_diploid(genotype_matrix, n_bins=20, population=None,
     geno_clean = cp.where(valid_mask, geno, 0).astype(cp.float64)
     n_valid = cp.sum(valid_mask, axis=0).astype(cp.float64)
     derived = cp.sum(geno_clean, axis=0)
-    present = derived > 0
+    present = (derived > 0) & (derived < 2.0 * n_valid)
     keep = _daf_keep_mask(present, n_valid, geno.shape[0], missing_data)
     dafs = derived[keep] / (2.0 * n_valid[keep])
 

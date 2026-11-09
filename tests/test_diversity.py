@@ -771,15 +771,15 @@ class TestDafHistogramDiploidMatchesHaplotype:
         assert hist[0] == 0.0
 
     @pytest.mark.parametrize("missing_data", ["include", "exclude"])
-    def test_fixed_derived_incomplete_site(self, missing_data):
-        # A site where every called individual carries the derived allele
-        # (DAF 1.0) but one individual is missing: kept at DAF 1.0 under
-        # 'include', dropped under 'exclude' since it isn't complete.
+    def test_incomplete_segregating_site(self, missing_data):
+        # A segregating site (DAF 3/6) with one individual missing: kept
+        # at that frequency under 'include', dropped under 'exclude'
+        # since it isn't complete.
         from pg_gpu import GenotypeMatrix
-        geno = np.array([[2, 2, 0, 1],
+        geno = np.array([[2, 1, 0, 1],
                          [2, 2, 0, 1],
                          [2, -1, 0, 0],
-                         [2, 2, 0, 0]], dtype=np.int8)
+                         [2, 0, 0, 0]], dtype=np.int8)
         pos = np.array([100, 200, 300, 400])
         gm = GenotypeMatrix(geno, pos, 1, 500)
         hm = gm.to_haplotype_matrix()
@@ -788,6 +788,49 @@ class TestDafHistogramDiploidMatchesHaplotype:
         hm_hist, _ = diversity.daf_histogram(hm, n_bins=4,
                                              missing_data=missing_data)
         np.testing.assert_allclose(gm_hist, hm_hist, rtol=1e-12)
+
+
+class TestDafHistogramExcludesFixedDerived:
+    """A site fixed for the derived allele does not vary, so daf_histogram
+    must leave it out entirely, matching sfs -- not bin it at frequency 1.0.
+    Covers the haplotype branch, the GenotypeMatrix branch, and the
+    windowed scatter engine, which each compute this independently."""
+
+    def _hm(self):
+        hap = np.zeros((8, 4), dtype=np.int8)
+        hap[:, 0] = 1                          # fixed for the derived allele
+        hap[0, 1] = hap[1, 2] = hap[2, 3] = 1  # singletons
+        return HaplotypeMatrix(hap, np.array([100, 200, 300, 400]), 1, 1000)
+
+    def test_haplotype_matrix(self):
+        hm = self._hm()
+        hist, _ = diversity.daf_histogram(hm, n_bins=8)
+        np.testing.assert_allclose(hist, [0, 1, 0, 0, 0, 0, 0, 0])
+
+    def test_matches_sfs(self):
+        hm = self._hm()
+        hist, _ = diversity.daf_histogram(hm, n_bins=8)
+        s = sfs.sfs(hm)
+        assert hist[0] == 0.0 and s[0] == 0
+        assert hist[-1] == 0.0 and s[-1] == 0
+
+    def test_windowed_matches_scalar(self):
+        from pg_gpu.windowed_analysis import windowed_analysis, N_DAF_BINS
+        hm = self._hm()
+        ref, _ = diversity.daf_histogram(hm, n_bins=N_DAF_BINS)
+        r = windowed_analysis(hm, window_size=1000, statistics=["daf_hist"])
+        got = np.array([r[f"daf_bin_{b}"].iloc[0] for b in range(N_DAF_BINS)])
+        np.testing.assert_allclose(got, ref)
+
+    def test_genotype_matrix(self):
+        from pg_gpu import GenotypeMatrix
+        geno = np.array([[2, 0, 0, 0],
+                         [2, 1, 0, 0],
+                         [2, 0, 1, 0],
+                         [2, 0, 0, 1]], dtype=np.int8)
+        gm = GenotypeMatrix(geno, np.array([100, 200, 300, 400]), 1, 500)
+        hist, _ = diversity.daf_histogram(gm, n_bins=8)
+        np.testing.assert_allclose(hist, [0, 1, 0, 0, 0, 0, 0, 0])
 
 
 def test_diversity_stats_key_order_matches_request():

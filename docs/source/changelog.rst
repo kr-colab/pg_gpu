@@ -614,6 +614,10 @@ Bug fixes
   sites with no valid call in bin 0, and ignored ``missing_data``, so
   ``'exclude'`` gave the same result as ``'include'``. A site with no
   present derived allele, or no call at all, now contributes nothing.
+* ``daf_histogram`` and the windowed ``daf_hist`` counted a site fixed for
+  the derived allele at frequency 1.0, in the top bin, while ``sfs``
+  already left such a site out. A fixed-derived site now contributes
+  nothing in both, matching ``sfs``.
 
 New warnings
 ~~~~~~~~~~~~
