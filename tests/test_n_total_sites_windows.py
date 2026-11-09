@@ -132,6 +132,24 @@ def test_include_invariant_masks_the_record_positions(tmp_path, cls):
         [True, False, False, True]
 
 
+def test_genotype_from_vcf_counts_a_dropped_multiallelic_record(tmp_path):
+    # GenotypeMatrix drops the triallelic record at 5, but it is still a
+    # called base at the start of the region, as for HaplotypeMatrix.
+    vcf = tmp_path / "tri.vcf"
+    lines = ["##fileformat=VCFv4.2", "##contig=<ID=1,length=100>",
+             '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">',
+             "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts0\ts1\ts2",
+             "1\t5\t.\tA\tC,G\t.\tPASS\t.\tGT\t0|1\t1|2\t0|2"]
+    lines += [f"1\t{p}\t.\tA\tT\t.\tPASS\t.\tGT\t0|0\t0|1\t0|0" for p in (10, 15, 20, 25)]
+    vcf.write_text("\n".join(lines) + "\n")
+    with pytest.warns(Warning):
+        gm = GenotypeMatrix.from_vcf(str(vcf), include_invariant=True)
+    hm = HaplotypeMatrix.from_vcf(str(vcf), include_invariant=True)
+    assert (gm.chrom_start, gm.chrom_end, gm.n_total_sites) == (5, 25, 5)
+    assert (gm.chrom_start, gm.chrom_end, gm.n_total_sites) == \
+        (hm.chrom_start, hm.chrom_end, hm.n_total_sites)
+
+
 def test_include_invariant_windows_divide_by_called_bases(tmp_path):
     hm = HaplotypeMatrix.from_vcf(_write_vcf(tmp_path / "inv.vcf"), include_invariant=True)
     df = windowed_analysis(hm, window_size=10, statistics=["pi"])

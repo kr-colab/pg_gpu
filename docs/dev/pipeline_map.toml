@@ -147,7 +147,7 @@ span = "Same rule as HaplotypeMatrix.__init__, in its own code."
 [inputs."GenotypeMatrix.from_vcf"]
 params = ["path", "include_invariant", "accessible_bed", "fields"]
 returns = "GenotypeMatrix"
-span = "include_invariant=True sets the mask to the record positions, multiallelic records it drops included (accessible._called_sites_mask; with accessible_bed, only those in the BED). accessible_bed sets the mask on the VCF's contig; a VCF with several contigs raises ValueError, since there is no region= here."
+span = "include_invariant=True sets the mask to the record positions, multiallelic records it drops included (accessible._called_sites_mask; with accessible_bed, only those in the BED). The bounds span every loaded record, multiallelic ones it drops included. accessible_bed sets the mask on the VCF's contig; a VCF with several contigs raises ValueError, since there is no region= here."
 notes = "No region and no samples parameter, unlike HaplotypeMatrix.from_vcf."
 
 [inputs."GenotypeMatrix.from_zarr"]

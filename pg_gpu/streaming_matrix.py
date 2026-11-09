@@ -32,6 +32,7 @@ import zarr
 from kvikio.zarr import GDSStore
 
 from ._gpu_genotype_prep import build_genotype_matrix, build_haplotype_matrix
+from .haplotype_matrix import _total_sites_share
 from ._warnings import (BadlyChunkedWarning, KvikioUnavailableWarning,
                         _phase_dependent, _warn_unphased)
 
@@ -562,7 +563,6 @@ class _StreamingMatrixBase:
         if self.accessible_mask is not None:
             m.set_accessible_mask(self.accessible_mask)
         elif self.n_total_sites is not None:
-            from .haplotype_matrix import _total_sites_share
             m.n_total_sites = float(_total_sites_share(self, [left], [right + 1])[0])
 
     def materialize(self, *, region=None, sample_subset=None):

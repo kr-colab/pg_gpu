@@ -316,6 +316,10 @@ Read this section if you are comparing against older pg_gpu results.
   those inside ``accessible_bed`` when one is given. With the mask,
   ``ihs`` and ``xpehh`` scale gaps by their called fraction, not by
   ``gap_scale``.
+* ``GenotypeMatrix.from_vcf`` set its region bounds from the records it
+  kept after dropping multiallelic ones, so a multiallelic first or last
+  record shortened the region. The bounds now span every loaded record,
+  as in ``HaplotypeMatrix.from_vcf``.
 * ``ihs`` and ``xpehh`` read a matrix's accessible mask as if it
   started at position 1. A mask that starts elsewhere (a region load, or
   a BED that does not start at the first base) gave each gap the

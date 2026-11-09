@@ -532,7 +532,10 @@ class GenotypeMatrix:
         # transpose to (n_individuals, n_variants)
         geno = geno.T
 
-        gm = cls(geno, pos, chrom_start=pos[0], chrom_end=pos[-1],
+        # The region spans every loaded record, as in HaplotypeMatrix.from_vcf:
+        # a record dropped above as multiallelic is still a base of it.
+        all_pos = callset['variants/POS']
+        gm = cls(geno, pos, chrom_start=int(all_pos[0]), chrom_end=int(all_pos[-1]),
                  samples=samples, fields=qc_fields)
         chrom = None
         if accessible_bed is not None and 'variants/CHROM' in callset:
@@ -541,10 +544,8 @@ class GenotypeMatrix:
                 "load one contig per GenotypeMatrix, e.g. from a VCF "
                 "subset with bcftools view -r")
         if include_invariant:
-            # Every record is a called base, multiallelic ones dropped above too.
             gm.set_accessible_mask(_called_sites_mask(
-                callset['variants/POS'], gm.chrom_start, gm.chrom_end,
-                accessible_bed, chrom))
+                all_pos, gm.chrom_start, gm.chrom_end, accessible_bed, chrom))
         elif accessible_bed is not None:
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
         return gm
