@@ -71,18 +71,6 @@ def test_fused_transfers_cpu_matrix():
     assert m.device == "GPU"
     assert np.isfinite(result["pi"][0])
 
-
-# ── forward-looking: window_type/statistic combinations deferred to later ──
-# Each case below raises NotImplementedError today and marks work the issue
-# leaves for the future. When one is implemented its dispatch guard goes away
-# and this test fails -- the signal to drop that case here and from the guard.
-#
-# window_type='regions' no longer defers any statistic: the scatter engine
-# serves the scatter-only theta estimators and neutrality tests over region
-# windows, and the fused engine's per-site range stats (mean_nsl, daf_hist,
-# mu_sfs, het_expected) reduce each region's variant range, so all now have a
-# regions path (see TestRegionsScatterStats).
-
 # snp windows route to the per-window fallback, so stats that aren't
 # implemented there still raise.
 _SNP_UNSUPPORTED = ["theta_l", "zeng_e", "theta_h", "max_daf", "mean_nsl",
