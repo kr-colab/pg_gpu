@@ -153,7 +153,7 @@ notes = "No region and no samples parameter, unlike HaplotypeMatrix.from_vcf."
 [inputs."GenotypeMatrix.from_zarr"]
 params = ["path", "region", "accessible_bed", "include_invariant", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields"]
 returns = "GenotypeMatrix, or StreamingGenotypeMatrix on the streaming path"
-span = "include_invariant=True sets the mask to the record positions (accessible._called_sites_mask) on the eager path only; the streaming path ignores it. accessible_bed sets the mask on both paths, on the region's contig, else the store's; data on several contigs need region= (ValueError)."
+span = "include_invariant=True sets the mask to the record positions (accessible._called_sites_mask) on the eager and the streaming path (accessible.resolve_streaming_accessible_mask). accessible_bed sets the mask on both paths, on the region's contig, else the store's; data on several contigs need region= (ValueError)."
 
 [inputs."GenotypeMatrix.from_haplotype_matrix"]
 params = ["hap_matrix"]
@@ -209,7 +209,7 @@ methods = [
     "num_haplotypes", "num_variants", "phased", "sample_sets", "set_phased",
     "set_unphased",
 ]
-notes = "accessible_mask and n_total_sites are instance attributes: the loader sets accessible_mask from accessible_bed and leaves n_total_sites None. .haplotypes raises. iter_gpu_chunks yields closed chunks [s, s + chunk_bp - 1] as eager HaplotypeMatrix objects; materialize(region=) gives an eager sub-region."
+notes = "accessible_mask and n_total_sites are instance attributes: the loader sets accessible_mask from accessible_bed (and, for GenotypeMatrix.from_zarr with include_invariant=True, from the record positions) and leaves n_total_sites None. .haplotypes raises. iter_gpu_chunks yields closed chunks [s, s + chunk_bp - 1] as eager HaplotypeMatrix objects; materialize(region=) gives an eager sub-region."
 
 [matrices.StreamingGenotypeMatrix]
 module = "streaming_matrix"
@@ -525,7 +525,7 @@ new_windowed_statistic = [
 span_rule = [
     "HaplotypeMatrix.get_span and streaming_matrix._StreamingMatrixBase.get_span.",
     "windowed_analysis._compute_window_bases (every windowed engine; the fallback through WindowIterator._set_window_bases).",
-    "accessible._called_sites_mask (include_invariant in HaplotypeMatrix.from_vcf, GenotypeMatrix.from_vcf and the eager GenotypeMatrix.from_zarr).",
+    "accessible._called_sites_mask (include_invariant in HaplotypeMatrix.from_vcf, GenotypeMatrix.from_vcf and both GenotypeMatrix.from_zarr paths).",
     "GenotypeMatrix, which has its own n_total_sites code and no get_span.",
     "Every function row with span other than \"none\".",
 ]

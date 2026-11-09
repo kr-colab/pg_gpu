@@ -306,9 +306,12 @@ Read this section if you are comparing against older pg_gpu results.
   denominator of the scalar function. Windowed values from the fused,
   chunked and fallback engines change for such a matrix.
 * ``include_invariant=True`` (``HaplotypeMatrix.from_vcf``,
-  ``GenotypeMatrix.from_vcf``, eager ``GenotypeMatrix.from_zarr``) now
-  makes the record positions the accessible mask, so each window divides
-  by its own called bases. ``n_total_sites`` is the count of distinct
+  ``GenotypeMatrix.from_vcf``, ``GenotypeMatrix.from_zarr``) now makes
+  the record positions the accessible mask, so each window divides by
+  its own called bases. The streaming ``GenotypeMatrix.from_zarr`` path
+  used to ignore the flag, so ``streaming='auto'`` gave a different
+  denominator when the data did not fit in memory; both paths now build
+  the same mask. ``n_total_sites`` is the count of distinct
   called positions (a split multiallelic site counts once), and only
   those inside ``accessible_bed`` when one is given. With the mask,
   ``ihs`` and ``xpehh`` scale gaps by their called fraction, not by

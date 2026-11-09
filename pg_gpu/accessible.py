@@ -383,7 +383,8 @@ def slice_fields(fields, keep_idx, accessible_idx=None):
     return {tag: arr[keep_idx] for tag, arr in fields.items()}
 
 
-def resolve_streaming_accessible_mask(accessible_bed, source, region=None):
+def resolve_streaming_accessible_mask(accessible_bed, source, region=None,
+                                      include_invariant=False):
     """Resolve an accessible BED over a streaming source's grid bounds.
 
     Both streaming loaders (haplotype and genotype) resolve the same mask
@@ -406,13 +407,20 @@ def resolve_streaming_accessible_mask(accessible_bed, source, region=None):
         ``"chrom:start-end"`` region string (both ends inclusive, as in
         samtools); its contig overrides
         ``source.chrom`` for matching a BED file's contig name.
+    include_invariant : bool
+        The store has a record for each called base: the mask is the
+        record positions (only those in ``accessible_bed``, if given), as
+        on the eager path.
 
     Returns
     -------
     AccessibleMask or None
     """
-    if accessible_bed is None:
+    if accessible_bed is None and not include_invariant:
         return None
     chrom = parse_region(region)[0] or source.chrom
+    if include_invariant:
+        return _called_sites_mask(source.site_pos, source.grid_start,
+                                  source.grid_end, accessible_bed, chrom)
     return resolve_accessible_mask(
         accessible_bed, source.grid_start, source.grid_end, chrom)

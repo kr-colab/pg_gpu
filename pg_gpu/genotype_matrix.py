@@ -573,8 +573,8 @@ class GenotypeMatrix:
         include_invariant : bool
             If True, the store has a record for each called base. The
             record positions become the accessible mask, as in
-            ``HaplotypeMatrix.from_vcf``. Eager path only: the streaming
-            path ignores it.
+            ``HaplotypeMatrix.from_vcf``, on the eager and the streaming
+            path alike.
         path, region, accessible_bed, pop_assignment, streaming, chunk_bp, prefetch, backend, fields
             See ``HaplotypeMatrix.from_zarr``.
 
@@ -603,6 +603,7 @@ class GenotypeMatrix:
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 backend=backend, accessible_bed=accessible_bed,
+                include_invariant=include_invariant,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits;
@@ -625,6 +626,7 @@ class GenotypeMatrix:
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 backend=backend, source=source, accessible_bed=accessible_bed,
+                include_invariant=include_invariant,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
@@ -696,7 +698,7 @@ class GenotypeMatrix:
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
                          prefetch, backend="auto", source=None,
-                         accessible_bed=None):
+                         accessible_bed=None, include_invariant=False):
         from .streaming_matrix import (
             StreamingGenotypeMatrix, _pick_chunk_fetcher,
         )
@@ -712,7 +714,7 @@ class GenotypeMatrix:
         # Resolve the accessible BED once over the source's bounds
         from .accessible import resolve_streaming_accessible_mask
         accessible_mask = resolve_streaming_accessible_mask(
-            accessible_bed, source, region)
+            accessible_bed, source, region, include_invariant)
 
         return StreamingGenotypeMatrix(
             source, fetcher,

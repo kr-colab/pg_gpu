@@ -126,13 +126,26 @@ def test_include_invariant_with_bed_counts_records_in_the_bed(tmp_path, cls):
     assert m.n_total_sites == 10
 
 
-def test_include_invariant_genotype_from_zarr(tmp_path):
+@pytest.mark.parametrize("streaming", ["never", "always"])
+@pytest.mark.parametrize("bed_end, n_called", [(None, len(_SITES)), (20, 10)])
+def test_include_invariant_genotype_from_zarr(tmp_path, streaming, bed_end, n_called):
+    # Eager and streaming loads build the same mask of called bases.
     hm = HaplotypeMatrix.from_vcf(_write_vcf(tmp_path / "inv.vcf"))
     store = str(tmp_path / "inv.vcz")
     hm.to_zarr(store, format="vcz", contig_name="1")
-    gm = GenotypeMatrix.from_zarr(store, include_invariant=True)
-    assert gm.has_accessible_mask
-    assert gm.n_total_sites == len(_SITES)
+    bed = None
+    if bed_end is not None:
+        bed = tmp_path / "acc.bed"
+        bed.write_text(f"1\t5\t{bed_end}\n")
+        bed = str(bed)
+    gm = GenotypeMatrix.from_zarr(store, include_invariant=True, accessible_bed=bed,
+                                  streaming=streaming, chunk_bp=10)
+    assert gm.accessible_mask.is_accessible_at([10, 11, 16]).tolist() == [True, False, True]
+    assert gm.accessible_mask.total_accessible == n_called
+    # The eager matrix keeps the count in n_total_sites; the stream reads
+    # it from the mask in get_span.
+    span = gm.n_total_sites if streaming == "never" else gm.get_span()
+    assert span == n_called
 
 
 def test_range_subset_before_the_first_record_keeps_the_mask_aligned(tmp_path):
