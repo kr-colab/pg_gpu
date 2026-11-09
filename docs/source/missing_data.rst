@@ -360,7 +360,11 @@ After a mask is attached (or ``include_invariant=True`` was passed at
 load time), three properties decompose the analysis universe:
 
 * ``n_callable_sites`` -- alias for ``n_total_sites``; the BED span when
-  masked, or the matrix length if loaded with ``include_invariant=True``.
+  masked. A VCF or store loaded with ``include_invariant=True`` has a
+  record for each called base, and the loader makes the record
+  positions its accessible mask, so this is the count of called bases
+  (only those in the BED, if ``accessible_bed`` is given too). Each
+  window then divides by its own called bases.
 * ``n_segregating_sites`` -- polymorphic sites in the matrix
   (``0 < derived_count < n_valid``).
 * ``n_invariant_sites`` -- ``n_callable_sites - n_segregating_sites``;
@@ -409,9 +413,15 @@ to missing data handling.
 ``span_normalize`` accepts ``True`` or ``False``:
 
 * ``True`` (default): auto-detect the best denominator. If an accessible
-  mask is set, divides by ``mask.total_accessible`` (the BED span).
-  Otherwise divides by the genomic span (1-based inclusive,
-  ``chrom_end - chrom_start + 1``).
+  mask is set, divides by the accessible bases in
+  ``[chrom_start, chrom_end]``. Otherwise, if ``n_total_sites`` is set,
+  divides by it. Otherwise divides by the genomic span (1-based
+  inclusive, ``chrom_end - chrom_start + 1``).
+* In ``windowed_analysis``, each window uses the same order: the
+  accessible bases in the window; else the window's share of
+  ``n_total_sites``, in proportion to its length (the shares of windows
+  that tile the region add up to ``n_total_sites``); else the window
+  length. Every engine uses this rule.
 * ``False``: return raw sum (used internally by composite statistics like
   Tajima's D, and by advanced users who need custom normalization).
 

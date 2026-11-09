@@ -105,21 +105,33 @@ _LOCAL_PCA_ONLY_KWARGS = frozenset(
 
 def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
                           is_accessible=None):
-    """Compute per-window accessible base counts for per-base normalization.
+    """Per-window base count, the denominator of per-base statistics.
+
+    Every windowed engine uses this one rule, so they agree on each
+    window. In order of precedence:
+
+    - an accessible mask (``is_accessible``, else the matrix's): the
+      accessible bases in the window;
+    - ``n_total_sites`` with no mask: the window's share of it, in
+      proportion to the window length, over the region's
+      ``chrom_end - chrom_start + 1`` bases. The shares of windows that
+      tile the region add up to ``n_total_sites``, the denominator of
+      the scalar function on the whole region;
+    - otherwise the window length.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
-        Source matrix (checked for accessible_mask attribute).
+        Source of the mask, ``n_total_sites`` and the region bounds.
     win_starts, win_stops : array_like
-        Window boundary arrays (numpy, not cupy).
+        Window edges, right-open (numpy, not cupy).
     is_accessible : array_like, optional
         Explicit accessibility mask (takes precedence over matrix attribute).
 
     Returns
     -------
     numpy.ndarray, float64
-        Accessible base count per window.
+        Base count per window.
     """
     ws = np.asarray(win_starts, dtype=np.float64)
     we = np.asarray(win_stops, dtype=np.float64)
@@ -134,7 +146,27 @@ def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
         return haplotype_matrix.accessible_mask.count_accessible_windows(
             ws.astype(np.int64), we.astype(np.int64))
 
+    if haplotype_matrix.n_total_sites is not None:
+        chrom_start, chrom_end = _bp_grid_bounds(
+            haplotype_matrix, haplotype_matrix.positions)
+        return (we - ws) * (haplotype_matrix.n_total_sites
+                            / (chrom_end - chrom_start + 1))
+
     return we - ws
+
+
+def _scatter_spans(haplotype_matrix, win_starts, win_stops, span_normalize):
+    """Per-window denominators of the scatter engines, and which are zero.
+
+    A window with no base (fully inaccessible) divides to NaN, not 0: its
+    per-base rate is undefined. The spans are clamped to 1 for a safe
+    division and the zero-span flags go back for that post-processing.
+    """
+    if span_normalize is False:
+        n = len(win_starts)
+        return np.ones(n), np.zeros(n, dtype=bool)
+    spans = _compute_window_bases(haplotype_matrix, win_starts, win_stops)
+    return np.maximum(spans, 1.0), spans <= 0
 
 
 CANONICAL_WINDOW_PREFIX = (
@@ -407,7 +439,6 @@ class WindowIterator:
 
     def __init__(self, haplotype_matrix: HaplotypeMatrix,
                  window_params: WindowParams):
-        self._parent_mask = haplotype_matrix.accessible_mask
         self.matrix = haplotype_matrix
         self.params = window_params
         self.positions = self.matrix.positions
@@ -418,11 +449,16 @@ class WindowIterator:
         else:
             self.positions_np = self.positions
 
-    def _attach_window_mask(self, window_matrix, start, end):
-        """Set per-window n_total_sites from the parent's accessible mask."""
-        if self._parent_mask is not None:
-            window_matrix.n_total_sites = \
-                self._parent_mask.count_accessible(start, end)
+    def _set_window_bases(self, window_matrix, start, end):
+        """Set the window's n_total_sites to its base count in the parent.
+
+        get_subset copies the parent's n_total_sites, which counts the
+        whole region; the window needs its own count, by the rule that
+        every engine uses (_compute_window_bases).
+        """
+        if self.matrix.has_accessible_mask or self.matrix.n_total_sites is not None:
+            window_matrix.n_total_sites = float(
+                _compute_window_bases(self.matrix, [start], [end])[0])
 
     def __iter__(self) -> Iterator[WindowData]:
         """Iterate over windows based on window type."""
@@ -457,7 +493,7 @@ class WindowIterator:
                 # Set correct chromosome coordinates for span normalization
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1  # end is exclusive in our window definition
-                self._attach_window_mask(window_matrix, start, end)
+                self._set_window_bases(window_matrix, start, end)
 
                 yield WindowData(
                     chrom=1,  # TODO: Handle multiple chromosomes
@@ -489,7 +525,7 @@ class WindowIterator:
             # Set correct chromosome coordinates for span normalization
             window_matrix.chrom_start = window_start
             window_matrix.chrom_end = window_end
-            self._attach_window_mask(window_matrix, window_start, window_end + 1)
+            self._set_window_bases(window_matrix, window_start, window_end + 1)
 
             yield WindowData(
                 chrom=1,  # TODO: Handle multiple chromosomes
@@ -522,7 +558,7 @@ class WindowIterator:
                 window_matrix = self.matrix.get_subset(variant_indices)
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1 # TODO: treat region bounds as inclusive.
-                self._attach_window_mask(window_matrix, start, end)
+                self._set_window_bases(window_matrix, start, end)
 
                 yield WindowData(
                     chrom=region.get('chrom', 1),
@@ -939,27 +975,8 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
-    # Span for normalization
-    if span_normalize is not False:
-        if haplotype_matrix.has_accessible_mask:
-            am = haplotype_matrix.accessible_mask
-            spans = am.count_accessible_windows(
-                results['start'], results['end'])
-        elif matrix.n_total_sites is not None:
-            # Proportional from n_total_sites. Both bounds are bases, so the
-            # region has chrom_end - chrom_start + 1 of them.
-            total_span = chrom_end - chrom_start + 1
-            spans = (win_stops - win_starts) * matrix.n_total_sites / total_span
-        else:
-            spans = win_stops - win_starts
-        # Windows with zero span (fully inaccessible) divide to NaN rather
-        # than 0 — the per-base rate is undefined, not zero. Clamp for
-        # safe division and carry the zero-span mask for post-processing.
-        zero_span = spans <= 0
-        spans = np.maximum(spans, 1.0)
-    else:
-        spans = np.ones(n_windows)
-        zero_span = np.zeros(n_windows, dtype=bool)
+    spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
+                                      span_normalize)
 
     stats_set = set(statistics)
 
@@ -1147,25 +1164,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
-    # Span normalization
-    if span_normalize is not False:
-        if haplotype_matrix.has_accessible_mask:
-            am = haplotype_matrix.accessible_mask
-            spans = am.count_accessible_windows(
-                results['start'], results['end'])
-        elif haplotype_matrix.n_total_sites is not None:
-            total_span = chrom_end - chrom_start + 1
-            spans = (win_stops - win_starts) * haplotype_matrix.n_total_sites / total_span
-        else:
-            spans = win_stops - win_starts
-        # Windows with zero span (fully inaccessible) divide to NaN rather
-        # than 0 — the per-base rate is undefined, not zero. Clamp for
-        # safe division and carry the zero-span mask for post-processing.
-        zero_span = spans <= 0
-        spans = np.maximum(spans, 1.0)
-    else:
-        spans = np.ones(n_windows)
-        zero_span = np.zeros(n_windows, dtype=bool)
+    spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
+                                      span_normalize)
 
     # Compute per-site components (single pass over the data). Only needed
     # for the gamete statistics, not a pure fst_wc request. dxy and the
@@ -1384,7 +1384,9 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator per window.
+        ``True`` (default): divide each window by its accessible bases if
+        the matrix has a mask; else by its share of ``n_total_sites``, in
+        proportion to the window length; else by the window length.
         ``False``: return raw sums.
     accessible_bed : str, optional
         Path to a BED file defining accessible/callable regions.

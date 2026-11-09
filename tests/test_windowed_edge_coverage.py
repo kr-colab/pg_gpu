@@ -194,10 +194,11 @@ def test_scatter_all_single_pop_stat_outputs():
     assert r["tajimas_d"] == pytest.approx(float(diversity.tajimas_d(m)))
     assert r["fay_wu_h"] == pytest.approx(float(diversity.fay_wus_h(m)))
     assert r["max_daf"] == pytest.approx(float(diversity.max_daf(m)))
-    # span-normalization by n_total_sites shrinks the raw per-window value.
+    # One window covers the whole region, so its share of n_total_sites is
+    # all of it.
     norm = windowed_analysis(
         m, window_size=100_000, statistics=["pi"]).iloc[0]["pi"]
-    assert 0 < norm < r["pi"]
+    assert norm == pytest.approx(r["pi"] / 8000)
 
 
 # ── fused-path edges: non-overlapping windows + fst_wc ─────────────────

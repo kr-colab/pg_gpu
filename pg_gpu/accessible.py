@@ -83,7 +83,9 @@ class AccessibleMask:
         j = min(len(self.mask), end - self.offset)
         if j <= i:
             return AccessibleMask(np.array([], dtype=bool), offset=start)
-        return AccessibleMask(self.mask[i:j], offset=start)
+        # The kept bases start at offset + i, which is past start when the
+        # range begins before this mask does.
+        return AccessibleMask(self.mask[i:j], offset=self.offset + i)
 
     def count_accessible_windows(self, starts, ends):
         """Count accessible bases for multiple windows at once.
@@ -278,6 +280,42 @@ def _intervals_to_mask(intervals, length, offset):
         if j > i:
             mask[i:j] = True
     return AccessibleMask(mask, offset=offset)
+
+
+def _called_sites_mask(positions, chrom_start, chrom_end, accessible_bed=None,
+                       chrom=None):
+    """AccessibleMask whose accessible bases are the given record positions.
+
+    A VCF or store loaded with its invariant sites has one record for each
+    called base, so the record positions are the callable bases. A mask of
+    them gives every window its exact count of called bases, which a single
+    total for the whole region cannot.
+
+    Parameters
+    ----------
+    positions : array_like, int
+        1-based positions of every loaded record, invariant sites included.
+    chrom_start, chrom_end : int
+        Inclusive bounds of the mask. Positions outside them are ignored.
+    accessible_bed : str, optional
+        BED file of the same data. Only positions inside it count.
+    chrom : str, optional
+        Contig to read from ``accessible_bed``; see
+        ``resolve_accessible_mask``.
+
+    Returns
+    -------
+    AccessibleMask
+    """
+    start, end = int(chrom_start), int(chrom_end)
+    positions = np.asarray(positions, dtype=np.int64)
+    positions = positions[(positions >= start) & (positions <= end)]
+    if accessible_bed is not None:
+        bed_mask = resolve_accessible_mask(accessible_bed, start, end, chrom)
+        positions = positions[bed_mask.is_accessible_at(positions)]
+    mask = np.zeros(end - start + 1, dtype=bool)
+    mask[positions - start] = True
+    return AccessibleMask(mask, offset=start)
 
 
 def resolve_accessible_mask(mask_or_path, chrom_start, chrom_end, chrom=None):

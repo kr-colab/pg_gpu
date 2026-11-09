@@ -7,7 +7,7 @@ import tskit
 import warnings
 from collections import Counter, OrderedDict
 
-from .accessible import (AccessibleMask, _data_contig, resolve_accessible_mask,
+from .accessible import (AccessibleMask, _called_sites_mask, _data_contig, resolve_accessible_mask,
                          slice_fields)
 from .zarr_io import _distinct_contigs, parse_region
 from ._warnings import _phase_dependent, _warn_unphased
@@ -504,9 +504,11 @@ class HaplotypeMatrix:
         """Total callable sites in the analysis universe.
 
         Alias for ``n_total_sites``. When an accessible mask is set, this is
-        the BED span (mask.total_accessible). When no mask is set but the
-        matrix was loaded with ``include_invariant=True``, this is the matrix
-        length at construction. Otherwise None.
+        the accessible bases in [chrom_start, chrom_end]; a VCF loaded with
+        ``include_invariant=True`` gets a mask of its record positions, so
+        this is its count of called bases. Without a mask, it is the value
+        given at construction (``from_ts(include_invariant=True)`` gives the
+        sequence length), else None.
 
         This is the denominator for per-base span normalization, and
         ``n_callable_sites = n_segregating_sites + n_invariant_sites``.
@@ -588,7 +590,12 @@ class HaplotypeMatrix:
         samples : list of str, optional
             Subset of samples to load. If None, loads all samples.
         include_invariant : bool
-            If True, set n_total_sites from the loaded variant count.
+            If True, the VCF has a record for each called base, invariant
+            sites included. The positions of the records become the
+            accessible mask, so per-base statistics divide by the called
+            bases of each window and of the whole region
+            (``n_total_sites``). With ``accessible_bed`` too, only records
+            in the BED count.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
         fields : list of str, optional
@@ -661,11 +668,12 @@ class HaplotypeMatrix:
         qc_fields = (_resolve_qc_fields_vcf(vcf, tag_to_path, unknown_tags)
                      if fields else {})
 
-        n_total_sites = num_variants if include_invariant else None
         hm = cls(haplotypes, positions, chrom_start, chrom_end,
-                 n_total_sites=n_total_sites, samples=sample_names,
-                 fields=qc_fields, phased=phased)
-        if accessible_bed is not None:
+                 samples=sample_names, fields=qc_fields, phased=phased)
+        if include_invariant:
+            hm.set_accessible_mask(_called_sites_mask(
+                positions, chrom_start, chrom_end, accessible_bed, chrom))
+        elif accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
         return hm
 
