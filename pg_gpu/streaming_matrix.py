@@ -547,13 +547,23 @@ class _StreamingMatrixBase:
                 chrom_start=int(left), chrom_end=int(right),
                 sample_sets=self._sample_sets,
             )
-            # A load-time accessible mask filters variants to accessible sites,
-            # exactly as it does on an eager matrix -- attach it here, at the
-            # single chunk-production point, so every streaming consumer sees
-            # accessible-filtered chunks by construction.
-            if self.accessible_mask is not None:
-                m.accessible_mask = self.accessible_mask
+            self._attach_span(m, int(left), int(right))
             yield int(left), int(right), m
+
+    def _attach_span(self, m, left, right):
+        """Give an eager matrix over ``[left, right]`` this stream's span.
+
+        A load-time accessible mask filters variants to accessible sites,
+        exactly as it does on an eager matrix, so every chunk and every
+        materialized slice gets it. Without a mask, ``n_total_sites``
+        counts the whole stream, so the slice gets its share of it, by the
+        rule the windowed engines use.
+        """
+        if self.accessible_mask is not None:
+            m.set_accessible_mask(self.accessible_mask)
+        elif self.n_total_sites is not None:
+            from .haplotype_matrix import _total_sites_share
+            m.n_total_sites = float(_total_sites_share(self, [left], [right + 1])[0])
 
     def materialize(self, *, region=None, sample_subset=None):
         """Build an eager matrix over a sub-region.
@@ -646,11 +656,13 @@ class _StreamingMatrixBase:
                     self._renumber_sets(sets, sample_subset).items()
                     if len(rows)}
 
-        return self._build_chunk(
+        m = self._build_chunk(
             gt, pos,
             chrom_start=left, chrom_end=right,
             sample_sets=sets,
         )
+        self._attach_span(m, left, right)
+        return m
 
     def _renumber_sets(self, sets, sample_subset):
         """Sets renumbered into the subset's row space; rows the subset

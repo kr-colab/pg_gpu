@@ -323,6 +323,21 @@ Read this section if you are comparing against older pg_gpu results.
 * ``get_subset_from_range`` with a range that starts before the
   accessible mask does shifted the subset's mask, so it marked the wrong
   bases accessible. The subset's mask now keeps its own start.
+* ``get_subset_from_range`` on a matrix with ``n_total_sites`` and no
+  mask dropped ``n_total_sites``, so the subset divided by its length.
+  It now gets its share of ``n_total_sites``, by the rule the windowed
+  engines use, so a windowed value equals the plain function on the
+  window's range.
+* Streaming chunks and ``materialize`` slices got neither the stream's
+  accessible mask (``materialize``) nor its ``n_total_sites`` (both).
+  Each now gets the mask, or else its share of ``n_total_sites``, so a
+  streamed value equals the eager one. ``windowed_analysis`` on a stream
+  that has a mask now ignores ``accessible_bed``, as it does on an eager
+  matrix; it used to put the BED over the stream's mask.
+* A bool ``is_accessible`` array has element 0 at position 1, as in
+  scikit-allel, for ``ihs``, ``xpehh``, ``windowed_statistics_fused`` and
+  ``windowed_statistics_fused_chunked``. The windowed functions read
+  element 0 as position 0, one base off from ``ihs`` and ``xpehh``.
 * The biallelic and segregating filters keep the parent matrix's
   chromosome bounds. The old filter moved the bounds to the first and
   last surviving variant, which quietly changed the denominator of any

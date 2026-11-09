@@ -218,7 +218,9 @@ class GenotypeMatrix:
         Parameters
         ----------
         mask_or_path : str, path-like, numpy.ndarray, or AccessibleMask
-            BED file path, boolean array, or AccessibleMask instance.
+            BED file path, boolean array, or AccessibleMask instance. A
+            boolean array starts at chrom_start; see
+            ``HaplotypeMatrix.set_accessible_mask``.
         chrom : str, optional
             Chromosome name to extract from the BED file. Required when the
             BED file has more than one contig (otherwise ValueError); a

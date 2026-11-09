@@ -211,6 +211,40 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_assignment,
     return "streaming", source
 
 
+def _bp_grid_bounds(matrix, positions=None):
+    """Bounds of the bp window grid.
+
+    The matrix's chromosome coordinates win when set; the first and last
+    variant are the fallback. Every windowed engine anchors with this one
+    rule, so they all tile the same grid for the same matrix -- anchoring
+    at the first variant instead would shift every window of a region- or
+    subset-derived matrix whose chrom_start sits before its first variant.
+    ``positions`` defaults to ``matrix.positions``, read only when a
+    bound is unset.
+    """
+    if positions is None and (matrix.chrom_start is None or matrix.chrom_end is None):
+        positions = matrix.positions
+    chrom_start = (int(matrix.chrom_start) if matrix.chrom_start is not None
+                   else int(positions[0]))
+    chrom_end = (int(matrix.chrom_end) if matrix.chrom_end is not None
+                 else int(positions[-1]))
+    return chrom_start, chrom_end
+
+
+def _total_sites_share(matrix, starts, stops):
+    """Each range's share of ``matrix.n_total_sites``.
+
+    With no mask, ``n_total_sites`` is a count for the whole region with
+    no positions, so each range gets it in proportion to the bases it
+    covers inside ``[chrom_start, chrom_end]`` (both inclusive). Shares
+    of ranges that tile the region add up to ``n_total_sites``.
+    """
+    lo, hi = _bp_grid_bounds(matrix)
+    starts = np.clip(np.asarray(starts, dtype=np.float64), lo, hi + 1)
+    stops = np.clip(np.asarray(stops, dtype=np.float64), lo, hi + 1)
+    return np.maximum(stops - starts, 0) * (matrix.n_total_sites / (hi - lo + 1))
+
+
 class HaplotypeMatrix:
     """Haplotype matrix for population genetics analysis.
 
@@ -462,7 +496,9 @@ class HaplotypeMatrix:
         mask_or_path : str, path-like, numpy.ndarray, or AccessibleMask
             If a string/path, treated as a BED file path defining accessible
             regions. If an ndarray, wrapped as an AccessibleMask with offset
-            equal to chrom_start. If already an AccessibleMask, assigned
+            equal to chrom_start: element 0 is chrom_start, unlike the
+            ``is_accessible`` argument of statistics, whose element 0 is
+            position 1. If already an AccessibleMask, assigned
             directly.
         chrom : str, optional
             Chromosome name to extract from the BED file. Required when the
@@ -1317,15 +1353,20 @@ class HaplotypeMatrix:
         if self.accessible_mask is not None:
             sliced_mask = self.accessible_mask.slice(low, high)
 
+        # The parent count covers the whole parent range, not this one: a
+        # mask is recounted over the range, else the range gets its share.
+        n_total_sites = None
+        if sliced_mask is None and self.n_total_sites is not None:
+            n_total_sites = float(_total_sites_share(self, [low], [high])[0])
+
         # chrom_end is inclusive, so the last base of [low, high) is high - 1.
         if len(indices) == 0:
             result = self._empty_subset()
             result.chrom_start = low
             result.chrom_end = high - 1
             result.accessible_mask = sliced_mask
-            # The parent count covers the whole parent range, not this one.
             result.n_total_sites = (result._accessible_bases_in_range()
-                                    if sliced_mask is not None else None)
+                                    if sliced_mask is not None else n_total_sites)
             return result
 
         return HaplotypeMatrix(
@@ -1334,6 +1375,7 @@ class HaplotypeMatrix:
             chrom_start=low,
             chrom_end=high - 1,
             sample_sets=self._sample_sets,
+            n_total_sites=n_total_sites,
             samples=self.samples,
             accessible_mask=sliced_mask,
             fields=slice_fields(self.fields, indices, self._accessible_idx),

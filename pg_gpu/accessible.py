@@ -282,6 +282,17 @@ def _intervals_to_mask(intervals, length, offset):
     return AccessibleMask(mask, offset=offset)
 
 
+def _as_accessible_mask(is_accessible):
+    """The ``is_accessible`` argument of a statistic, as an AccessibleMask.
+
+    A bool array follows scikit-allel: element 0 is position 1. An
+    AccessibleMask keeps its own offset.
+    """
+    if isinstance(is_accessible, AccessibleMask):
+        return is_accessible
+    return AccessibleMask(is_accessible, offset=1)
+
+
 def _called_sites_mask(positions, chrom_start, chrom_end, accessible_bed=None,
                        chrom=None):
     """AccessibleMask whose accessible bases are the given record positions.

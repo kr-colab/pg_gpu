@@ -13,6 +13,7 @@ import pytest
 
 from pg_gpu import GenotypeMatrix, HaplotypeMatrix, diversity
 from pg_gpu.windowed_analysis import (WindowedAnalyzer, windowed_analysis,
+                                     windowed_statistics_fused,
                                      windowed_statistics_fused_chunked)
 
 N_TOTAL = 800
@@ -61,6 +62,31 @@ def test_region_windows_share_n_total_sites(stats):
 def test_two_pop_windows_share_n_total_sites(stats):
     den = _denominators(stats, stat="dxy", window_size=500, populations=["a", "b"])
     np.testing.assert_allclose(den, N_TOTAL / 4)
+
+
+def test_range_subset_gets_its_share():
+    # A range subset divides by its share, so the windowed value equals the
+    # plain function on the window's range.
+    hm = _hm()
+    sub = hm.get_subset_from_range(501, 1001)
+    assert sub.n_total_sites == pytest.approx(N_TOTAL / 4)
+    df = windowed_analysis(hm, 500, statistics=["pi"])
+    assert df["pi"].iloc[1] == pytest.approx(diversity.pi(sub))
+    # Bases past chrom_end are not in the region, so they get no share.
+    assert hm.get_subset_from_range(1501, 3001).n_total_sites == pytest.approx(N_TOTAL / 4)
+
+
+def test_is_accessible_array_starts_at_position_one():
+    # As in scikit-allel, element 0 of a bool is_accessible array is
+    # position 1: marking positions 1..250 makes window [1, 501) count 250.
+    hm = _hm()
+    arr = np.zeros(2000, dtype=bool)
+    arr[:250] = True
+    bins = np.array([1, 501, 1001], dtype=float)
+    raw = windowed_statistics_fused(hm, bins, statistics=("pi",), per_base=False)
+    norm = windowed_statistics_fused(hm, bins, statistics=("pi",), per_base=True,
+                                     is_accessible=arr)
+    assert raw["pi"][0] / norm["pi"][0] == pytest.approx(250)
 
 
 def test_snp_windows_share_n_total_sites():
@@ -155,4 +181,31 @@ def test_range_subset_before_the_first_record_keeps_the_mask_aligned(tmp_path):
     sub = hm.get_subset_from_range(0, 21)
     assert sub.accessible_mask.is_accessible_at([10, 11, 16, 20]).tolist() == \
         [True, False, True, True]
+    assert sub.n_total_sites == 15                  # 1..10 and 16..20
+
+
+def test_stream_with_n_total_sites_matches_eager(tmp_path):
+    # Each streaming chunk, and each materialized slice, gets its share of
+    # the stream's n_total_sites, as an eager range subset does.
+    store = str(tmp_path / "hm.vcz")
+    _hm().to_zarr(store, format="vcz", contig_name="1")
+    stream = HaplotypeMatrix.from_zarr(store, region="1:1-2000",
+                                       streaming="always", chunk_bp=1000)
+    stream.n_total_sites = N_TOTAL
+    eager = windowed_analysis(_hm(), 500, statistics=["pi"])["pi"].to_numpy()
+    streamed = windowed_analysis(stream, 500, statistics=["pi"])["pi"].to_numpy()
+    np.testing.assert_allclose(streamed, eager)
+    sub = stream.materialize(region=(501, 1000))
+    assert sub.n_total_sites == pytest.approx(N_TOTAL / 4)
+    assert diversity.pi(sub) == pytest.approx(eager[1])
+
+
+def test_materialize_keeps_the_stream_mask(tmp_path):
+    hm = HaplotypeMatrix.from_vcf(_write_vcf(tmp_path / "inv.vcf"))
+    store = str(tmp_path / "inv.vcz")
+    hm.to_zarr(store, format="vcz", contig_name="1")
+    stream = GenotypeMatrix.from_zarr(store, include_invariant=True,
+                                      streaming="always", chunk_bp=10)
+    sub = stream.materialize(region=(1, 20))
+    assert sub.has_accessible_mask
     assert sub.n_total_sites == 15                  # 1..10 and 16..20

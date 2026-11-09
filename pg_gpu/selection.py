@@ -10,7 +10,7 @@ using CuPy for GPU acceleration.
 import numpy as np
 import cupy as cp
 from typing import Union, Optional, Tuple
-from .accessible import AccessibleMask
+from .accessible import _as_accessible_mask
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import population_rows
 from ._memutil import allele_counts
@@ -477,8 +477,9 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
         Rescale gaps larger than this value.
     max_gap : int, optional
         Mark gaps larger than this as invalid.
-    is_accessible : array_like, optional
-        Genome accessibility mask.
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Genome accessibility, as in scikit-allel: element 0 is position 1.
+        Defaults to the matrix's accessible mask.
     population : str or list, optional
         Population name or sample indices.
     missing_data : str
@@ -613,8 +614,9 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
         Rescale gaps larger than this value.
     max_gap : int, optional
         Mark gaps larger than this as invalid.
-    is_accessible : array_like, optional
-        Genome accessibility mask.
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Genome accessibility, as in scikit-allel: element 0 is position 1.
+        Defaults to the matrix's accessible mask.
     missing_data : str
         'include' - missing extends shared suffix length (default)
         'exclude' - filter to sites with no missing data before scan
@@ -977,8 +979,7 @@ def _compute_gaps(pos, map_pos=None, gap_scale=20000, max_gap=200000,
     max_gap : int
         Mark gaps larger than this as -1 (invalid).
     is_accessible : ndarray, bool, or AccessibleMask, optional
-        Genome accessibility. A bool array has element 0 at position 1,
-        as in scikit-allel; an AccessibleMask carries its own offset.
+        Genome accessibility; see ``accessible._as_accessible_mask``.
 
     Returns
     -------
@@ -997,8 +998,7 @@ def _compute_gaps(pos, map_pos=None, gap_scale=20000, max_gap=200000,
     physical_gaps = np.diff(pos)
 
     if is_accessible is not None:
-        if not isinstance(is_accessible, AccessibleMask):
-            is_accessible = AccessibleMask(is_accessible, offset=1)
+        is_accessible = _as_accessible_mask(is_accessible)
         # Accessible bases in [pos[i], pos[i+1]) for each gap.
         accessible_gaps = is_accessible.count_accessible_windows(pos[:-1], pos[1:])
         gaps = gaps * (accessible_gaps / physical_gaps)

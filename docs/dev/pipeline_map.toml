@@ -185,7 +185,7 @@ methods = [
     "tally_gpu_haplotypes_two_pops_with_missing", "to_zarr", "transfer_to_cpu",
     "transfer_to_gpu", "vcf_to_zarr", "watersons_theta", "windowed_r_squared",
 ]
-notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask."
+notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask, else gets its share of n_total_sites (haplotype_matrix._total_sites_share, the rule the windowed engines use)."
 
 [matrices.GenotypeMatrix]
 module = "genotype_matrix"
@@ -209,7 +209,7 @@ methods = [
     "num_haplotypes", "num_variants", "phased", "sample_sets", "set_phased",
     "set_unphased",
 ]
-notes = "accessible_mask and n_total_sites are instance attributes: the loader sets accessible_mask from accessible_bed (and, for GenotypeMatrix.from_zarr with include_invariant=True, from the record positions) and leaves n_total_sites None. .haplotypes raises. iter_gpu_chunks yields closed chunks [s, s + chunk_bp - 1] as eager HaplotypeMatrix objects; materialize(region=) gives an eager sub-region."
+notes = "accessible_mask and n_total_sites are instance attributes: the loader sets accessible_mask from accessible_bed (and, for GenotypeMatrix.from_zarr with include_invariant=True, from the record positions) and leaves n_total_sites None. .haplotypes raises. iter_gpu_chunks yields closed chunks [s, s + chunk_bp - 1] as eager HaplotypeMatrix objects; each chunk and each materialize slice gets the mask, else its share of a hand-set n_total_sites (streaming_matrix._StreamingMatrixBase._attach_span); materialize(region=) gives an eager sub-region."
 
 [matrices.StreamingGenotypeMatrix]
 module = "streaming_matrix"
@@ -218,7 +218,7 @@ methods = [
     "genotypes", "get_span", "iter_gpu_chunks", "materialize",
     "num_individuals", "num_variants", "sample_sets",
 ]
-notes = ".genotypes raises. Chunks are eager GenotypeMatrix objects."
+notes = ".genotypes raises. Chunks are eager GenotypeMatrix objects, with the span set as for StreamingHaplotypeMatrix."
 
 # ---------------------------------------------------------------------------
 # Windowed engines: the implementations that windowed_analysis dispatches to.
@@ -1459,7 +1459,7 @@ axis_kwargs = ["missing_data", "population", "is_accessible"]
 inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
-span = "none (gaps scaled by is_accessible, else the matrix mask with its offset, else gap_scale)"
+span = "none (gaps scaled by is_accessible, a bool array with element 0 at position 1 as in scikit-allel, else the matrix mask with its offset, else gap_scale)"
 undefined = "NaN where MAF < min_maf, EHH does not decay below min_ehh (unless include_edges), or past a gap > max_gap; all NaN with no alternate allele"
 parallel = []
 notes = "Under 'exclude' pos is subset but map_pos is not, so a map_pos with dropped sites raises IndexError."
@@ -1470,7 +1470,7 @@ axis_kwargs = ["missing_data", "pop1", "pop2", "is_accessible"]
 inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
-span = "none (gaps scaled by is_accessible, else the matrix mask with its offset, else gap_scale)"
+span = "none (gaps scaled by is_accessible, a bool array with element 0 at position 1 as in scikit-allel, else the matrix mask with its offset, else gap_scale)"
 undefined = "NaN where EHH does not decay below min_ehh (unless include_edges) or past a gap > max_gap"
 parallel = []
 notes = "Under 'exclude' sites are dropped on every row of the matrix, and map_pos is not subset (IndexError)."

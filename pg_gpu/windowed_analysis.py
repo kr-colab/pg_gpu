@@ -15,7 +15,8 @@ from dataclasses import dataclass, field, replace
 import warnings
 from tqdm import tqdm
 
-from .haplotype_matrix import HaplotypeMatrix
+from .accessible import _as_accessible_mask, resolve_accessible_mask
+from .haplotype_matrix import HaplotypeMatrix, _bp_grid_bounds, _total_sites_share
 from . import ld_statistics
 from . import divergence
 from . import diversity
@@ -112,11 +113,11 @@ def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
 
     - an accessible mask (``is_accessible``, else the matrix's): the
       accessible bases in the window;
-    - ``n_total_sites`` with no mask: the window's share of it, in
-      proportion to the window length, over the region's
-      ``chrom_end - chrom_start + 1`` bases. The shares of windows that
-      tile the region add up to ``n_total_sites``, the denominator of
-      the scalar function on the whole region;
+    - ``n_total_sites`` with no mask: the window's share of it
+      (``haplotype_matrix._total_sites_share``), in proportion to the
+      bases it covers in the region. The shares of windows that tile the
+      region add up to ``n_total_sites``, the denominator of the scalar
+      function on the whole region;
     - otherwise the window length.
 
     Parameters
@@ -125,8 +126,9 @@ def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
         Source of the mask, ``n_total_sites`` and the region bounds.
     win_starts, win_stops : array_like
         Window edges, right-open (numpy, not cupy).
-    is_accessible : array_like, optional
-        Explicit accessibility mask (takes precedence over matrix attribute).
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Explicit accessibility (takes precedence over the matrix's mask);
+        a bool array has element 0 at position 1, as in scikit-allel.
 
     Returns
     -------
@@ -137,9 +139,7 @@ def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
     we = np.asarray(win_stops, dtype=np.float64)
 
     if is_accessible is not None:
-        from .accessible import AccessibleMask
-        amask = AccessibleMask(np.asarray(is_accessible, dtype=bool))
-        return amask.count_accessible_windows(
+        return _as_accessible_mask(is_accessible).count_accessible_windows(
             ws.astype(np.int64), we.astype(np.int64))
 
     if haplotype_matrix.has_accessible_mask:
@@ -147,10 +147,7 @@ def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
             ws.astype(np.int64), we.astype(np.int64))
 
     if haplotype_matrix.n_total_sites is not None:
-        chrom_start, chrom_end = _bp_grid_bounds(
-            haplotype_matrix, haplotype_matrix.positions)
-        return (we - ws) * (haplotype_matrix.n_total_sites
-                            / (chrom_end - chrom_start + 1))
+        return _total_sites_share(haplotype_matrix, ws, we)
 
     return we - ws
 
@@ -800,22 +797,6 @@ class WindowedAnalyzer:
                 yield pd.DataFrame(batch_results)
 
 
-def _bp_grid_bounds(matrix, positions):
-    """Bounds of the bp window grid.
-
-    The matrix's chromosome coordinates win when set; the first and last
-    variant are the fallback. Every windowed engine anchors with this one
-    rule, so they all tile the same grid for the same matrix -- anchoring
-    at the first variant instead would shift every window of a region- or
-    subset-derived matrix whose chrom_start sits before its first variant.
-    """
-    chrom_start = (int(matrix.chrom_start) if matrix.chrom_start is not None
-                   else int(positions[0]))
-    chrom_end = (int(matrix.chrom_end) if matrix.chrom_end is not None
-                 else int(positions[-1]))
-    return chrom_start, chrom_end
-
-
 def _bp_window_grid(chrom_start, chrom_end, window_size, step_size):
     """Start/stop arrays of the bp window grid.
 
@@ -1281,13 +1262,12 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             "the region eagerly to run it."
         )
 
-    # Parse the BED mask once up front and inject the resolved
-    # AccessibleMask into each chunk -- otherwise windowed_analysis would
-    # re-open and re-parse the BED for every chunk via
-    # haplotype_matrix.set_accessible_mask.
+    # As on the eager path, accessible_bed applies only when the stream has
+    # no mask of its own (iter_gpu_chunks attaches that one). Parse the BED
+    # once up front and hand the resolved AccessibleMask to each chunk, not
+    # the path, which each chunk would re-open and re-parse.
     shared_mask = None
-    if accessible_bed is not None:
-        from .accessible import resolve_accessible_mask
+    if accessible_bed is not None and streaming_hm.accessible_mask is None:
         # The stream knows its contig, so a multi-contig BED needs no chrom.
         shared_mask = resolve_accessible_mask(
             accessible_bed, streaming_hm.chrom_start, streaming_hm.chrom_end,
@@ -1297,7 +1277,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
     parts = []
     for left, right, chunk_hm in streaming_hm.iter_gpu_chunks(skip_empty = False):
         if shared_mask is not None:
-            chunk_hm.accessible_mask = shared_mask
+            chunk_hm.set_accessible_mask(shared_mask)
         df = _windowed_analysis(
             chunk_hm,
             window_size=window_size, step_size=step_size,
@@ -2324,8 +2304,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         Populations for two-pop statistics.
     per_base : bool
         Normalize by window size in base pairs.
-    is_accessible : array_like, optional
-        Accessibility mask for per-base normalization.
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Accessibility for per-base normalization, in place of the matrix's
+        mask; a bool array has element 0 at position 1, as in scikit-allel.
     missing_data : {'include', 'exclude'}
         'include' uses every site with the calls it has. 'exclude' keeps
         only sites with no missing call in the rows the request reads (see
