@@ -517,17 +517,15 @@ class HaplotypeMatrix:
     def n_segregating_sites(self):
         """Number of polymorphic sites in the matrix.
 
-        Counts sites where 0 < derived_count < n_valid (i.e. polymorphic
-        among observed haplotypes), with at least 2 valid samples.
+        Counts sites with at least two distinct alleles present among the
+        non-missing haplotypes.
         """
-        xp = cp if self.device == 'GPU' else np
-        hap = self.haplotypes
-        valid_mask = hap >= 0
-        hap_clean = xp.where(valid_mask, hap, 0)
-        derived_counts = xp.sum(hap_clean, axis=0)
-        n_valid = xp.sum(valid_mask, axis=0)
-        is_variant = (derived_counts > 0) & (derived_counts < n_valid) & (n_valid >= 2)
-        return int(xp.sum(is_variant))
+        if self.device == 'CPU':
+            self.transfer_to_gpu()
+        from ._memutil import allele_counts
+        ac, _ = allele_counts(self.haplotypes)
+        is_variant = (ac > 0).sum(axis=1) >= 2
+        return int(cp.sum(is_variant))
 
     @property
     def n_invariant_sites(self):

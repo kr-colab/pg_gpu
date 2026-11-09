@@ -664,7 +664,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "0 when no site has two valid haplotypes"
 parallel = ["diversity._compute_thetas", "diversity.FrequencySpectrum.__init__", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "haplotype_matrix.HaplotypeMatrix.n_segregating_sites", "genotype_matrix.GenotypeMatrix.n_segregating_sites"]
-notes = "Counts mutations (alleles present - 1, so a triallelic site counts 2); the n_segregating_sites properties use a different biallelic rule."
+notes = "Counts mutations (alleles present - 1, so a triallelic site counts 2), not sites; haplotype_matrix.HaplotypeMatrix.n_segregating_sites counts sites (>= 2 distinct alleles present) via the same allele_counts primitive. genotype_matrix.GenotypeMatrix.n_segregating_sites uses a separate, genuinely biallelic dosage rule."
 
 [functions."diversity.singleton_count"]
 # signature: (haplotype_matrix, population, missing_data)
