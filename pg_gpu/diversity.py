@@ -1898,7 +1898,8 @@ def mu_var(haplotype_matrix: HaplotypeMatrix,
     ----------
     haplotype_matrix : HaplotypeMatrix
     window_length : float, optional
-        Window length in bp. If None, uses chrom_end - chrom_start.
+        Window length in bp. If None, uses ``get_span()``, the length that
+        ``pi`` normalizes by.
     population : str or list, optional
 
     Returns
@@ -1913,7 +1914,7 @@ def mu_var(haplotype_matrix: HaplotypeMatrix,
 
     n_snps = matrix.num_variants
     if window_length is None:
-        window_length = matrix.chrom_end - matrix.chrom_start
+        window_length = matrix.get_span()
     if window_length <= 0:
         return float('nan')
 

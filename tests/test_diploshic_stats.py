@@ -8,6 +8,7 @@ import numpy as np
 import cupy as cp
 from pg_gpu import HaplotypeMatrix, GenotypeMatrix
 from pg_gpu import ld_statistics, diversity, selection, distance_stats
+from pg_gpu.windowed_analysis import windowed_analysis
 
 from .conftest import founder_haplotypes
 
@@ -405,6 +406,22 @@ class TestDiversityNewStats:
     def test_mu_var(self, hap_data):
         mv = diversity.mu_var(hap_data)
         assert mv > 0
+
+    @pytest.mark.parametrize("masked, span", [(None, 1000), (slice(300, 600), 700)])
+    def test_mu_var_length_matches_windowed(self, masked, span):
+        # chrom_start and chrom_end are inclusive, so [1, 1000] is 1000 bp;
+        # a mask leaves only its accessible bases in the length.
+        hap = np.random.default_rng(0).integers(0, 2, (20, 10)).astype(np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(10) * 100 + 1, 1, 1000)
+        if masked is not None:
+            mask = np.ones(1000, dtype=bool)
+            mask[masked] = False
+            hm.set_accessible_mask(mask)
+        mv = diversity.mu_var(hm)
+        assert mv == pytest.approx(hm.num_variants / span)
+        assert diversity.mu_var(hm, population=list(range(10))) == pytest.approx(mv)
+        df = windowed_analysis(hm, window_size=1000, statistics=['mu_var'])
+        assert df['mu_var'].iloc[0] == pytest.approx(mv)
 
     def test_mu_sfs(self, hap_data):
         ms = diversity.mu_sfs(hap_data)

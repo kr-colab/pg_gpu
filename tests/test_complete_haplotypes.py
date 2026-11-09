@@ -31,7 +31,7 @@ def _hap(n, rate, seed=0, n_var=400):
 def _hm(hap, sample_sets=None):
     n_var = hap.shape[1]
     return HaplotypeMatrix(hap.copy(), np.arange(n_var, dtype=np.int64) * SPACING,
-                           0, n_var * SPACING, sample_sets=sample_sets)
+                           0, n_var * SPACING - 1, sample_sets=sample_sets)
 
 
 def _ref_complete(hap):
@@ -114,7 +114,7 @@ def test_streaming_reports_the_column_and_warns_once(tmp_path):
     hap = cp.asnumpy(hm.haplotypes).astype(np.int8)
     pos = cp.asnumpy(hm.positions)
     hap[np.random.default_rng(3).random(hap.shape) < 0.05] = -1
-    hm = HaplotypeMatrix(hap, pos, 0, 50_000)
+    hm = HaplotypeMatrix(hap, pos, 0, 49_999)
     hm.samples = [f"s{i}" for i in range(hap.shape[0] // 2)]
     path = str(tmp_path / "missing.vcz")
     hm.to_zarr(path, format="vcz", contig_name="1")
