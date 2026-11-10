@@ -1410,36 +1410,38 @@ def zeng_dh(haplotype_matrix: HaplotypeMatrix,
             missing_data: str = 'include') -> float:
     """Compute Zeng's DH joint test statistic.
 
-    Combines Tajima's D and Fay & Wu's H into a single test with
-    improved power to detect directional selection. Defined as the
-    product D * H when both are negative, zero otherwise.
+    The product of Tajima's D and the normalized H* statistic (Zeng et al.
+    2006, Equation 11) when both are negative, zero otherwise -- an
+    empirical composite of the two neutrality tests' joint signal, not
+    the paper's own Equation (15) (a joint tail region evaluated against
+    simulated critical values).
 
     Reference: Zeng et al. (2006), "Statistical Tests for Detecting
     Positive Selection by Utilizing High-Frequency Variants",
-    Genetics 174: 1431-1439, Equation (15).
+    Genetics 174: 1431-1439.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     missing_data : str
-        Passed through to tajimas_d and fay_wus_h.
+        Passed through to tajimas_d and normalized_fay_wus_h.
 
     Returns
     -------
     float
-        DH statistic. Positive when both D and H are negative
+        DH statistic. Positive when both D and H* are negative
         (consistent with a selective sweep). NaN when either test is
         undefined (too few segregating sites).
     """
     D = tajimas_d(haplotype_matrix, population, missing_data=missing_data)
-    H = fay_wus_h(haplotype_matrix, population, missing_data=missing_data)
+    H = normalized_fay_wus_h(haplotype_matrix, population, missing_data=missing_data)
 
     return float(_zeng_dh_combine(D, H))
 
 
 def _zeng_dh_combine(D, H):
-    """Zeng's DH from Tajima's D and Fay & Wu's H, scalars or arrays.
+    """Zeng's DH from Tajima's D and the normalized H* statistic, scalars or arrays.
 
     The product when both are negative (sweep signal), else 0. An undefined
     test (too few sites) is not "no sweep", so it gives NaN.

@@ -1090,9 +1090,11 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         if 'tajimas_d' in stats_set:
             results['tajimas_d'] = tajd
 
-    if 'normalized_fay_wu_h' in stats_set:
-        results['normalized_fay_wu_h'] = windowed_test(
-            'pi', 'theta_h', raw['pi'].get() - raw['theta_h'].get())
+    if stats_set & {'normalized_fay_wu_h', 'zeng_dh'}:
+        h_star = windowed_test('pi', 'theta_h',
+                               raw['pi'].get() - raw['theta_h'].get())
+        if 'normalized_fay_wu_h' in stats_set:
+            results['normalized_fay_wu_h'] = h_star
 
     if 'zeng_e' in stats_set:
         results['zeng_e'] = windowed_test(
@@ -1100,8 +1102,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             raw['theta_l'].get() - raw['watterson'].get())
 
     if 'zeng_dh' in stats_set:
-        H = (raw['pi'] - raw['theta_h']).get()
-        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, H)
+        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, h_star)
 
     # Windows with no accessible bases get NaN for every per-base rate.
     # fay_wu_h and zeng_dh have no span-normalized form, so a zero-span

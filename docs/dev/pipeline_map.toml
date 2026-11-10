@@ -696,7 +696,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "0.0 with no variants or fewer than two haplotypes"
 parallel = ["diversity.diversity_stats", "diversity.FrequencySpectrum.fay_wu_h", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "Returns the raw pi - theta_H sum; the windowed 'fay_wu_h' column matches it exactly on each window's variants, with no span division -- it is a difference of estimators, not a rate."
+notes = "Returns the raw pi - theta_H sum; the windowed 'fay_wu_h' column matches it exactly on each window's variants, with no span division."
 
 [functions."diversity.haplotype_diversity"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -759,9 +759,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN when Tajima's D is NaN (Fay-Wu H is always defined); 0.0 unless both are negative"
+undefined = "NaN when Tajima's D or the normalized H* is NaN; 0.0 unless both are negative"
 parallel = ["windowed_analysis._windowed_thetas_scatter"]
-notes = "Scalar and scatter engine both multiply D by the raw H, now that the scatter engine no longer divides H by the span."
+notes = "Multiplies D by normalized_fay_wus_h (H*), not the raw H; the scatter engine shares the same windowed_test call that serves normalized_fay_wu_h."
 
 [functions."diversity.max_daf"]
 # signature: (haplotype_matrix, population, missing_data)
