@@ -1122,7 +1122,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when variants exist but no site has a call in both pops, or when span <= 0; 0.0 with no variants at all; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes). per_site=True gives NaN at a site where either pop has no call."
 parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
-notes = "span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span, correcting for sites one population's own missing calls dropped from the sum; the fused engines have their own C copy of the per-site formula, without this rescale."
+notes = "span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span, correcting for sites one population's own missing calls dropped from the sum; the fused engines have their own C copy of the per-site formula, with the same rescale from their kernel's own per-window gate count."
 
 [functions."divergence.da"]
 # signature: (haplotype_matrix, pop1, pop2, missing_data, span_normalize)
@@ -1133,7 +1133,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when variants exist but no site has both pops' own pair, or when span <= 0; 0.0 with no variants at all; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)."
 parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
-notes = "Within-pop pi terms (and the between term they're combined with) count only sites where both pops have their own pair (>=2 calls each), stricter than dxy's one-call-each and so different from diversity.pi on the same population. span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span; the fused engines have their own C copy of the per-site formula, without this rescale."
+notes = "Within-pop pi terms (and the between term they're combined with) count only sites where both pops have their own pair (>=2 calls each), stricter than dxy's one-call-each and so different from diversity.pi on the same population. span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span; the fused engines have their own C copy of the per-site formula, with the same rescale from their kernel's own per-window gate count."
 
 [functions."divergence.pi_within_population"]
 # signature: (haplotype_matrix, pop, missing_data, span_normalize)

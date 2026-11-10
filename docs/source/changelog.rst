@@ -696,11 +696,13 @@ Bug fixes
   when a request mixes one of these with a Garud's H statistic, a diploSHIC
   statistic, or ``mean_nsl``) had the same per-window bias and now get the
   same rescale.
+* Windowed ``dxy``/``da`` (both fused CUDA engines) had the same per-window
+  bias and now get the same rescale, using dxy's and da's own gates as the
+  scatter engine does.
 * Windowed ``fay_wu_h`` keeps using the raw, unrescaled ``pi``/``theta_h``
   sums in both engines, so it no longer equals their difference now that
   those are rescaled; the scatter engine's ``zeng_dh`` reuses the same raw
-  values and has the same gap. The fused engine's two-population path
-  (``dxy``, ``da``) is also not rescaled. All three are left for follow-up.
+  values and has the same gap. Left for follow-up.
 
 New warnings
 ~~~~~~~~~~~~

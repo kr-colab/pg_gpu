@@ -688,6 +688,116 @@ class TestFusedSinglePopSpanNormalizedRescale:
                                        rtol=1e-9)
 
 
+class TestFusedTwoPopSpanNormalizedRescale:
+    """windowed_statistics_fused/_chunked's dxy/da pick up the same per-window
+    rescale as the scatter engine, from the per-window gate counts the kernel
+    now returns alongside its existing sums."""
+
+    def _engines(self):
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused, windowed_statistics_fused_chunked)
+        return [windowed_statistics_fused, windowed_statistics_fused_chunked]
+
+    def _hm(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        hm.sample_sets = {"a": list(range(hap.shape[0] - 8)),
+                          "b": list(range(hap.shape[0] - 8, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_scalar_under_missingness(self):
+        rng = np.random.default_rng(29)
+        n_hap, n_var = 24, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            np.testing.assert_allclose(out['dxy'][0], divergence.dxy(hm, 'a', 'b'),
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['da'][0], divergence.da(hm, 'a', 'b'),
+                                       rtol=1e-9)
+
+    def test_raw_sum_untouched_by_rescale(self):
+        rng = np.random.default_rng(30)
+        n_hap, n_var = 16, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b', per_base=False)
+            np.testing.assert_allclose(
+                out['dxy'][0], divergence.dxy(hm, 'a', 'b', span_normalize=False))
+            np.testing.assert_allclose(
+                out['da'][0], divergence.da(hm, 'a', 'b', span_normalize=False))
+
+    def test_nan_when_population_has_no_call_in_window(self):
+        rng = np.random.default_rng(31)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            assert np.isnan(out['dxy'][0]) and np.isnan(out['da'][0])
+
+    def test_nan_when_population_has_a_single_call_in_window(self):
+        rng = np.random.default_rng(32)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:-1] = -1  # population b keeps exactly one haplotype with calls
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            assert np.isfinite(out['dxy'][0])
+            assert np.isnan(out['da'][0])
+
+    def test_complete_data_unaffected(self):
+        rng = np.random.default_rng(33)
+        n_hap, n_var = 20, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            np.testing.assert_allclose(out['dxy'][0], divergence.dxy(hm, 'a', 'b'),
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['da'][0], divergence.da(hm, 'a', 'b'),
+                                       rtol=1e-9)
+
+    def test_matches_scatter_engine_under_missingness(self):
+        # Before this fix the fused engines disagreed with the scatter engine
+        # (and the scalar) under missing data; all engines must agree again.
+        from pg_gpu.windowed_analysis import _windowed_twopop_scatter
+        rng = np.random.default_rng(34)
+        n_hap, n_var = 24, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+        window_size = n_var * 10
+        bp_bins = np.array([1, window_size + 1])
+        scatter = _windowed_twopop_scatter(
+            hm, window_size=window_size, step_size=window_size,
+            statistics=['dxy', 'da'], populations=['a', 'b'],
+            missing_data='include', span_normalize=True)
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            np.testing.assert_allclose(out['dxy'][0], scatter['dxy'].iloc[0],
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['da'][0], scatter['da'].iloc[0],
+                                       rtol=1e-9)
+
+
 class TestExcludeKeepsMatrixContext:
     """exclude_missing_sites keeps the parent chromosome bounds and
     accessibility mask, like the restrict_to_* filters, so exclude-mode
