@@ -699,10 +699,20 @@ Bug fixes
 * Windowed ``dxy``/``da`` (both fused CUDA engines) had the same per-window
   bias and now get the same rescale, using dxy's and da's own gates as the
   scatter engine does.
-* Windowed ``fay_wu_h`` keeps using the raw, unrescaled ``pi``/``theta_h``
-  sums in both engines, so it no longer equals their difference now that
-  those are rescaled; the scatter engine's ``zeng_dh`` reuses the same raw
-  values and has the same gap. Left for follow-up.
+* ``fay_wus_h`` is a difference of two estimators, not a rate, and has no
+  ``span_normalize`` parameter at the scalar level. Windowed ``fay_wu_h``
+  divided it by the window span anyway, giving a value that depended on
+  window size and didn't match the scalar. It is now the raw difference
+  on every engine, matching ``diversity.fay_wus_h`` on the window's
+  variants exactly, like the other neutrality tests. The scatter engine's
+  ``zeng_dh`` reused the same span-divided value for its own H term and
+  had the same bias; it is now the same raw difference too.
+* ``zeng_dh`` combined Tajima's D with the raw, unnormalized H
+  (``pi - theta_h``), whose scale depends on the sample's
+  segregating-site count and isn't comparable across windows or
+  datasets. It now combines D with the normalized H*
+  (``normalized_fay_wus_h``), matching the statistic Zeng et al. (2006)
+  actually uses in their joint test.
 
 New warnings
 ~~~~~~~~~~~~

@@ -469,6 +469,72 @@ class TestWindowedSpanNormalizedRescale:
         assert df["theta_w"].iloc[1] == 0.0
 
 
+class TestWindowedFayWuHZengDHNoSpanNormalize:
+    """fay_wu_h and zeng_dh are differences of estimators, not rates, so
+    span_normalize=True -- the windowed_analysis default -- must not change
+    them at all: no span division, and no NaN from an accessible mask that
+    would otherwise zero out a window's span for pi/theta_w."""
+
+    def _hm_with_mask(self, seq_len=100_000, mask_start=40_000,
+                      mask_end=60_000):
+        """HM with a contiguous inaccessible region in the middle, so some
+        windows are fully masked and others partially masked."""
+        rng = np.random.RandomState(14)
+        positions = np.sort(rng.choice(np.arange(1, seq_len), size=400,
+                                       replace=False))
+        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+        hm = HaplotypeMatrix(hap, positions, chrom_start=0,
+                             chrom_end=seq_len - 1)
+        mask = np.ones(seq_len, dtype=bool)
+        mask[mask_start:mask_end] = False
+        hm.set_accessible_mask(mask)
+        return hm, mask_start, mask_end
+
+    def test_matches_scalar_under_span_normalize_true(self):
+        # Windowed zeng_dh used to be the scalar value divided by the window
+        # span under the default span_normalize=True.
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(97)
+        pos = np.sort(rng.choice(np.arange(1, 2001), 120, replace=False))
+        freq = np.where(rng.random(120) < 0.6, rng.uniform(0.8, 0.97, 120),
+                        rng.uniform(0.03, 0.1, 120))
+        hap = (rng.random((30, 120)) < freq).astype(np.int8)
+        hm = HaplotypeMatrix(hap, pos, 1, 2000)
+        df = windowed_analysis(hm, 1000, statistics=['fay_wu_h', 'zeng_dh'])
+        for s, e in df[['start', 'end']].to_numpy():
+            sub = hm.get_subset_from_range(int(s), int(e))
+            row = df[(df['start'] == s) & (df['end'] == e)].iloc[0]
+            np.testing.assert_allclose(row['fay_wu_h'], diversity.fay_wus_h(sub),
+                                       rtol=1e-6, atol=1e-9)
+            np.testing.assert_allclose(row['zeng_dh'], diversity.zeng_dh(sub),
+                                       rtol=1e-6, atol=1e-9, equal_nan=True)
+
+    def test_accessible_mask_does_not_affect_them(self):
+        # pi/theta_w go NaN in a fully-masked window (zero span); fay_wu_h
+        # and zeng_dh must not, since they never divide by the span.
+        from pg_gpu.windowed_analysis import windowed_analysis
+        hm, ms, me = self._hm_with_mask()
+        df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                               statistics=['pi', 'fay_wu_h', 'zeng_dh'])
+        fully_masked = (df['start'] >= ms) & (df['end'] <= me)
+        assert fully_masked.sum() > 0, "test needs a fully-masked window"
+        assert df.loc[fully_masked, 'pi'].isna().all()
+        assert not df.loc[fully_masked, 'fay_wu_h'].isna().any()
+
+        no_mask = HaplotypeMatrix(hm.haplotypes.get(), hm.positions.get(),
+                                  chrom_start=hm.chrom_start,
+                                  chrom_end=hm.chrom_end)
+        df_no_mask = windowed_analysis(no_mask, window_size=10_000,
+                                       step_size=10_000,
+                                       statistics=['fay_wu_h', 'zeng_dh'])
+        np.testing.assert_allclose(df['fay_wu_h'].to_numpy(),
+                                   df_no_mask['fay_wu_h'].to_numpy(),
+                                   rtol=1e-9, equal_nan=True)
+        np.testing.assert_allclose(df['zeng_dh'].to_numpy(),
+                                   df_no_mask['zeng_dh'].to_numpy(),
+                                   rtol=1e-9, equal_nan=True)
+
+
 class TestWindowedDivergenceSpanNormalizedRescale:
     """The windowed scatter engine's dxy/da pick up the same per-window
     rescale as the scalar functions above, each against its own site gate."""
@@ -627,7 +693,9 @@ class TestFusedSinglePopSpanNormalizedRescale:
                 out['theta_h'][0], diversity.theta_h(hm, span_normalize=False))
 
     def test_tajimas_d_and_fay_wu_h_unaffected(self):
-        # tajimas_d and fay_wu_h must keep reading the raw, unrescaled sums.
+        # tajimas_d and fay_wu_h must keep reading the raw, unrescaled sums;
+        # fay_wu_h has no span-normalized form at all, so it matches the
+        # scalar directly, with no span division.
         rng = np.random.default_rng(25)
         n_hap, n_var = 20, 400
         hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
@@ -641,8 +709,7 @@ class TestFusedSinglePopSpanNormalizedRescale:
             np.testing.assert_allclose(out['tajimas_d'][0],
                                        diversity.tajimas_d(hm), rtol=1e-6)
             np.testing.assert_allclose(out['fay_wu_h'][0],
-                                       diversity.fay_wus_h(hm) / hm.get_span(),
-                                       rtol=1e-6)
+                                       diversity.fay_wus_h(hm), rtol=1e-6)
 
     def test_nan_when_no_site_has_two_calls(self):
         n_hap, n_var = 6, 20
