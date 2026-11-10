@@ -18,7 +18,7 @@ from ._utils import population_rows
 from ._warnings import _phase_dependent, _warn_unphased
 
 
-def _apply_span_normalize(value, matrix, span_normalize):
+def _apply_span_normalize(value, matrix, span_normalize, n_sites_with_data=None):
     """Apply span normalization to a raw statistic value.
 
     Parameters
@@ -30,9 +30,19 @@ def _apply_span_normalize(value, matrix, span_normalize):
     span_normalize : bool or str
         True: auto-detect best span. False: return raw value.
         String: explicit mode passed to get_span() (internal use).
+    n_sites_with_data : int, optional
+        When given, rescales ``value`` by
+        ``matrix.num_variants / n_sites_with_data`` before the span divide.
+        NaN when the matrix has variants but none qualifies; with no
+        variants at all, the rescale is skipped (the raw sum is 0 by
+        definition there, not undefined).
     """
     if span_normalize is False:
         return float(value.get() if hasattr(value, 'get') else value)
+    if n_sites_with_data is not None and matrix.num_variants > 0:
+        if n_sites_with_data <= 0:
+            return float('nan')
+        value = value * (matrix.num_variants / n_sites_with_data)
     mode = 'auto' if span_normalize is True else span_normalize
     span = matrix.get_span(mode)
     if span > 0:
@@ -280,6 +290,7 @@ def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')
         'thetas': dict of estimator name -> float (raw sum)
         'S': int, number of segregating sites
         'n_harmonic_mean': int, harmonic mean of per-site sample sizes
+        'n_sites_with_data': int, count of sites with n_valid >= 2
     """
     ac, n_valid, n_hap = _prepare_allele_counts(matrix)
 
@@ -292,11 +303,13 @@ def _compute_thetas(matrix, estimators=('pi', 'watterson', 'theta_h', 'theta_l')
     # (tskit convention: triallelic counts as 2; reference-absent sites count).
     has_data = n_valid >= 2
     S = int(cp.sum(cp.where(has_data, (ac > 0).sum(axis=1) - 1, 0)).get())
+    n_sites_with_data = int(cp.sum(has_data).get())
 
     valid_n = n_valid[has_data].astype(cp.float64)
     n_harm = int(_harmonic_mean_n(valid_n.shape[0], float(cp.sum(1.0 / valid_n).get())))
 
-    return {'thetas': thetas, 'S': S, 'n_harmonic_mean': n_harm}
+    return {'thetas': thetas, 'S': S, 'n_harmonic_mean': n_harm,
+            'n_sites_with_data': n_sites_with_data}
 
 
 def _compute_neutrality_test(matrix, w1_name, w2_name):
@@ -869,9 +882,10 @@ def pi(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator (accessible
-        bases if mask set, else genomic span).
-        ``False``: return raw sum.
+        ``True`` (default): per-base nucleotide diversity, from sites
+        where the population has at least two calls; NaN with variants
+        but none qualifying, 0.0 with no variants at all.
+        ``False``: the raw sum.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
@@ -882,10 +896,9 @@ def pi(haplotype_matrix: HaplotypeMatrix,
         Nucleotide diversity value
     """
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
-    if matrix.num_variants == 0:
-        return 0.0
     result = _compute_thetas(matrix, ('pi',))
-    return _apply_span_normalize(result['thetas']['pi'], matrix, span_normalize)
+    return _apply_span_normalize(result['thetas']['pi'], matrix, span_normalize,
+                                 result['n_sites_with_data'])
 
 
 def theta_w(haplotype_matrix: HaplotypeMatrix,
@@ -905,8 +918,10 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
     population : str or list, optional
         Population name or list of sample indices. If None, uses all samples
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator.
-        ``False``: return raw sum.
+        ``True`` (default): per-base Watterson's theta, from sites where
+        the population has at least two calls; NaN with variants but
+        none qualifying, 0.0 with no variants at all.
+        ``False``: the raw sum.
     missing_data : str
         ``'include'`` (default) uses per-site valid data.
         ``'exclude'`` filters to sites with no missing data.
@@ -917,10 +932,9 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
         Watterson's theta value
     """
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
-    if matrix.num_variants == 0:
-        return 0.0
     result = _compute_thetas(matrix, ('watterson',))
-    return _apply_span_normalize(result['thetas']['watterson'], matrix, span_normalize)
+    return _apply_span_normalize(result['thetas']['watterson'], matrix, span_normalize,
+                                 result['n_sites_with_data'])
 
 
 def tajimas_d(haplotype_matrix: HaplotypeMatrix,
@@ -1079,8 +1093,11 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
         ``normalized_fay_wus_h``, ``zeng_e``. Also ``segregating_sites``,
         ``singletons``, ``n_variants``, ``haplotype_diversity``.
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator.
-        ``False``: return raw sums.
+        ``True`` (default): per-base rates for ``pi``, ``theta_w``,
+        ``theta_h``, ``theta_l`` and the eta-family, from sites where the
+        population has at least two calls; NaN with variants but none
+        qualifying, 0.0 with no variants at all.
+        ``False``: the raw sums.
     missing_data : str
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
@@ -1111,36 +1128,35 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
 
     if needs_thetas:
         matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
-        if matrix.num_variants == 0:
-            for s in needs_thetas:
-                results[s] = float('nan') if s in test_specs else 0.0
-        else:
-            # Collect all needed estimators for a single _compute_thetas call
-            estimators = set()
-            for s in needs_thetas:
-                if s in theta_stats:
-                    estimators.add(theta_stats[s])
-                else:
-                    estimators.update(test_specs.get(s) or difference_stats[s])
-            ct = _compute_thetas(matrix, tuple(estimators))
+        # Collect all needed estimators for a single _compute_thetas call.
+        # _compute_thetas tolerates a 0-variant matrix, so this also covers
+        # the empty case.
+        estimators = set()
+        for s in needs_thetas:
+            if s in theta_stats:
+                estimators.add(theta_stats[s])
+            else:
+                estimators.update(test_specs.get(s) or difference_stats[s])
+        ct = _compute_thetas(matrix, tuple(estimators))
 
-            for s in needs_thetas:
-                if s in theta_stats:
-                    results[s] = _apply_span_normalize(
-                        ct['thetas'][theta_stats[s]], matrix, span_normalize)
-                elif s in difference_stats:
-                    w1, w2 = difference_stats[s]
-                    results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
+        for s in needs_thetas:
+            if s in theta_stats:
+                results[s] = _apply_span_normalize(
+                    ct['thetas'][theta_stats[s]], matrix, span_normalize,
+                    ct['n_sites_with_data'])
+            elif s in difference_stats:
+                w1, w2 = difference_stats[s]
+                results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
+            else:
+                w1, w2 = test_specs[s]
+                S = ct['S']
+                n = ct['n_harmonic_mean']
+                if S < 3 or n < 3:
+                    results[s] = float('nan')
                 else:
-                    w1, w2 = test_specs[s]
-                    S = ct['S']
-                    n = ct['n_harmonic_mean']
-                    if S < 3 or n < 3:
-                        results[s] = float('nan')
-                    else:
-                        var = _achaz_variance(w1, w2, n, S)
-                        num = ct['thetas'][w1] - ct['thetas'][w2]
-                        results[s] = float(num / math.sqrt(var)) if var > 0 else float('nan')
+                    var = _achaz_variance(w1, w2, n, S)
+                    num = ct['thetas'][w1] - ct['thetas'][w2]
+                    results[s] = float(num / math.sqrt(var)) if var > 0 else float('nan')
 
     # Non-theta stats
     for stat in statistics:
@@ -1274,8 +1290,10 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator.
-        ``False``: return raw sum.
+        ``True`` (default): per-base theta_H, from sites where the
+        population has at least two calls; NaN with variants but none
+        qualifying, 0.0 with no variants at all.
+        ``False``: the raw sum.
     missing_data : str
         'include' - per-site sample sizes
         'exclude' - only sites with no missing data
@@ -1285,10 +1303,9 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     float
     """
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
-    if matrix.num_variants == 0:
-        return 0.0
     result = _compute_thetas(matrix, ('theta_h',))
-    return _apply_span_normalize(result['thetas']['theta_h'], matrix, span_normalize)
+    return _apply_span_normalize(result['thetas']['theta_h'], matrix, span_normalize,
+                                 result['n_sites_with_data'])
 
 
 def theta_l(haplotype_matrix: HaplotypeMatrix,
@@ -1308,8 +1325,10 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     haplotype_matrix : HaplotypeMatrix
     population : str or list, optional
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator.
-        ``False``: return raw sum.
+        ``True`` (default): per-base theta_L, from sites where the
+        population has at least two calls; NaN with variants but none
+        qualifying, 0.0 with no variants at all.
+        ``False``: the raw sum.
     missing_data : str
         'include' - per-site sample sizes
         'exclude' - only sites with no missing data
@@ -1319,10 +1338,9 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     float
     """
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
-    if matrix.num_variants == 0:
-        return 0.0
     result = _compute_thetas(matrix, ('theta_l',))
-    return _apply_span_normalize(result['thetas']['theta_l'], matrix, span_normalize)
+    return _apply_span_normalize(result['thetas']['theta_l'], matrix, span_normalize,
+                                 result['n_sites_with_data'])
 
 
 

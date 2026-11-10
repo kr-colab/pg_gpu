@@ -673,6 +673,36 @@ Bug fixes
   variants, while the scalar ``mu_var`` gives 0.0 there. The fused engine
   (and the chunked engine, which shares its code for this statistic) now
   give 0.0 too, keeping NaN only for a window with no accessible base.
+* ``pi``, ``theta_w``, ``theta_h``, ``theta_l`` and the Achaz eta-family
+  (``diversity_stats``'s ``eta1``, ``eta1_star``, ``minus_eta1``,
+  ``minus_eta1_star``) silently treated a site where the population has
+  fewer than two calls as invariant: the site added 0 to the raw sum but
+  stayed in the span denominator, biasing the default per-base rate
+  toward 0 under missing data. The raw sum is now rescaled to the sites
+  where the population actually had two calls before the span divides it;
+  the rate is NaN when variants exist but none qualifies, and 0.0 (as
+  before) with no variants at all (``span_normalize=False`` is
+  unaffected; it already returned the plain raw sum).
+* Windowed ``pi``, ``theta_w``, ``theta_h`` and ``theta_l`` (the scatter
+  engine) had the same per-window bias and now get the same rescale.
+* ``dxy`` and ``da`` had the same bias: a site where a population lacked
+  enough calls (one call each for ``dxy``, two for ``da``) added 0 to the
+  raw sum but stayed in the span denominator. Both are now rescaled the
+  same way, and ``dxy(per_site=True)`` gives NaN rather than 0.0 at a site
+  where either population has no call.
+* Windowed ``dxy``/``da`` (the scatter engine) had the same per-window
+  bias and now get the same rescale.
+* Windowed ``pi``, ``theta_w`` and ``theta_h`` (the fused CUDA engine, used
+  when a request mixes one of these with a Garud's H statistic, a diploSHIC
+  statistic, or ``mean_nsl``) had the same per-window bias and now get the
+  same rescale.
+* Windowed ``dxy``/``da`` (both fused CUDA engines) had the same per-window
+  bias and now get the same rescale, using dxy's and da's own gates as the
+  scatter engine does.
+* Windowed ``fay_wu_h`` keeps using the raw, unrescaled ``pi``/``theta_h``
+  sums in both engines, so it no longer equals their difference now that
+  those are rescaled; the scatter engine's ``zeng_dh`` reuses the same raw
+  values and has the same gap. Left for follow-up.
 
 New warnings
 ~~~~~~~~~~~~

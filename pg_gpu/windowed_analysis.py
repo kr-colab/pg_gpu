@@ -166,6 +166,30 @@ def _scatter_spans(haplotype_matrix, win_starts, win_stops, span_normalize):
     return np.maximum(spans, 1.0), spans <= 0
 
 
+def _windowed_rescale(n_variants, n_sites_with_data):
+    """Per-window num_variants / n_sites_with_data, correcting for sites a
+    population's own missing calls dropped from a raw sum. 1 for a window
+    with no variants, since there is nothing to rescale; NaN for a window
+    that has variants but none meeting the site's own call-count gate.
+    """
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return np.where(n_variants == 0, 1.0,
+                        np.where(n_sites_with_data > 0,
+                                n_variants / n_sites_with_data, np.nan))
+
+
+def _missing_data_rescale(n_variants_per_window, normalize, all_complete, count_sites):
+    """Per-window rescale for a raw sum, correcting sites a population's own
+    missing calls dropped from it before the span divides it. None when
+    ``normalize`` is False or every site already qualifies (``all_complete``).
+    ``count_sites`` is called, lazily, for the per-window count of sites
+    meeting the statistic's own gate.
+    """
+    if normalize is False or bool(all_complete):
+        return None
+    return _windowed_rescale(n_variants_per_window, count_sites())
+
+
 CANONICAL_WINDOW_PREFIX = (
     'chrom', 'start', 'end', 'center', 'n_variants', 'window_id')
 
@@ -976,6 +1000,15 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             raw[est_name] = scatter_sum(
                 _ac_contribution(est_name, ac, n_valid, n_hap))
 
+    # Without this, a site with too few calls to contribute would still
+    # count toward the span, reading as invariant rather than unmeasured.
+    rate_stats = {'pi', 'theta_w', 'theta_h', 'theta_l'}
+    rescale = None
+    if bool(stats_set & rate_stats):
+        rescale = _missing_data_rescale(
+            n_variants_per_window, span_normalize, all_complete,
+            lambda: scatter_sum(has_data.astype(cp.float64)).get())
+
     if stats_set & {'segregating_sites', 'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}:
         seg_count = scatter_sum(mut)
     derived = ac[:, 1:]
@@ -999,7 +1032,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     for est_name, out_name in [('pi', 'pi'), ('watterson', 'theta_w'),
                                 ('theta_h', 'theta_h'), ('theta_l', 'theta_l')]:
         if out_name in stats_set and est_name in raw:
-            results[out_name] = raw[est_name].get() / spans
+            vals = raw[est_name].get()
+            if rescale is not None:
+                vals = vals * rescale
+            results[out_name] = vals / spans
 
     if 'segregating_sites' in stats_set:
         results['segregating_sites'] = seg_count.get()
@@ -1157,6 +1193,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     need_dxy = 'dxy' in stats_set
     if need_fst_da or need_dxy:
         ac1, ac2, nv1, nv2 = divergence._aligned_pop_counts(hap1, hap2)
+        dxy_all_complete = cp.all((nv1 > 0) & (nv2 > 0))
+        da_all_complete = cp.all((nv1 > 1) & (nv2 > 1))
         if need_fst_da:
             mpd1, mpd2, between = divergence._site_components_from_counts(
                 ac1, nv1, ac2, nv2)
@@ -1182,6 +1220,21 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         pi1_sum = scatter_sum(mpd1)
         pi2_sum = scatter_sum(mpd2)
 
+    # Without this, a site with too few calls to contribute would still
+    # count toward the span, reading as invariant rather than unmeasured.
+    # dxy and da need their own count, since they use different site gates.
+    dxy_rescale = da_rescale = None
+    if need_dxy:
+        r = _missing_data_rescale(
+            n_variants_per_window, span_normalize, dxy_all_complete,
+            lambda: scatter_sum(((nv1 > 0) & (nv2 > 0)).astype(cp.float64)).get())
+        dxy_rescale = cp.asarray(r) if r is not None else None
+    if 'da' in stats_set:
+        r = _missing_data_rescale(
+            n_variants_per_window, span_normalize, da_all_complete,
+            lambda: scatter_sum(((nv1 > 1) & (nv2 > 1)).astype(cp.float64)).get())
+        da_rescale = cp.asarray(r) if r is not None else None
+
     # Build output — stay on GPU, single .get() per result
     spans_gpu = cp.asarray(spans)
 
@@ -1193,10 +1246,14 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             results['fst_hudson'] = fst_vals
 
     if 'dxy' in stats_set:
-        results['dxy'] = (dxy_sum / spans_gpu).get()
+        vals = dxy_sum * dxy_rescale if dxy_rescale is not None else dxy_sum
+        results['dxy'] = (vals / spans_gpu).get()
 
     if 'da' in stats_set:
-        results['da'] = ((between_sum - (pi1_sum + pi2_sum) / 2.0) / spans_gpu).get()
+        vals = between_sum - (pi1_sum + pi2_sum) / 2.0
+        if da_rescale is not None:
+            vals = vals * da_rescale
+        results['da'] = (vals / spans_gpu).get()
 
     if 'fst_wc' in stats_set:
         results['fst_wc'] = cp.where(wc_abc_sum > 0, wc_a_sum / wc_abc_sum,
@@ -2048,7 +2105,9 @@ void fused_windowed_twopop(const signed char* hap1_t,
                            double* out_pi1_sum,
                            double* out_pi2_sum,
                            double* out_wc_a_sum,
-                           double* out_wc_abc_sum) {
+                           double* out_wc_abc_sum,
+                           double* out_dxy_valid,
+                           double* out_da_valid) {
     int wid = blockIdx.x;
     if (wid >= n_windows) return;
 
@@ -2061,6 +2120,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
             out_dxy_sum[wid] = 0.0;  out_pi1_sum[wid] = 0.0;
             out_pi2_sum[wid] = 0.0;  out_wc_a_sum[wid] = 0.0;
             out_wc_abc_sum[wid] = 0.0;
+            out_dxy_valid[wid] = 0.0;  out_da_valid[wid] = 0.0;
         }
         return;
     }
@@ -2068,6 +2128,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
     double t_fst_num = 0.0, t_fst_den = 0.0;
     double t_dxy = 0.0, t_pi1 = 0.0, t_pi2 = 0.0;
     double t_wc_a = 0.0, t_wc_abc = 0.0;
+    double t_dxy_valid = 0.0, t_da_valid = 0.0;
 
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
@@ -2087,6 +2148,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
                   hom2, het2, half2, &valid2, &nind2);
 
         if (valid1 == 0 || valid2 == 0) continue;
+        t_dxy_valid += 1.0;
 
         double dn1 = (double)valid1;
         double dn2 = (double)valid2;
@@ -2152,6 +2214,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
         // fst/da need Hb and Hw from the same site set (both pops >= 2
         // calls), stricter than dxy alone; see _site_components_from_counts.
         bool joint_pairs = (dn1 > 1.0) && (dn2 > 1.0);
+        if (joint_pairs) t_da_valid += 1.0;
         double mpd1_j = joint_pairs ? mpd1 : 0.0;
         double mpd2_j = joint_pairs ? mpd2 : 0.0;
         double between_j = joint_pairs ? between : 0.0;
@@ -2162,8 +2225,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
         t_pi2 += mpd2_j;
     }
 
-    // Block reduction (7 values)
-    __shared__ double smem[7 * 256];
+    // Block reduction (9 values)
+    __shared__ double smem[9 * 256];
     int tid = threadIdx.x;
     smem[tid]          = t_fst_num;
     smem[256 + tid]    = t_fst_den;
@@ -2172,6 +2235,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
     smem[1024 + tid]   = t_pi2;
     smem[1280 + tid]   = t_wc_a;
     smem[1536 + tid]   = t_wc_abc;
+    smem[1792 + tid]   = t_dxy_valid;
+    smem[2048 + tid]   = t_da_valid;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
@@ -2183,6 +2248,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
             smem[1024 + tid]   += smem[1024 + tid + s];
             smem[1280 + tid]   += smem[1280 + tid + s];
             smem[1536 + tid]   += smem[1536 + tid + s];
+            smem[1792 + tid]   += smem[1792 + tid + s];
+            smem[2048 + tid]   += smem[2048 + tid + s];
         }
         __syncthreads();
     }
@@ -2195,6 +2262,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
         out_pi2_sum[wid]  = smem[1024];
         out_wc_a_sum[wid] = smem[1280];
         out_wc_abc_sum[wid] = smem[1536];
+        out_dxy_valid[wid] = smem[1792];
+        out_da_valid[wid]  = smem[2048];
     }
 }
 ''', 'fused_windowed_twopop')
@@ -2403,10 +2472,10 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
     # overwrite below with a missing-data-aware count.
+    n_variants_raw = _window_site_counts(hap_raw, win_start, win_stop,
+                                         missing_data).get()
     results = _init_window_results(
-        chrom, ws_cpu, we_cpu,
-        n_variants=_window_site_counts(hap_raw, win_start, win_stop,
-                                       missing_data).get())
+        chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
 
     window_bases = None
     if per_base:
@@ -2456,11 +2525,17 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
+        rescale = _missing_data_rescale(var_count, per_base, False,
+                                        lambda: count_valid_w)
+
         if 'pi' in statistics:
-            results['pi'] = _rate(mpd_sum, window_bases, per_base)
+            vals = mpd_sum * rescale if rescale is not None else mpd_sum
+            results['pi'] = _rate(vals, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
+            vals = (watterson_num_w * rescale if rescale is not None
+                    else watterson_num_w)
+            results['theta_w'] = _rate(vals, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -2474,7 +2549,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
+            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
+            results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
             results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
@@ -2519,6 +2595,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         out_pi2 = cp.zeros(n_windows, dtype=cp.float64)
         out_wc_a = cp.zeros(n_windows, dtype=cp.float64)
         out_wc_abc = cp.zeros(n_windows, dtype=cp.float64)
+        out_dxy_valid = cp.zeros(n_windows, dtype=cp.float64)
+        out_da_valid = cp.zeros(n_windows, dtype=cp.float64)
         need_wc = 'fst_wc' in statistics
 
         block = 256
@@ -2531,7 +2609,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
              np.int32(n_total_var), np.int32(n_windows),
              np.int32(need_wc),
              out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
-             out_wc_a, out_wc_abc))
+             out_wc_a, out_wc_abc, out_dxy_valid, out_da_valid))
 
         # Post-process on GPU, single .get() per result
         if 'fst' in statistics or 'fst_hudson' in statistics:
@@ -2546,17 +2624,27 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             results['fst_wc'] = cp.where(out_wc_abc > 0,
                                           out_wc_a / out_wc_abc, cp.nan).get()
 
+        # Without this, a site with too few calls to contribute would still
+        # count toward the span, reading as invariant rather than unmeasured.
+        # dxy and da need their own count, since they use different site gates.
         if 'dxy' in statistics:
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: out_dxy_valid.get())
+            vals = out_dxy * cp.asarray(r) if r is not None else out_dxy
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['dxy'] = cp.where(wb > 0,
-                                          out_dxy / wb, cp.nan).get()
+                                          vals / wb, cp.nan).get()
             else:
-                results['dxy'] = out_dxy.get()
+                results['dxy'] = vals.get()
 
         if 'da' in statistics:
             # da's between term is fst's (both pops >= 2 calls), not dxy's.
             da_sum = out_fst_den - (out_pi1 + out_pi2) / 2.0
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: out_da_valid.get())
+            if r is not None:
+                da_sum = da_sum * cp.asarray(r)
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['da'] = cp.where(wb > 0,
@@ -2898,10 +2986,10 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
     # overwrite below with a missing-data-aware count.
+    n_variants_raw = _window_site_counts(hap_raw, win_start, win_stop,
+                                         missing_data).get()
     results = _init_window_results(
-        chrom, ws_cpu, we_cpu,
-        n_variants=_window_site_counts(hap_raw, win_start, win_stop,
-                                       missing_data).get())
+        chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
 
     window_bases = None
     if per_base:
@@ -2994,11 +3082,17 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
+        rescale = _missing_data_rescale(var_count, per_base, False,
+                                        lambda: count_valid_w)
+
         if 'pi' in statistics:
-            results['pi'] = _rate(mpd_sum, window_bases, per_base)
+            vals = mpd_sum * rescale if rescale is not None else mpd_sum
+            results['pi'] = _rate(vals, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
+            vals = (watterson_num_w * rescale if rescale is not None
+                    else watterson_num_w)
+            results['theta_w'] = _rate(vals, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -3012,7 +3106,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
+            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
+            results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
             results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
@@ -3077,6 +3172,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         acc_pi2 = cp.zeros(n_windows, dtype=cp.float64)
         acc_wc_a = cp.zeros(n_windows, dtype=cp.float64)
         acc_wc_abc = cp.zeros(n_windows, dtype=cp.float64)
+        acc_dxy_valid = cp.zeros(n_windows, dtype=cp.float64)
+        acc_da_valid = cp.zeros(n_windows, dtype=cp.float64)
 
         for c_start in range(0, n_total_var, twopop_chunk):
             c_end = min(c_start + twopop_chunk, n_total_var)
@@ -3110,6 +3207,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             out_pi2 = cp.zeros(n_overlap, dtype=cp.float64)
             out_wc_a = cp.zeros(n_overlap, dtype=cp.float64)
             out_wc_abc = cp.zeros(n_overlap, dtype=cp.float64)
+            out_dxy_valid = cp.zeros(n_overlap, dtype=cp.float64)
+            out_da_valid = cp.zeros(n_overlap, dtype=cp.float64)
 
             _fused_windowed_twopop_kernel(
                 (int(n_overlap),), (256,),
@@ -3118,13 +3217,15 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                  np.int32(n_chunk_var), np.int32(n_overlap),
                  np.int32(need_wc),
                  out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
-                 out_wc_a, out_wc_abc))
+                 out_wc_a, out_wc_abc, out_dxy_valid, out_da_valid))
 
             cp.add.at(acc_fst_num, w_idx, out_fst_num)
             cp.add.at(acc_fst_den, w_idx, out_fst_den)
             cp.add.at(acc_dxy, w_idx, out_dxy)
             cp.add.at(acc_pi1, w_idx, out_pi1)
             cp.add.at(acc_pi2, w_idx, out_pi2)
+            cp.add.at(acc_dxy_valid, w_idx, out_dxy_valid)
+            cp.add.at(acc_da_valid, w_idx, out_da_valid)
             if need_wc:
                 cp.add.at(acc_wc_a, w_idx, out_wc_a)
                 cp.add.at(acc_wc_abc, w_idx, out_wc_abc)
@@ -3145,17 +3246,27 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             results['fst_wc'] = cp.where(acc_wc_abc > 0,
                                           acc_wc_a / acc_wc_abc, cp.nan).get()
 
+        # Without this, a site with too few calls to contribute would still
+        # count toward the span, reading as invariant rather than unmeasured.
+        # dxy and da need their own count, since they use different site gates.
         if 'dxy' in statistics:
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: acc_dxy_valid.get())
+            vals = acc_dxy * cp.asarray(r) if r is not None else acc_dxy
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['dxy'] = cp.where(wb > 0,
-                                          acc_dxy / wb, cp.nan).get()
+                                          vals / wb, cp.nan).get()
             else:
-                results['dxy'] = acc_dxy.get()
+                results['dxy'] = vals.get()
 
         if 'da' in statistics:
             # da's between term is fst's (both pops >= 2 calls), not dxy's.
             da_sum = acc_fst_den - (acc_pi1 + acc_pi2) / 2.0
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: acc_da_valid.get())
+            if r is not None:
+                da_sum = da_sum * cp.asarray(r)
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['da'] = cp.where(wb > 0,
