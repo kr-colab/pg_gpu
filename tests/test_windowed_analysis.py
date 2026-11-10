@@ -10,6 +10,7 @@ from pg_gpu.windowed_analysis import (
     WindowedAnalyzer, windowed_analysis, WindowParams,
     WindowIterator, WindowData, CANONICAL_WINDOW_PREFIX,
     _window_variant_ranges, _WindowAccumulator,
+    _windows_emptied_by_exclude,
 )
 
 
@@ -1848,6 +1849,48 @@ class TestWindowAccumulator:
         got = self.acc.max(v)
         assert got[0] == hi                        # exact, not rounded to 1.0
         assert got[0] > 1.0
+
+
+class TestWindowsEmptiedByExclude:
+    """``_windows_emptied_by_exclude`` flags only windows that held variants
+    before missing-data exclusion but none after -- the max_daf NaN-vs-0.0
+    distinction. A window that never held a variant, or that keeps at least one
+    after exclusion (even if partially excluded), is not flagged.
+    """
+
+    # Positions before exclusion, and the subset surviving it: the sites at
+    # bp 20 and 30 are the ones dropped by missing_data='exclude'.
+    PRE = np.array([10, 20, 30, 40, 50], dtype=np.int64)
+    POST = np.array([10, 40, 50], dtype=np.int64)
+    WIN = np.array([
+        (15, 35),    # had {20, 30}, both excluded -> emptied -> True
+        (0, 15),     # had {10}, keeps {10}                   -> False
+        (45, 55),    # had {50}, keeps {50}                   -> False
+        (100, 200),  # never held a variant                   -> False
+        (15, 45),    # had {20, 30, 40}, keeps {40}           -> False
+    ], dtype=np.float64)
+    STARTS = WIN[:, 0]
+    STOPS = WIN[:, 1]
+
+    def test_flags_only_fully_excluded_windows(self):
+        post = _WindowAccumulator(self.POST, self.STARTS, self.STOPS)
+        got = _windows_emptied_by_exclude(
+            self.PRE, post, self.STARTS, self.STOPS)
+        exp = np.array([True, False, False, False, False])
+        assert got.dtype == bool          # host numpy mask, not a device array
+        np.testing.assert_array_equal(got, exp)
+
+    def test_matches_bruteforce(self):
+        # Independent reference: emptied == (had any pre) AND (none post).
+        pre_member = ((self.PRE[None, :] >= self.STARTS[:, None])
+                      & (self.PRE[None, :] < self.STOPS[:, None]))
+        post_member = ((self.POST[None, :] >= self.STARTS[:, None])
+                       & (self.POST[None, :] < self.STOPS[:, None]))
+        exp = (pre_member.sum(axis=1) > 0) & (post_member.sum(axis=1) == 0)
+        post = _WindowAccumulator(self.POST, self.STARTS, self.STOPS)
+        got = _windows_emptied_by_exclude(
+            self.PRE, post, self.STARTS, self.STOPS)
+        np.testing.assert_array_equal(got, exp)
 
 
 class TestFusedPerSiteWindowMembership:

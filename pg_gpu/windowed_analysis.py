@@ -936,6 +936,9 @@ class _WindowAccumulator:
             np.maximum.at(out, win_idx, vals[var_idx])
         return out
 
+def _windows_emptied_by_exclude(pre_positions, post_windows, win_starts, win_stops):
+    pre_windows = _WindowAccumulator(pre_positions, win_starts, win_stops)
+    return ((pre_windows.counts() > 0) & (post_windows.counts() == 0)).get()
 
 def _achaz_coeffs_per_window(uniq_n, inv_idx, w1, w2):
     """(alpha, beta) per window from _achaz_variance_coefficients(w1, w2, n).
@@ -1027,8 +1030,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     # (NaN); one with no variant to begin with stays 0.0.
     excluded_to_empty = None
     if missing_data == 'exclude' and 'max_daf' in statistics:
-        windows_pre_exclude = _WindowAccumulator(pos_cpu_pre_exclude, win_starts, win_stops)
-        excluded_to_empty = ((windows_pre_exclude.counts() > 0).get() & (n_variants_per_window == 0))
+        excluded_to_empty = _windows_emptied_by_exclude(pos_cpu_pre_exclude, windows, win_starts, win_stops)
 
     results = _init_window_results(
         chrom, win_starts, win_stops,
@@ -1224,10 +1226,11 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     # scatter.
     windows = _WindowAccumulator(pos_cpu, win_starts, win_stops)
     scatter_sum = windows.sum
+    n_variants_per_window = windows.counts().get()
 
     results = _init_window_results(
         chrom, win_starts, win_stops,
-        n_variants=windows.counts().get())
+        n_variants=n_variants_per_window)
 
     spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
                                       span_normalize)
@@ -2507,8 +2510,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     excluded_to_empty = None
     if orig_missing_data == 'exclude' and 'max_daf' in statistics:
-        windows_orig = _WindowAccumulator(orig_positions_gpu, ws_gpu, we_gpu)
-        excluded_to_empty = ((windows_orig.counts() > 0) & (windows.counts() == 0)).get()
+        excluded_to_empty = _windows_emptied_by_exclude(orig_positions_gpu, windows, ws_gpu, we_gpu)
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
@@ -2978,8 +2980,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 
     excluded_to_empty = None
     if orig_missing_data == 'exclude' and 'max_daf' in statistics:
-        windows_orig = _WindowAccumulator(orig_positions_gpu, ws_gpu, we_gpu)
-        excluded_to_empty = ((windows_orig.counts() > 0) & (windows.counts() == 0)).get()
+        excluded_to_empty = _windows_emptied_by_exclude(orig_positions_gpu, windows, ws_gpu, we_gpu)
 
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
