@@ -98,6 +98,15 @@ def simulation_results():
         "theta_w": _pop1(diversity.theta_w, span_normalize=False),
         "theta_h": _pop1(diversity.theta_h, span_normalize=False),
         "theta_l": _pop1(diversity.theta_l, span_normalize=False),
+        # Same four estimators, span-normalized (the default): exercises the
+        # missing-data rescale, since the physical span is the same at every
+        # missing rate (missingness never moves chrom_start/chrom_end) while
+        # the raw sum above was already shown unbiased, so any bias here is
+        # from the rescale alone.
+        "pi_rate": _pop1(diversity.pi),
+        "theta_w_rate": _pop1(diversity.theta_w),
+        "theta_h_rate": _pop1(diversity.theta_h),
+        "theta_l_rate": _pop1(diversity.theta_l),
         "tajd": _pop1(diversity.tajimas_d),
         "fay_wus_h": _pop1(diversity.fay_wus_h),
         "zeng_e": _pop1(diversity.zeng_e),
@@ -162,6 +171,7 @@ NEAR_ZERO = {"tajd", "fay_wus_h", "zeng_e", "achaz_tajd", "achaz_zeng_e"}
 # All stats that should be unbiased under MCAR
 ALL_UNBIASED = [
     "pi", "theta_w", "theta_h", "theta_l",
+    "pi_rate", "theta_w_rate", "theta_h_rate", "theta_l_rate",
     "tajd", "fay_wus_h", "zeng_e",
     "dxy", "fst_hudson", "fst_wc", "da",
     "achaz_pi", "achaz_watterson", "achaz_theta_h", "achaz_theta_l",
@@ -201,6 +211,658 @@ class TestExcludeConsistency:
         dxy_inc = divergence.dxy(hm, "pop1", "pop2", missing_data='include')
         dxy_exc = divergence.dxy(hm, "pop1", "pop2", missing_data='exclude')
         assert abs(dxy_inc - dxy_exc) < 1e-10
+
+
+class TestSpanNormalizedRescale:
+    """pi/theta_w/theta_h/theta_l rescale their raw sum to the sites where
+    the population has at least two calls before dividing by the span:
+    without it, a site a population's own missing calls dropped from the
+    sum stayed in the span denominator, reading as invariant rather than
+    unmeasured, and silently pulling the per-base rate down."""
+
+    def _pop_b(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var) * 10 + 1, 1, n_var * 10)
+        hm.sample_sets = {"b": list(range(hap.shape[0] - 4, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_complete_data_under_heavy_missingness(self):
+        # Half of population b's calls are missing at random; the fixed
+        # per-base pi must stay close to the complete-data value instead of
+        # shrinking toward it the way the raw sum alone would (unrescaled,
+        # it would be cut roughly in half).
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 20, 4000
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        pi_complete = diversity.pi(self._pop_b(hap.copy(), n_var), "b")
+
+        miss = hap.copy()
+        miss[-4:][rng.random((4, n_var)) < 0.5] = -1
+        pi_missing = diversity.pi(self._pop_b(miss, n_var), "b")
+
+        assert abs(pi_missing / pi_complete - 1) < 0.1
+
+    def test_raw_sum_untouched_by_rescale(self):
+        # span_normalize=False is explicitly out of scope for the rescale:
+        # the raw sum (and so the 0.0 it gives over an empty analysis) is
+        # unchanged, matching every other raw-sum statistic in the package.
+        rng = np.random.default_rng(1)
+        n_hap, n_var = 10, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._pop_b(hap, n_var)
+        for fn in (diversity.pi, diversity.theta_w, diversity.theta_h,
+                  diversity.theta_l):
+            assert np.isfinite(fn(hm, "b", span_normalize=False))
+
+    def test_nan_when_population_has_no_call_anywhere(self):
+        # Population b has zero calls at every site: no information at all,
+        # so the span-normalized rate is NaN, not the old silent 0.0; the
+        # raw sum stays the empty-sum 0.0.
+        rng = np.random.default_rng(2)
+        n_hap, n_var = 10, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:] = -1
+        hm = self._pop_b(hap, n_var)
+        for fn in (diversity.pi, diversity.theta_w, diversity.theta_h,
+                  diversity.theta_l):
+            assert np.isnan(fn(hm, "b"))
+            assert fn(hm, "b", span_normalize=False) == 0.0
+
+    def test_complete_data_unaffected(self):
+        # No missing data: n_sites_with_data == num_variants, so the
+        # rescale factor is exactly 1 and every value matches what the
+        # function returned before this fix.
+        rng = np.random.default_rng(3)
+        n_hap, n_var = 12, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._pop_b(hap, n_var)
+        for fn in (diversity.pi, diversity.theta_w, diversity.theta_h,
+                  diversity.theta_l):
+            rescaled = fn(hm, "b")
+            raw = fn(hm, "b", span_normalize=False)
+            np.testing.assert_allclose(rescaled, raw / hm.get_span(), rtol=1e-12)
+
+    def test_diversity_stats_eta_family_shares_the_rescale(self):
+        # eta1/eta1_star/minus_eta1/minus_eta1_star share _compute_thetas'
+        # has_data gate with pi/theta_w/theta_h/theta_l, so they pick up
+        # the same fix through diversity_stats' one _apply_span_normalize
+        # call site.
+        rng = np.random.default_rng(4)
+        n_hap, n_var = 10, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:] = -1
+        hm = self._pop_b(hap, n_var)
+        stats = diversity.diversity_stats(
+            hm, "b", statistics=["eta1", "eta1_star", "minus_eta1",
+                                 "minus_eta1_star"])
+        assert all(np.isnan(v) for v in stats.values())
+
+
+class TestDivergenceSpanNormalizedRescale:
+    """dxy/da rescale their raw sum to the sites where each population has
+    enough calls (one each for dxy, two each for da) before dividing by the
+    span, the same fix as pi/theta_w/theta_h/theta_l but for the two-pop
+    site gates in _dxy_per_site_from_counts / _site_components_from_counts."""
+
+    def _hm(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var) * 10 + 1, 1, n_var * 10)
+        hm.sample_sets = {"a": list(range(hap.shape[0] - 8)),
+                          "b": list(range(hap.shape[0] - 8, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_complete_data_under_heavy_missingness(self):
+        rng = np.random.default_rng(10)
+        n_hap, n_var = 24, 4000
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm_complete = self._hm(hap.copy(), n_var)
+        dxy_complete = divergence.dxy(hm_complete, "a", "b")
+        da_complete = divergence.da(hm_complete, "a", "b")
+
+        miss = hap.copy()
+        miss[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm_missing = self._hm(miss, n_var)
+        dxy_missing = divergence.dxy(hm_missing, "a", "b")
+        da_missing = divergence.da(hm_missing, "a", "b")
+
+        assert abs(dxy_missing / dxy_complete - 1) < 0.1
+        assert abs(da_missing - da_complete) < 0.01
+
+    def test_raw_sum_untouched_by_rescale(self):
+        rng = np.random.default_rng(11)
+        n_hap, n_var = 16, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        assert np.isfinite(divergence.dxy(hm, "a", "b", span_normalize=False))
+        assert np.isfinite(divergence.da(hm, "a", "b", span_normalize=False))
+
+    def test_nan_when_population_has_no_call_anywhere(self):
+        rng = np.random.default_rng(12)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:] = -1
+        hm = self._hm(hap, n_var)
+        assert np.isnan(divergence.dxy(hm, "a", "b"))
+        assert np.isnan(divergence.da(hm, "a", "b"))
+        assert divergence.dxy(hm, "a", "b", span_normalize=False) == 0.0
+        assert divergence.da(hm, "a", "b", span_normalize=False) == 0.0
+
+    def test_nan_when_population_has_a_single_call(self):
+        # da needs its own pair (two calls) in each population at a site;
+        # exactly one call everywhere is enough for dxy but not for da.
+        rng = np.random.default_rng(13)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:-1] = -1  # population b keeps exactly one haplotype with calls
+        hm = self._hm(hap, n_var)
+        assert np.isfinite(divergence.dxy(hm, "a", "b"))
+        assert np.isnan(divergence.da(hm, "a", "b"))
+
+    def test_per_site_dxy_nan_where_either_population_has_no_call(self):
+        rng = np.random.default_rng(14)
+        n_hap, n_var = 16, 20
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:, 5] = -1  # population b missing entirely at site 5
+        hm = self._hm(hap, n_var)
+        per_site = divergence.dxy(hm, "a", "b", per_site=True)
+        assert np.isnan(per_site[5])
+        assert np.isfinite(per_site[:5]).all() and np.isfinite(per_site[6:]).all()
+
+    def test_complete_data_unaffected(self):
+        rng = np.random.default_rng(15)
+        n_hap, n_var = 20, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        dxy_raw = divergence.dxy(hm, "a", "b", span_normalize=False)
+        da_raw = divergence.da(hm, "a", "b", span_normalize=False)
+        np.testing.assert_allclose(divergence.dxy(hm, "a", "b"),
+                                   dxy_raw / hm.get_span(), rtol=1e-12)
+        np.testing.assert_allclose(divergence.da(hm, "a", "b"),
+                                   da_raw / hm.get_span(), rtol=1e-12)
+
+    def test_exclude_to_empty_is_zero_not_nan(self):
+        # No variants at all survive exclude, so dxy/da are 0 by definition
+        # (not undefined), matching the windowed engines' convention.
+        rng = np.random.default_rng(16)
+        n_hap, n_var = 16, 30
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[0, :] = -1  # population a missing at every site
+        hm = self._hm(hap, n_var)
+        assert divergence.dxy(hm, "a", "b", missing_data='exclude') == 0.0
+        assert divergence.da(hm, "a", "b", missing_data='exclude') == 0.0
+
+
+class TestWindowedSpanNormalizedRescale:
+    """The windowed scatter engine's pi/theta_w/theta_h/theta_l pick up the
+    same per-window rescale as the scalar functions above."""
+
+    def _hm(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        hm.sample_sets = {"b": list(range(hap.shape[0] - 4, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_scalar_under_missingness(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(5)
+        n_hap, n_var = 20, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:][rng.random((4, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+
+        stats = ["pi", "theta_w", "theta_h", "theta_l"]
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=stats, populations=["b"])
+        for stat, fn in zip(stats, (diversity.pi, diversity.theta_w,
+                                    diversity.theta_h, diversity.theta_l)):
+            np.testing.assert_allclose(df[stat].iloc[0], fn(hm, "b"), rtol=1e-9)
+
+    def test_raw_sum_untouched_by_rescale(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(6)
+        n_hap, n_var = 10, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["pi"], populations=["b"],
+                               span_normalize=False)
+        np.testing.assert_allclose(
+            df["pi"].iloc[0], diversity.pi(hm, "b", span_normalize=False))
+
+    def test_nan_when_population_has_no_call_in_window(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(7)
+        n_hap, n_var = 10, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:] = -1
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["pi", "theta_w"], populations=["b"])
+        assert np.isnan(df["pi"].iloc[0]) and np.isnan(df["theta_w"].iloc[0])
+
+    def test_complete_data_unaffected(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(8)
+        n_hap, n_var = 12, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["pi", "theta_w"])
+        np.testing.assert_allclose(df["pi"].iloc[0], diversity.pi(hm), rtol=1e-9)
+        np.testing.assert_allclose(df["theta_w"].iloc[0], diversity.theta_w(hm),
+                                   rtol=1e-9)
+
+    def test_zero_variant_window_is_zero_not_nan_amid_missing_data(self):
+        # A window with no variants at all gives 0, even when some other
+        # window's missing data forces the real per-window rescale path
+        # (not the trivial all-complete shortcut).
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(27)
+        pos = np.array([10, 20, 30, 210, 220, 230], dtype=np.int64)
+        hap = rng.integers(0, 2, (10, len(pos))).astype(np.int8)
+        hap[-4:, 0] = -1  # missing data in window 0, window 1 has no variants
+        hm = HaplotypeMatrix(hap, pos, 1, 300)
+        hm.sample_sets = {"b": list(range(6, 10))}
+        df = windowed_analysis(hm, window_size=100, step_size=100,
+                               statistics=["pi", "theta_w"], populations=["b"])
+        assert df["n_variants"].iloc[1] == 0
+        assert df["pi"].iloc[1] == 0.0
+        assert df["theta_w"].iloc[1] == 0.0
+
+
+class TestWindowedFayWuHZengDHNoSpanNormalize:
+    """fay_wu_h and zeng_dh are differences of estimators, not rates, so
+    span_normalize=True -- the windowed_analysis default -- must not change
+    them at all: no span division, and no NaN from an accessible mask that
+    would otherwise zero out a window's span for pi/theta_w."""
+
+    def _hm_with_mask(self, seq_len=100_000, mask_start=40_000,
+                      mask_end=60_000):
+        """HM with a contiguous inaccessible region in the middle, so some
+        windows are fully masked and others partially masked."""
+        rng = np.random.RandomState(14)
+        positions = np.sort(rng.choice(np.arange(1, seq_len), size=400,
+                                       replace=False))
+        hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
+        hm = HaplotypeMatrix(hap, positions, chrom_start=0,
+                             chrom_end=seq_len - 1)
+        mask = np.ones(seq_len, dtype=bool)
+        mask[mask_start:mask_end] = False
+        hm.set_accessible_mask(mask)
+        return hm, mask_start, mask_end
+
+    def test_matches_scalar_under_span_normalize_true(self):
+        # Windowed zeng_dh used to be the scalar value divided by the window
+        # span under the default span_normalize=True.
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(97)
+        pos = np.sort(rng.choice(np.arange(1, 2001), 120, replace=False))
+        freq = np.where(rng.random(120) < 0.6, rng.uniform(0.8, 0.97, 120),
+                        rng.uniform(0.03, 0.1, 120))
+        hap = (rng.random((30, 120)) < freq).astype(np.int8)
+        hm = HaplotypeMatrix(hap, pos, 1, 2000)
+        df = windowed_analysis(hm, 1000, statistics=['fay_wu_h', 'zeng_dh'])
+        for s, e in df[['start', 'end']].to_numpy():
+            sub = hm.get_subset_from_range(int(s), int(e))
+            row = df[(df['start'] == s) & (df['end'] == e)].iloc[0]
+            np.testing.assert_allclose(row['fay_wu_h'], diversity.fay_wus_h(sub),
+                                       rtol=1e-6, atol=1e-9)
+            np.testing.assert_allclose(row['zeng_dh'], diversity.zeng_dh(sub),
+                                       rtol=1e-6, atol=1e-9, equal_nan=True)
+
+    def test_accessible_mask_does_not_affect_them(self):
+        # pi/theta_w go NaN in a fully-masked window (zero span); fay_wu_h
+        # and zeng_dh must not, since they never divide by the span.
+        from pg_gpu.windowed_analysis import windowed_analysis
+        hm, ms, me = self._hm_with_mask()
+        df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
+                               statistics=['pi', 'fay_wu_h', 'zeng_dh'])
+        fully_masked = (df['start'] >= ms) & (df['end'] <= me)
+        assert fully_masked.sum() > 0, "test needs a fully-masked window"
+        assert df.loc[fully_masked, 'pi'].isna().all()
+        assert not df.loc[fully_masked, 'fay_wu_h'].isna().any()
+
+        no_mask = HaplotypeMatrix(hm.haplotypes.get(), hm.positions.get(),
+                                  chrom_start=hm.chrom_start,
+                                  chrom_end=hm.chrom_end)
+        df_no_mask = windowed_analysis(no_mask, window_size=10_000,
+                                       step_size=10_000,
+                                       statistics=['fay_wu_h', 'zeng_dh'])
+        np.testing.assert_allclose(df['fay_wu_h'].to_numpy(),
+                                   df_no_mask['fay_wu_h'].to_numpy(),
+                                   rtol=1e-9, equal_nan=True)
+        np.testing.assert_allclose(df['zeng_dh'].to_numpy(),
+                                   df_no_mask['zeng_dh'].to_numpy(),
+                                   rtol=1e-9, equal_nan=True)
+
+
+class TestWindowedDivergenceSpanNormalizedRescale:
+    """The windowed scatter engine's dxy/da pick up the same per-window
+    rescale as the scalar functions above, each against its own site gate."""
+
+    def _hm(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        hm.sample_sets = {"a": list(range(hap.shape[0] - 8)),
+                          "b": list(range(hap.shape[0] - 8, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_scalar_under_missingness(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(18)
+        n_hap, n_var = 24, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        np.testing.assert_allclose(df["dxy"].iloc[0], divergence.dxy(hm, "a", "b"),
+                                   rtol=1e-9)
+        np.testing.assert_allclose(df["da"].iloc[0], divergence.da(hm, "a", "b"),
+                                   rtol=1e-9)
+
+    def test_raw_sum_untouched_by_rescale(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(19)
+        n_hap, n_var = 16, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"],
+                               span_normalize=False)
+        np.testing.assert_allclose(
+            df["dxy"].iloc[0], divergence.dxy(hm, "a", "b", span_normalize=False))
+        np.testing.assert_allclose(
+            df["da"].iloc[0], divergence.da(hm, "a", "b", span_normalize=False))
+
+    def test_nan_when_population_has_no_call_in_window(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(20)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:] = -1
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        assert np.isnan(df["dxy"].iloc[0]) and np.isnan(df["da"].iloc[0])
+
+    def test_nan_when_population_has_a_single_call_in_window(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(21)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:-1] = -1  # population b keeps exactly one haplotype with calls
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        assert np.isfinite(df["dxy"].iloc[0])
+        assert np.isnan(df["da"].iloc[0])
+
+    def test_complete_data_unaffected(self):
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(22)
+        n_hap, n_var = 20, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        np.testing.assert_allclose(df["dxy"].iloc[0], divergence.dxy(hm, "a", "b"),
+                                   rtol=1e-9)
+        np.testing.assert_allclose(df["da"].iloc[0], divergence.da(hm, "a", "b"),
+                                   rtol=1e-9)
+
+    def test_exclude_to_empty_is_zero_not_nan(self):
+        # Mirrors the single-pop windowed convention: a window with literally
+        # zero variants (the whole matrix excluded to empty) gives 0, not
+        # NaN -- NaN is reserved for a window that has variants but no
+        # population-pair overlap among them.
+        from pg_gpu.windowed_analysis import windowed_analysis
+        n_hap, n_var = 16, 6
+        hap = np.full((n_hap, n_var), -1, dtype=np.int8)
+        hm = self._hm(hap, n_var)
+        df = windowed_analysis(hm, window_size=n_var * 10, step_size=n_var * 10,
+                               statistics=["dxy", "da"], populations=["a", "b"],
+                               missing_data='exclude')
+        assert (df["n_variants"] == 0).all()
+        assert (df["dxy"] == 0).all() and (df["da"] == 0).all()
+
+    def test_zero_variant_window_is_zero_not_nan_amid_missing_data(self):
+        # A window with no variants at all gives 0, even when some other
+        # window's missing data forces the real per-window rescale path
+        # (not the trivial all-complete shortcut).
+        from pg_gpu.windowed_analysis import windowed_analysis
+        rng = np.random.default_rng(28)
+        pos = np.array([10, 20, 30, 210, 220, 230], dtype=np.int64)
+        hap = rng.integers(0, 2, (16, len(pos))).astype(np.int8)
+        hap[0:8, 0] = -1  # population a has no call in window 0; window 1 is empty
+        hm = HaplotypeMatrix(hap, pos, 1, 300)
+        hm.sample_sets = {"a": list(range(8)), "b": list(range(8, 16))}
+        df = windowed_analysis(hm, window_size=100, step_size=100,
+                               statistics=["dxy", "da"], populations=["a", "b"])
+        assert df["n_variants"].iloc[1] == 0
+        assert df["dxy"].iloc[1] == 0.0
+        assert df["da"].iloc[1] == 0.0
+
+
+class TestFusedSinglePopSpanNormalizedRescale:
+    """windowed_statistics_fused/_chunked's pi/theta_w/theta_h pick up the
+    same per-window rescale as the scatter engine, from the per-window
+    counts (var_count, count_valid_w) the kernel already returns."""
+
+    def _engines(self):
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused, windowed_statistics_fused_chunked)
+        return [windowed_statistics_fused, windowed_statistics_fused_chunked]
+
+    def _hm(self, hap, n_var):
+        return HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                               1, n_var * 10)
+
+    def test_rate_matches_scalar_under_missingness(self):
+        rng = np.random.default_rng(23)
+        n_hap, n_var = 10, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[rng.random((n_hap, n_var)) < 0.85] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h'))
+            np.testing.assert_allclose(out['pi'][0], diversity.pi(hm), rtol=1e-9)
+            np.testing.assert_allclose(out['theta_w'][0], diversity.theta_w(hm),
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['theta_h'][0], diversity.theta_h(hm),
+                                       rtol=1e-9)
+
+    def test_raw_sum_untouched_by_rescale(self):
+        rng = np.random.default_rng(24)
+        n_hap, n_var = 10, 100
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[rng.random((n_hap, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h'),
+                         per_base=False)
+            np.testing.assert_allclose(
+                out['pi'][0], diversity.pi(hm, span_normalize=False))
+            np.testing.assert_allclose(
+                out['theta_w'][0], diversity.theta_w(hm, span_normalize=False))
+            np.testing.assert_allclose(
+                out['theta_h'][0], diversity.theta_h(hm, span_normalize=False))
+
+    def test_tajimas_d_and_fay_wu_h_unaffected(self):
+        # tajimas_d and fay_wu_h must keep reading the raw, unrescaled sums;
+        # fay_wu_h has no span-normalized form at all, so it matches the
+        # scalar directly, with no span division.
+        rng = np.random.default_rng(25)
+        n_hap, n_var = 20, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[rng.random((n_hap, n_var)) < 0.3] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h', 'tajimas_d',
+                                     'fay_wu_h'))
+            np.testing.assert_allclose(out['tajimas_d'][0],
+                                       diversity.tajimas_d(hm), rtol=1e-6)
+            np.testing.assert_allclose(out['fay_wu_h'][0],
+                                       diversity.fay_wus_h(hm), rtol=1e-6)
+
+    def test_nan_when_no_site_has_two_calls(self):
+        n_hap, n_var = 6, 20
+        hap = np.zeros((n_hap, n_var), dtype=np.int8)
+        hap[1:, :] = -1  # only one haplotype called anywhere
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h'))
+            assert np.isnan(out['pi'][0])
+            assert np.isnan(out['theta_w'][0])
+            assert np.isnan(out['theta_h'][0])
+
+    def test_zero_variant_window_is_zero_not_nan(self):
+        # Mirrors the scatter engine's convention: a window with literally
+        # no variants gives 0, not NaN.
+        n_hap, n_var = 6, 10
+        hap = np.zeros((n_hap, n_var), dtype=np.int8)
+        hap[:, :] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('pi', 'theta_w'),
+                         missing_data='exclude')
+            assert out['n_variants'][0] == 0
+            assert out['pi'][0] == 0.0
+            assert out['theta_w'][0] == 0.0
+
+    def test_complete_data_unaffected(self):
+        rng = np.random.default_rng(26)
+        n_hap, n_var = 12, 150
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins,
+                         statistics=('pi', 'theta_w', 'theta_h'))
+            np.testing.assert_allclose(out['pi'][0], diversity.pi(hm), rtol=1e-9)
+            np.testing.assert_allclose(out['theta_w'][0], diversity.theta_w(hm),
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['theta_h'][0], diversity.theta_h(hm),
+                                       rtol=1e-9)
+
+
+class TestFusedTwoPopSpanNormalizedRescale:
+    """windowed_statistics_fused/_chunked's dxy/da pick up the same per-window
+    rescale as the scatter engine, from the per-window gate counts the kernel
+    now returns alongside its existing sums."""
+
+    def _engines(self):
+        from pg_gpu.windowed_analysis import (
+            windowed_statistics_fused, windowed_statistics_fused_chunked)
+        return [windowed_statistics_fused, windowed_statistics_fused_chunked]
+
+    def _hm(self, hap, n_var):
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10 + 1,
+                             1, n_var * 10)
+        hm.sample_sets = {"a": list(range(hap.shape[0] - 8)),
+                          "b": list(range(hap.shape[0] - 8, hap.shape[0]))}
+        return hm
+
+    def test_rate_matches_scalar_under_missingness(self):
+        rng = np.random.default_rng(29)
+        n_hap, n_var = 24, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            np.testing.assert_allclose(out['dxy'][0], divergence.dxy(hm, 'a', 'b'),
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['da'][0], divergence.da(hm, 'a', 'b'),
+                                       rtol=1e-9)
+
+    def test_raw_sum_untouched_by_rescale(self):
+        rng = np.random.default_rng(30)
+        n_hap, n_var = 16, 200
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b', per_base=False)
+            np.testing.assert_allclose(
+                out['dxy'][0], divergence.dxy(hm, 'a', 'b', span_normalize=False))
+            np.testing.assert_allclose(
+                out['da'][0], divergence.da(hm, 'a', 'b', span_normalize=False))
+
+    def test_nan_when_population_has_no_call_in_window(self):
+        rng = np.random.default_rng(31)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:] = -1
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            assert np.isnan(out['dxy'][0]) and np.isnan(out['da'][0])
+
+    def test_nan_when_population_has_a_single_call_in_window(self):
+        rng = np.random.default_rng(32)
+        n_hap, n_var = 16, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:-1] = -1  # population b keeps exactly one haplotype with calls
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            assert np.isfinite(out['dxy'][0])
+            assert np.isnan(out['da'][0])
+
+    def test_complete_data_unaffected(self):
+        rng = np.random.default_rng(33)
+        n_hap, n_var = 20, 300
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hm = self._hm(hap, n_var)
+        bp_bins = np.array([1, n_var * 10 + 1])
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            np.testing.assert_allclose(out['dxy'][0], divergence.dxy(hm, 'a', 'b'),
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['da'][0], divergence.da(hm, 'a', 'b'),
+                                       rtol=1e-9)
+
+    def test_matches_scatter_engine_under_missingness(self):
+        # Before this fix the fused engines disagreed with the scatter engine
+        # (and the scalar) under missing data; all engines must agree again.
+        from pg_gpu.windowed_analysis import _windowed_twopop_scatter
+        rng = np.random.default_rng(34)
+        n_hap, n_var = 24, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-8:][rng.random((8, n_var)) < 0.5] = -1
+        hm = self._hm(hap, n_var)
+        window_size = n_var * 10
+        bp_bins = np.array([1, window_size + 1])
+        scatter = _windowed_twopop_scatter(
+            hm, window_size=window_size, step_size=window_size,
+            statistics=['dxy', 'da'], populations=['a', 'b'],
+            missing_data='include', span_normalize=True)
+        for engine in self._engines():
+            out = engine(hm, bp_bins=bp_bins, statistics=('dxy', 'da'),
+                        pop1='a', pop2='b')
+            np.testing.assert_allclose(out['dxy'][0], scatter['dxy'].iloc[0],
+                                       rtol=1e-9)
+            np.testing.assert_allclose(out['da'][0], scatter['da'].iloc[0],
+                                       rtol=1e-9)
 
 
 class TestExcludeKeepsMatrixContext:

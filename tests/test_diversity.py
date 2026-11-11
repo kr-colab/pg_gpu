@@ -435,17 +435,17 @@ class TestNeutralityTests:
 
     def test_zeng_dh_sweep_signal(self):
         # Post-sweep-like SFS: excess singletons (Tajima's D < 0) and excess
-        # high-frequency derived alleles (Fay-Wu H < 0) -> DH = D * H > 0.
+        # high-frequency derived alleles (H* < 0) -> DH = D * H* > 0.
         n = 10
         hap = np.zeros((n, 40), dtype=np.int8)
         hap[0, :20] = 1     # 20 singletons (derived count 1)
         hap[:9, 20:] = 1    # 20 near-fixed derived (count 9)
         hm = HaplotypeMatrix(hap, np.arange(40) * 100, 0, 4000)
         d = diversity.tajimas_d(hm)
-        h = diversity.fay_wus_h(hm)
-        assert d < 0 and h < 0
+        h_star = diversity.normalized_fay_wus_h(hm)
+        assert d < 0 and h_star < 0
         dh = diversity.zeng_dh(hm)
-        assert dh == pytest.approx(d * h)
+        assert dh == pytest.approx(d * h_star)
         assert dh > 0
 
     def test_zeng_dh_zero_when_not_swept(self):
@@ -730,6 +730,109 @@ class TestMaxDafIncludeNeedsOwnPair:
         np.testing.assert_allclose(fused['max_daf'][0], ref, rtol=1e-12)
 
 
+class TestDafHistogramDiploidMatchesHaplotype:
+    """daf_histogram on a GenotypeMatrix must follow the same site rule as
+    on a HaplotypeMatrix: drop monomorphic and no-call sites instead of
+    binning them at frequency 0, and respect missing_data."""
+
+    def _matrices(self):
+        from pg_gpu import GenotypeMatrix
+        # Two monomorphic sites, two segregating (DAF 2/8), one with one
+        # sample missing (DAF 3/6), one with no valid call.
+        geno = np.array([[0, 0, 1, 2,  2, -1],
+                         [0, 0, 0, 0,  1, -1],
+                         [0, 0, 0, 0, -1, -1],
+                         [0, 0, 1, 0,  0, -1]], dtype=np.int8)
+        pos = np.array([100, 200, 300, 400, 500, 600])
+        gm = GenotypeMatrix(geno, pos, 1, 1000)
+        hap = np.array([[0, 0, 1, 1,  1, -1], [0, 0, 0, 1,  1, -1],
+                        [0, 0, 0, 0,  1, -1], [0, 0, 0, 0,  0, -1],
+                        [0, 0, 0, 0, -1, -1], [0, 0, 0, 0, -1, -1],
+                        [0, 0, 1, 0,  0, -1], [0, 0, 0, 0,  0, -1]],
+                       dtype=np.int8)
+        hm = HaplotypeMatrix(hap, pos, 1, 1000)
+        return gm, hm
+
+    @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+    def test_matches_haplotype_result(self, missing_data):
+        gm, hm = self._matrices()
+        gm_hist, gm_edges = diversity.daf_histogram(gm, n_bins=8,
+                                                     missing_data=missing_data)
+        hm_hist, hm_edges = diversity.daf_histogram(hm, n_bins=8,
+                                                     missing_data=missing_data)
+        np.testing.assert_allclose(gm_hist, hm_hist, rtol=1e-12)
+        np.testing.assert_allclose(gm_edges, hm_edges, rtol=1e-12)
+
+    def test_no_call_site_contributes_nothing(self):
+        # A site with no valid call must not land in bin 0.
+        gm, _ = self._matrices()
+        hist, _ = diversity.daf_histogram(gm, n_bins=8)
+        assert hist.sum() == pytest.approx(1.0)
+        assert hist[0] == 0.0
+
+    @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+    def test_incomplete_segregating_site(self, missing_data):
+        # A segregating site (DAF 3/6) with one individual missing: kept
+        # at that frequency under 'include', dropped under 'exclude'
+        # since it isn't complete.
+        from pg_gpu import GenotypeMatrix
+        geno = np.array([[2, 1, 0, 1],
+                         [2, 2, 0, 1],
+                         [2, -1, 0, 0],
+                         [2, 0, 0, 0]], dtype=np.int8)
+        pos = np.array([100, 200, 300, 400])
+        gm = GenotypeMatrix(geno, pos, 1, 500)
+        hm = gm.to_haplotype_matrix()
+        gm_hist, _ = diversity.daf_histogram(gm, n_bins=4,
+                                             missing_data=missing_data)
+        hm_hist, _ = diversity.daf_histogram(hm, n_bins=4,
+                                             missing_data=missing_data)
+        np.testing.assert_allclose(gm_hist, hm_hist, rtol=1e-12)
+
+
+class TestDafHistogramExcludesFixedDerived:
+    """A site fixed for the derived allele does not vary, so daf_histogram
+    must leave it out entirely, matching sfs -- not bin it at frequency 1.0.
+    Covers the haplotype branch, the GenotypeMatrix branch, and the
+    windowed scatter engine, which each compute this independently."""
+
+    def _hm(self):
+        hap = np.zeros((8, 4), dtype=np.int8)
+        hap[:, 0] = 1                          # fixed for the derived allele
+        hap[0, 1] = hap[1, 2] = hap[2, 3] = 1  # singletons
+        return HaplotypeMatrix(hap, np.array([100, 200, 300, 400]), 1, 1000)
+
+    def test_haplotype_matrix(self):
+        hm = self._hm()
+        hist, _ = diversity.daf_histogram(hm, n_bins=8)
+        np.testing.assert_allclose(hist, [0, 1, 0, 0, 0, 0, 0, 0])
+
+    def test_matches_sfs(self):
+        hm = self._hm()
+        hist, _ = diversity.daf_histogram(hm, n_bins=8)
+        s = sfs.sfs(hm)
+        assert hist[0] == 0.0 and s[0] == 0
+        assert hist[-1] == 0.0 and s[-1] == 0
+
+    def test_windowed_matches_scalar(self):
+        from pg_gpu.windowed_analysis import windowed_analysis, N_DAF_BINS
+        hm = self._hm()
+        ref, _ = diversity.daf_histogram(hm, n_bins=N_DAF_BINS)
+        r = windowed_analysis(hm, window_size=1000, statistics=["daf_hist"])
+        got = np.array([r[f"daf_bin_{b}"].iloc[0] for b in range(N_DAF_BINS)])
+        np.testing.assert_allclose(got, ref)
+
+    def test_genotype_matrix(self):
+        from pg_gpu import GenotypeMatrix
+        geno = np.array([[2, 0, 0, 0],
+                         [2, 1, 0, 0],
+                         [2, 0, 1, 0],
+                         [2, 0, 0, 1]], dtype=np.int8)
+        gm = GenotypeMatrix(geno, np.array([100, 200, 300, 400]), 1, 500)
+        hist, _ = diversity.daf_histogram(gm, n_bins=8)
+        np.testing.assert_allclose(hist, [0, 1, 0, 0, 0, 0, 0, 0])
+
+
 def test_diversity_stats_key_order_matches_request():
     """The result dict lists keys in the caller's order, whatever the
     process hash seed, so DataFrame columns built from it are stable."""
@@ -744,7 +847,8 @@ def test_diversity_stats_key_order_matches_request():
 
 
 def test_fay_wus_h_no_variants_is_zero():
-    # H = pi - theta_H is 0 with no variants on every path; the
+    # H = pi - theta_H is 0 with no variants on every path (it has no
+    # span_normalize, so is unaffected by the no-site rescale below); the
     # variance-normalized H stays NaN.
     rng = np.random.default_rng(1)
     hap = rng.integers(0, 2, (8, 10)).astype(np.int8)
@@ -753,7 +857,11 @@ def test_fay_wus_h_no_variants_is_zero():
     assert diversity.fay_wus_h(empty) == 0.0
     stats = diversity.diversity_stats(
         empty, statistics=["fay_wus_h", "normalized_fay_wus_h", "pi"])
-    assert stats["fay_wus_h"] == 0.0 and stats["pi"] == 0.0
+    assert stats["fay_wus_h"] == 0.0
+    # No variants at all, so pi is 0 by definition (not undefined) on both
+    # the raw sum and the default span-normalized path.
+    assert stats["pi"] == 0.0
+    assert diversity.pi(empty, span_normalize=False) == 0.0
     assert np.isnan(stats["normalized_fay_wus_h"])
     assert np.isnan(diversity.normalized_fay_wus_h(empty))
     assert diversity.FrequencySpectrum(empty).fay_wu_h() == 0.0

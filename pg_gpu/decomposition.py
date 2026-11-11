@@ -988,11 +988,12 @@ def _resolve_window_params(window_params, window_size, step_size, window_type,
 
 
 def _estimate_n_windows(matrix, window_params) -> int:
-    """Upper bound on the number of windows ``WindowIterator`` will yield.
+    """Number of windows ``WindowIterator`` tiles.
 
-    Exact for ``window_type='snp'`` and ``'regions'``. For ``'bp'`` this is
-    an upper bound (some bp windows may be empty and skipped); overestimating
-    only biases the auto-selector toward streaming, which is safe.
+    Exact for ``window_type='snp'`` and ``'regions'``. For ``'bp'`` it is
+    the whole grid, empty windows included, which the iterator skips; an
+    overestimate only biases the auto-selector toward streaming, which is
+    safe.
     """
     if window_params.window_type == 'regions':
         return 0 if window_params.regions is None else len(window_params.regions)
@@ -1002,15 +1003,13 @@ def _estimate_n_windows(matrix, window_params) -> int:
             return 0
         return (n_var - window_params.window_size) // window_params.step_size + 1
     if window_params.window_type == 'bp':
-        positions = matrix.positions
-        if isinstance(positions, cp.ndarray):
-            chrom_start = int(positions[0].get())
-            chrom_end = int(positions[-1].get())
-        else:
-            chrom_start = int(positions[0])
-            chrom_end = int(positions[-1])
-        span = max(0, chrom_end - chrom_start)
-        return span // window_params.step_size + 1
+        # The grid that WindowIterator tiles, anchored at the matrix bounds.
+        from .windowed_analysis import _bp_grid_bounds, _bp_window_grid
+        if matrix.num_variants == 0:
+            return 0
+        lo, hi = _bp_grid_bounds(matrix)
+        return len(_bp_window_grid(lo, hi, window_params.window_size,
+                                   window_params.step_size)[0])
     return 0
 
 

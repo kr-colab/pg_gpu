@@ -15,7 +15,8 @@ from dataclasses import dataclass, field, replace
 import warnings
 from tqdm import tqdm
 
-from .haplotype_matrix import HaplotypeMatrix
+from .accessible import _as_accessible_mask, resolve_accessible_mask
+from .haplotype_matrix import HaplotypeMatrix, _bp_grid_bounds, _total_sites_share
 from . import ld_statistics
 from . import divergence
 from . import diversity
@@ -61,17 +62,13 @@ _FUSED_SINGLE_STATS = frozenset({
     'pi', 'theta_w', 'tajimas_d', 'segregating_sites', 'singletons',
     'theta_h', 'fay_wu_h', 'max_daf'})
 
-# Fused stats scattered per variant into windows; they share the window
-# membership arrays (site_win/site_ok) built in windowed_statistics_fused.
-# Those arrays need windows whose starts and ends only increase, so these do
-# not serve window_type='regions'. As each migrates to the region-safe
-# per-window variant range (see _PER_SITE_MEAN_STATS), it moves out of here.
-_PER_SITE_SCATTER_STATS = ('mean_nsl', 'daf_hist', 'mu_sfs')
-
-# Fused per-site means computed from each window's variant range
-# [win_start, win_stop) with prefix sums, so they serve any window family,
-# including unordered or overlapping regions.
-_PER_SITE_MEAN_STATS = frozenset({'het_expected'})
+# Fused per-site stats binned into windows by reducing each window's variant
+# range [win_start, win_stop) with _WindowAccumulator (prefix-sum sum/mean, a
+# 2-D cumsum histogram for daf_hist), so they serve any window family --
+# including unordered or overlapping regions -- without the per-(variant,
+# window) membership arrays the old scatter path needed.
+_PER_SITE_RANGE_STATS = frozenset({'het_expected', 'mean_nsl', 'daf_hist',
+                                   'mu_sfs'})
 
 # Fused statistics of the variant positions in each window; mu_var is the
 # variant density.
@@ -85,8 +82,8 @@ _DIST_MOMENT_STATS = frozenset({'dist_var', 'dist_skew', 'dist_kurt'})
 
 # Statistics that windowed_statistics_fused computes.
 _FUSED_STATS = (_FUSED_SINGLE_STATS | _TWO_POP_STATS
-                | frozenset(_FUSED_GARUD_STATS) | frozenset(_PER_SITE_SCATTER_STATS)
-                | _PER_SITE_MEAN_STATS
+                | frozenset(_FUSED_GARUD_STATS)
+                | _PER_SITE_RANGE_STATS
                 | _SNP_DIST_STATS | _PAIRWISE_LD_STATS | _DIST_MOMENT_STATS)
 
 # Statistics that windowed_statistics_fused_chunked computes itself, in
@@ -105,36 +102,88 @@ _LOCAL_PCA_ONLY_KWARGS = frozenset(
 
 def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
                           is_accessible=None):
-    """Compute per-window accessible base counts for per-base normalization.
+    """Per-window base count, the denominator of per-base statistics.
+
+    Every windowed engine uses this one rule, so they agree on each
+    window. In order of precedence:
+
+    - an accessible mask (``is_accessible``, else the matrix's): the
+      accessible bases in the window;
+    - ``n_total_sites`` with no mask: the window's share of it
+      (``haplotype_matrix._total_sites_share``), in proportion to the
+      bases it covers in the region. The shares of windows that tile the
+      region add up to ``n_total_sites``, the denominator of the scalar
+      function on the whole region;
+    - otherwise the window length.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
-        Source matrix (checked for accessible_mask attribute).
+        Source of the mask, ``n_total_sites`` and the region bounds.
     win_starts, win_stops : array_like
-        Window boundary arrays (numpy, not cupy).
-    is_accessible : array_like, optional
-        Explicit accessibility mask (takes precedence over matrix attribute).
+        Window edges, right-open (numpy, not cupy).
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Explicit accessibility (takes precedence over the matrix's mask);
+        a bool array has element 0 at position 1, as in scikit-allel.
 
     Returns
     -------
     numpy.ndarray, float64
-        Accessible base count per window.
+        Base count per window.
     """
     ws = np.asarray(win_starts, dtype=np.float64)
     we = np.asarray(win_stops, dtype=np.float64)
 
     if is_accessible is not None:
-        from .accessible import AccessibleMask
-        amask = AccessibleMask(np.asarray(is_accessible, dtype=bool))
-        return amask.count_accessible_windows(
+        return _as_accessible_mask(is_accessible).count_accessible_windows(
             ws.astype(np.int64), we.astype(np.int64))
 
     if haplotype_matrix.has_accessible_mask:
         return haplotype_matrix.accessible_mask.count_accessible_windows(
             ws.astype(np.int64), we.astype(np.int64))
 
+    if haplotype_matrix.n_total_sites is not None:
+        return _total_sites_share(haplotype_matrix, ws, we)
+
     return we - ws
+
+
+def _scatter_spans(haplotype_matrix, win_starts, win_stops, span_normalize):
+    """Per-window denominators of the scatter engines, and which are zero.
+
+    A window with no base (fully inaccessible) divides to NaN, not 0: its
+    per-base rate is undefined. The spans are clamped to 1 for a safe
+    division and the zero-span flags go back for that post-processing.
+    """
+    if span_normalize is False:
+        n = len(win_starts)
+        return np.ones(n), np.zeros(n, dtype=bool)
+    spans = _compute_window_bases(haplotype_matrix, win_starts, win_stops)
+    return np.maximum(spans, 1.0), spans <= 0
+
+
+def _windowed_rescale(n_variants, n_sites_with_data):
+    """Per-window num_variants / n_sites_with_data, correcting for sites a
+    population's own missing calls dropped from a raw sum. 1 for a window
+    with no variants, since there is nothing to rescale; NaN for a window
+    that has variants but none meeting the site's own call-count gate.
+    """
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return np.where(n_variants == 0, 1.0,
+                        np.where(n_sites_with_data > 0,
+                                n_variants / n_sites_with_data, np.nan))
+
+
+def _missing_data_rescale(n_variants_per_window, normalize, all_complete, count_sites):
+    """Per-window rescale for a raw sum, correcting sites a population's own
+    missing calls dropped from it before the span divides it. None when
+    ``normalize`` is False or every site already qualifies (``all_complete``).
+    ``count_sites`` is called, lazily, for the per-window count of sites
+    meeting the statistic's own gate.
+    """
+    if normalize is False or bool(all_complete):
+        return None
+    return _windowed_rescale(n_variants_per_window, count_sites())
 
 
 CANONICAL_WINDOW_PREFIX = (
@@ -190,7 +239,7 @@ def _window_mean_het_expected(matrix, missing_data):
     """Per-window mean expected heterozygosity for the per-window fallback.
 
     The mean of the per-site He over the sites with a defined value, NaN when
-    none has one -- the same value the fused engine's _windowed_mean returns,
+    none has one -- the same value the fused engine's windows.mean returns,
     and == np.nanmean(diversity.heterozygosity_expected(window)).
     """
     he = np.asarray(diversity.heterozygosity_expected(
@@ -407,7 +456,6 @@ class WindowIterator:
 
     def __init__(self, haplotype_matrix: HaplotypeMatrix,
                  window_params: WindowParams):
-        self._parent_mask = haplotype_matrix.accessible_mask
         self.matrix = haplotype_matrix
         self.params = window_params
         self.positions = self.matrix.positions
@@ -418,11 +466,16 @@ class WindowIterator:
         else:
             self.positions_np = self.positions
 
-    def _attach_window_mask(self, window_matrix, start, end):
-        """Set per-window n_total_sites from the parent's accessible mask."""
-        if self._parent_mask is not None:
-            window_matrix.n_total_sites = \
-                self._parent_mask.count_accessible(start, end)
+    def _set_window_bases(self, window_matrix, start, end):
+        """Set the window's n_total_sites to its base count in the parent.
+
+        get_subset copies the parent's n_total_sites, which counts the
+        whole region; the window needs its own count, by the rule that
+        every engine uses (_compute_window_bases).
+        """
+        if self.matrix.has_accessible_mask or self.matrix.n_total_sites is not None:
+            window_matrix.n_total_sites = float(
+                _compute_window_bases(self.matrix, [start], [end])[0])
 
     def __iter__(self) -> Iterator[WindowData]:
         """Iterate over windows based on window type."""
@@ -457,7 +510,7 @@ class WindowIterator:
                 # Set correct chromosome coordinates for span normalization
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1  # end is exclusive in our window definition
-                self._attach_window_mask(window_matrix, start, end)
+                self._set_window_bases(window_matrix, start, end)
 
                 yield WindowData(
                     chrom=1,  # TODO: Handle multiple chromosomes
@@ -489,7 +542,7 @@ class WindowIterator:
             # Set correct chromosome coordinates for span normalization
             window_matrix.chrom_start = window_start
             window_matrix.chrom_end = window_end
-            self._attach_window_mask(window_matrix, window_start, window_end + 1)
+            self._set_window_bases(window_matrix, window_start, window_end + 1)
 
             yield WindowData(
                 chrom=1,  # TODO: Handle multiple chromosomes
@@ -522,7 +575,7 @@ class WindowIterator:
                 window_matrix = self.matrix.get_subset(variant_indices)
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1 # TODO: treat region bounds as inclusive.
-                self._attach_window_mask(window_matrix, start, end)
+                self._set_window_bases(window_matrix, start, end)
 
                 yield WindowData(
                     chrom=region.get('chrom', 1),
@@ -764,22 +817,6 @@ class WindowedAnalyzer:
                 yield pd.DataFrame(batch_results)
 
 
-def _bp_grid_bounds(matrix, positions):
-    """Bounds of the bp window grid.
-
-    The matrix's chromosome coordinates win when set; the first and last
-    variant are the fallback. Every windowed engine anchors with this one
-    rule, so they all tile the same grid for the same matrix -- anchoring
-    at the first variant instead would shift every window of a region- or
-    subset-derived matrix whose chrom_start sits before its first variant.
-    """
-    chrom_start = (int(matrix.chrom_start) if matrix.chrom_start is not None
-                   else int(positions[0]))
-    chrom_end = (int(matrix.chrom_end) if matrix.chrom_end is not None
-                 else int(positions[-1]))
-    return chrom_start, chrom_end
-
-
 def _bp_window_grid(chrom_start, chrom_end, window_size, step_size):
     """Start/stop arrays of the bp window grid.
 
@@ -795,52 +832,113 @@ def _bp_window_grid(chrom_start, chrom_end, window_size, step_size):
                                   int(chrom_end) + 1)
 
 
-def _build_scatter_indices(pos_cpu, chrom_start, chrom_end,
-                           window_size, step_size):
-    """Build window indices for scatter-add over (possibly overlapping) windows.
+def _window_variant_ranges(positions, win_starts, win_stops):
+    """Each window's contiguous variant-index range ``[start, stop)``.
 
-    When step_size < window_size, each variant falls inside up to
-    n_per_var = ceil(window_size / step_size) consecutive windows. We
-    replicate each variant's slot into those candidate windows, then mask
-    out candidates that are either out of range or whose window stop is
-    <= the variant position (which can happen at the low end when
-    window_size is not a multiple of step_size, or at chromosome edges).
+    ``positions`` is a sorted array, so a binary search of each window
+    bound gives the range endpoints.
 
-    Returns
-    -------
-    win_starts, win_stops : np.ndarray, float64, shape (n_windows,)
-    n_windows : int
-    n_per_var : int
-    k_safe : np.ndarray, int64, shape (n_variants, n_per_var)
-        Clipped candidate window indices per variant, safe for indexing
-        into arrays of length n_windows. Rows where `contains` is False
-        must be ignored.
-    contains : np.ndarray, bool, shape (n_variants, n_per_var)
-        True where the candidate window actually contains the variant.
-    win_idx_gpu : cp.ndarray, int64, shape (n_variants * n_per_var,)
-    mask_gpu : cp.ndarray, bool, shape (n_variants * n_per_var,)
-
-    The 2D arrays are raveled in row-major (C) order so that broadcasting
-    `values[:, None]` across n_per_var and raveling yields values aligned
-    with win_idx_gpu / mask_gpu.
+    Returns a pair ``(start, stop)`` of CuPy int64 arrays, each the same length
+    as ``win_starts`` (one entry per window): window ``w``'s range is
+    ``[start[w], stop[w])``.
     """
-    win_starts, win_stops = _bp_window_grid(
-        chrom_start, chrom_end, window_size, step_size)
-    n_windows = len(win_starts)
-    n_per_var = int(np.ceil(window_size / step_size))
+    pos = positions if isinstance(positions, cp.ndarray) else cp.asarray(positions)
+    ws = cp.asarray(win_starts, dtype=cp.float64)
+    we = cp.asarray(win_stops, dtype=cp.float64)
+    start = cp.searchsorted(pos, ws, side='left').astype(cp.int64)
+    stop = cp.searchsorted(pos, we, side='left').astype(cp.int64)
+    return start, stop
 
-    k_hi = np.searchsorted(win_starts, pos_cpu, side='right') - 1
-    offsets = np.arange(n_per_var, dtype=np.int64)[None, :]
-    k_cand = k_hi[:, None] - offsets
-    in_range = (k_cand >= 0) & (k_cand < n_windows)
-    k_safe = np.clip(k_cand, 0, n_windows - 1)
-    contains = in_range & (pos_cpu[:, None] < win_stops[k_safe])
 
-    win_idx_gpu = cp.asarray(k_safe.ravel())
-    mask_gpu = cp.asarray(contains.ravel())
-    return (win_starts, win_stops, n_windows, n_per_var,
-            k_safe, contains, win_idx_gpu, mask_gpu)
+class _WindowAccumulator:
+    """Per-window reductions over each window's contiguous variant range.
 
+    Built from the variant-index ranges ``_window_variant_ranges`` returns, it
+    answers per-window ``sum`` / ``mean`` / ``counts`` as prefix-sum range
+    queries -- ``csum[stop] - csum[start]`` -- plus ``max`` (a host-side range
+    reduction, since cupy's indexed max loses float64 precision), so a per-site
+    quantity is binned into windows without materializing per-(variant, window)
+    membership. Per-site consumers call these methods instead of touching the
+    raw ranges, so they cannot silently no-op when windows overlap or regions
+    are unordered: every window family is served because each window's range is
+    found on its own.
+    """
+
+    def __init__(self, positions, win_starts, win_stops):
+        self.start, self.stop = _window_variant_ranges(
+            positions, win_starts, win_stops)
+        self.n_windows = int(self.start.shape[0])
+
+    def counts(self):
+        """Variants per window (int64)."""
+        return self.stop - self.start
+
+    def sum(self, per_var):
+        """Per-window sum of a per-variant array (float64)."""
+        per_var = cp.asarray(per_var, dtype=cp.float64)
+        csum = cp.concatenate([cp.zeros(1, dtype=cp.float64),
+                               cp.cumsum(per_var, dtype=cp.float64)])
+        return csum[self.stop] - csum[self.start]
+
+    def sum2d(self, per_var):
+        """Per-window column sums of a ``(n_var, k)`` array -> ``(n_windows, k)``.
+
+        The 2-D cumsum form of ``sum``, for a per-site histogram (daf_hist)
+        binned into windows in one pass.
+        """
+        per_var = cp.asarray(per_var, dtype=cp.float64)
+        k = per_var.shape[1]
+        csum = cp.concatenate([cp.zeros((1, k), dtype=cp.float64),
+                               cp.cumsum(per_var, axis=0)])
+        return csum[self.stop] - csum[self.start]
+
+    def mean(self, per_var, valid=None):
+        """Per-window mean over the valid entries, NaN where a window has none.
+
+        ``per_var`` is ``(n_var,)`` or ``(n_var, k)`` (e.g. one nSL score per
+        derived allele); a 2-D input averages over every valid ``(variant,
+        item)`` entry, so the divisor is the count of valid entries, not of
+        variants. ``valid`` is a mask of ``per_var``'s shape; masked-out entries
+        never reach the sum, and by default it masks out the NaN (non-finite)
+        entries.
+        """
+        per_var = cp.asarray(per_var, dtype=cp.float64)
+        if valid is None:
+            valid = cp.isfinite(per_var)
+        valid = valid.astype(cp.float64)
+        num = cp.where(valid > 0, per_var, 0.0)
+        if per_var.ndim > 1:
+            # Reduce each variant's items to a finite sum and count first; the
+            # window mean is then two prefix-sum range queries over those.
+            axes = tuple(range(1, per_var.ndim))
+            num = num.sum(axis=axes)
+            valid = valid.sum(axis=axes)
+        total = self.sum(num)
+        count = self.sum(valid)
+        return cp.where(count > 0, total / count, cp.nan)
+
+    def max(self, per_var, init=0.0):
+        """Per-window maximum of a per-variant array; empty windows keep ``init``.
+
+        Reduced on the host and returned as a numpy array, unlike the other
+        reducers: max is not a prefix-sum query, and cupy's indexed max reduces
+        in float32, losing the float64 precision the other engines keep.
+        """
+        out = np.full(self.n_windows, init, dtype=np.float64)
+        start = self.start.get()
+        counts = self.stop.get() - start
+        total = int(counts.sum())
+        if total:
+            vals = cp.asarray(per_var, dtype=cp.float64).get()
+            win_idx = np.repeat(np.arange(self.n_windows), counts)
+            base = np.repeat(np.cumsum(counts) - counts, counts)
+            var_idx = np.repeat(start, counts) + (np.arange(total) - base)
+            np.maximum.at(out, win_idx, vals[var_idx])
+        return out
+
+def _windows_emptied_by_exclude(pre_positions, post_windows, win_starts, win_stops):
+    pre_windows = _WindowAccumulator(pre_positions, win_starts, win_stops)
+    return ((pre_windows.counts() > 0) & (post_windows.counts() == 0)).get()
 
 def _achaz_coeffs_per_window(uniq_n, inv_idx, w1, w2):
     """(alpha, beta) per window from _achaz_variance_coefficients(w1, w2, n).
@@ -863,16 +961,20 @@ def _achaz_coeffs_per_window(uniq_n, inv_idx, w1, w2):
 
 def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
                               statistics, populations, missing_data,
-                              span_normalize, chrom=None):
+                              span_normalize, chrom=None,
+                              win_starts=None, win_stops=None):
     """Compute windowed theta estimators via scatter-add on GPU.
 
     Uses per-allele counts (``allele_counts``) + per-variant contributions
-    (``_ac_contribution``) + scatter_add for per-window accumulation, so
-    multiallelic sites are handled per-allele. Handles variable sample sizes
-    per site.
-    """
-    from cupyx import scatter_add
+    (``_ac_contribution``) + per-window range sums (_WindowAccumulator) for
+    per-window accumulation, so multiallelic sites are handled per-allele.
+    Handles variable sample sizes per site.
 
+    ``win_starts`` / ``win_stops`` give explicit window bounds (custom regions,
+    possibly overlapping or unordered); without them the bp grid is built from
+    ``window_size`` / ``step_size``. Either way each window's per-site sum is a
+    prefix-sum range query, so the two window families share one code path.
+    """
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
@@ -911,55 +1013,31 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     alleles_present = (ac > 0).sum(axis=1)
     mut = cp.where(has_data, cp.maximum(alleles_present - 1, 0), 0).astype(cp.float64)
 
-    (win_starts, win_stops, n_windows, n_per_var,
-     k_safe, contains, win_idx_gpu, mask_gpu) = _build_scatter_indices(
-        pos_cpu, chrom_start, chrom_end, window_size, step_size)
-
-    def scatter_sum(values):
-        out = cp.zeros(n_windows, dtype=cp.float64)
-        if n_per_var == 1:
-            scatter_add(out, win_idx_gpu, values * mask_gpu)
-        else:
-            rep = cp.broadcast_to(values[:, None],
-                                  (values.shape[0], n_per_var)).ravel()
-            scatter_add(out, win_idx_gpu, rep * mask_gpu)
-        return out
+    if win_starts is None:
+        win_starts, win_stops = _bp_window_grid(
+            chrom_start, chrom_end, window_size, step_size)
+    n_windows = len(win_starts)
+    # Each window's per-variant sum is a prefix-sum range query over its
+    # contiguous variant range (the shared membership rule), so overlapping or
+    # unordered windows accumulate a variant into every window covering it
+    # without replicating it across candidate windows.
+    windows = _WindowAccumulator(pos_cpu, win_starts, win_stops)
+    scatter_sum = windows.sum
 
     # Compute requested per-variant contributions and scatter
-    n_variants_per_window = np.bincount(
-        k_safe[contains], minlength=n_windows)
+    n_variants_per_window = windows.counts().get()
     # A window that lost every site to 'exclude' is undefined for max_daf
     # (NaN); one with no variant to begin with stays 0.0.
     excluded_to_empty = None
     if missing_data == 'exclude' and 'max_daf' in statistics:
-        lo = np.searchsorted(pos_cpu_pre_exclude, win_starts, side='left')
-        hi = np.searchsorted(pos_cpu_pre_exclude, win_stops, side='left')
-        excluded_to_empty = (hi > lo) & (n_variants_per_window == 0)
+        excluded_to_empty = _windows_emptied_by_exclude(pos_cpu_pre_exclude, windows, win_starts, win_stops)
+
     results = _init_window_results(
         chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
-    # Span for normalization
-    if span_normalize is not False:
-        if haplotype_matrix.has_accessible_mask:
-            am = haplotype_matrix.accessible_mask
-            spans = am.count_accessible_windows(
-                results['start'], results['end'])
-        elif matrix.n_total_sites is not None:
-            # Proportional from n_total_sites. Both bounds are bases, so the
-            # region has chrom_end - chrom_start + 1 of them.
-            total_span = chrom_end - chrom_start + 1
-            spans = (win_stops - win_starts) * matrix.n_total_sites / total_span
-        else:
-            spans = win_stops - win_starts
-        # Windows with zero span (fully inaccessible) divide to NaN rather
-        # than 0 — the per-base rate is undefined, not zero. Clamp for
-        # safe division and carry the zero-span mask for post-processing.
-        zero_span = spans <= 0
-        spans = np.maximum(spans, 1.0)
-    else:
-        spans = np.ones(n_windows)
-        zero_span = np.zeros(n_windows, dtype=bool)
+    spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
+                                      span_normalize)
 
     stats_set = set(statistics)
 
@@ -978,6 +1056,15 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             raw[est_name] = scatter_sum(
                 _ac_contribution(est_name, ac, n_valid, n_hap))
 
+    # Without this, a site with too few calls to contribute would still
+    # count toward the span, reading as invariant rather than unmeasured.
+    rate_stats = {'pi', 'theta_w', 'theta_h', 'theta_l'}
+    rescale = None
+    if bool(stats_set & rate_stats):
+        rescale = _missing_data_rescale(
+            n_variants_per_window, span_normalize, all_complete,
+            lambda: scatter_sum(has_data.astype(cp.float64)).get())
+
     if stats_set & {'segregating_sites', 'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}:
         seg_count = scatter_sum(mut)
     derived = ac[:, 1:]
@@ -987,21 +1074,23 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
                   else cp.zeros(ac.shape[0], dtype=cp.int64))
         sing_count = scatter_sum(cp.where(has_data, n_sing, 0).astype(cp.float64))
     if 'max_daf' in stats_set:
-        # Per-allele: highest derived-allele frequency at the site.
+        # Per-allele: highest derived-allele frequency at the site, reduced
+        # to each window's range max (empty windows stay 0, as before).
         if derived.shape[1]:
             p_der = derived.astype(cp.float64) / cp.where(n > 0, n, 1.0)[:, None]
-            dafs = cp.where(has_data, p_der.max(axis=1), 0.0).get()
+            dafs = cp.where(has_data, p_der.max(axis=1), 0.0)
         else:
-            dafs = np.zeros(ac.shape[0])
-        rep_dafs = np.broadcast_to(dafs[:, None], contains.shape) * contains
-        max_daf_arr = np.zeros(n_windows)
-        np.maximum.at(max_daf_arr, k_safe.ravel(), rep_dafs.ravel())
+            dafs = cp.zeros(ac.shape[0], dtype=cp.float64)
+        max_daf_arr = windows.max(dafs)
 
     # Build output — theta estimators as per-base rates
     for est_name, out_name in [('pi', 'pi'), ('watterson', 'theta_w'),
                                 ('theta_h', 'theta_h'), ('theta_l', 'theta_l')]:
         if out_name in stats_set and est_name in raw:
-            results[out_name] = raw[est_name].get() / spans
+            vals = raw[est_name].get()
+            if rescale is not None:
+                vals = vals * rescale
+            results[out_name] = vals / spans
 
     if 'segregating_sites' in stats_set:
         results['segregating_sites'] = seg_count.get()
@@ -1012,9 +1101,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             max_daf_arr = np.where(excluded_to_empty, np.nan, max_daf_arr)
         results['max_daf'] = max_daf_arr
 
-    # Composite stats from raw theta sums
+    # Composite stats from raw theta sums. fay_wu_h is a difference of two
+    # estimators, not a rate, so it has no span-normalized form.
     if 'fay_wu_h' in stats_set:
-        results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get() / spans
+        results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get()
 
     # Neutrality tests — Achaz (2009) variance framework, with the effective
     # sample size the per-window harmonic mean of n_valid rather than the
@@ -1055,9 +1145,11 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         if 'tajimas_d' in stats_set:
             results['tajimas_d'] = tajd
 
-    if 'normalized_fay_wu_h' in stats_set:
-        results['normalized_fay_wu_h'] = windowed_test(
-            'pi', 'theta_h', raw['pi'].get() - raw['theta_h'].get())
+    if stats_set & {'normalized_fay_wu_h', 'zeng_dh'}:
+        h_star = windowed_test('pi', 'theta_h',
+                               raw['pi'].get() - raw['theta_h'].get())
+        if 'normalized_fay_wu_h' in stats_set:
+            results['normalized_fay_wu_h'] = h_star
 
     if 'zeng_e' in stats_set:
         results['zeng_e'] = windowed_test(
@@ -1065,13 +1157,13 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             raw['theta_l'].get() - raw['watterson'].get())
 
     if 'zeng_dh' in stats_set:
-        H = (raw['pi'] - raw['theta_h']).get() / spans
-        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, H)
+        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, h_star)
 
     # Windows with no accessible bases get NaN for every per-base rate.
+    # fay_wu_h and zeng_dh have no span-normalized form, so a zero-span
+    # window doesn't make them undefined.
     if zero_span.any():
-        for name in ('pi', 'theta_w', 'theta_h', 'theta_l',
-                     'fay_wu_h', 'zeng_dh'):
+        for name in ('pi', 'theta_w', 'theta_h', 'theta_l'):
             if name in results:
                 results[name] = np.where(zero_span, np.nan, results[name])
 
@@ -1080,14 +1172,14 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
 
 def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
                               statistics, populations, missing_data,
-                              span_normalize, chrom=None):
+                              span_normalize, chrom=None,
+                              win_starts=None, win_stops=None):
     """Compute windowed two-population stats via scatter-add on GPU.
 
-    Same pattern as _windowed_thetas_scatter but for fst, fst_wc, dxy, da.
+    Same pattern as _windowed_thetas_scatter but for fst, fst_wc, dxy, da,
+    including the explicit ``win_starts`` / ``win_stops`` region bounds.
     Uses per-site valid counts for correct missing data handling.
     """
-    from cupyx import scatter_add
-
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
@@ -1127,45 +1219,24 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     hap1 = mat1.haplotypes
     hap2 = mat2.haplotypes
 
-    (win_starts, win_stops, n_windows, n_per_var,
-     k_safe, contains, win_idx_gpu, mask_gpu) = _build_scatter_indices(
-        pos_cpu, chrom_start, chrom_end, window_size, step_size)
+    if win_starts is None:
+        win_starts, win_stops = _bp_window_grid(
+            chrom_start, chrom_end, window_size, step_size)
+    n_windows = len(win_starts)
+    # Same shared membership rule as the single-pop engine: each window's
+    # per-site sum is a prefix-sum range query over its contiguous variant
+    # range, so overlapping or unordered windows need no replicated-index
+    # scatter.
+    windows = _WindowAccumulator(pos_cpu, win_starts, win_stops)
+    scatter_sum = windows.sum
+    n_variants_per_window = windows.counts().get()
 
-    def scatter_sum(values):
-        out = cp.zeros(n_windows, dtype=cp.float64)
-        if n_per_var == 1:
-            scatter_add(out, win_idx_gpu, values * mask_gpu)
-        else:
-            rep = cp.broadcast_to(values[:, None],
-                                  (values.shape[0], n_per_var)).ravel()
-            scatter_add(out, win_idx_gpu, rep * mask_gpu)
-        return out
-
-    n_variants_per_window = np.bincount(
-        k_safe[contains], minlength=n_windows)
     results = _init_window_results(
         chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
-    # Span normalization
-    if span_normalize is not False:
-        if haplotype_matrix.has_accessible_mask:
-            am = haplotype_matrix.accessible_mask
-            spans = am.count_accessible_windows(
-                results['start'], results['end'])
-        elif haplotype_matrix.n_total_sites is not None:
-            total_span = chrom_end - chrom_start + 1
-            spans = (win_stops - win_starts) * haplotype_matrix.n_total_sites / total_span
-        else:
-            spans = win_stops - win_starts
-        # Windows with zero span (fully inaccessible) divide to NaN rather
-        # than 0 — the per-base rate is undefined, not zero. Clamp for
-        # safe division and carry the zero-span mask for post-processing.
-        zero_span = spans <= 0
-        spans = np.maximum(spans, 1.0)
-    else:
-        spans = np.ones(n_windows)
-        zero_span = np.zeros(n_windows, dtype=bool)
+    spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
+                                      span_normalize)
 
     # Compute per-site components (single pass over the data). Only needed
     # for the gamete statistics, not a pure fst_wc request. dxy and the
@@ -1176,6 +1247,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     need_dxy = 'dxy' in stats_set
     if need_fst_da or need_dxy:
         ac1, ac2, nv1, nv2 = divergence._aligned_pop_counts(hap1, hap2)
+        dxy_all_complete = cp.all((nv1 > 0) & (nv2 > 0))
+        da_all_complete = cp.all((nv1 > 1) & (nv2 > 1))
         if need_fst_da:
             mpd1, mpd2, between = divergence._site_components_from_counts(
                 ac1, nv1, ac2, nv2)
@@ -1201,6 +1274,21 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         pi1_sum = scatter_sum(mpd1)
         pi2_sum = scatter_sum(mpd2)
 
+    # Without this, a site with too few calls to contribute would still
+    # count toward the span, reading as invariant rather than unmeasured.
+    # dxy and da need their own count, since they use different site gates.
+    dxy_rescale = da_rescale = None
+    if need_dxy:
+        r = _missing_data_rescale(
+            n_variants_per_window, span_normalize, dxy_all_complete,
+            lambda: scatter_sum(((nv1 > 0) & (nv2 > 0)).astype(cp.float64)).get())
+        dxy_rescale = cp.asarray(r) if r is not None else None
+    if 'da' in stats_set:
+        r = _missing_data_rescale(
+            n_variants_per_window, span_normalize, da_all_complete,
+            lambda: scatter_sum(((nv1 > 1) & (nv2 > 1)).astype(cp.float64)).get())
+        da_rescale = cp.asarray(r) if r is not None else None
+
     # Build output — stay on GPU, single .get() per result
     spans_gpu = cp.asarray(spans)
 
@@ -1212,10 +1300,14 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             results['fst_hudson'] = fst_vals
 
     if 'dxy' in stats_set:
-        results['dxy'] = (dxy_sum / spans_gpu).get()
+        vals = dxy_sum * dxy_rescale if dxy_rescale is not None else dxy_sum
+        results['dxy'] = (vals / spans_gpu).get()
 
     if 'da' in stats_set:
-        results['da'] = ((between_sum - (pi1_sum + pi2_sum) / 2.0) / spans_gpu).get()
+        vals = between_sum - (pi1_sum + pi2_sum) / 2.0
+        if da_rescale is not None:
+            vals = vals * da_rescale
+        results['da'] = (vals / spans_gpu).get()
 
     if 'fst_wc' in stats_set:
         results['fst_wc'] = cp.where(wc_abc_sum > 0, wc_a_sum / wc_abc_sum,
@@ -1281,13 +1373,12 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             "the region eagerly to run it."
         )
 
-    # Parse the BED mask once up front and inject the resolved
-    # AccessibleMask into each chunk -- otherwise windowed_analysis would
-    # re-open and re-parse the BED for every chunk via
-    # haplotype_matrix.set_accessible_mask.
+    # As on the eager path, accessible_bed applies only when the stream has
+    # no mask of its own (iter_gpu_chunks attaches that one). Parse the BED
+    # once up front and hand the resolved AccessibleMask to each chunk, not
+    # the path, which each chunk would re-open and re-parse.
     shared_mask = None
-    if accessible_bed is not None:
-        from .accessible import resolve_accessible_mask
+    if accessible_bed is not None and streaming_hm.accessible_mask is None:
         # The stream knows its contig, so a multi-contig BED needs no chrom.
         shared_mask = resolve_accessible_mask(
             accessible_bed, streaming_hm.chrom_start, streaming_hm.chrom_end,
@@ -1297,7 +1388,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
     parts = []
     for left, right, chunk_hm in streaming_hm.iter_gpu_chunks(skip_empty = False):
         if shared_mask is not None:
-            chunk_hm.accessible_mask = shared_mask
+            chunk_hm.set_accessible_mask(shared_mask)
         df = _windowed_analysis(
             chunk_hm,
             window_size=window_size, step_size=step_size,
@@ -1384,7 +1475,9 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator per window.
+        ``True`` (default): divide each window by its accessible bases if
+        the matrix has a mask; else by its share of ``n_total_sites``, in
+        proportion to the window length; else by the window length.
         ``False``: return raw sums.
     accessible_bed : str, optional
         Path to a BED file defining accessible/callable regions.
@@ -1565,13 +1658,28 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
 
     requested = set(statistics)
 
-    if window_type == 'bp':
+    # Explicit window bounds for region windows, shared by the scatter and
+    # fused engines (bp grids are built per engine from window_size/step_size,
+    # so win_starts/win_stops stay None there). Each window's variant range is
+    # found on its own, so the scatter engine now serves regions too, the same
+    # dispatch rules as bp.
+    win_starts = win_stops = None
+    if window_type == 'regions':
+        regions = kwargs.get('regions')
+        if regions is None:
+            raise ValueError("Regions must be provided for region window type")
+        win_starts = np.asarray(regions['start'], dtype=np.float64)
+        win_stops = np.asarray(regions['end'], dtype=np.float64)
+        if len(win_starts) == 0:
+            return pd.DataFrame()
+
+    if window_type in ('bp', 'regions'):
         # Pure single-pop request
         if requested <= _SCATTER_SINGLE_STATS and len(populations or []) <= 1:
             result = _windowed_thetas_scatter(
                 haplotype_matrix, window_size, step_size,
                 statistics, populations, missing_data, span_normalize,
-                chrom=chrom)
+                chrom=chrom, win_starts=win_starts, win_stops=win_stops)
             if result is not None:
                 return result
 
@@ -1580,7 +1688,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             result = _windowed_twopop_scatter(
                 haplotype_matrix, window_size, step_size,
                 statistics, populations, missing_data, span_normalize,
-                chrom=chrom)
+                chrom=chrom, win_starts=win_starts, win_stops=win_stops)
             if result is not None:
                 return result
 
@@ -1593,11 +1701,11 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             df1 = _windowed_thetas_scatter(
                 haplotype_matrix, window_size, step_size,
                 single_stats, [populations[0]], missing_data, span_normalize,
-                chrom=chrom)
+                chrom=chrom, win_starts=win_starts, win_stops=win_stops)
             df2 = _windowed_twopop_scatter(
                 haplotype_matrix, window_size, step_size,
                 twopop_stats, populations, missing_data, span_normalize,
-                chrom=chrom)
+                chrom=chrom, win_starts=win_starts, win_stops=win_stops)
             if df1 is not None and df2 is not None:
                 # Both DataFrames share the canonical prefix; copy only the
                 # per-stat columns from df2 into df1.
@@ -1628,16 +1736,6 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 and (not (requested & _TWO_POP_STATS)
                      or len(populations or []) == 2))
 
-    if window_type == 'regions':
-        # theta_l, zeng_e, zeng_dh, normalized_fay_wu_h, mean_nsl,
-        # daf_hist, mu_sfs currently not supported with window_type = 'regions'.
-        unsupported_regions = {'theta_l', 'zeng_e', 'zeng_dh', 'normalized_fay_wu_h',
-                                'mean_nsl', 'daf_hist', 'mu_sfs'}
-        if requested & unsupported_regions:
-            raise NotImplementedError(f"{sorted(requested & unsupported_regions)} are not "
-            "supported for window_type='regions'."
-            )
-
     # fused engine can't handle 'snp' windows yet, only local_pca and fallback.
     if window_type == 'snp':
         unsupported_snp = {s for s in requested if isinstance(s, str)} - _fallback_stats()
@@ -1655,11 +1753,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         positions = np.asarray(positions)
 
         if window_type == 'regions':
-            regions = kwargs.get('regions')
-            if regions is None:
-                raise ValueError("Regions must be provided for region window type")
-            win_starts = np.asarray(regions['start'], dtype=np.float64)
-            win_stops = np.asarray(regions['end'], dtype=np.float64)
+            # win_starts / win_stops were extracted from the regions above.
             bp_bins = None
         else:
             chrom_start, chrom_end = _bp_grid_bounds(haplotype_matrix, positions)
@@ -2066,7 +2160,9 @@ void fused_windowed_twopop(const signed char* hap1_t,
                            double* out_pi1_sum,
                            double* out_pi2_sum,
                            double* out_wc_a_sum,
-                           double* out_wc_abc_sum) {
+                           double* out_wc_abc_sum,
+                           double* out_dxy_valid,
+                           double* out_da_valid) {
     int wid = blockIdx.x;
     if (wid >= n_windows) return;
 
@@ -2079,6 +2175,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
             out_dxy_sum[wid] = 0.0;  out_pi1_sum[wid] = 0.0;
             out_pi2_sum[wid] = 0.0;  out_wc_a_sum[wid] = 0.0;
             out_wc_abc_sum[wid] = 0.0;
+            out_dxy_valid[wid] = 0.0;  out_da_valid[wid] = 0.0;
         }
         return;
     }
@@ -2086,6 +2183,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
     double t_fst_num = 0.0, t_fst_den = 0.0;
     double t_dxy = 0.0, t_pi1 = 0.0, t_pi2 = 0.0;
     double t_wc_a = 0.0, t_wc_abc = 0.0;
+    double t_dxy_valid = 0.0, t_da_valid = 0.0;
 
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
@@ -2105,6 +2203,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
                   hom2, het2, half2, &valid2, &nind2);
 
         if (valid1 == 0 || valid2 == 0) continue;
+        t_dxy_valid += 1.0;
 
         double dn1 = (double)valid1;
         double dn2 = (double)valid2;
@@ -2170,6 +2269,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
         // fst/da need Hb and Hw from the same site set (both pops >= 2
         // calls), stricter than dxy alone; see _site_components_from_counts.
         bool joint_pairs = (dn1 > 1.0) && (dn2 > 1.0);
+        if (joint_pairs) t_da_valid += 1.0;
         double mpd1_j = joint_pairs ? mpd1 : 0.0;
         double mpd2_j = joint_pairs ? mpd2 : 0.0;
         double between_j = joint_pairs ? between : 0.0;
@@ -2180,8 +2280,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
         t_pi2 += mpd2_j;
     }
 
-    // Block reduction (7 values)
-    __shared__ double smem[7 * 256];
+    // Block reduction (9 values)
+    __shared__ double smem[9 * 256];
     int tid = threadIdx.x;
     smem[tid]          = t_fst_num;
     smem[256 + tid]    = t_fst_den;
@@ -2190,6 +2290,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
     smem[1024 + tid]   = t_pi2;
     smem[1280 + tid]   = t_wc_a;
     smem[1536 + tid]   = t_wc_abc;
+    smem[1792 + tid]   = t_dxy_valid;
+    smem[2048 + tid]   = t_da_valid;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
@@ -2201,6 +2303,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
             smem[1024 + tid]   += smem[1024 + tid + s];
             smem[1280 + tid]   += smem[1280 + tid + s];
             smem[1536 + tid]   += smem[1536 + tid + s];
+            smem[1792 + tid]   += smem[1792 + tid + s];
+            smem[2048 + tid]   += smem[2048 + tid + s];
         }
         __syncthreads();
     }
@@ -2213,35 +2317,28 @@ void fused_windowed_twopop(const signed char* hap1_t,
         out_pi2_sum[wid]  = smem[1024];
         out_wc_a_sum[wid] = smem[1280];
         out_wc_abc_sum[wid] = smem[1536];
+        out_dxy_valid[wid] = smem[1792];
+        out_da_valid[wid]  = smem[2048];
     }
 }
 ''', 'fused_windowed_twopop')
 
 
-def _compute_window_ranges(positions, bp_bins):
-    """Map window edges to variant index ranges using searchsorted.
-
-    Returns (win_start, win_stop) as CuPy int64 arrays where
-    win_start[i]:win_stop[i] are the variant indices in window i.
-    """
-    n_windows = len(bp_bins) - 1
-    win_start = cp.searchsorted(positions, bp_bins[:-1], side='left')
-    win_stop = cp.searchsorted(positions, bp_bins[1:], side='left')
-    return win_start.astype(cp.int64), win_stop.astype(cp.int64)
-
-
-def _window_site_counts(hap, win_start, win_stop, missing_data):
+def _window_site_counts(hap, windows, missing_data):
     """Sites per window: every site, or under 'exclude' the complete ones.
 
-    Only a Garud-only request reaches an engine still under 'exclude' (see
-    ``_apply_exclude``); its sites are counted here because
-    ``garud_h_windows`` skips the incomplete ones without a filtered copy.
+    The base count is ``windows.counts()`` -- each window's variant-range
+    length. Only a Garud-only request reaches an engine still under 'exclude'
+    (see ``_apply_exclude``); its sites are counted here because
+    ``garud_h_windows`` skips the incomplete ones without a filtered copy, so
+    the incomplete sites in each range are subtracted off.
     """
+    base = windows.counts()
     if missing_data != 'exclude':
-        return win_stop - win_start
+        return base
     n_miss = cp.concatenate([cp.zeros(1, dtype=cp.int64),
                              cp.cumsum(column_has_missing(hap), dtype=cp.int64)])
-    return (win_stop - win_start) - (n_miss[win_stop] - n_miss[win_start])
+    return base - (n_miss[windows.stop] - n_miss[windows.start])
 
 
 def _apply_exclude(haplotype_matrix, missing_data, statistics, population,
@@ -2322,8 +2419,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         Populations for two-pop statistics.
     per_base : bool
         Normalize by window size in base pairs.
-    is_accessible : array_like, optional
-        Accessibility mask for per-base normalization.
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Accessibility for per-base normalization, in place of the matrix's
+        mask; a bool array has element 0 at position 1, as in scikit-allel.
     missing_data : {'include', 'exclude'}
         'include' uses every site with the calls it has. 'exclude' keeps
         only sites with no missing call in the rows the request reads (see
@@ -2394,36 +2492,36 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         matrix = matrix.get_subset(cap_keep)
     n_total_var = hap_raw.shape[1]
 
-    # Support overlapping windows via explicit start/stop arrays
+    # Window bounds in bp: either explicit start/stop arrays (overlapping bp
+    # grids and custom regions) or contiguous bp bin edges.
     if _win_starts is not None and _win_stops is not None:
         ws_gpu = cp.asarray(_win_starts, dtype=cp.float64)
         we_gpu = cp.asarray(_win_stops, dtype=cp.float64)
-        n_windows = len(ws_gpu)
-        win_start = cp.searchsorted(positions, ws_gpu, side='left').astype(cp.int64)
-        win_stop = cp.searchsorted(positions, we_gpu, side='left').astype(cp.int64)
     elif bp_bins is not None:
         bp_bins_gpu = cp.asarray(bp_bins, dtype=cp.float64)
-        n_windows = len(bp_bins_gpu) - 1
-        win_start, win_stop = _compute_window_ranges(positions, bp_bins_gpu)
         ws_gpu = bp_bins_gpu[:-1]
         we_gpu = bp_bins_gpu[1:]
     else:
         raise ValueError('bp_bins and _win_starts/_win_stops must not both be None.')
 
+    # One membership rule for every window family: each window's contiguous
+    # variant range, and the per-window reductions over it. win_start/win_stop
+    # feed the fused kernels; the per-site stats use the accumulator's methods.
+    windows = _WindowAccumulator(positions, ws_gpu, we_gpu)
+    win_start, win_stop = windows.start, windows.stop
+    n_windows = windows.n_windows
+
     excluded_to_empty = None
     if orig_missing_data == 'exclude' and 'max_daf' in statistics:
-        orig_lo = cp.searchsorted(orig_positions_gpu, ws_gpu, side='left')
-        orig_hi = cp.searchsorted(orig_positions_gpu, we_gpu, side='left')
-        excluded_to_empty = ((orig_hi > orig_lo) & (win_stop == win_start)).get()
-
+        excluded_to_empty = _windows_emptied_by_exclude(orig_positions_gpu, windows, ws_gpu, we_gpu)
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
     # overwrite below with a missing-data-aware count.
+    n_variants_raw = _window_site_counts(hap_raw, windows,
+                                         missing_data).get()
     results = _init_window_results(
-        chrom, ws_cpu, we_cpu,
-        n_variants=_window_site_counts(hap_raw, win_start, win_stop,
-                                       missing_data).get())
+        chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
 
     window_bases = None
     if per_base:
@@ -2473,11 +2571,17 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
+        rescale = _missing_data_rescale(var_count, per_base, False,
+                                        lambda: count_valid_w)
+
         if 'pi' in statistics:
-            results['pi'] = _rate(mpd_sum, window_bases, per_base)
+            vals = mpd_sum * rescale if rescale is not None else mpd_sum
+            results['pi'] = _rate(vals, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
+            vals = (watterson_num_w * rescale if rescale is not None
+                    else watterson_num_w)
+            results['theta_w'] = _rate(vals, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -2491,11 +2595,13 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
+            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
+            results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
-                                        per_base)
+            # A difference of two estimators, not a rate: no span-normalized
+            # form, so it never goes through _rate.
+            results['fay_wu_h'] = mpd_sum - theta_h_sum
 
         if 'max_daf' in statistics:
             if excluded_to_empty is not None:
@@ -2536,6 +2642,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         out_pi2 = cp.zeros(n_windows, dtype=cp.float64)
         out_wc_a = cp.zeros(n_windows, dtype=cp.float64)
         out_wc_abc = cp.zeros(n_windows, dtype=cp.float64)
+        out_dxy_valid = cp.zeros(n_windows, dtype=cp.float64)
+        out_da_valid = cp.zeros(n_windows, dtype=cp.float64)
         need_wc = 'fst_wc' in statistics
 
         block = 256
@@ -2548,7 +2656,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
              np.int32(n_total_var), np.int32(n_windows),
              np.int32(need_wc),
              out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
-             out_wc_a, out_wc_abc))
+             out_wc_a, out_wc_abc, out_dxy_valid, out_da_valid))
 
         # Post-process on GPU, single .get() per result
         if 'fst' in statistics or 'fst_hudson' in statistics:
@@ -2563,17 +2671,27 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             results['fst_wc'] = cp.where(out_wc_abc > 0,
                                           out_wc_a / out_wc_abc, cp.nan).get()
 
+        # Without this, a site with too few calls to contribute would still
+        # count toward the span, reading as invariant rather than unmeasured.
+        # dxy and da need their own count, since they use different site gates.
         if 'dxy' in statistics:
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: out_dxy_valid.get())
+            vals = out_dxy * cp.asarray(r) if r is not None else out_dxy
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['dxy'] = cp.where(wb > 0,
-                                          out_dxy / wb, cp.nan).get()
+                                          vals / wb, cp.nan).get()
             else:
-                results['dxy'] = out_dxy.get()
+                results['dxy'] = vals.get()
 
         if 'da' in statistics:
             # da's between term is fst's (both pops >= 2 calls), not dxy's.
             da_sum = out_fst_den - (out_pi1 + out_pi2) / 2.0
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: out_da_valid.get())
+            if r is not None:
+                da_sum = da_sum * cp.asarray(r)
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['da'] = cp.where(wb > 0,
@@ -2586,39 +2704,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results,
                                missing_data=missing_data)
 
-    # Per-site stats binned into windows via scatter_add. A variant belongs
-    # to window w iff ws[w] <= pos < we[w] -- the same right-open rule
-    # win_start / win_stop and n_variants use. Searching the window ENDS
-    # would put a variant sitting exactly on a boundary (pos == a window end
-    # == the next window's start) in the lower window, disagreeing with
-    # n_variants. Windows may also overlap (step < window), where a variant
-    # belongs to every window covering it, not just one. Both window
-    # families here have nondecreasing starts and ends, so the member
-    # windows of a variant are the consecutive run [k_lo, k_hi]: k_hi is
-    # the last window whose start is <= pos, k_lo the first whose end is
-    # > pos. Row j of site_win holds candidate k_hi - j; site_ok masks the
-    # rows outside the run. For contiguous windows the run has length one
-    # and the arrays stay (1, n_var).
-    if any(s in statistics for s in _PER_SITE_SCATTER_STATS):
-        k_hi = cp.searchsorted(ws_gpu, positions, side='right') - 1
-        k_lo = cp.searchsorted(we_gpu, positions, side='right')
-        # n_per_var is grid geometry, not data: coverage depth (windows j
-        # with ws[j] <= x < we[j]) is maximized at a window start, and the
-        # window arrays are already on the host. An upper bound on any
-        # variant's run length; site_ok masks unused rows.
-        depth = (np.searchsorted(ws_cpu, ws_cpu, side='right')
-                 - np.searchsorted(we_cpu, ws_cpu, side='right'))
-        n_per_var = max(1, int(depth.max(initial=0)))
-        site_win = (k_hi[None, :]
-                    - cp.arange(n_per_var, dtype=cp.int64)[:, None])
-        # site_win <= k_hi <= n_windows - 1 by construction, so k_lo is the
-        # only bound that can exclude a candidate (k_lo >= 0 also rules out
-        # the negative rows below the first window).
-        site_ok = site_win >= k_lo[None, :]
-
-        def _expand(v):
-            """Zero-copy view of a per-variant array at site_win's shape."""
-            return cp.broadcast_to(v, site_win.shape)
+    # Per-site stats binned into windows. A variant belongs to window w iff
+    # ws[w] <= pos < we[w] -- the same right-open variant range win_start /
+    # win_stop and n_variants use -- so each is a prefix-sum range query over
+    # the window's range (``windows``), correct under overlap and for unordered
+    # or nested regions alike without any per-(variant, window) membership.
 
     # Shared per-allele counts (used by daf_hist and mu_sfs). Per-derived-allele,
     # per-site n_valid -- the same convention as diversity.daf_histogram / mu_sfs,
@@ -2637,30 +2727,22 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         # chunk boundaries (see _stream_windowed_analysis).
         # nsl() returns (n_var,) for biallelic data and (n_var, n_derived)
         # when multiallelic focal sites are present; average every finite
-        # (site, allele) score in every window the site belongs to.
+        # (site, allele) score in every window the site belongs to -- the
+        # 2-D per-site mean the accumulator reduces over its finite entries.
         nsl_2d = cp.asarray(sel.nsl(matrix)).reshape(matrix.num_variants, -1)
-        vals, wins = cp.broadcast_arrays(nsl_2d[None, :, :],
-                                         site_win[:, :, None])
-        valid = cp.isfinite(vals) & site_ok[:, :, None]
-        results['mean_nsl'] = _windowed_mean(vals, wins, valid, n_windows)
+        results['mean_nsl'] = windows.mean(nsl_2d).get()
 
     if 'het_expected' in statistics:
         # Per-window mean of per-site expected heterozygosity over the sites
-        # with a defined value. Each window is the variant range
-        # [win_start, win_stop), so prefix sums of the non-NaN He and of their
-        # count give the mean for any window family -- including unordered or
-        # overlapping regions, which the site_win path above cannot serve.
+        # with a defined value, NaN for a window with none -- the per-site-range
+        # mean (``windows.mean``) every other per-site stat here now shares,
+        # serving any window family including unordered or overlapping regions.
         # matrix is already population-subsetted and allele-cap-filtered
         # upstream; missing_data is 'include' here (see _apply_exclude). Reuses
         # the scalar's per-site rule via the CuPy helper, with no host round trip.
         he = diversity._heterozygosity_expected_sites(
             matrix, missing_data=missing_data)                # (n_var,) CuPy
-        ok = ~cp.isnan(he)
-        csum = cp.concatenate([cp.zeros(1), cp.cumsum(cp.where(ok, he, 0.0))])
-        ccnt = cp.concatenate([cp.zeros(1), cp.cumsum(ok.astype(cp.float64))])
-        n_ok = ccnt[win_stop] - ccnt[win_start]
-        results['het_expected'] = cp.where(
-            n_ok > 0, (csum[win_stop] - csum[win_start]) / n_ok, cp.nan).get()
+        results['het_expected'] = windows.mean(he, valid=~cp.isnan(he)).get()
 
     # SNP distance stats per window
     if not _SNP_DIST_STATS.isdisjoint(statistics):
@@ -2701,22 +2783,22 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             if stat in statistics:
                 results[stat] = arr
 
-    # DAF histogram per window (GPU scatter). One entry per present derived
-    # allele (freq = count / n_valid), scattered into (window, bin) and
-    # normalized per window -- matching diversity.daf_histogram.
+    # DAF histogram per window. One entry per present derived allele
+    # (freq = count / n_valid), binned per site into (site, daf_bin) and then
+    # summed over each window's variant range, normalized per window --
+    # matching diversity.daf_histogram.
     if 'daf_hist' in statistics:
         nv = cp.maximum(nv_daf.astype(cp.float64), 1.0)[:, None]
         freq = derived.astype(cp.float64) / nv                   # per (site, allele)
         dbin = diversity._daf_bin_index(freq, N_DAF_BINS)
-        # One entry per present derived allele at a non-missing site, in
-        # every window the site belongs to.
-        keep = (((derived > 0) & (nv_daf[:, None] > 0))[None, :, :]
-                & site_ok[:, :, None])
-        composite = site_win[:, :, None] * N_DAF_BINS + dbin[None, :, :]
-        member = composite[keep]
-        flat = _scatter_sum(cp.ones_like(member, dtype=cp.float64),
-                            member, n_windows * N_DAF_BINS)
-        hist_matrix = flat.get().reshape(n_windows, N_DAF_BINS)
+        # One entry per segregating derived allele (present, not fixed),
+        # tallied into a per-site histogram; the window histogram is the
+        # range sum.
+        keep = (derived > 0) & (derived < nv_daf[:, None])       # (n_var, K-1)
+        site_hist = cp.zeros((matrix.num_variants, N_DAF_BINS), dtype=cp.float64)
+        kv, ka = cp.where(keep)
+        cp.add.at(site_hist, (kv, dbin[kv, ka]), 1.0)
+        hist_matrix = windows.sum2d(site_hist).get()            # (n_windows, N)
         row_sum = hist_matrix.sum(axis=1, keepdims=True)
         hist_matrix = np.divide(hist_matrix, row_sum,
                                 out=np.zeros_like(hist_matrix),
@@ -2731,14 +2813,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         is_seg = (derived > 0) & (derived < nvc)                 # (n_var, K-1)
         is_edge = is_seg & ((derived == 1) | (derived == nvc - 1))
         # The window index depends only on the site, so sum the per-allele
-        # counts per site first, then scatter into each membership.
+        # counts per site first, then range-sum over each window.
         seg_site = is_seg.sum(axis=1).astype(cp.float64)         # (n_var,)
         edge_site = is_edge.sum(axis=1).astype(cp.float64)
-        member_win = site_win[site_ok]
-        seg_sum = _scatter_sum(_expand(seg_site)[site_ok], member_win,
-                               n_windows)
-        edge_sum = _scatter_sum(_expand(edge_site)[site_ok], member_win,
-                                n_windows)
+        seg_sum = windows.sum(seg_site)
+        edge_sum = windows.sum(edge_site)
         # 0/0 is NaN for a window with no segregating entry
         results['mu_sfs'] = (edge_sum / seg_sum).get()
 
@@ -2889,36 +2968,32 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         cap_source=haplotype_matrix.haplotypes if two_pop_requested else None)
     n_total_var = hap_raw.shape[1]
 
-    # Window ranges (same setup as non-chunked)
+    # Window ranges (same membership rule as non-chunked)
     if _win_starts is not None and _win_stops is not None:
         ws_gpu = cp.asarray(_win_starts, dtype=cp.float64)
         we_gpu = cp.asarray(_win_stops, dtype=cp.float64)
-        n_windows = len(ws_gpu)
-        win_start = cp.searchsorted(positions, ws_gpu, side='left').astype(cp.int64)
-        win_stop = cp.searchsorted(positions, we_gpu, side='left').astype(cp.int64)
     elif bp_bins is not None:
         bp_bins_gpu = cp.asarray(bp_bins, dtype=cp.float64)
-        n_windows = len(bp_bins_gpu) - 1
-        win_start, win_stop = _compute_window_ranges(positions, bp_bins_gpu)
         ws_gpu = bp_bins_gpu[:-1]
         we_gpu = bp_bins_gpu[1:]
     else:
         raise ValueError('bp_bins and _win_starts/_win_stops must not both be None.')
 
+    windows = _WindowAccumulator(positions, ws_gpu, we_gpu)
+    win_start, win_stop = windows.start, windows.stop
+    n_windows = windows.n_windows
+
     excluded_to_empty = None
     if orig_missing_data == 'exclude' and 'max_daf' in statistics:
-        orig_lo = cp.searchsorted(orig_positions_gpu, ws_gpu, side='left')
-        orig_hi = cp.searchsorted(orig_positions_gpu, we_gpu, side='left')
-        excluded_to_empty = ((orig_hi > orig_lo) & (win_stop == win_start)).get()
+        excluded_to_empty = _windows_emptied_by_exclude(orig_positions_gpu, windows, ws_gpu, we_gpu)
 
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
     # overwrite below with a missing-data-aware count.
+    n_variants_raw = _window_site_counts(hap_raw, windows, missing_data).get()
     results = _init_window_results(
-        chrom, ws_cpu, we_cpu,
-        n_variants=_window_site_counts(hap_raw, win_start, win_stop,
-                                       missing_data).get())
+        chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
 
     window_bases = None
     if per_base:
@@ -3011,11 +3086,17 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
+        rescale = _missing_data_rescale(var_count, per_base, False,
+                                        lambda: count_valid_w)
+
         if 'pi' in statistics:
-            results['pi'] = _rate(mpd_sum, window_bases, per_base)
+            vals = mpd_sum * rescale if rescale is not None else mpd_sum
+            results['pi'] = _rate(vals, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
+            vals = (watterson_num_w * rescale if rescale is not None
+                    else watterson_num_w)
+            results['theta_w'] = _rate(vals, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -3029,11 +3110,13 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
+            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
+            results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
-                                        per_base)
+            # A difference of two estimators, not a rate: no span-normalized
+            # form, so it never goes through _rate.
+            results['fay_wu_h'] = mpd_sum - theta_h_sum
 
         if 'max_daf' in statistics:
             if excluded_to_empty is not None:
@@ -3094,6 +3177,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         acc_pi2 = cp.zeros(n_windows, dtype=cp.float64)
         acc_wc_a = cp.zeros(n_windows, dtype=cp.float64)
         acc_wc_abc = cp.zeros(n_windows, dtype=cp.float64)
+        acc_dxy_valid = cp.zeros(n_windows, dtype=cp.float64)
+        acc_da_valid = cp.zeros(n_windows, dtype=cp.float64)
 
         for c_start in range(0, n_total_var, twopop_chunk):
             c_end = min(c_start + twopop_chunk, n_total_var)
@@ -3127,6 +3212,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             out_pi2 = cp.zeros(n_overlap, dtype=cp.float64)
             out_wc_a = cp.zeros(n_overlap, dtype=cp.float64)
             out_wc_abc = cp.zeros(n_overlap, dtype=cp.float64)
+            out_dxy_valid = cp.zeros(n_overlap, dtype=cp.float64)
+            out_da_valid = cp.zeros(n_overlap, dtype=cp.float64)
 
             _fused_windowed_twopop_kernel(
                 (int(n_overlap),), (256,),
@@ -3135,13 +3222,15 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                  np.int32(n_chunk_var), np.int32(n_overlap),
                  np.int32(need_wc),
                  out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
-                 out_wc_a, out_wc_abc))
+                 out_wc_a, out_wc_abc, out_dxy_valid, out_da_valid))
 
             cp.add.at(acc_fst_num, w_idx, out_fst_num)
             cp.add.at(acc_fst_den, w_idx, out_fst_den)
             cp.add.at(acc_dxy, w_idx, out_dxy)
             cp.add.at(acc_pi1, w_idx, out_pi1)
             cp.add.at(acc_pi2, w_idx, out_pi2)
+            cp.add.at(acc_dxy_valid, w_idx, out_dxy_valid)
+            cp.add.at(acc_da_valid, w_idx, out_da_valid)
             if need_wc:
                 cp.add.at(acc_wc_a, w_idx, out_wc_a)
                 cp.add.at(acc_wc_abc, w_idx, out_wc_abc)
@@ -3162,17 +3251,27 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             results['fst_wc'] = cp.where(acc_wc_abc > 0,
                                           acc_wc_a / acc_wc_abc, cp.nan).get()
 
+        # Without this, a site with too few calls to contribute would still
+        # count toward the span, reading as invariant rather than unmeasured.
+        # dxy and da need their own count, since they use different site gates.
         if 'dxy' in statistics:
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: acc_dxy_valid.get())
+            vals = acc_dxy * cp.asarray(r) if r is not None else acc_dxy
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['dxy'] = cp.where(wb > 0,
-                                          acc_dxy / wb, cp.nan).get()
+                                          vals / wb, cp.nan).get()
             else:
-                results['dxy'] = acc_dxy.get()
+                results['dxy'] = vals.get()
 
         if 'da' in statistics:
             # da's between term is fst's (both pops >= 2 calls), not dxy's.
             da_sum = acc_fst_den - (acc_pi1 + acc_pi2) / 2.0
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: acc_da_valid.get())
+            if r is not None:
+                da_sum = da_sum * cp.asarray(r)
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['da'] = cp.where(wb > 0,
@@ -3206,15 +3305,6 @@ def _rate(total, window_bases, per_base):
     return np.where(window_bases > 0, total / window_bases, np.nan)
 
 
-def _windowed_mean(values, bin_idx, valid_mask, n_bins):
-    """Compute mean of values per window bin, returning NaN for empty bins."""
-    val_sum = _scatter_sum(values[valid_mask], bin_idx[valid_mask], n_bins)
-    val_count = _bin_counts(bin_idx[valid_mask], n_bins)
-    sum_cpu = val_sum.get()
-    count_cpu = val_count.get()
-    return np.where(count_cpu > 0, sum_cpu / count_cpu, np.nan)
-
-
 def _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results,
                            missing_data='include'):
     """Windowed Garud's H and distinct-haplotype count into ``results``.
@@ -3232,19 +3322,3 @@ def _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results,
     results['n_complete_haplotypes'] = n_complete
 
 
-# ---------------------------------------------------------------------------
-# GPU-native windowed statistics: compute once, bin everywhere
-# ---------------------------------------------------------------------------
-
-def _scatter_sum(values, bin_idx, n_bins):
-    """Sum values into bins using scatter_add on GPU."""
-    result = cp.zeros(n_bins, dtype=cp.float64)
-    valid = (bin_idx >= 0) & (bin_idx < n_bins)
-    cp.add.at(result, bin_idx[valid], values[valid])
-    return result
-
-
-def _bin_counts(bin_idx, n_bins):
-    """Count variants per bin on GPU."""
-    valid = (bin_idx >= 0) & (bin_idx < n_bins)
-    return cp.bincount(bin_idx[valid], minlength=n_bins)
