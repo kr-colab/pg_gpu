@@ -1046,9 +1046,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             max_daf_arr = np.where(excluded_to_empty, np.nan, max_daf_arr)
         results['max_daf'] = max_daf_arr
 
-    # Composite stats from raw theta sums
+    # Composite stats from raw theta sums. fay_wu_h is a difference of two
+    # estimators, not a rate, so it has no span-normalized form.
     if 'fay_wu_h' in stats_set:
-        results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get() / spans
+        results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get()
 
     # Neutrality tests — Achaz (2009) variance framework, with the effective
     # sample size the per-window harmonic mean of n_valid rather than the
@@ -1089,9 +1090,11 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         if 'tajimas_d' in stats_set:
             results['tajimas_d'] = tajd
 
-    if 'normalized_fay_wu_h' in stats_set:
-        results['normalized_fay_wu_h'] = windowed_test(
-            'pi', 'theta_h', raw['pi'].get() - raw['theta_h'].get())
+    if stats_set & {'normalized_fay_wu_h', 'zeng_dh'}:
+        h_star = windowed_test('pi', 'theta_h',
+                               raw['pi'].get() - raw['theta_h'].get())
+        if 'normalized_fay_wu_h' in stats_set:
+            results['normalized_fay_wu_h'] = h_star
 
     if 'zeng_e' in stats_set:
         results['zeng_e'] = windowed_test(
@@ -1099,13 +1102,13 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             raw['theta_l'].get() - raw['watterson'].get())
 
     if 'zeng_dh' in stats_set:
-        H = (raw['pi'] - raw['theta_h']).get() / spans
-        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, H)
+        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, h_star)
 
     # Windows with no accessible bases get NaN for every per-base rate.
+    # fay_wu_h and zeng_dh have no span-normalized form, so a zero-span
+    # window doesn't make them undefined.
     if zero_span.any():
-        for name in ('pi', 'theta_w', 'theta_h', 'theta_l',
-                     'fay_wu_h', 'zeng_dh'):
+        for name in ('pi', 'theta_w', 'theta_h', 'theta_l'):
             if name in results:
                 results[name] = np.where(zero_span, np.nan, results[name])
 
@@ -2553,8 +2556,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
-                                        per_base)
+            # A difference of two estimators, not a rate: no span-normalized
+            # form, so it never goes through _rate.
+            results['fay_wu_h'] = mpd_sum - theta_h_sum
 
         if 'max_daf' in statistics:
             if excluded_to_empty is not None:
@@ -3110,8 +3114,9 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
-                                        per_base)
+            # A difference of two estimators, not a rate: no span-normalized
+            # form, so it never goes through _rate.
+            results['fay_wu_h'] = mpd_sum - theta_h_sum
 
         if 'max_daf' in statistics:
             if excluded_to_empty is not None:

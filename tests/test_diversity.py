@@ -435,17 +435,17 @@ class TestNeutralityTests:
 
     def test_zeng_dh_sweep_signal(self):
         # Post-sweep-like SFS: excess singletons (Tajima's D < 0) and excess
-        # high-frequency derived alleles (Fay-Wu H < 0) -> DH = D * H > 0.
+        # high-frequency derived alleles (H* < 0) -> DH = D * H* > 0.
         n = 10
         hap = np.zeros((n, 40), dtype=np.int8)
         hap[0, :20] = 1     # 20 singletons (derived count 1)
         hap[:9, 20:] = 1    # 20 near-fixed derived (count 9)
         hm = HaplotypeMatrix(hap, np.arange(40) * 100, 0, 4000)
         d = diversity.tajimas_d(hm)
-        h = diversity.fay_wus_h(hm)
-        assert d < 0 and h < 0
+        h_star = diversity.normalized_fay_wus_h(hm)
+        assert d < 0 and h_star < 0
         dh = diversity.zeng_dh(hm)
-        assert dh == pytest.approx(d * h)
+        assert dh == pytest.approx(d * h_star)
         assert dh > 0
 
     def test_zeng_dh_zero_when_not_swept(self):
