@@ -18,6 +18,12 @@ from ._utils import _eager_only, population_rows
 from ._warnings import _phase_dependent, _warn_unphased
 
 
+def _emptied_by_exclude(orig_num_variants, matrix, missing_data):
+    """True when 'exclude' filtering removed every variant the matrix had."""
+    return (missing_data == 'exclude' and orig_num_variants > 0
+            and matrix.num_variants == 0)
+
+
 def _apply_span_normalize(value, matrix, span_normalize, n_sites_with_data=None):
     """Apply span normalization to a raw statistic value.
 
@@ -896,7 +902,10 @@ def pi(haplotype_matrix: HaplotypeMatrix,
     float
         Nucleotide diversity value
     """
+    orig_num_variants = haplotype_matrix.num_variants
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if _emptied_by_exclude(orig_num_variants, matrix, missing_data):
+        return float('nan')
     result = _compute_thetas(matrix, ('pi',))
     return _apply_span_normalize(result['thetas']['pi'], matrix, span_normalize,
                                  result['n_sites_with_data'])
@@ -933,7 +942,10 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
     float
         Watterson's theta value
     """
+    orig_num_variants = haplotype_matrix.num_variants
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if _emptied_by_exclude(orig_num_variants, matrix, missing_data):
+        return float('nan')
     result = _compute_thetas(matrix, ('watterson',))
     return _apply_span_normalize(result['thetas']['watterson'], matrix, span_normalize,
                                  result['n_sites_with_data'])
@@ -1311,7 +1323,10 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     -------
     float
     """
+    orig_num_variants = haplotype_matrix.num_variants
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if _emptied_by_exclude(orig_num_variants, matrix, missing_data):
+        return float('nan')
     result = _compute_thetas(matrix, ('theta_h',))
     return _apply_span_normalize(result['thetas']['theta_h'], matrix, span_normalize,
                                  result['n_sites_with_data'])
@@ -1347,7 +1362,10 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     -------
     float
     """
+    orig_num_variants = haplotype_matrix.num_variants
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
+    if _emptied_by_exclude(orig_num_variants, matrix, missing_data):
+        return float('nan')
     result = _compute_thetas(matrix, ('theta_l',))
     return _apply_span_normalize(result['thetas']['theta_l'], matrix, span_normalize,
                                  result['n_sites_with_data'])
