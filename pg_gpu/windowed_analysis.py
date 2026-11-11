@@ -1247,9 +1247,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     # dxy/da; one with no variant to begin with stays 0.0.
     excluded_to_empty = None
     if missing_data == 'exclude' and (stats_set & {'dxy', 'da'}):
-        lo = np.searchsorted(pos_cpu_pre_exclude, win_starts, side='left')
-        hi = np.searchsorted(pos_cpu_pre_exclude, win_stops, side='left')
-        excluded_to_empty = (hi > lo) & (n_variants_per_window == 0)
+        excluded_to_empty = _windows_emptied_by_exclude(
+            pos_cpu_pre_exclude, windows, win_starts, win_stops)
 
     # Compute per-site components (single pass over the data). Only needed
     # for the gamete statistics, not a pure fst_wc request. dxy and the

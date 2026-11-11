@@ -9,6 +9,7 @@ complete sites.
 """
 import cupy as cp
 import numpy as np
+import pandas as pd
 import pytest
 
 from pg_gpu import HaplotypeMatrix, diversity, divergence, distance_stats, ld_statistics, selection
@@ -380,6 +381,85 @@ def test_dxy_da_nan_when_exclude_empties_a_window_with_data():
     window0.sample_sets = {"p1": [0, 1], "p2": [2, 3]}
     assert np.isnan(divergence.dxy(window0, "p1", "p2", missing_data='exclude'))
     assert np.isnan(divergence.da(window0, "p1", "p2", missing_data='exclude'))
+
+
+def _unordered_overlapping_region_case():
+    # Two sites (10, 20) missing in every sample; three complete sites
+    # (30, 40, 50). Regions given out of order and overlapping:
+    #   [25, 100) -- complete data, 3 variants
+    #   [0, 30)   -- 2 variants (10, 20), both excluded -- emptied
+    #   [100, 200) -- no variant at all
+    #   [5, 25)   -- overlaps [0, 30), same 2 variants excluded -- emptied
+    rng = np.random.default_rng(3)
+    hap = rng.integers(0, 2, (8, 5)).astype(np.int8)
+    hap[:, 0] = -1
+    hap[:, 1] = -1
+    pos = np.array([10, 20, 30, 40, 50])
+    hm = HaplotypeMatrix(hap, pos, 0, 300)
+    hm.sample_sets = {"p1": [0, 1, 2, 3], "p2": [4, 5, 6, 7]}
+    regions = pd.DataFrame({'start': [25, 0, 100, 5], 'end': [100, 30, 200, 25]})
+    return hm, regions
+
+
+def test_rate_stats_nan_for_region_windows_emptied_by_exclude():
+    # Overlapping, unordered window_type='regions' windows on the scatter
+    # engine follow the same exclude-emptied rule as bp windows, for two
+    # windows that lose all their data to 'exclude' (rows 1 and 3, which
+    # overlap) at once.
+    hm, regions = _unordered_overlapping_region_case()
+    rate_stats = ['pi', 'theta_w', 'theta_h', 'theta_l']
+
+    scatter = windowed_analysis(hm, window_type='regions', regions=regions,
+                                statistics=rate_stats, missing_data='exclude',
+                                span_normalize=False)
+    assert scatter['n_variants'].tolist() == [3, 0, 0, 0]
+    for name in rate_stats:
+        assert np.isfinite(scatter[name].iloc[0]), name
+        assert np.isnan(scatter[name].iloc[1]), name
+        assert scatter[name].iloc[2] == 0.0, name
+        assert np.isnan(scatter[name].iloc[3]), name
+
+    ws = regions['start'].to_numpy(dtype=np.float64)
+    we = regions['end'].to_numpy(dtype=np.float64)
+    fused_stats = ['pi', 'theta_w', 'theta_h']  # theta_l has no fused path
+    for engine in (windowed_statistics_fused, windowed_statistics_fused_chunked):
+        out = engine(hm, statistics=tuple(fused_stats), _win_starts=ws, _win_stops=we,
+                     missing_data='exclude', per_base=False)
+        np.testing.assert_array_equal(out['n_variants'], [3, 0, 0, 0])
+        for name in fused_stats:
+            assert np.isfinite(out[name][0]), name
+            assert np.isnan(out[name][1]), name
+            assert out[name][2] == 0.0, name
+            assert np.isnan(out[name][3]), name
+
+
+def test_dxy_da_nan_for_region_windows_emptied_by_exclude():
+    # Same overlapping, unordered regions as the rate-stats case, for the
+    # two-population scatter and fused engines.
+    hm, regions = _unordered_overlapping_region_case()
+
+    scatter = windowed_analysis(hm, window_type='regions', regions=regions,
+                                statistics=['dxy', 'da'], populations=['p1', 'p2'],
+                                missing_data='exclude', span_normalize=False)
+    assert scatter['n_variants'].tolist() == [3, 0, 0, 0]
+    for name in ('dxy', 'da'):
+        assert np.isfinite(scatter[name].iloc[0]), name
+        assert np.isnan(scatter[name].iloc[1]), name
+        assert scatter[name].iloc[2] == 0.0, name
+        assert np.isnan(scatter[name].iloc[3]), name
+
+    ws = regions['start'].to_numpy(dtype=np.float64)
+    we = regions['end'].to_numpy(dtype=np.float64)
+    for engine in (windowed_statistics_fused, windowed_statistics_fused_chunked):
+        out = engine(hm, statistics=('dxy', 'da'), pop1='p1', pop2='p2',
+                     _win_starts=ws, _win_stops=we,
+                     missing_data='exclude', per_base=False)
+        np.testing.assert_array_equal(out['n_variants'], [3, 0, 0, 0])
+        for name in ('dxy', 'da'):
+            assert np.isfinite(out[name][0]), name
+            assert np.isnan(out[name][1]), name
+            assert out[name][2] == 0.0, name
+            assert np.isnan(out[name][3]), name
 
 
 def test_streaming_exclude_matches_scalar(tmp_path):
