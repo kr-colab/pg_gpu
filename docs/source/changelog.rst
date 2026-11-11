@@ -745,6 +745,13 @@ Bug fixes
   frequencies (and so could ``n_invariant_sites``, which is computed from
   it). It now counts a site as segregating when at least two distinct
   alleles are present among the non-missing haplotypes.
+* ``pi``, ``theta_w``, ``theta_h``, ``theta_l``, ``dxy`` and ``da`` gave
+  0.0, not NaN, when ``missing_data='exclude'`` removed every variant a
+  matrix or window originally had. They now give NaN in that case, the
+  same convention ``max_daf`` already used; 0.0 stays for a matrix or
+  window with no variant to begin with. This covers the scalar
+  functions, ``diversity_stats``'s theta/eta-family batch, and the
+  scatter and fused windowed engines.
 
 New warnings
 ~~~~~~~~~~~~

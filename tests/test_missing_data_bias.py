@@ -296,6 +296,27 @@ class TestSpanNormalizedRescale:
                                  "minus_eta1_star"])
         assert all(np.isnan(v) for v in stats.values())
 
+    def test_diversity_stats_nan_when_exclude_empties_a_matrix_with_data(self):
+        # diversity_stats has its own _prepare_matrix + _compute_thetas path,
+        # separate from pi/theta_w/theta_h/theta_l themselves, so it needs
+        # its own emptied-by-exclude check: the matrix had variants, but
+        # 'exclude' removed every one of them -- NaN, not 0.0.
+        rng = np.random.default_rng(5)
+        n_hap, n_var = 10, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:] = -1  # population b missing at every site
+        hm = self._pop_b(hap, n_var)
+        stats = diversity.diversity_stats(
+            hm, "b", statistics=["pi", "theta_w", "theta_h", "theta_l", "eta1"],
+            missing_data='exclude')
+        assert all(np.isnan(v) for v in stats.values())
+        # A window with no variant to begin with stays 0.0, not NaN.
+        empty = hm.get_subset_from_range(n_var * 10, n_var * 10 + 1)
+        empty.sample_sets = hm.sample_sets
+        stats_empty = diversity.diversity_stats(
+            empty, "b", statistics=["pi", "theta_w"], missing_data='exclude')
+        assert all(v == 0.0 for v in stats_empty.values())
+
 
 class TestDivergenceSpanNormalizedRescale:
     """dxy/da rescale their raw sum to the sites where each population has
