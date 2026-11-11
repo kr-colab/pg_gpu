@@ -241,7 +241,8 @@ class TestWindowedAnalyzer:
         assert results['n_variants'].sum() == in_region
 
     def test_compute_region_without_variants(self):
-        """A region that covers no variant gives no windows, not an error."""
+        """A region that covers no variant gives its empty windows, with the
+        values the scatter and fused engines give them, not an error."""
         positions = np.array([1000, 2000, 900000])
         haplotypes = np.random.randint(0, 2, size=(10, 3))
         matrix = HaplotypeMatrix(haplotypes, positions, 1, 999999)
@@ -252,7 +253,9 @@ class TestWindowedAnalyzer:
         results = analyzer.compute_region(matrix, '1', 400000, 500000)
 
         assert isinstance(results, pd.DataFrame)
-        assert len(results) == 0
+        assert len(results) == 10
+        assert (results['n_variants'] == 0).all()
+        assert (results['pi'] == 0.0).all()
 
     def test_population_analysis(self):
         """Test analysis with multiple populations."""
@@ -1983,10 +1986,9 @@ class TestFusedPerSiteWindowMembership:
 
 
 def _region_case(seed=0):
-    """A matrix plus custom regions (unsorted, overlapping/nested, gapped, all
-    populated) for the regions-dispatch agreement tests. Every region holds at
-    least one variant so the fallback -- which skips empty regions -- yields a
-    row per region too, aligned with the fused engine's dense output.
+    """A matrix plus custom regions (unsorted, overlapping/nested, gapped, and
+    one with no variant) for the regions-dispatch agreement tests. Every
+    engine gives a row per region, the empty one included.
     """
     rng = np.random.RandomState(seed)
     n_var = 400
@@ -1994,9 +1996,11 @@ def _region_case(seed=0):
     hap = rng.randint(0, 2, (40, n_var)).astype(np.int8)
     hm = HaplotypeMatrix(hap, pos, 1, 999_999)
     hm.sample_sets = {'p1': list(range(20)), 'p2': list(range(20, 40))}
+    # The last region falls between two variants, so it holds none.
+    gap = int(np.argmax(np.diff(pos)))
     regions = pd.DataFrame({
-        'start': [600_000, 100_000, 100_000, 400_000],
-        'end':   [900_000, 300_000, 250_000, 500_000],
+        'start': [600_000, 100_000, 100_000, 400_000, int(pos[gap]) + 1],
+        'end':   [900_000, 300_000, 250_000, 500_000, int(pos[gap + 1])],
     })
     return hm, regions
 
@@ -2020,16 +2024,12 @@ class TestEngineGridAgreement:
         it = WindowedAnalyzer(window_size=10_000, step_size=10_000,
                               statistics=['pi'],
                               progress_bar=False).compute(hm)
-        # The fused engine reports every window; the iterator skips empty
-        # ones. Compare on the non-empty rows.
-        nonempty = fused[fused['n_variants'] > 0].reset_index(drop=True)
-        assert list(nonempty['start'].astype(int)) == \
-            list(it['start'].astype(int))
-        assert list(nonempty['end'].astype(int)) == \
-            list(it['end'].astype(int))
-        assert list(nonempty['n_variants'].astype(int)) == \
+        # Both engines report every window, empty ones included.
+        assert list(fused['start'].astype(int)) == list(it['start'].astype(int))
+        assert list(fused['end'].astype(int)) == list(it['end'].astype(int))
+        assert list(fused['n_variants'].astype(int)) == \
             list(it['n_variants'].astype(int))
-        np.testing.assert_allclose(it['pi'].values, nonempty['pi'].values,
+        np.testing.assert_allclose(it['pi'].values, fused['pi'].values,
                                    rtol=1e-9)
 
     def test_positions_fallback_without_chrom_bounds(self):
@@ -2181,8 +2181,13 @@ class TestWindowedHetExpected:
             # snp windows report 'end' as the last variant's position
             # (inclusive); bp and regions windows are half-open [start, end).
             stop = row['end'] + 1 if inclusive_end else row['end']
+            got = row['het_expected']
+            if row['n_variants'] == 0:
+                # A window with no variant has no site to average.
+                assert np.isnan(got), (row['start'], got)
+                continue
             sub = self._subset(hm, row['start'], stop)
-            got, ref = row['het_expected'], self._ref(sub, missing_data)
+            ref = self._ref(sub, missing_data)
             if np.isnan(got) or np.isnan(ref):
                 assert np.isnan(got) and np.isnan(ref), (row['start'], got, ref)
             else:
@@ -2355,3 +2360,50 @@ class TestOneGridAllModes:
         assert df["start"].tolist() == [1, 1001]
         assert df["end"].tolist() == [1001, 1002]
         assert df["n_variants"].tolist() == [10, 1]
+
+
+class TestFallbackKeepsEmptyWindows:
+    """The per-window fallback gives a row for a window or region with no
+    variant, with the values the scatter and fused engines give it, so the
+    rows of a request do not depend on which engine serves it."""
+
+    REGIONS = pd.DataFrame({'start': [1, 1001, 2001, 1500],
+                            'end': [1001, 2001, 3001, 1600]})
+
+    @staticmethod
+    def _hm():
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (8, 40)).astype(np.int8)
+        hap[rng.random(hap.shape) < 0.05] = -1
+        # No variant in [1001, 2001).
+        pos = np.r_[np.arange(20) * 40 + 1, np.arange(20) * 40 + 2001]
+        return HaplotypeMatrix(hap, pos, 1, 3000,
+                               sample_sets={'a': [0, 1, 2, 3], 'b': [4, 5, 6, 7]})
+
+    @pytest.mark.parametrize("window_type", ["bp", "regions"])
+    @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+    @pytest.mark.parametrize("pops, stats", [
+        (None, ['pi', 'theta_w', 'tajimas_d', 'segregating_sites', 'garud_h1',
+                'het_expected']),
+        (['a'], ['pi', 'theta_w', 'tajimas_d']),
+        (['a', 'b'], ['dxy', 'fst', 'fst_hudson', 'fst_wc', 'da']),
+    ], ids=["no-pop", "one-pop", "two-pop"])
+    def test_fallback_matches_fast_engine(self, window_type, missing_data,
+                                          pops, stats):
+        kw = (dict(window_type='regions', regions=self.REGIONS)
+              if window_type == 'regions' else dict(window_size=1000))
+        fallback = WindowedAnalyzer(statistics=stats, populations=pops,
+                                    missing_data=missing_data,
+                                    progress_bar=False, **kw).compute(self._hm())
+        fast = windowed_analysis(self._hm(), statistics=stats, populations=pops,
+                                 missing_data=missing_data,
+                                 **({'window_size': 1000} | kw))
+        suffix = f"_{'_'.join(pops)}" if pops else ""
+        fallback = fallback.rename(columns={f"{s}{suffix}": s for s in stats})
+        assert len(fallback) == len(fast)
+        assert 0 in fallback['n_variants'].tolist()
+        np.testing.assert_array_equal(fallback['n_variants'], fast['n_variants'])
+        for s in stats:
+            np.testing.assert_allclose(fallback[s].to_numpy(float),
+                                       fast[s].to_numpy(float),
+                                       rtol=1e-9, equal_nan=True)

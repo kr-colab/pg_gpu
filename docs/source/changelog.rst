@@ -373,6 +373,16 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* The per-window fallback of ``windowed_analysis`` (used under
+  ``missing_data='exclude'`` for most statistics, for ``snp`` windows,
+  and for requests the fast engines cannot serve) skipped a window or
+  region with no variant, while the scatter and fused engines gave it a
+  row, so the rows of a request depended on the engine. The fallback now
+  gives every window a row, with the values the other engines give an
+  empty window (for example ``pi`` 0.0, ``tajimas_d`` NaN). A custom
+  statistic gets NaN on an empty window, without a call. With two or
+  more populations, its empty rows also use the per-population column
+  names, as its other rows do.
 * A scalar statistic given a streaming matrix failed deep inside with a
   bare ``AttributeError`` (no attribute ``device``), which did not say
   what to do. Every function that needs the whole matrix in memory now

@@ -343,16 +343,6 @@ class StatisticsComputer:
             'window_id': window.window_id,
         }
 
-        # Skip if no variants
-        if window.n_variants == 0:
-            # Fill with NaN for all statistics
-            for stat in self.statistics:
-                if isinstance(stat, str):
-                    results[stat] = np.nan
-                else:
-                    results[stat.__name__] = np.nan
-            return results
-
         # One n_variants column serves every population, so under 'exclude'
         # it counts the sites complete in all of them, as the fused engines do.
         window = replace(window, n_variants=self._n_sites(
@@ -406,8 +396,12 @@ class StatisticsComputer:
                 kwargs['bins'] = self.ld_bins
             results[stat] = self.LD_STATS[stat](window, **kwargs)
 
-        # Custom statistics
+        # Custom statistics. A window with no variant gives NaN without a
+        # call, so user code never has to handle an empty matrix.
         for stat in self.custom_stats:
+            if window.n_variants == 0:
+                results[stat.__name__] = np.nan
+                continue
             kwargs = self.custom_stat_kwargs.get(stat.__name__, {})
             results[stat.__name__] = _outside_phase_guard(stat, window, **kwargs)
 
@@ -455,9 +449,13 @@ class WindowIterator:
     """Iterates over genomic windows."""
 
     def __init__(self, haplotype_matrix: HaplotypeMatrix,
-                 window_params: WindowParams):
+                 window_params: WindowParams, skip_empty: bool = True):
         self.matrix = haplotype_matrix
         self.params = window_params
+        # The windowed fallback keeps windows with no variant, so it gives
+        # the same rows as the scatter and fused engines; local PCA, which
+        # cannot decompose an empty window, skips them.
+        self.skip_empty = skip_empty
         self.positions = self.matrix.positions
 
         # Get positions as numpy array for easier manipulation
@@ -490,9 +488,11 @@ class WindowIterator:
 
     def _iter_bp_windows(self) -> Iterator[WindowData]:
         """Iterate over fixed base pair windows."""
-        # A matrix with no variants -- a region that covers none, for
-        # example -- has no windows to yield, and no fallback bounds.
-        if len(self.positions_np) == 0:
+        # A matrix with no variants and no bounds has no grid to tile; with
+        # bounds set, its windows are all empty and are kept like any other.
+        if len(self.positions_np) == 0 and (
+                self.skip_empty or self.matrix.chrom_start is None
+                or self.matrix.chrom_end is None):
             return
         chrom_start, chrom_end = _bp_grid_bounds(self.matrix,
                                                  self.positions_np)
@@ -504,7 +504,7 @@ class WindowIterator:
             start, end = int(start), int(end)
             # Variants in the right-open [start, end); positions are sorted.
             lo, hi = np.searchsorted(self.positions_np, (start, end))
-            if hi > lo:
+            if hi > lo or not self.skip_empty:
                 # Extract window matrix
                 window_matrix = self.matrix.get_subset(np.arange(lo, hi))
                 # Set correct chromosome coordinates for span normalization
@@ -571,7 +571,7 @@ class WindowIterator:
             mask = (self.positions_np >= start) & (self.positions_np < end)
             variant_indices = np.where(mask)[0]
 
-            if len(variant_indices) > 0:
+            if len(variant_indices) > 0 or not self.skip_empty:
                 window_matrix = self.matrix.get_subset(variant_indices)
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1 # TODO: treat region bounds as inclusive.
@@ -716,7 +716,8 @@ class WindowedAnalyzer:
             warnings.warn("Populations specified but haplotype_matrix has no sample_sets")
 
         # Create window iterator
-        window_iter = WindowIterator(haplotype_matrix, self.window_params)
+        window_iter = WindowIterator(haplotype_matrix, self.window_params,
+                                     skip_empty=False)
         total_windows = window_iter.count_windows()
 
         # Process windows
@@ -797,7 +798,8 @@ class WindowedAnalyzer:
         # phase depth, so each window runs inside its own phase-dependent
         # frame; the statistics it reaches then stay silent.
         compute_window = _phase_dependent(self.stats_computer.compute)
-        window_iter = WindowIterator(haplotype_matrix, self.window_params)
+        window_iter = WindowIterator(haplotype_matrix, self.window_params,
+                                     skip_empty=False)
         total_windows = window_iter.count_windows()
 
         batch_results = []
