@@ -488,11 +488,7 @@ class WindowIterator:
 
     def _iter_bp_windows(self) -> Iterator[WindowData]:
         """Iterate over fixed base pair windows."""
-        # A matrix with no variants and no bounds has no grid to tile; with
-        # bounds set, its windows are all empty and are kept like any other.
-        if len(self.positions_np) == 0 and (
-                self.skip_empty or self.matrix.chrom_start is None
-                or self.matrix.chrom_end is None):
+        if not self._has_grid():
             return
         chrom_start, chrom_end = _bp_grid_bounds(self.matrix,
                                                  self.positions_np)
@@ -587,10 +583,18 @@ class WindowIterator:
                     window_id=window_id
                 )
 
+    def _has_grid(self):
+        """Whether the bp grid has bounds to tile: the matrix bounds, else
+        its first and last variant. A matrix with no variant and no bounds
+        has none; with bounds, its windows are empty but still tiled."""
+        return len(self.positions_np) > 0 or (
+            self.matrix.chrom_start is not None
+            and self.matrix.chrom_end is not None)
+
     def count_windows(self) -> int:
         """Count total number of windows."""
         if self.params.window_type == 'bp':
-            if len(self.positions_np) == 0:
+            if not self._has_grid():
                 return 0
             chrom_start, chrom_end = _bp_grid_bounds(self.matrix,
                                                      self.positions_np)
@@ -1470,7 +1474,11 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     step_size : int, optional
         Step size. If None, uses window_size
     statistics : list
-        Statistics to compute
+        Statistics to compute. ``n_variants`` is a column of every result,
+        and ``n_singletons`` is another name for ``singletons``. Statistics
+        that no single engine computes (for example ``theta_l`` with
+        ``zns``) raise ValueError; request them in separate calls. A custom
+        callable gets NaN on a window with no variant, without a call.
     populations : list, optional
         Population names
     missing_data : str
@@ -1536,15 +1544,41 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         _warn_unphased(haplotype_matrix, context=phase_ctx)
     result = _windowed_analysis(
         haplotype_matrix, window_size=window_size, step_size=step_size,
-        statistics=statistics, populations=populations,
+        statistics=_engine_statistics(statistics), populations=populations,
         missing_data=missing_data, span_normalize=span_normalize,
         accessible_bed=accessible_bed, chrom=chrom, window_type=window_type, **kwargs)
     # A local-PCA request returns a LocalPCAResult; its scalar columns sit
     # in .windows.
     frame = getattr(result, 'windows', result)
+    _name_singletons_as_requested(frame, statistics)
     _check_complete_haplotypes(frame, haplotype_matrix, populations,
                                min_complete_haplotypes)
     return result
+
+
+def _engine_statistics(statistics):
+    """The request as the engines take it.
+
+    ``n_variants`` is dropped, since every engine returns that column, so
+    naming it does not send the request to the per-window fallback.
+    ``n_singletons`` is another name for ``singletons``.
+    """
+    return list(dict.fromkeys(
+        'singletons' if s == 'n_singletons' else s
+        for s in statistics if s != 'n_variants'))
+
+
+def _name_singletons_as_requested(df, statistics):
+    """Give the singleton columns the ``n_singletons`` name when the caller
+    asked for it, keeping the ``singletons`` ones only if asked for too."""
+    if 'n_singletons' not in statistics:
+        return
+    cols = [c for c in df.columns
+            if c == 'singletons' or str(c).startswith('singletons_')]
+    for col in cols:
+        df['n_' + col] = df[col]
+    if 'singletons' not in statistics:
+        df.drop(columns=cols, inplace=True)
 
 
 def _check_complete_haplotypes(df, matrix, populations, min_complete):
@@ -1572,6 +1606,37 @@ def _check_complete_haplotypes(df, matrix, populations, min_complete):
                   if pop is not None else matrix.num_haplotypes)
         _warn_few_complete_haplotypes(n_complete, n_rows,
                                       context="windowed_analysis")
+
+
+# The fallback's name for a statistic that the other engines name otherwise.
+_FALLBACK_NAMES = {'singletons': 'n_singletons'}
+
+
+def _check_fallback_covers(requested, window_type):
+    """Raise for names the per-window fallback cannot compute.
+
+    The fallback serves every request that no single fast engine covers, and
+    is the only engine for ``snp`` windows, so a name it does not know means
+    either a mix that no one engine computes or an unknown name.
+    """
+    fallback = _fallback_stats() | set(_FALLBACK_NAMES)
+    missing = sorted(s for s in requested if isinstance(s, str)
+                     and s not in fallback)
+    if not missing:
+        return
+    engines = {'scatter': _SCATTER_SINGLE_STATS | _TWO_POP_STATS,
+               'fused': _FUSED_STATS}
+    unknown = [s for s in missing if not any(s in e for e in engines.values())]
+    if unknown:
+        raise ValueError(f"Unknown statistic: {', '.join(unknown)}")
+    if window_type == 'snp':
+        raise NotImplementedError(
+            f"{missing} not yet supported for window_type='snp'.")
+    where = '; '.join(
+        f"{s} ({' or '.join(n for n, e in engines.items() if s in e)} engine)"
+        for s in missing)
+    raise ValueError(f"No single windowed engine computes this mix; only one "
+                     f"engine computes {where}. Request it separately.")
 
 
 def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
@@ -1738,14 +1803,6 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 and (not (requested & _TWO_POP_STATS)
                      or len(populations or []) == 2))
 
-    # fused engine can't handle 'snp' windows yet, only local_pca and fallback.
-    if window_type == 'snp':
-        unsupported_snp = {s for s in requested if isinstance(s, str)} - _fallback_stats()
-        if unsupported_snp:
-            raise NotImplementedError(
-                f"{sorted(unsupported_snp)} not yet supported for window_type='snp'."
-            )
-
     if can_fuse:
         if haplotype_matrix.device == 'CPU':
             haplotype_matrix.transfer_to_gpu()
@@ -1799,18 +1856,26 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         )
         return pd.DataFrame(result_dict)
 
-    # Fallback: per-window Python loop
+    # Fallback: per-window Python loop, which knows some statistics by
+    # another name (_FALLBACK_NAMES); its columns get the request's names.
+    _check_fallback_covers(requested, window_type)
     analyzer = WindowedAnalyzer(
         window_type=window_type,
         window_size=window_size,
         step_size=step_size,
-        statistics=statistics,
+        statistics=[_FALLBACK_NAMES.get(s, s) if isinstance(s, str) else s
+                    for s in statistics],
         populations=populations,
         missing_data=missing_data,
         span_normalize=span_normalize,
         **kwargs
     )
     df = analyzer.compute(haplotype_matrix)
+    for ours, theirs in _FALLBACK_NAMES.items():
+        if ours in requested:
+            df = df.rename(columns=lambda c: ours + c[len(theirs):]
+                           if str(c) == theirs or str(c).startswith(theirs + '_')
+                           else c)
     # The analyzer names two-population columns "<stat>_<pop1>_<pop2>"
     # because it computes every pair. The fused and scatter engines name
     # them after the statistic alone when exactly two populations are

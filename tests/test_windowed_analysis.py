@@ -2407,3 +2407,60 @@ class TestFallbackKeepsEmptyWindows:
             np.testing.assert_allclose(fallback[s].to_numpy(float),
                                        fast[s].to_numpy(float),
                                        rtol=1e-9, equal_nan=True)
+
+
+class TestMixedRequests:
+    """Every engine returns n_variants and computes the singleton count, so
+    naming either does not send a request to the per-window fallback; a mix
+    that no one engine can compute gets an error that says why."""
+
+    @staticmethod
+    def _hm():
+        rng = np.random.default_rng(1)
+        hap = rng.integers(0, 2, (20, 30)).astype(np.int8)
+        hap[rng.random(hap.shape) < 0.05] = -1
+        return HaplotypeMatrix(hap, np.arange(30) * 100 + 1, 1, 3000,
+                               sample_sets={'a': list(range(10)),
+                                            'b': list(range(10, 20))})
+
+    @pytest.mark.parametrize("stats", [['zns'], ['theta_h'], ['pi']])
+    def test_n_variants_does_not_change_the_engine(self, stats):
+        alone = windowed_analysis(self._hm(), 1000, statistics=stats)
+        mixed = windowed_analysis(self._hm(), 1000,
+                                  statistics=['n_variants'] + stats)
+        pd.testing.assert_frame_equal(mixed, alone)
+
+    def test_n_variants_alone(self):
+        df = windowed_analysis(self._hm(), 1000, statistics=['n_variants'])
+        assert df['n_variants'].tolist() == [10, 10, 10]
+
+    @pytest.mark.parametrize("window_type", ["bp", "snp"])
+    @pytest.mark.parametrize("pops", [None, ['a']])
+    def test_singleton_names_are_one_count(self, window_type, pops):
+        size = 1000 if window_type == 'bp' else 10
+        kw = dict(window_type=window_type, populations=pops)
+        both = windowed_analysis(self._hm(), size,
+                                 statistics=['singletons', 'n_singletons'], **kw)
+        cols = [c for c in both.columns if 'singletons' in str(c)]
+        assert sorted(cols) == sorted(
+            [n + (f"_{pops[0]}" if pops and window_type == 'snp' else "")
+             for n in ('singletons', 'n_singletons')])
+        pairs = [(c, 'n_' + c) for c in cols if c.startswith('singletons')]
+        for a, b in pairs:
+            np.testing.assert_array_equal(both[a], both[b])
+        alias = windowed_analysis(self._hm(), size, statistics=['n_singletons'], **kw)
+        assert not any(str(c).startswith('singletons') for c in alias.columns)
+
+    @pytest.mark.parametrize("stats, names", [
+        (['theta_l', 'zns'], ['theta_l (scatter engine)', 'zns (fused engine)']),
+        (['ld_decay', 'zns'], ['zns (fused engine)']),
+    ])
+    def test_mix_no_engine_computes_names_the_engines(self, stats, names):
+        with pytest.raises(ValueError, match="No single windowed engine") as err:
+            windowed_analysis(self._hm(), 1000, statistics=stats)
+        for name in names:
+            assert name in str(err.value)
+
+    def test_unknown_name_is_called_unknown(self):
+        with pytest.raises(ValueError, match="Unknown statistic: pie"):
+            windowed_analysis(self._hm(), 1000, statistics=['pi', 'pie'])

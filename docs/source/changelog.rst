@@ -373,6 +373,21 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``windowed_analysis`` raised ``Unknown statistic`` when a request
+  mixed statistics that no single engine computes, even for
+  ``n_variants`` (a column of every result) and ``n_singletons``
+  (another name for ``singletons``). Naming ``n_variants`` no longer
+  sends a request to the per-window fallback, and ``n_singletons`` and
+  ``singletons`` are one statistic on every engine, with the column named
+  as requested. So ``['n_variants', 'pi']`` now gives the same rows as
+  ``['pi']``, empty windows included. A mix that still has no single
+  engine (for example ``theta_l`` with ``zns``) raises a ``ValueError``
+  that names the engine of each statistic; a misspelled name says
+  ``Unknown statistic`` for every window type. A request with
+  ``n_singletons`` that a fast engine can now serve gets that engine's
+  columns: with two populations, single-population statistics for the
+  first population only, where the fallback gave one column per
+  population (which rule every engine should follow is open in #200).
 * The per-window fallback of ``windowed_analysis`` (used under
   ``missing_data='exclude'`` for most statistics, for ``snp`` windows,
   and for requests the fast engines cannot serve) skipped a window or
