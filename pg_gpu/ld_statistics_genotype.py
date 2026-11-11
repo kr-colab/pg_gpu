@@ -22,6 +22,8 @@ as:
 """
 import cupy as cp
 
+from ._utils import _eager_only
+
 
 def _safe_div(numer, denom, valid):
     """Element-wise division, NaN where *valid* is False."""
@@ -1515,6 +1517,7 @@ def pi2_geno_alldiff(pi, pj, pk, pl):  # pragma: no cover
 # Gravel 2019). This is the diploid analogue of pg_gpu.ld_statistics's
 # tile-based sigma_d2 path, which works on phased haplotypes.
 
+@_eager_only
 def sigma_d2_geno(matrix, idx_i=None, idx_j=None):
     """Per-pair unbiased sigma_D^2 (D^2 / pi^2) for diploid data.
 

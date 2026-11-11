@@ -9,6 +9,7 @@ import numpy as np
 import cupy as cp
 from typing import Optional, Union, Tuple, List, Dict
 from ._warnings import _phase_dependent, _warn_unphased
+from ._utils import _eager_only, _reject_streaming
 
 
 def dd(counts: cp.ndarray,
@@ -387,17 +388,6 @@ def _resolve_ld_estimator(estimator, kind, *,
         raise ValueError("estimator='rogers_huff' needs genotype data, "
                          f"not {_KIND_NOUN[kind]}")
     return resolved
-
-
-def _reject_streaming(obj, context):
-    """Raise a pointed error when ``obj`` is a streaming matrix: the
-    pairwise LD statistics need every variant pair in scope at once."""
-    from .streaming_matrix import _StreamingMatrixBase
-    if isinstance(obj, _StreamingMatrixBase):
-        raise NotImplementedError(
-            f"{context} needs every variant pair in scope at once, which a "
-            "streaming matrix cannot hold; call .materialize(region=(lo, hi)) "
-            "to get an eager matrix over a sub-region and compute on that.")
 
 
 def _ld_input_kind(obj, context):
@@ -1144,7 +1134,7 @@ def _r2_matrix_diploid(genotype_matrix):
 
 
 # Keep old names as aliases for backward compat
-r2_matrix_diploid = _r2_matrix_diploid
+r2_matrix_diploid = _eager_only(_r2_matrix_diploid, name='r2_matrix_diploid')
 zns_diploid = zns
 omega_diploid = omega
 

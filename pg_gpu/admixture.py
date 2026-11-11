@@ -9,7 +9,7 @@ import numpy as np
 import cupy as cp
 from typing import Union, Optional, Tuple
 from .haplotype_matrix import HaplotypeMatrix
-from ._utils import population_rows
+from ._utils import _eager_only, population_rows
 from .resampling import block_jackknife, _moving_nansum, _moving_nanmean
 
 
@@ -89,6 +89,7 @@ def _f4_terms(xa, na, xb, nb, xc, nc, xd, nd):
 # Public API: Per-variant F-statistics
 # ---------------------------------------------------------------------------
 
+@_eager_only
 def patterson_f2(haplotype_matrix: HaplotypeMatrix,
                  pop_a: Union[str, list],
                  pop_b: Union[str, list],
@@ -120,6 +121,7 @@ def patterson_f2(haplotype_matrix: HaplotypeMatrix,
     return _f2_terms(xa, na, xb, nb).get()
 
 
+@_eager_only
 def patterson_f3(haplotype_matrix: HaplotypeMatrix,
                  pop_c: Union[str, list],
                  pop_a: Union[str, list],
@@ -174,6 +176,7 @@ def _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
     return T, B
 
 
+@_eager_only
 def patterson_f4(haplotype_matrix: HaplotypeMatrix,
                  pop_a: Union[str, list],
                  pop_b: Union[str, list],
@@ -209,6 +212,7 @@ def patterson_f4(haplotype_matrix: HaplotypeMatrix,
     return _f4_terms(xa, na, xb, nb, xc, nc, xd, nd).get()
 
 
+@_eager_only
 def patterson_d(haplotype_matrix: HaplotypeMatrix,
                 pop_a: Union[str, list],
                 pop_b: Union[str, list],
@@ -311,6 +315,7 @@ def _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
 # Public API: Moving window variants
 # ---------------------------------------------------------------------------
 
+@_eager_only
 def moving_patterson_f3(haplotype_matrix: HaplotypeMatrix,
                         pop_c: Union[str, list],
                         pop_a: Union[str, list],
@@ -351,6 +356,7 @@ def moving_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     return f3.get()
 
 
+@_eager_only
 def moving_patterson_d(haplotype_matrix: HaplotypeMatrix,
                        pop_a: Union[str, list],
                        pop_b: Union[str, list],
@@ -386,6 +392,7 @@ def moving_patterson_d(haplotype_matrix: HaplotypeMatrix,
 # Public API: Block-jackknife averaged variants
 # ---------------------------------------------------------------------------
 
+@_eager_only
 def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
                          pop_c: Union[str, list],
                          pop_a: Union[str, list],
@@ -442,6 +449,7 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     return f3, se, z, vb, vj
 
 
+@_eager_only
 def average_patterson_d(haplotype_matrix: HaplotypeMatrix,
                         pop_a: Union[str, list],
                         pop_b: Union[str, list],

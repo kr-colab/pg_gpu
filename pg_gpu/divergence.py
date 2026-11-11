@@ -14,6 +14,7 @@ from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
 from .diversity import _apply_span_normalize, pi as _diversity_pi
 from ._warnings import _phase_dependent, _warn_unphased
+from ._utils import _eager_only, population_rows
 
 
 def _aligned_pop_counts(pop1_haps, pop2_haps):
@@ -178,6 +179,7 @@ def _hudson_num_den(ac1, nv1, ac2, nv2):
     return between - (mpd1 + mpd2) / 2.0, between
 
 
+@_eager_only
 def fst(haplotype_matrix: HaplotypeMatrix,
         pop1: Union[str, list],
         pop2: Union[str, list],
@@ -219,6 +221,7 @@ def fst(haplotype_matrix: HaplotypeMatrix,
         raise ValueError(f"Unknown FST method: {method}")
 
 
+@_eager_only
 def fst_hudson(haplotype_matrix: HaplotypeMatrix,
                pop1: Union[str, list],
                pop2: Union[str, list],
@@ -274,6 +277,7 @@ def fst_hudson(haplotype_matrix: HaplotypeMatrix,
     return float('nan')
 
 
+@_eager_only
 def fst_tskit(haplotype_matrix: HaplotypeMatrix,
               pop1: Union[str, list],
               pop2: Union[str, list],
@@ -450,6 +454,7 @@ def _wc_site_components(pop1_haps, pop2_haps, k):
     return a.sum(axis=1), (a + b + c).sum(axis=1)
 
 
+@_eager_only
 def fst_weir_cockerham(haplotype_matrix,
                        pop1: Union[str, list],
                        pop2: Union[str, list],
@@ -513,6 +518,7 @@ def fst_weir_cockerham(haplotype_matrix,
     return float('nan')
 
 
+@_eager_only
 def fst_nei(haplotype_matrix: HaplotypeMatrix,
             pop1: Union[str, list],
             pop2: Union[str, list],
@@ -592,6 +598,7 @@ def fst_nei(haplotype_matrix: HaplotypeMatrix,
     return (sum_ht - sum_hs) / sum_ht
 
 
+@_eager_only
 def dxy(haplotype_matrix: HaplotypeMatrix,
         pop1: Union[str, list],
         pop2: Union[str, list],
@@ -658,6 +665,7 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
                                      n_sites_with_data)
 
 
+@_eager_only
 def da(haplotype_matrix: HaplotypeMatrix,
        pop1: Union[str, list],
        pop2: Union[str, list],
@@ -715,6 +723,7 @@ def da(haplotype_matrix: HaplotypeMatrix,
                                  n_sites_with_data)
 
 
+@_eager_only
 def pi_within_population(haplotype_matrix: HaplotypeMatrix,
                         pop: Union[str, list],
                         missing_data: str = 'include',
@@ -744,6 +753,7 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
                span_normalize=span_normalize, missing_data=missing_data)
 
 
+@_eager_only
 def divergence_stats(haplotype_matrix: HaplotypeMatrix,
                     pop1: Union[str, list],
                     pop2: Union[str, list],
@@ -805,6 +815,7 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
     return results
 
 
+@_eager_only
 def pairwise_fst(haplotype_matrix: HaplotypeMatrix,
                  populations: Optional[list] = None,
                  method: str = 'hudson',
@@ -903,6 +914,7 @@ def _windowed_fst(num, den, size, start=0, stop=None, step=None):
     return cp.where(den_sum != 0, num_sum / den_sum, cp.nan)
 
 
+@_eager_only
 def pbs(haplotype_matrix: HaplotypeMatrix,
         pop1: Union[str, list],
         pop2: Union[str, list],
@@ -1111,6 +1123,7 @@ def _resolve_distance_matrices(haplotype_matrix, pop1, pop2,
     return pairwise_distance_matrix(haplotype_matrix, pop1, pop2, missing_data)
 
 
+@_eager_only
 @_phase_dependent
 def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
                               missing_data='include'):
@@ -1178,6 +1191,7 @@ def pairwise_distance_matrix(haplotype_matrix, pop1, pop2,
     return dist[:n1, n1:], dist[:n1, :n1], dist[n1:, n1:]
 
 
+@_eager_only
 @_phase_dependent
 def snn(haplotype_matrix: HaplotypeMatrix,
         pop1: Union[str, list],
@@ -1223,6 +1237,7 @@ def snn(haplotype_matrix: HaplotypeMatrix,
     return _ratio(score1 + score2, n_scored1 + n_scored2)
 
 
+@_eager_only
 @_phase_dependent
 def dxy_min(haplotype_matrix: HaplotypeMatrix,
             pop1: Union[str, list],
@@ -1265,6 +1280,7 @@ def dxy_min(haplotype_matrix: HaplotypeMatrix,
     return _min_or_nan(_finite(dist_between))
 
 
+@_eager_only
 @_phase_dependent
 def gmin(haplotype_matrix: HaplotypeMatrix,
          pop1: Union[str, list],
@@ -1306,6 +1322,7 @@ def gmin(haplotype_matrix: HaplotypeMatrix,
     return _ratio(_min_or_nan(between), _mean_or_nan(between))
 
 
+@_eager_only
 @_phase_dependent
 def dd(haplotype_matrix: HaplotypeMatrix,
        pop1: Union[str, list],
@@ -1359,6 +1376,7 @@ def dd(haplotype_matrix: HaplotypeMatrix,
             _ratio(min_dxy, _mean_or_nan(_within_pairs(dist_within2))))
 
 
+@_eager_only
 @_phase_dependent
 def dd_rank(haplotype_matrix: HaplotypeMatrix,
             pop1: Union[str, list],
@@ -1406,6 +1424,7 @@ def dd_rank(haplotype_matrix: HaplotypeMatrix,
             _rank_below(_within_pairs(dist_within2), min_dxy))
 
 
+@_eager_only
 @_phase_dependent
 def zx(haplotype_matrix: HaplotypeMatrix,
        pop1: Union[str, list],
@@ -1445,7 +1464,6 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     _warn_unphased(haplotype_matrix, context="zx")
 
     from . import ld_statistics
-    from ._utils import population_rows
 
     # zns restricts to the biallelic sites of whatever matrix it is handed;
     # restricting once up front keeps all three terms on the same sites.
@@ -1461,6 +1479,7 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     return (z1 + z2) / (2 * z_total)
 
 
+@_eager_only
 @_phase_dependent
 def distance_based_stats(haplotype_matrix: HaplotypeMatrix,
                           pop1: Union[str, list],

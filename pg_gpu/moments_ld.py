@@ -38,8 +38,10 @@ from .haplotype_kernels import compute_multi_pop_statistics_batch_hap
 from .genotype_matrix import GenotypeMatrix
 from . import ld_statistics
 from ._warnings import _phase_dependent, _warn_unphased
+from ._utils import _eager_only
 
 
+@_eager_only
 @_phase_dependent
 def compute_ld_statistics(
     vcf_file=None, rec_map_file=None, pop_file=None, pops=None,

@@ -12,7 +12,7 @@ import cupy as cp
 from typing import Union, Optional, Tuple
 from .accessible import _as_accessible_mask
 from .haplotype_matrix import HaplotypeMatrix
-from ._utils import population_rows
+from ._utils import _eager_only, population_rows
 from ._memutil import allele_counts
 from ._haplotype_groups import complete_sites, frequencies
 from ._haplotype_hash import garud_from_moments, garud_h_windows
@@ -104,6 +104,7 @@ def standardize_by_allele_count(score, aac, bins=None, n_bins=None):
 # Public API: Garud's H statistics
 # ---------------------------------------------------------------------------
 
+@_eager_only
 @_phase_dependent
 def garud_h(matrix, population=None, missing_data='include'):
     """Compute Garud's H1, H12, H123, and H2/H1 statistics.
@@ -175,6 +176,7 @@ def garud_h(matrix, population=None, missing_data='include'):
     return _garud_from_freqs(frequencies(hap).get())
 
 
+@_eager_only
 @_phase_dependent
 def moving_garud_h(haplotype_matrix: HaplotypeMatrix,
                    size: int,
@@ -279,13 +281,14 @@ def _garud_h_diploid(genotype_matrix, population=None, missing_data='include'):
 
 
 # backward compat alias
-garud_h_diploid = _garud_h_diploid
+garud_h_diploid = _eager_only(_garud_h_diploid, name='garud_h_diploid')
 
 
 # ---------------------------------------------------------------------------
 # Public API: nSL / XP-nSL
 # ---------------------------------------------------------------------------
 
+@_eager_only
 @_phase_dependent
 def nsl(haplotype_matrix: HaplotypeMatrix,
         population: Optional[Union[str, list]] = None,
@@ -371,6 +374,7 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
     return scores.get()
 
 
+@_eager_only
 @_phase_dependent
 def xpnsl(haplotype_matrix: HaplotypeMatrix,
           pop1: Union[str, list],
@@ -438,6 +442,7 @@ def xpnsl(haplotype_matrix: HaplotypeMatrix,
 # Public API: IHS / XP-EHH
 # ---------------------------------------------------------------------------
 
+@_eager_only
 @_phase_dependent
 def ihs(haplotype_matrix: HaplotypeMatrix,
         pos=None,
@@ -578,6 +583,7 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     return scores.get()
 
 
+@_eager_only
 @_phase_dependent
 def xpehh(haplotype_matrix: HaplotypeMatrix,
           pop1: Union[str, list],
@@ -682,6 +688,7 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
 # Public API: EHH decay
 # ---------------------------------------------------------------------------
 
+@_eager_only
 @_phase_dependent
 def ehh_decay(haplotype_matrix: HaplotypeMatrix,
               truncate: bool = False,
