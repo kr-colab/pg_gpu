@@ -111,6 +111,20 @@ def test_compute_gaps_accepts_cupy_positions():
     np.testing.assert_allclose(got, ref)
 
 
+def test_compute_gaps_honors_the_mask_offset():
+    # A matrix's mask starts at its own offset, not at position 1; the
+    # accessible fraction of each gap must not depend on that offset.
+    from pg_gpu.accessible import AccessibleMask
+    pos = np.array([1100, 1200, 1450, 1900], dtype=np.int64)
+    from_one = np.zeros(2000, dtype=bool)        # element 0 is position 1
+    from_one[1100:1300] = True                   # positions 1101..1300
+    expected = selection._compute_gaps(pos, max_gap=None, is_accessible=from_one)
+    np.testing.assert_allclose(expected, [99, 101, 0])
+    offset_mask = AccessibleMask(from_one[999:], offset=1000)
+    got = selection._compute_gaps(pos, max_gap=None, is_accessible=offset_mask)
+    np.testing.assert_allclose(got, expected)
+
+
 def _frequencies(hap):
     return frequencies(cp.asarray(hap)).get()
 

@@ -19,7 +19,7 @@ class TestWindowIterator:
         """Test base pair windows without overlap."""
         # Create test data
         n_variants = 100
-        positions = np.linspace(0, 100000, n_variants).astype(int)
+        positions = np.linspace(0, 99_999, n_variants).astype(int)
         haplotypes = np.random.randint(0, 2, size=(10, n_variants))
 
         matrix = HaplotypeMatrix(haplotypes, positions)
@@ -44,7 +44,7 @@ class TestWindowIterator:
     def test_bp_windows_overlapping(self):
         """Test base pair windows with overlap."""
         n_variants = 100
-        positions = np.linspace(0, 100000, n_variants).astype(int)
+        positions = np.linspace(0, 99_999, n_variants).astype(int)
         haplotypes = np.random.randint(0, 2, size=(10, n_variants))
 
         matrix = HaplotypeMatrix(haplotypes, positions)
@@ -82,7 +82,7 @@ class TestWindowIterator:
     def test_region_windows(self):
         """Test custom region windows."""
         n_variants = 100
-        positions = np.linspace(0, 100000, n_variants).astype(int)
+        positions = np.linspace(0, 99_999, n_variants).astype(int)
         haplotypes = np.random.randint(0, 2, size=(10, n_variants))
 
         regions = pd.DataFrame({
@@ -282,7 +282,7 @@ class TestWindowedAnalyzer:
         """Test windowed_analysis convenience function."""
         n_variants = 200
         n_samples = 20
-        positions = np.linspace(0, 100000, n_variants).astype(int)
+        positions = np.linspace(0, 99_999, n_variants).astype(int)
         haplotypes = np.random.randint(0, 2, size=(n_samples, n_variants))
 
         matrix = HaplotypeMatrix(haplotypes, positions)
@@ -301,7 +301,7 @@ class TestWindowedAnalyzer:
         """Test streaming mode."""
         n_variants = 500
         n_samples = 20
-        positions = np.linspace(0, 500000, n_variants).astype(int)
+        positions = np.linspace(0, 499_999, n_variants).astype(int)
         haplotypes = np.random.randint(0, 2, size=(n_samples, n_variants))
 
         matrix = HaplotypeMatrix(haplotypes, positions)
@@ -363,7 +363,7 @@ class TestCustomStatistics:
 
         n_variants = 200
         n_samples = 30
-        positions = np.linspace(0, 100000, n_variants).astype(int)
+        positions = np.linspace(0, 99_999, n_variants).astype(int)
         haplotypes = np.random.randint(0, 2, size=(n_samples, n_variants))
 
         matrix = HaplotypeMatrix(haplotypes, positions)
@@ -858,7 +858,7 @@ def _leading_gap_hm(seq_len=100_000, first_pos=243):
     ])
     hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
     return HaplotypeMatrix(hap, positions,
-                           chrom_start=0, chrom_end=seq_len)
+                           chrom_start=0, chrom_end=seq_len - 1)
 
 
 class TestChromStartZero:
@@ -900,7 +900,7 @@ class TestChromStartZero:
             np.arange(50_100, 150_000), size=500, replace=False))
         hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
         hm = HaplotypeMatrix(hap, positions,
-                             chrom_start=50_000, chrom_end=150_000)
+                             chrom_start=50_000, chrom_end=149_999)
         df = windowed_analysis(hm, window_size=10_000, step_size=10_000,
                                statistics=["pi"])
         assert int(df["start"].iloc[0]) == 50_000
@@ -924,7 +924,7 @@ class TestFullyMaskedWindowNaN:
                                         replace=False))
         hap = rng.randint(0, 2, (20, len(positions)), dtype=np.int8)
         hm = HaplotypeMatrix(hap, positions,
-                             chrom_start=0, chrom_end=seq_len)
+                             chrom_start=0, chrom_end=seq_len - 1)
         mask = np.ones(seq_len, dtype=bool)
         mask[mask_start:mask_end] = False
         hm.set_accessible_mask(mask)
@@ -2073,7 +2073,7 @@ class TestOneGridAllModes:
         hap = rng.randint(0, 2, (12, 40)).astype(np.int8)
         hap[0, 5] = 9          # beyond the fused per-allele capacity
         pos = (np.arange(40) * 100 + 50).astype(np.int64)
-        hm = HaplotypeMatrix(hap, pos, 0, 4000)
+        hm = HaplotypeMatrix(hap, pos, 0, 3999)
         with _w.catch_warnings():
             _w.simplefilter("ignore")
             wa = windowed_analysis(hm, window_size=1000, step_size=1000,
@@ -2087,20 +2087,25 @@ class TestOneGridAllModes:
         exp_mu = diversity.mu_sfs(sub)
         np.testing.assert_allclose(wa['mu_sfs'].iloc[0], exp_mu, atol=1e-12)
 
-    def test_single_variant_no_bounds_returns_empty(self):
+    @pytest.mark.parametrize("engine", ["scatter", "fused", "fallback"])
+    @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+    def test_single_variant_no_bounds_one_window(self, engine, missing_data):
+        # With no bounds the region is [500, 500], one base: every engine
+        # gives one 1-bp window that holds the variant.
         hm = HaplotypeMatrix(np.array([[0], [1], [1], [0]], dtype=np.int8),
                              np.array([500], dtype=np.int64))
-        wa = windowed_analysis(hm, window_size=1000, step_size=1000,
-                               statistics=['pi'])
-        assert len(wa) == 0
-        wa_ex = windowed_analysis(hm, window_size=1000, step_size=1000,
-                                  statistics=['pi'],
-                                  missing_data='exclude')
-        assert len(wa_ex) == 0
+        if engine == "fallback":
+            wa = WindowedAnalyzer(window_size=1000, step_size=1000, statistics=['pi'],
+                                  missing_data=missing_data, progress_bar=False).compute(hm)
+        else:
+            stats = ['pi'] if engine == "scatter" else ['pi', 'zns']
+            wa = windowed_analysis(hm, window_size=1000, step_size=1000,
+                                   statistics=stats, missing_data=missing_data)
+        assert wa[['start', 'end', 'n_variants']].values.tolist() == [[500, 501, 1]]
 
     def test_variant_at_chrom_end_membership(self):
         # A variant at the inclusive chrom_end stays in a partial trailing
-        # window; on an aligned grid the right-open boundary excludes it.
+        # window.
         hap = np.tile(np.array([[0], [1], [1], [0]], dtype=np.int8), (1, 5))
         pos = np.array([100, 800, 1500, 2200, 2500], dtype=np.int64)
         partial = HaplotypeMatrix(hap.copy(), pos, 0, 2500)
@@ -2108,9 +2113,22 @@ class TestOneGridAllModes:
                                statistics=['pi'])
         assert int(wa['n_variants'].sum()) == 5
         assert int(wa['end'].iloc[-1]) == 2501
-        hap6 = np.tile(np.array([[0], [1], [1], [0]], dtype=np.int8), (1, 6))
-        pos6 = np.array([100, 800, 1500, 2200, 2500, 3000], dtype=np.int64)
-        aligned = HaplotypeMatrix(hap6, pos6, 0, 3000)
-        wa2 = windowed_analysis(aligned, window_size=1000, step_size=1000,
-                                statistics=['pi'])
-        assert int(wa2['n_variants'].sum()) == 5   # the 3000 variant is out
+
+    @pytest.mark.parametrize("engine", ["scatter", "fused", "fallback"])
+    def test_aligned_grid_covers_variant_at_chrom_end(self, engine):
+        # chrom_end is a base (bounds are inclusive). With chrom_end - chrom_start
+        # a multiple of the step, the last window must still cover it, so a
+        # variant sitting exactly there is counted on every engine.
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (20, 11)).astype(np.int8)
+        pos = np.r_[np.arange(10) * 100 + 1, 1001]
+        hm = HaplotypeMatrix(hap, pos, 1, 1001)
+        if engine == "fallback":
+            df = WindowedAnalyzer(window_size=1000, step_size=1000, statistics=["pi"],
+                                  progress_bar=False).compute(hm)
+        else:
+            stats = ["pi"] if engine == "scatter" else ["pi", "zns"]
+            df = windowed_analysis(hm, 1000, step_size=1000, statistics=stats)
+        assert df["start"].tolist() == [1, 1001]
+        assert df["end"].tolist() == [1001, 1002]
+        assert df["n_variants"].tolist() == [10, 1]

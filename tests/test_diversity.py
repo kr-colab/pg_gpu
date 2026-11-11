@@ -435,17 +435,17 @@ class TestNeutralityTests:
 
     def test_zeng_dh_sweep_signal(self):
         # Post-sweep-like SFS: excess singletons (Tajima's D < 0) and excess
-        # high-frequency derived alleles (Fay-Wu H < 0) -> DH = D * H > 0.
+        # high-frequency derived alleles (H* < 0) -> DH = D * H* > 0.
         n = 10
         hap = np.zeros((n, 40), dtype=np.int8)
         hap[0, :20] = 1     # 20 singletons (derived count 1)
         hap[:9, 20:] = 1    # 20 near-fixed derived (count 9)
         hm = HaplotypeMatrix(hap, np.arange(40) * 100, 0, 4000)
         d = diversity.tajimas_d(hm)
-        h = diversity.fay_wus_h(hm)
-        assert d < 0 and h < 0
+        h_star = diversity.normalized_fay_wus_h(hm)
+        assert d < 0 and h_star < 0
         dh = diversity.zeng_dh(hm)
-        assert dh == pytest.approx(d * h)
+        assert dh == pytest.approx(d * h_star)
         assert dh > 0
 
     def test_zeng_dh_zero_when_not_swept(self):
@@ -847,7 +847,8 @@ def test_diversity_stats_key_order_matches_request():
 
 
 def test_fay_wus_h_no_variants_is_zero():
-    # H = pi - theta_H is 0 with no variants on every path; the
+    # H = pi - theta_H is 0 with no variants on every path (it has no
+    # span_normalize, so is unaffected by the no-site rescale below); the
     # variance-normalized H stays NaN.
     rng = np.random.default_rng(1)
     hap = rng.integers(0, 2, (8, 10)).astype(np.int8)
@@ -856,7 +857,11 @@ def test_fay_wus_h_no_variants_is_zero():
     assert diversity.fay_wus_h(empty) == 0.0
     stats = diversity.diversity_stats(
         empty, statistics=["fay_wus_h", "normalized_fay_wus_h", "pi"])
-    assert stats["fay_wus_h"] == 0.0 and stats["pi"] == 0.0
+    assert stats["fay_wus_h"] == 0.0
+    # No variants at all, so pi is 0 by definition (not undefined) on both
+    # the raw sum and the default span-normalized path.
+    assert stats["pi"] == 0.0
+    assert diversity.pi(empty, span_normalize=False) == 0.0
     assert np.isnan(stats["normalized_fay_wus_h"])
     assert np.isnan(diversity.normalized_fay_wus_h(empty))
     assert diversity.FrequencySpectrum(empty).fay_wu_h() == 0.0

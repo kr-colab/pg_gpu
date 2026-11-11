@@ -279,6 +279,69 @@ Read this section if you are comparing against older pg_gpu results.
   produce a defined ``fst_hudson``/``da``/``pbs`` value against anything,
   since it never has its own pair; NaN where data allowed a number
   before.
+* Scalar ``mu_var`` divides by ``get_span()``, the length that ``pi``
+  uses. It used to divide by ``chrom_end - chrom_start``, one base short
+  of the inclusive region, and it ignored an accessible mask. With or
+  without a mask, or with ``n_total_sites``, it now agrees with windowed
+  ``mu_var``.
+* The bp window grid now covers the base at ``chrom_end``. When
+  ``chrom_end - chrom_start`` was a multiple of ``step_size``, a variant at
+  ``chrom_end`` was in no window; a 1-bp trailing window now holds it, and
+  a one-variant matrix with no bounds gets one window on every engine.
+  Bounds are inclusive, so a half-open ``chrom_end`` (one past the last
+  base) now adds an empty 1-bp window.
+* With ``n_total_sites`` set and no mask, the scatter engines gave each
+  window a share of ``n_total_sites`` over ``chrom_end - chrom_start``
+  bases, one short of the inclusive region. They now divide by
+  ``chrom_end - chrom_start + 1``, so the shares add up to
+  ``n_total_sites``.
+* With ``n_total_sites`` set and no mask, each windowed engine divided a
+  window by a different number: the scatter engines by the window's
+  share of ``n_total_sites``, the fused and chunked engines by the window
+  length, and the per-window fallback by the ``n_total_sites`` of the
+  whole region (so its per-base values were too low by about the number
+  of windows). Every engine now uses the share, in proportion to the
+  window length, for ``bp``, ``snp`` and ``regions`` windows. The shares
+  of windows that tile the region add up to ``n_total_sites``, the
+  denominator of the scalar function. Windowed values from the fused,
+  chunked and fallback engines change for such a matrix.
+* ``include_invariant=True`` (``HaplotypeMatrix.from_vcf``,
+  ``GenotypeMatrix.from_vcf``, ``GenotypeMatrix.from_zarr``) now makes
+  the record positions the accessible mask, so each window divides by
+  its own called bases. The streaming ``GenotypeMatrix.from_zarr`` path
+  used to ignore the flag, so ``streaming='auto'`` gave a different
+  denominator when the data did not fit in memory; both paths now build
+  the same mask. ``n_total_sites`` is the count of distinct
+  called positions (a split multiallelic site counts once), and only
+  those inside ``accessible_bed`` when one is given. With the mask,
+  ``ihs`` and ``xpehh`` scale gaps by their called fraction, not by
+  ``gap_scale``.
+* ``GenotypeMatrix.from_vcf`` set its region bounds from the records it
+  kept after dropping multiallelic ones, so a multiallelic first or last
+  record shortened the region. The bounds now span every loaded record,
+  as in ``HaplotypeMatrix.from_vcf``.
+* ``ihs`` and ``xpehh`` read a matrix's accessible mask as if it
+  started at position 1. A mask that starts elsewhere (a region load, or
+  a BED that does not start at the first base) gave each gap the
+  accessible count of the wrong bases. They now use the mask's offset.
+* ``get_subset_from_range`` with a range that starts before the
+  accessible mask does shifted the subset's mask, so it marked the wrong
+  bases accessible. The subset's mask now keeps its own start.
+* ``get_subset_from_range`` on a matrix with ``n_total_sites`` and no
+  mask dropped ``n_total_sites``, so the subset divided by its length.
+  It now gets its share of ``n_total_sites``, by the rule the windowed
+  engines use, so a windowed value equals the plain function on the
+  window's range.
+* Streaming chunks and ``materialize`` slices got neither the stream's
+  accessible mask (``materialize``) nor its ``n_total_sites`` (both).
+  Each now gets the mask, or else its share of ``n_total_sites``, so a
+  streamed value equals the eager one. ``windowed_analysis`` on a stream
+  that has a mask now ignores ``accessible_bed``, as it does on an eager
+  matrix; it used to put the BED over the stream's mask.
+* A bool ``is_accessible`` array has element 0 at position 1, as in
+  scikit-allel, for ``ihs``, ``xpehh``, ``windowed_statistics_fused`` and
+  ``windowed_statistics_fused_chunked``. The windowed functions read
+  element 0 as position 0, one base off from ``ihs`` and ``xpehh``.
 * The biallelic and segregating filters keep the parent matrix's
   chromosome bounds. The old filter moved the bounds to the first and
   last surviving variant, which quietly changed the denominator of any
@@ -618,6 +681,46 @@ Bug fixes
   the derived allele at frequency 1.0, in the top bin, while ``sfs``
   already left such a site out. A fixed-derived site now contributes
   nothing in both, matching ``sfs``.
+* ``pi``, ``theta_w``, ``theta_h``, ``theta_l`` and the Achaz eta-family
+  (``diversity_stats``'s ``eta1``, ``eta1_star``, ``minus_eta1``,
+  ``minus_eta1_star``) silently treated a site where the population has
+  fewer than two calls as invariant: the site added 0 to the raw sum but
+  stayed in the span denominator, biasing the default per-base rate
+  toward 0 under missing data. The raw sum is now rescaled to the sites
+  where the population actually had two calls before the span divides it;
+  the rate is NaN when variants exist but none qualifies, and 0.0 (as
+  before) with no variants at all (``span_normalize=False`` is
+  unaffected; it already returned the plain raw sum).
+* Windowed ``pi``, ``theta_w``, ``theta_h`` and ``theta_l`` (the scatter
+  engine) had the same per-window bias and now get the same rescale.
+* ``dxy`` and ``da`` had the same bias: a site where a population lacked
+  enough calls (one call each for ``dxy``, two for ``da``) added 0 to the
+  raw sum but stayed in the span denominator. Both are now rescaled the
+  same way, and ``dxy(per_site=True)`` gives NaN rather than 0.0 at a site
+  where either population has no call.
+* Windowed ``dxy``/``da`` (the scatter engine) had the same per-window
+  bias and now get the same rescale.
+* Windowed ``pi``, ``theta_w`` and ``theta_h`` (the fused CUDA engine, used
+  when a request mixes one of these with a Garud's H statistic, a diploSHIC
+  statistic, or ``mean_nsl``) had the same per-window bias and now get the
+  same rescale.
+* Windowed ``dxy``/``da`` (both fused CUDA engines) had the same per-window
+  bias and now get the same rescale, using dxy's and da's own gates as the
+  scatter engine does.
+* ``fay_wus_h`` is a difference of two estimators, not a rate, and has no
+  ``span_normalize`` parameter at the scalar level. Windowed ``fay_wu_h``
+  divided it by the window span anyway, giving a value that depended on
+  window size and didn't match the scalar. It is now the raw difference
+  on every engine, matching ``diversity.fay_wus_h`` on the window's
+  variants exactly, like the other neutrality tests. The scatter engine's
+  ``zeng_dh`` reused the same span-divided value for its own H term and
+  had the same bias; it is now the same raw difference too.
+* ``zeng_dh`` combined Tajima's D with the raw, unnormalized H
+  (``pi - theta_h``), whose scale depends on the sample's
+  segregating-site count and isn't comparable across windows or
+  datasets. It now combines D with the normalized H*
+  (``normalized_fay_wus_h``), matching the statistic Zeng et al. (2006)
+  actually uses in their joint test.
 
 New warnings
 ~~~~~~~~~~~~

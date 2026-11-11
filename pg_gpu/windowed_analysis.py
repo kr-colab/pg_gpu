@@ -15,7 +15,8 @@ from dataclasses import dataclass, field, replace
 import warnings
 from tqdm import tqdm
 
-from .haplotype_matrix import HaplotypeMatrix
+from .accessible import _as_accessible_mask, resolve_accessible_mask
+from .haplotype_matrix import HaplotypeMatrix, _bp_grid_bounds, _total_sites_share
 from . import ld_statistics
 from . import divergence
 from . import diversity
@@ -105,36 +106,88 @@ _LOCAL_PCA_ONLY_KWARGS = frozenset(
 
 def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
                           is_accessible=None):
-    """Compute per-window accessible base counts for per-base normalization.
+    """Per-window base count, the denominator of per-base statistics.
+
+    Every windowed engine uses this one rule, so they agree on each
+    window. In order of precedence:
+
+    - an accessible mask (``is_accessible``, else the matrix's): the
+      accessible bases in the window;
+    - ``n_total_sites`` with no mask: the window's share of it
+      (``haplotype_matrix._total_sites_share``), in proportion to the
+      bases it covers in the region. The shares of windows that tile the
+      region add up to ``n_total_sites``, the denominator of the scalar
+      function on the whole region;
+    - otherwise the window length.
 
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
-        Source matrix (checked for accessible_mask attribute).
+        Source of the mask, ``n_total_sites`` and the region bounds.
     win_starts, win_stops : array_like
-        Window boundary arrays (numpy, not cupy).
-    is_accessible : array_like, optional
-        Explicit accessibility mask (takes precedence over matrix attribute).
+        Window edges, right-open (numpy, not cupy).
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Explicit accessibility (takes precedence over the matrix's mask);
+        a bool array has element 0 at position 1, as in scikit-allel.
 
     Returns
     -------
     numpy.ndarray, float64
-        Accessible base count per window.
+        Base count per window.
     """
     ws = np.asarray(win_starts, dtype=np.float64)
     we = np.asarray(win_stops, dtype=np.float64)
 
     if is_accessible is not None:
-        from .accessible import AccessibleMask
-        amask = AccessibleMask(np.asarray(is_accessible, dtype=bool))
-        return amask.count_accessible_windows(
+        return _as_accessible_mask(is_accessible).count_accessible_windows(
             ws.astype(np.int64), we.astype(np.int64))
 
     if haplotype_matrix.has_accessible_mask:
         return haplotype_matrix.accessible_mask.count_accessible_windows(
             ws.astype(np.int64), we.astype(np.int64))
 
+    if haplotype_matrix.n_total_sites is not None:
+        return _total_sites_share(haplotype_matrix, ws, we)
+
     return we - ws
+
+
+def _scatter_spans(haplotype_matrix, win_starts, win_stops, span_normalize):
+    """Per-window denominators of the scatter engines, and which are zero.
+
+    A window with no base (fully inaccessible) divides to NaN, not 0: its
+    per-base rate is undefined. The spans are clamped to 1 for a safe
+    division and the zero-span flags go back for that post-processing.
+    """
+    if span_normalize is False:
+        n = len(win_starts)
+        return np.ones(n), np.zeros(n, dtype=bool)
+    spans = _compute_window_bases(haplotype_matrix, win_starts, win_stops)
+    return np.maximum(spans, 1.0), spans <= 0
+
+
+def _windowed_rescale(n_variants, n_sites_with_data):
+    """Per-window num_variants / n_sites_with_data, correcting for sites a
+    population's own missing calls dropped from a raw sum. 1 for a window
+    with no variants, since there is nothing to rescale; NaN for a window
+    that has variants but none meeting the site's own call-count gate.
+    """
+    with np.errstate(invalid='ignore', divide='ignore'):
+        return np.where(n_variants == 0, 1.0,
+                        np.where(n_sites_with_data > 0,
+                                n_variants / n_sites_with_data, np.nan))
+
+
+def _missing_data_rescale(n_variants_per_window, normalize, all_complete, count_sites):
+    """Per-window rescale for a raw sum, correcting sites a population's own
+    missing calls dropped from it before the span divides it. None when
+    ``normalize`` is False or every site already qualifies (``all_complete``).
+    ``count_sites`` is called, lazily, for the per-window count of sites
+    meeting the statistic's own gate.
+    """
+    if normalize is False or bool(all_complete):
+        return None
+    return _windowed_rescale(n_variants_per_window, count_sites())
 
 
 CANONICAL_WINDOW_PREFIX = (
@@ -407,7 +460,6 @@ class WindowIterator:
 
     def __init__(self, haplotype_matrix: HaplotypeMatrix,
                  window_params: WindowParams):
-        self._parent_mask = haplotype_matrix.accessible_mask
         self.matrix = haplotype_matrix
         self.params = window_params
         self.positions = self.matrix.positions
@@ -418,11 +470,16 @@ class WindowIterator:
         else:
             self.positions_np = self.positions
 
-    def _attach_window_mask(self, window_matrix, start, end):
-        """Set per-window n_total_sites from the parent's accessible mask."""
-        if self._parent_mask is not None:
-            window_matrix.n_total_sites = \
-                self._parent_mask.count_accessible(start, end)
+    def _set_window_bases(self, window_matrix, start, end):
+        """Set the window's n_total_sites to its base count in the parent.
+
+        get_subset copies the parent's n_total_sites, which counts the
+        whole region; the window needs its own count, by the rule that
+        every engine uses (_compute_window_bases).
+        """
+        if self.matrix.has_accessible_mask or self.matrix.n_total_sites is not None:
+            window_matrix.n_total_sites = float(
+                _compute_window_bases(self.matrix, [start], [end])[0])
 
     def __iter__(self) -> Iterator[WindowData]:
         """Iterate over windows based on window type."""
@@ -457,7 +514,7 @@ class WindowIterator:
                 # Set correct chromosome coordinates for span normalization
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1  # end is exclusive in our window definition
-                self._attach_window_mask(window_matrix, start, end)
+                self._set_window_bases(window_matrix, start, end)
 
                 yield WindowData(
                     chrom=1,  # TODO: Handle multiple chromosomes
@@ -489,7 +546,7 @@ class WindowIterator:
             # Set correct chromosome coordinates for span normalization
             window_matrix.chrom_start = window_start
             window_matrix.chrom_end = window_end
-            self._attach_window_mask(window_matrix, window_start, window_end + 1)
+            self._set_window_bases(window_matrix, window_start, window_end + 1)
 
             yield WindowData(
                 chrom=1,  # TODO: Handle multiple chromosomes
@@ -522,7 +579,7 @@ class WindowIterator:
                 window_matrix = self.matrix.get_subset(variant_indices)
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1 # TODO: treat region bounds as inclusive.
-                self._attach_window_mask(window_matrix, start, end)
+                self._set_window_bases(window_matrix, start, end)
 
                 yield WindowData(
                     chrom=region.get('chrom', 1),
@@ -764,33 +821,16 @@ class WindowedAnalyzer:
                 yield pd.DataFrame(batch_results)
 
 
-def _bp_grid_bounds(matrix, positions):
-    """Bounds of the bp window grid.
-
-    The matrix's chromosome coordinates win when set; the first and last
-    variant are the fallback. Every windowed engine anchors with this one
-    rule, so they all tile the same grid for the same matrix -- anchoring
-    at the first variant instead would shift every window of a region- or
-    subset-derived matrix whose chrom_start sits before its first variant.
-    """
-    chrom_start = (int(matrix.chrom_start) if matrix.chrom_start is not None
-                   else int(positions[0]))
-    chrom_end = (int(matrix.chrom_end) if matrix.chrom_end is not None
-                 else int(positions[-1]))
-    return chrom_start, chrom_end
-
-
 def _bp_window_grid(chrom_start, chrom_end, window_size, step_size):
     """Start/stop arrays of the bp window grid.
 
-    Starts run from chrom_start in steps of step_size while strictly below
-    chrom_end; each window spans window_size, and the trailing partial
-    window is clipped at chrom_end + 1: chrom_end is a base (the bounds
-    are inclusive), so the right-open trailing window keeps a variant
-    sitting exactly there and its span counts the bases that exist.
-    Shared by every windowed engine so the grids agree by construction.
+    Starts run from chrom_start to chrom_end inclusive in steps of
+    step_size; stops clip at chrom_end + 1. Both bounds are bases, so a
+    variant at chrom_end is in a window and each span counts only bases
+    that exist. Shared by every windowed engine so the grids agree by
+    construction.
     """
-    win_starts = np.arange(int(chrom_start), int(chrom_end), step_size,
+    win_starts = np.arange(int(chrom_start), int(chrom_end) + 1, step_size,
                            dtype=np.float64)
     return win_starts, np.minimum(win_starts + window_size,
                                   int(chrom_end) + 1)
@@ -889,7 +929,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     # in a mixed request its own grid.
     pos_cpu = cp.asnumpy(matrix.positions)
     chrom_start, chrom_end = _bp_grid_bounds(matrix, pos_cpu)
-    if chrom_end <= chrom_start:
+    if chrom_end < chrom_start:
         return pd.DataFrame()
 
     pos_cpu_pre_exclude = pos_cpu
@@ -940,26 +980,8 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
-    # Span for normalization
-    if span_normalize is not False:
-        if haplotype_matrix.has_accessible_mask:
-            am = haplotype_matrix.accessible_mask
-            spans = am.count_accessible_windows(
-                results['start'], results['end'])
-        elif matrix.n_total_sites is not None:
-            # Proportional from n_total_sites
-            total_span = chrom_end - chrom_start
-            spans = (win_stops - win_starts) * matrix.n_total_sites / total_span
-        else:
-            spans = win_stops - win_starts
-        # Windows with zero span (fully inaccessible) divide to NaN rather
-        # than 0 — the per-base rate is undefined, not zero. Clamp for
-        # safe division and carry the zero-span mask for post-processing.
-        zero_span = spans <= 0
-        spans = np.maximum(spans, 1.0)
-    else:
-        spans = np.ones(n_windows)
-        zero_span = np.zeros(n_windows, dtype=bool)
+    spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
+                                      span_normalize)
 
     stats_set = set(statistics)
 
@@ -977,6 +999,15 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         if dependents:
             raw[est_name] = scatter_sum(
                 _ac_contribution(est_name, ac, n_valid, n_hap))
+
+    # Without this, a site with too few calls to contribute would still
+    # count toward the span, reading as invariant rather than unmeasured.
+    rate_stats = {'pi', 'theta_w', 'theta_h', 'theta_l'}
+    rescale = None
+    if bool(stats_set & rate_stats):
+        rescale = _missing_data_rescale(
+            n_variants_per_window, span_normalize, all_complete,
+            lambda: scatter_sum(has_data.astype(cp.float64)).get())
 
     if stats_set & {'segregating_sites', 'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}:
         seg_count = scatter_sum(mut)
@@ -1001,7 +1032,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     for est_name, out_name in [('pi', 'pi'), ('watterson', 'theta_w'),
                                 ('theta_h', 'theta_h'), ('theta_l', 'theta_l')]:
         if out_name in stats_set and est_name in raw:
-            results[out_name] = raw[est_name].get() / spans
+            vals = raw[est_name].get()
+            if rescale is not None:
+                vals = vals * rescale
+            results[out_name] = vals / spans
 
     if 'segregating_sites' in stats_set:
         results['segregating_sites'] = seg_count.get()
@@ -1012,9 +1046,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             max_daf_arr = np.where(excluded_to_empty, np.nan, max_daf_arr)
         results['max_daf'] = max_daf_arr
 
-    # Composite stats from raw theta sums
+    # Composite stats from raw theta sums. fay_wu_h is a difference of two
+    # estimators, not a rate, so it has no span-normalized form.
     if 'fay_wu_h' in stats_set:
-        results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get() / spans
+        results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get()
 
     # Neutrality tests — Achaz (2009) variance framework, with the effective
     # sample size the per-window harmonic mean of n_valid rather than the
@@ -1055,9 +1090,11 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         if 'tajimas_d' in stats_set:
             results['tajimas_d'] = tajd
 
-    if 'normalized_fay_wu_h' in stats_set:
-        results['normalized_fay_wu_h'] = windowed_test(
-            'pi', 'theta_h', raw['pi'].get() - raw['theta_h'].get())
+    if stats_set & {'normalized_fay_wu_h', 'zeng_dh'}:
+        h_star = windowed_test('pi', 'theta_h',
+                               raw['pi'].get() - raw['theta_h'].get())
+        if 'normalized_fay_wu_h' in stats_set:
+            results['normalized_fay_wu_h'] = h_star
 
     if 'zeng_e' in stats_set:
         results['zeng_e'] = windowed_test(
@@ -1065,13 +1102,13 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             raw['theta_l'].get() - raw['watterson'].get())
 
     if 'zeng_dh' in stats_set:
-        H = (raw['pi'] - raw['theta_h']).get() / spans
-        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, H)
+        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, h_star)
 
     # Windows with no accessible bases get NaN for every per-base rate.
+    # fay_wu_h and zeng_dh have no span-normalized form, so a zero-span
+    # window doesn't make them undefined.
     if zero_span.any():
-        for name in ('pi', 'theta_w', 'theta_h', 'theta_l',
-                     'fay_wu_h', 'zeng_dh'):
+        for name in ('pi', 'theta_w', 'theta_h', 'theta_l'):
             if name in results:
                 results[name] = np.where(zero_span, np.nan, results[name])
 
@@ -1110,7 +1147,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     # engine tiles the same grid as every other statistic in the request.
     pos_cpu = cp.asnumpy(haplotype_matrix.positions)
     chrom_start, chrom_end = _bp_grid_bounds(haplotype_matrix, pos_cpu)
-    if chrom_end <= chrom_start:
+    if chrom_end < chrom_start:
         return pd.DataFrame()
 
     if missing_data == 'exclude':
@@ -1147,25 +1184,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
-    # Span normalization
-    if span_normalize is not False:
-        if haplotype_matrix.has_accessible_mask:
-            am = haplotype_matrix.accessible_mask
-            spans = am.count_accessible_windows(
-                results['start'], results['end'])
-        elif haplotype_matrix.n_total_sites is not None:
-            total_span = chrom_end - chrom_start
-            spans = (win_stops - win_starts) * haplotype_matrix.n_total_sites / total_span
-        else:
-            spans = win_stops - win_starts
-        # Windows with zero span (fully inaccessible) divide to NaN rather
-        # than 0 — the per-base rate is undefined, not zero. Clamp for
-        # safe division and carry the zero-span mask for post-processing.
-        zero_span = spans <= 0
-        spans = np.maximum(spans, 1.0)
-    else:
-        spans = np.ones(n_windows)
-        zero_span = np.zeros(n_windows, dtype=bool)
+    spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
+                                      span_normalize)
 
     # Compute per-site components (single pass over the data). Only needed
     # for the gamete statistics, not a pure fst_wc request. dxy and the
@@ -1176,6 +1196,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     need_dxy = 'dxy' in stats_set
     if need_fst_da or need_dxy:
         ac1, ac2, nv1, nv2 = divergence._aligned_pop_counts(hap1, hap2)
+        dxy_all_complete = cp.all((nv1 > 0) & (nv2 > 0))
+        da_all_complete = cp.all((nv1 > 1) & (nv2 > 1))
         if need_fst_da:
             mpd1, mpd2, between = divergence._site_components_from_counts(
                 ac1, nv1, ac2, nv2)
@@ -1201,6 +1223,21 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         pi1_sum = scatter_sum(mpd1)
         pi2_sum = scatter_sum(mpd2)
 
+    # Without this, a site with too few calls to contribute would still
+    # count toward the span, reading as invariant rather than unmeasured.
+    # dxy and da need their own count, since they use different site gates.
+    dxy_rescale = da_rescale = None
+    if need_dxy:
+        r = _missing_data_rescale(
+            n_variants_per_window, span_normalize, dxy_all_complete,
+            lambda: scatter_sum(((nv1 > 0) & (nv2 > 0)).astype(cp.float64)).get())
+        dxy_rescale = cp.asarray(r) if r is not None else None
+    if 'da' in stats_set:
+        r = _missing_data_rescale(
+            n_variants_per_window, span_normalize, da_all_complete,
+            lambda: scatter_sum(((nv1 > 1) & (nv2 > 1)).astype(cp.float64)).get())
+        da_rescale = cp.asarray(r) if r is not None else None
+
     # Build output — stay on GPU, single .get() per result
     spans_gpu = cp.asarray(spans)
 
@@ -1212,10 +1249,14 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
             results['fst_hudson'] = fst_vals
 
     if 'dxy' in stats_set:
-        results['dxy'] = (dxy_sum / spans_gpu).get()
+        vals = dxy_sum * dxy_rescale if dxy_rescale is not None else dxy_sum
+        results['dxy'] = (vals / spans_gpu).get()
 
     if 'da' in stats_set:
-        results['da'] = ((between_sum - (pi1_sum + pi2_sum) / 2.0) / spans_gpu).get()
+        vals = between_sum - (pi1_sum + pi2_sum) / 2.0
+        if da_rescale is not None:
+            vals = vals * da_rescale
+        results['da'] = (vals / spans_gpu).get()
 
     if 'fst_wc' in stats_set:
         results['fst_wc'] = cp.where(wc_abc_sum > 0, wc_a_sum / wc_abc_sum,
@@ -1281,13 +1322,12 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
             "the region eagerly to run it."
         )
 
-    # Parse the BED mask once up front and inject the resolved
-    # AccessibleMask into each chunk -- otherwise windowed_analysis would
-    # re-open and re-parse the BED for every chunk via
-    # haplotype_matrix.set_accessible_mask.
+    # As on the eager path, accessible_bed applies only when the stream has
+    # no mask of its own (iter_gpu_chunks attaches that one). Parse the BED
+    # once up front and hand the resolved AccessibleMask to each chunk, not
+    # the path, which each chunk would re-open and re-parse.
     shared_mask = None
-    if accessible_bed is not None:
-        from .accessible import resolve_accessible_mask
+    if accessible_bed is not None and streaming_hm.accessible_mask is None:
         # The stream knows its contig, so a multi-contig BED needs no chrom.
         shared_mask = resolve_accessible_mask(
             accessible_bed, streaming_hm.chrom_start, streaming_hm.chrom_end,
@@ -1297,7 +1337,7 @@ def _stream_windowed_analysis(streaming_hm, *, window_size, step_size,
     parts = []
     for left, right, chunk_hm in streaming_hm.iter_gpu_chunks(skip_empty = False):
         if shared_mask is not None:
-            chunk_hm.accessible_mask = shared_mask
+            chunk_hm.set_accessible_mask(shared_mask)
         df = _windowed_analysis(
             chunk_hm,
             window_size=window_size, step_size=step_size,
@@ -1384,7 +1424,9 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         'include' - Use all sites, calculate from available data per site
         'exclude' - Only use sites with no missing data
     span_normalize : bool
-        ``True`` (default): auto-detect best denominator per window.
+        ``True`` (default): divide each window by its accessible bases if
+        the matrix has a mask; else by its share of ``n_total_sites``, in
+        proportion to the window length; else by the window length.
         ``False``: return raw sums.
     accessible_bed : str, optional
         Path to a BED file defining accessible/callable regions.
@@ -1667,8 +1709,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             # Build window start/stop arrays (supports overlapping windows)
             win_starts, win_stops = _bp_window_grid(
                 chrom_start, chrom_end, window_size, step_size)
-            # A zero-span matrix (one variant, no bounds) tiles no windows.
-            bp_bins = np.concatenate([win_starts, [win_stops[-1]]])
+            bp_bins = np.concatenate([win_starts, win_stops[-1:]])
 
         if len(win_starts) == 0:
             return pd.DataFrame()
@@ -2067,7 +2108,9 @@ void fused_windowed_twopop(const signed char* hap1_t,
                            double* out_pi1_sum,
                            double* out_pi2_sum,
                            double* out_wc_a_sum,
-                           double* out_wc_abc_sum) {
+                           double* out_wc_abc_sum,
+                           double* out_dxy_valid,
+                           double* out_da_valid) {
     int wid = blockIdx.x;
     if (wid >= n_windows) return;
 
@@ -2080,6 +2123,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
             out_dxy_sum[wid] = 0.0;  out_pi1_sum[wid] = 0.0;
             out_pi2_sum[wid] = 0.0;  out_wc_a_sum[wid] = 0.0;
             out_wc_abc_sum[wid] = 0.0;
+            out_dxy_valid[wid] = 0.0;  out_da_valid[wid] = 0.0;
         }
         return;
     }
@@ -2087,6 +2131,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
     double t_fst_num = 0.0, t_fst_den = 0.0;
     double t_dxy = 0.0, t_pi1 = 0.0, t_pi2 = 0.0;
     double t_wc_a = 0.0, t_wc_abc = 0.0;
+    double t_dxy_valid = 0.0, t_da_valid = 0.0;
 
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
@@ -2106,6 +2151,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
                   hom2, het2, half2, &valid2, &nind2);
 
         if (valid1 == 0 || valid2 == 0) continue;
+        t_dxy_valid += 1.0;
 
         double dn1 = (double)valid1;
         double dn2 = (double)valid2;
@@ -2171,6 +2217,7 @@ void fused_windowed_twopop(const signed char* hap1_t,
         // fst/da need Hb and Hw from the same site set (both pops >= 2
         // calls), stricter than dxy alone; see _site_components_from_counts.
         bool joint_pairs = (dn1 > 1.0) && (dn2 > 1.0);
+        if (joint_pairs) t_da_valid += 1.0;
         double mpd1_j = joint_pairs ? mpd1 : 0.0;
         double mpd2_j = joint_pairs ? mpd2 : 0.0;
         double between_j = joint_pairs ? between : 0.0;
@@ -2181,8 +2228,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
         t_pi2 += mpd2_j;
     }
 
-    // Block reduction (7 values)
-    __shared__ double smem[7 * 256];
+    // Block reduction (9 values)
+    __shared__ double smem[9 * 256];
     int tid = threadIdx.x;
     smem[tid]          = t_fst_num;
     smem[256 + tid]    = t_fst_den;
@@ -2191,6 +2238,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
     smem[1024 + tid]   = t_pi2;
     smem[1280 + tid]   = t_wc_a;
     smem[1536 + tid]   = t_wc_abc;
+    smem[1792 + tid]   = t_dxy_valid;
+    smem[2048 + tid]   = t_da_valid;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
@@ -2202,6 +2251,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
             smem[1024 + tid]   += smem[1024 + tid + s];
             smem[1280 + tid]   += smem[1280 + tid + s];
             smem[1536 + tid]   += smem[1536 + tid + s];
+            smem[1792 + tid]   += smem[1792 + tid + s];
+            smem[2048 + tid]   += smem[2048 + tid + s];
         }
         __syncthreads();
     }
@@ -2214,6 +2265,8 @@ void fused_windowed_twopop(const signed char* hap1_t,
         out_pi2_sum[wid]  = smem[1024];
         out_wc_a_sum[wid] = smem[1280];
         out_wc_abc_sum[wid] = smem[1536];
+        out_dxy_valid[wid] = smem[1792];
+        out_da_valid[wid]  = smem[2048];
     }
 }
 ''', 'fused_windowed_twopop')
@@ -2323,8 +2376,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         Populations for two-pop statistics.
     per_base : bool
         Normalize by window size in base pairs.
-    is_accessible : array_like, optional
-        Accessibility mask for per-base normalization.
+    is_accessible : array_like of bool or AccessibleMask, optional
+        Accessibility for per-base normalization, in place of the matrix's
+        mask; a bool array has element 0 at position 1, as in scikit-allel.
     missing_data : {'include', 'exclude'}
         'include' uses every site with the calls it has. 'exclude' keeps
         only sites with no missing call in the rows the request reads (see
@@ -2421,10 +2475,10 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
     # overwrite below with a missing-data-aware count.
+    n_variants_raw = _window_site_counts(hap_raw, win_start, win_stop,
+                                         missing_data).get()
     results = _init_window_results(
-        chrom, ws_cpu, we_cpu,
-        n_variants=_window_site_counts(hap_raw, win_start, win_stop,
-                                       missing_data).get())
+        chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
 
     window_bases = None
     if per_base:
@@ -2474,11 +2528,17 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
+        rescale = _missing_data_rescale(var_count, per_base, False,
+                                        lambda: count_valid_w)
+
         if 'pi' in statistics:
-            results['pi'] = _rate(mpd_sum, window_bases, per_base)
+            vals = mpd_sum * rescale if rescale is not None else mpd_sum
+            results['pi'] = _rate(vals, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
+            vals = (watterson_num_w * rescale if rescale is not None
+                    else watterson_num_w)
+            results['theta_w'] = _rate(vals, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -2492,11 +2552,13 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
+            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
+            results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
-                                        per_base)
+            # A difference of two estimators, not a rate: no span-normalized
+            # form, so it never goes through _rate.
+            results['fay_wu_h'] = mpd_sum - theta_h_sum
 
         if 'max_daf' in statistics:
             if excluded_to_empty is not None:
@@ -2537,6 +2599,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         out_pi2 = cp.zeros(n_windows, dtype=cp.float64)
         out_wc_a = cp.zeros(n_windows, dtype=cp.float64)
         out_wc_abc = cp.zeros(n_windows, dtype=cp.float64)
+        out_dxy_valid = cp.zeros(n_windows, dtype=cp.float64)
+        out_da_valid = cp.zeros(n_windows, dtype=cp.float64)
         need_wc = 'fst_wc' in statistics
 
         block = 256
@@ -2549,7 +2613,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
              np.int32(n_total_var), np.int32(n_windows),
              np.int32(need_wc),
              out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
-             out_wc_a, out_wc_abc))
+             out_wc_a, out_wc_abc, out_dxy_valid, out_da_valid))
 
         # Post-process on GPU, single .get() per result
         if 'fst' in statistics or 'fst_hudson' in statistics:
@@ -2564,17 +2628,27 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             results['fst_wc'] = cp.where(out_wc_abc > 0,
                                           out_wc_a / out_wc_abc, cp.nan).get()
 
+        # Without this, a site with too few calls to contribute would still
+        # count toward the span, reading as invariant rather than unmeasured.
+        # dxy and da need their own count, since they use different site gates.
         if 'dxy' in statistics:
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: out_dxy_valid.get())
+            vals = out_dxy * cp.asarray(r) if r is not None else out_dxy
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['dxy'] = cp.where(wb > 0,
-                                          out_dxy / wb, cp.nan).get()
+                                          vals / wb, cp.nan).get()
             else:
-                results['dxy'] = out_dxy.get()
+                results['dxy'] = vals.get()
 
         if 'da' in statistics:
             # da's between term is fst's (both pops >= 2 calls), not dxy's.
             da_sum = out_fst_den - (out_pi1 + out_pi2) / 2.0
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: out_da_valid.get())
+            if r is not None:
+                da_sum = da_sum * cp.asarray(r)
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['da'] = cp.where(wb > 0,
@@ -2916,10 +2990,10 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
     # overwrite below with a missing-data-aware count.
+    n_variants_raw = _window_site_counts(hap_raw, win_start, win_stop,
+                                         missing_data).get()
     results = _init_window_results(
-        chrom, ws_cpu, we_cpu,
-        n_variants=_window_site_counts(hap_raw, win_start, win_stop,
-                                       missing_data).get())
+        chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
 
     window_bases = None
     if per_base:
@@ -3012,11 +3086,17 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
 
         results['n_variants'] = var_count.astype(int)
 
+        rescale = _missing_data_rescale(var_count, per_base, False,
+                                        lambda: count_valid_w)
+
         if 'pi' in statistics:
-            results['pi'] = _rate(mpd_sum, window_bases, per_base)
+            vals = mpd_sum * rescale if rescale is not None else mpd_sum
+            results['pi'] = _rate(vals, window_bases, per_base)
 
         if 'theta_w' in statistics:
-            results['theta_w'] = _rate(watterson_num_w, window_bases, per_base)
+            vals = (watterson_num_w * rescale if rescale is not None
+                    else watterson_num_w)
+            results['theta_w'] = _rate(vals, window_bases, per_base)
 
         if 'segregating_sites' in statistics:
             results['segregating_sites'] = seg_count.astype(int)
@@ -3030,11 +3110,13 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                 watterson_num_w)
 
         if 'theta_h' in statistics:
-            results['theta_h'] = _rate(theta_h_sum, window_bases, per_base)
+            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
+            results['theta_h'] = _rate(vals, window_bases, per_base)
 
         if 'fay_wu_h' in statistics:
-            results['fay_wu_h'] = _rate(mpd_sum - theta_h_sum, window_bases,
-                                        per_base)
+            # A difference of two estimators, not a rate: no span-normalized
+            # form, so it never goes through _rate.
+            results['fay_wu_h'] = mpd_sum - theta_h_sum
 
         if 'max_daf' in statistics:
             if excluded_to_empty is not None:
@@ -3095,6 +3177,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
         acc_pi2 = cp.zeros(n_windows, dtype=cp.float64)
         acc_wc_a = cp.zeros(n_windows, dtype=cp.float64)
         acc_wc_abc = cp.zeros(n_windows, dtype=cp.float64)
+        acc_dxy_valid = cp.zeros(n_windows, dtype=cp.float64)
+        acc_da_valid = cp.zeros(n_windows, dtype=cp.float64)
 
         for c_start in range(0, n_total_var, twopop_chunk):
             c_end = min(c_start + twopop_chunk, n_total_var)
@@ -3128,6 +3212,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             out_pi2 = cp.zeros(n_overlap, dtype=cp.float64)
             out_wc_a = cp.zeros(n_overlap, dtype=cp.float64)
             out_wc_abc = cp.zeros(n_overlap, dtype=cp.float64)
+            out_dxy_valid = cp.zeros(n_overlap, dtype=cp.float64)
+            out_da_valid = cp.zeros(n_overlap, dtype=cp.float64)
 
             _fused_windowed_twopop_kernel(
                 (int(n_overlap),), (256,),
@@ -3136,13 +3222,15 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                  np.int32(n_chunk_var), np.int32(n_overlap),
                  np.int32(need_wc),
                  out_fst_num, out_fst_den, out_dxy, out_pi1, out_pi2,
-                 out_wc_a, out_wc_abc))
+                 out_wc_a, out_wc_abc, out_dxy_valid, out_da_valid))
 
             cp.add.at(acc_fst_num, w_idx, out_fst_num)
             cp.add.at(acc_fst_den, w_idx, out_fst_den)
             cp.add.at(acc_dxy, w_idx, out_dxy)
             cp.add.at(acc_pi1, w_idx, out_pi1)
             cp.add.at(acc_pi2, w_idx, out_pi2)
+            cp.add.at(acc_dxy_valid, w_idx, out_dxy_valid)
+            cp.add.at(acc_da_valid, w_idx, out_da_valid)
             if need_wc:
                 cp.add.at(acc_wc_a, w_idx, out_wc_a)
                 cp.add.at(acc_wc_abc, w_idx, out_wc_abc)
@@ -3163,17 +3251,27 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             results['fst_wc'] = cp.where(acc_wc_abc > 0,
                                           acc_wc_a / acc_wc_abc, cp.nan).get()
 
+        # Without this, a site with too few calls to contribute would still
+        # count toward the span, reading as invariant rather than unmeasured.
+        # dxy and da need their own count, since they use different site gates.
         if 'dxy' in statistics:
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: acc_dxy_valid.get())
+            vals = acc_dxy * cp.asarray(r) if r is not None else acc_dxy
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['dxy'] = cp.where(wb > 0,
-                                          acc_dxy / wb, cp.nan).get()
+                                          vals / wb, cp.nan).get()
             else:
-                results['dxy'] = acc_dxy.get()
+                results['dxy'] = vals.get()
 
         if 'da' in statistics:
             # da's between term is fst's (both pops >= 2 calls), not dxy's.
             da_sum = acc_fst_den - (acc_pi1 + acc_pi2) / 2.0
+            r = _missing_data_rescale(n_variants_raw, per_base, False,
+                                      lambda: acc_da_valid.get())
+            if r is not None:
+                da_sum = da_sum * cp.asarray(r)
             if per_base:
                 wb = cp.asarray(window_bases)
                 results['da'] = cp.where(wb > 0,

@@ -387,9 +387,10 @@ class TestEdgeCases:
             'multi': list(range(1, 10))
         }
 
-        # Should handle gracefully
+        # pi needs its own pair; a single-haplotype population never has
+        # one, so it is undefined.
         pi_single = divergence.pi_within_population(matrix, 'single')
-        assert pi_single == 0.0  # No diversity in single sample
+        assert np.isnan(pi_single)
 
         # Hudson FST needs its own pair in each population at a site; a
         # single-haplotype population never has one, so it is undefined.

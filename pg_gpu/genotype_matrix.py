@@ -11,7 +11,7 @@ import numpy as np
 import cupy as cp
 from typing import Optional
 
-from .accessible import (AccessibleMask, _data_contig, resolve_accessible_mask,
+from .accessible import (AccessibleMask, _called_sites_mask, _data_contig, resolve_accessible_mask,
                          slice_fields)
 from .zarr_io import _distinct_contigs, parse_region
 
@@ -218,7 +218,9 @@ class GenotypeMatrix:
         Parameters
         ----------
         mask_or_path : str, path-like, numpy.ndarray, or AccessibleMask
-            BED file path, boolean array, or AccessibleMask instance.
+            BED file path, boolean array, or AccessibleMask instance. A
+            boolean array starts at chrom_start; see
+            ``HaplotypeMatrix.set_accessible_mask``.
         chrom : str, optional
             Chromosome name to extract from the BED file. Required when the
             BED file has more than one contig (otherwise ValueError); a
@@ -461,7 +463,9 @@ class GenotypeMatrix:
         path : str
             Path to VCF file.
         include_invariant : bool
-            If True, include invariant sites and set n_total_sites.
+            If True, the VCF has a record for each called base. The record
+            positions become the accessible mask; see
+            ``HaplotypeMatrix.from_vcf``.
         accessible_bed : str, optional
             Path to a BED file defining accessible/callable regions.
         fields : list of str, optional
@@ -528,17 +532,21 @@ class GenotypeMatrix:
         # transpose to (n_individuals, n_variants)
         geno = geno.T
 
-        n_total_sites = geno.shape[1] if include_invariant else None
-        gm = cls(geno, pos, chrom_start=pos[0], chrom_end=pos[-1],
-                 n_total_sites=n_total_sites, samples=samples,
-                 fields=qc_fields)
-        if accessible_bed is not None:
-            chrom = None
-            if 'variants/CHROM' in callset:
-                chrom = _data_contig(
-                    _distinct_contigs(callset['variants/CHROM']), f"VCF {path}",
-                    "load one contig per GenotypeMatrix, e.g. from a VCF "
-                    "subset with bcftools view -r")
+        # The region spans every loaded record, as in HaplotypeMatrix.from_vcf:
+        # a record dropped above as multiallelic is still a base of it.
+        all_pos = callset['variants/POS']
+        gm = cls(geno, pos, chrom_start=int(all_pos[0]), chrom_end=int(all_pos[-1]),
+                 samples=samples, fields=qc_fields)
+        chrom = None
+        if accessible_bed is not None and 'variants/CHROM' in callset:
+            chrom = _data_contig(
+                _distinct_contigs(callset['variants/CHROM']), f"VCF {path}",
+                "load one contig per GenotypeMatrix, e.g. from a VCF "
+                "subset with bcftools view -r")
+        if include_invariant:
+            gm.set_accessible_mask(_called_sites_mask(
+                all_pos, gm.chrom_start, gm.chrom_end, accessible_bed, chrom))
+        elif accessible_bed is not None:
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
         return gm
 
@@ -566,9 +574,10 @@ class GenotypeMatrix:
         Parameters
         ----------
         include_invariant : bool
-            If True, set ``n_total_sites`` from the loaded variant
-            count. Unique to this entry point (the haplotype matrix
-            does not need it).
+            If True, the store has a record for each called base. The
+            record positions become the accessible mask, as in
+            ``HaplotypeMatrix.from_vcf``, on the eager and the streaming
+            path alike.
         path, region, accessible_bed, pop_assignment, streaming, chunk_bp, prefetch, backend, fields
             See ``HaplotypeMatrix.from_zarr``.
 
@@ -597,6 +606,7 @@ class GenotypeMatrix:
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 backend=backend, accessible_bed=accessible_bed,
+                include_invariant=include_invariant,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits;
@@ -619,6 +629,7 @@ class GenotypeMatrix:
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 backend=backend, source=source, accessible_bed=accessible_bed,
+                include_invariant=include_invariant,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
@@ -641,8 +652,6 @@ class GenotypeMatrix:
         check_diploid_encoding(gt, sample_names=samples,
                                source=f"zarr store '{path}'")
 
-        n_total_sites = gt.shape[0] if include_invariant else None
-
         _, start, stop = parse_region(region)
         start = start if start is not None else int(positions[0])
         stop = stop - 1 if stop is not None else int(positions[-1])
@@ -651,7 +660,6 @@ class GenotypeMatrix:
             gt, positions,
             chrom_start=start,
             chrom_end=stop,
-            n_total_sites=n_total_sites,
             samples=list(samples) if samples else None,
         )
         from ._warnings import _warn_biallelic_only
@@ -664,9 +672,14 @@ class GenotypeMatrix:
                 variant_indices=data.get('variant_indices'),
                 region=region,
             )
+        chrom = None
         if accessible_bed is not None:
             chrom = _data_contig(data['contigs'], f"zarr store {path}",
                                  "load one contig with region=")
+        if include_invariant:
+            gm.set_accessible_mask(_called_sites_mask(
+                positions, start, stop, accessible_bed, chrom))
+        elif accessible_bed is not None:
             gm.set_accessible_mask(accessible_bed, chrom=chrom)
 
         try:
@@ -688,7 +701,7 @@ class GenotypeMatrix:
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
                          prefetch, backend="auto", source=None,
-                         accessible_bed=None):
+                         accessible_bed=None, include_invariant=False):
         from .streaming_matrix import (
             StreamingGenotypeMatrix, _pick_chunk_fetcher,
         )
@@ -704,7 +717,7 @@ class GenotypeMatrix:
         # Resolve the accessible BED once over the source's bounds
         from .accessible import resolve_streaming_accessible_mask
         accessible_mask = resolve_streaming_accessible_mask(
-            accessible_bed, source, region)
+            accessible_bed, source, region, include_invariant)
 
         return StreamingGenotypeMatrix(
             source, fetcher,
