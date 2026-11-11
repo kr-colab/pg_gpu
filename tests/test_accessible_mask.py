@@ -749,7 +749,8 @@ class TestSiteCountProperties:
 
     def test_n_segregating_cpu_resident(self):
         # The property must give the correct count from a CPU-resident
-        # matrix too, not just a GPU one.
+        # matrix too, not just a GPU one, and must not move the matrix to
+        # the GPU as a side effect of reading it.
         hap = np.array([
             [2, 2, 1, 0], [0, 2, 1, 1], [0, 2, 1, 2], [0, 2, 1, 0], [0, 2, 1, 0],
             [0, 2, 2, 0], [0, 2, 2, 0], [0, 2, 2, 0], [0, 0, 2, 0], [0, 0, 2, 0],
@@ -757,6 +758,7 @@ class TestSiteCountProperties:
         hm = HaplotypeMatrix(hap, np.array([100, 200, 300, 400]), 1, 1000)
         assert hm.device == 'CPU'
         assert hm.n_segregating_sites == 4
+        assert hm.device == 'CPU'
 
     def test_n_invariant_identity(self):
         # Identity: n_total = n_segregating + n_invariant when n_total set.

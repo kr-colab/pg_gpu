@@ -558,10 +558,8 @@ class HaplotypeMatrix:
         Counts sites with at least two distinct alleles present among the
         non-missing haplotypes.
         """
-        if self.device == 'CPU':
-            self.transfer_to_gpu()
         from ._memutil import allele_counts
-        ac, _ = allele_counts(self.haplotypes)
+        ac, _ = allele_counts(cp.asarray(self.haplotypes))
         is_variant = (ac > 0).sum(axis=1) >= 2
         return int(cp.sum(is_variant))
 
