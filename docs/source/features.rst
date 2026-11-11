@@ -581,6 +581,11 @@ What runs on a streaming matrix:
    * - ``zarr_io.allel_zarr_to_vcz``
      - Streaming converter from scikit-allel layout to VCZ for stores that pre-date bio2zarr.
 
+Every other statistic needs the whole matrix in memory. Given a streaming
+matrix, it raises ``NotImplementedError`` that names the two ways
+forward: ``windowed_analysis`` for a genome scan, or ``.materialize()``
+for a sub-region.
+
 Fused Windowed Statistics
 -------------------------
 

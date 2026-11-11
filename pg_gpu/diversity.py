@@ -14,7 +14,7 @@ import cupy as cp
 from typing import Union, Optional, Dict, Callable
 from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
-from ._utils import population_rows
+from ._utils import _eager_only, population_rows
 from ._warnings import _phase_dependent, _warn_unphased
 
 
@@ -865,6 +865,7 @@ def pi_components(haplotypes, n_total_sites=None, n_haplotypes_full=None):
 
 
 
+@_eager_only
 def pi(haplotype_matrix: HaplotypeMatrix,
        population: Optional[Union[str, list]] = None,
        span_normalize=True,
@@ -901,6 +902,7 @@ def pi(haplotype_matrix: HaplotypeMatrix,
                                  result['n_sites_with_data'])
 
 
+@_eager_only
 def theta_w(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
             span_normalize=True,
@@ -937,6 +939,7 @@ def theta_w(haplotype_matrix: HaplotypeMatrix,
                                  result['n_sites_with_data'])
 
 
+@_eager_only
 def tajimas_d(haplotype_matrix: HaplotypeMatrix,
               population: Optional[Union[str, list]] = None,
               missing_data: str = 'include') -> float:
@@ -968,6 +971,7 @@ def tajimas_d(haplotype_matrix: HaplotypeMatrix,
     return _compute_neutrality_test(matrix, 'pi', 'watterson')
 
 
+@_eager_only
 def segregating_sites(haplotype_matrix: HaplotypeMatrix,
                      population: Optional[Union[str, list]] = None,
                      missing_data: str = 'include') -> int:
@@ -1019,6 +1023,7 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
     return int(cp.sum(cp.where(sites_with_data, alleles_present - 1, 0)).get())
 
 
+@_eager_only
 def singleton_count(haplotype_matrix: HaplotypeMatrix,
                    population: Optional[Union[str, list]] = None,
                    missing_data: str = 'include') -> int:
@@ -1067,6 +1072,7 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
     return int(cp.sum((derived == 1) & (derived < n_valid[:, None])).get())
 
 
+@_eager_only
 @_phase_dependent
 def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                    population: Optional[Union[str, list]] = None,
@@ -1182,6 +1188,7 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
 
 
 
+@_eager_only
 def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
               population: Optional[Union[str, list]] = None,
               missing_data: str = 'include') -> float:
@@ -1211,6 +1218,7 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
     return result['thetas']['pi'] - result['thetas']['theta_h']
 
 
+@_eager_only
 @_phase_dependent
 def haplotype_diversity(haplotype_matrix: HaplotypeMatrix,
                        population: Optional[Union[str, list]] = None,
@@ -1276,6 +1284,7 @@ def _haplotypes_for_grouping(haplotype_matrix, population, missing_data):
 
 
 
+@_eager_only
 def theta_h(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
             span_normalize=True,
@@ -1308,6 +1317,7 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
                                  result['n_sites_with_data'])
 
 
+@_eager_only
 def theta_l(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
             span_normalize=True,
@@ -1345,6 +1355,7 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
 
 
 
+@_eager_only
 def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
                          population: Optional[Union[str, list]] = None,
                          missing_data: str = 'include') -> float:
@@ -1379,6 +1390,7 @@ def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
     return _compute_neutrality_test(matrix, 'pi', 'theta_h')
 
 
+@_eager_only
 def zeng_e(haplotype_matrix: HaplotypeMatrix,
            population: Optional[Union[str, list]] = None,
            missing_data: str = 'include') -> float:
@@ -1405,6 +1417,7 @@ def zeng_e(haplotype_matrix: HaplotypeMatrix,
     return _compute_neutrality_test(matrix, 'theta_l', 'watterson')
 
 
+@_eager_only
 def zeng_dh(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
             missing_data: str = 'include') -> float:
@@ -1453,6 +1466,7 @@ def _zeng_dh_combine(D, H):
     return np.where(np.isfinite(D) & np.isfinite(H), dh, np.nan)
 
 
+@_eager_only
 def max_daf(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
             missing_data: str = 'include') -> float:
@@ -1502,6 +1516,7 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
     return float(cp.max(freq).get())
 
 
+@_eager_only
 @_phase_dependent
 def haplotype_count(haplotype_matrix: HaplotypeMatrix,
                     population: Optional[Union[str, list]] = None,
@@ -1538,6 +1553,7 @@ def haplotype_count(haplotype_matrix: HaplotypeMatrix,
     return res[1]
 
 
+@_eager_only
 def daf_histogram(matrix, n_bins: int = 20,
                   population: Optional[Union[str, list]] = None,
                   missing_data: str = 'include'):
@@ -1588,6 +1604,7 @@ def daf_histogram(matrix, n_bins: int = 20,
     return _histogram_from_dafs(freq[keep], n_bins)
 
 
+@_eager_only
 def diplotype_frequency_spectrum(genotype_matrix,
                                  population: Optional[Union[str, list]] = None,
                                  missing_data: str = 'include'):
@@ -1684,11 +1701,12 @@ def _daf_histogram_diploid(genotype_matrix, n_bins=20, population=None,
 
 
 # backward compat alias
-daf_histogram_diploid = _daf_histogram_diploid
+daf_histogram_diploid = _eager_only(_daf_histogram_diploid, name='daf_histogram_diploid')
 
 
 # Summary statistics combinations commonly used
 
+@_eager_only
 def neutrality_tests(haplotype_matrix: HaplotypeMatrix,
                     population: Optional[Union[str, list]] = None,
                     missing_data: str = 'include') -> Dict[str, float]:
@@ -1721,6 +1739,7 @@ def neutrality_tests(haplotype_matrix: HaplotypeMatrix,
     }
 
 
+@_eager_only
 def heterozygosity_expected(haplotype_matrix: HaplotypeMatrix,
                             population: Optional[Union[str, list]] = None,
                             missing_data: str = 'include'):
@@ -1788,6 +1807,7 @@ def _heterozygosity_expected_sites(haplotype_matrix: HaplotypeMatrix,
     return he
 
 
+@_eager_only
 def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
                             population: Optional[Union[str, list]] = None,
                             ploidy: int = 2,
@@ -1883,6 +1903,7 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
     return ho.get()
 
 
+@_eager_only
 def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
                            population: Optional[Union[str, list]] = None,
                            ploidy: int = 2,
@@ -1918,6 +1939,7 @@ def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
     return f.get()
 
 
+@_eager_only
 def mu_var(haplotype_matrix: HaplotypeMatrix,
            window_length: Optional[float] = None,
            population: Optional[Union[str, list]] = None) -> float:
@@ -1953,6 +1975,7 @@ def mu_var(haplotype_matrix: HaplotypeMatrix,
     return float(n_snps / window_length)
 
 
+@_eager_only
 def mu_sfs(haplotype_matrix: HaplotypeMatrix,
            population: Optional[Union[str, list]] = None,
            missing_data: str = 'include') -> float:

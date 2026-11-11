@@ -2,6 +2,7 @@
 Shared utilities for pg_gpu modules.
 """
 
+import functools
 import warnings
 from typing import Union
 
@@ -12,6 +13,39 @@ from .accessible import slice_fields
 from .haplotype_matrix import HaplotypeMatrix
 from ._warnings import (UnpairedRowsWarning, _rows_as_numpy,
                         check_sample_set_rows, paired_rows_problem)
+
+
+def _reject_streaming(obj, context):
+    """Raise when ``obj`` is a streaming matrix, which ``context`` cannot use.
+
+    A streaming matrix holds no array of its own, so a function that needs
+    the whole matrix in memory would otherwise fail deep inside with an
+    unrelated AttributeError. The error names the two ways forward.
+    """
+    from .streaming_matrix import _StreamingMatrixBase
+    if isinstance(obj, _StreamingMatrixBase):
+        raise NotImplementedError(
+            f"{context} needs the whole matrix in memory, which a streaming "
+            "matrix does not hold. For a genome scan, use "
+            "windowed_analysis(stream, ...), which runs chunk by chunk; for a "
+            "sub-region, call stream.materialize(region=(lo, hi)) and pass "
+            "the eager matrix it returns.")
+
+
+def _eager_only(func, name=None):
+    """Reject a streaming matrix in any argument before ``func`` runs.
+
+    ``name`` is the public name for the error, for a public alias of a
+    private function.
+    """
+    name = name or func.__name__
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        for arg in (*args, *kwargs.values()):
+            _reject_streaming(arg, name)
+        return func(*args, **kwargs)
+    return wrapper
 
 
 def get_population_matrix(matrix, population: Union[str, list],

@@ -16,7 +16,7 @@ from cupy import cublas
 
 from .haplotype_matrix import HaplotypeMatrix
 from ._memutil import allele_counts, estimate_variant_chunk_size
-from ._utils import population_rows
+from ._utils import _eager_only, population_rows
 from ._warnings import _phase_dependent, _warn_unphased
 
 _GPU_MEM_BUDGET = 0.3
@@ -138,6 +138,7 @@ def _pca_from_gram(C, n_samples, n_components):
     return coords.get(), explained_variance_ratio.get()
 
 
+@_eager_only
 @_phase_dependent
 def pca(haplotype_matrix: HaplotypeMatrix,
         n_components: int = 10,
@@ -205,6 +206,7 @@ def pca(haplotype_matrix: HaplotypeMatrix,
     return _pca_from_gram(C, n_samples, n_components)
 
 
+@_eager_only
 @_phase_dependent
 def randomized_pca(haplotype_matrix: HaplotypeMatrix,
                    n_components: int = 10,
@@ -339,6 +341,7 @@ def _prepare_dosage(genotype_matrix, population=None, missing_data='include'):
     return X
 
 
+@_eager_only
 def pca_dosage(genotype_matrix,
                n_components: int = 10,
                population: Optional[Union[str, list]] = None,
@@ -381,6 +384,7 @@ def pca_dosage(genotype_matrix,
     return _pca_from_gram(X @ X.T, n_ind, n_components)
 
 
+@_eager_only
 def randomized_pca_dosage(genotype_matrix,
                           n_components: int = 10,
                           population: Optional[Union[str, list]] = None,
@@ -453,6 +457,7 @@ def randomized_pca_dosage(genotype_matrix,
     return coords.get(), explained_variance_ratio.get()
 
 
+@_eager_only
 @_phase_dependent
 def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
                       metric: str = 'euclidean',
@@ -1077,6 +1082,7 @@ def _sign_align_windows(eigvecs):
     return eigvecs
 
 
+@_eager_only
 @_phase_dependent
 def local_pca(haplotype_matrix: "HaplotypeMatrix",
               window_params=None,
@@ -1690,6 +1696,7 @@ class LostructResult:
         return self.local_pca.jackknife_se
 
 
+@_eager_only
 @_phase_dependent
 def lostruct(haplotype_matrix: "HaplotypeMatrix",
              *,
@@ -1902,6 +1909,7 @@ def _sign_align_replicates(vecs: "cp.ndarray") -> "cp.ndarray":
     return vecs * sign
 
 
+@_eager_only
 @_phase_dependent
 def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
                         window_params=None,

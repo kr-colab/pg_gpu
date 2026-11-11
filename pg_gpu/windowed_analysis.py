@@ -21,7 +21,7 @@ from . import ld_statistics
 from . import divergence
 from . import diversity
 from . import selection
-from ._utils import population_rows
+from ._utils import _eager_only, population_rows
 from ._haplotype_groups import column_has_missing
 from ._haplotype_hash import garud_h_windows
 from ._warnings import _outside_phase_guard, _phase_dependent, _warn_unphased
@@ -2335,6 +2335,7 @@ def _apply_exclude(haplotype_matrix, missing_data, statistics, population,
     return haplotype_matrix.exclude_missing_sites(populations=pops), 'include'
 
 
+@_eager_only
 @_phase_dependent
 def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                               bp_bins=None,
@@ -2894,6 +2895,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     return results
 
 
+@_eager_only
 @_phase_dependent
 def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                                       bp_bins=None,

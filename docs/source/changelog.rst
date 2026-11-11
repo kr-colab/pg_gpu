@@ -373,6 +373,16 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* A scalar statistic given a streaming matrix failed deep inside with a
+  bare ``AttributeError`` (no attribute ``device``), which did not say
+  what to do. Every function that needs the whole matrix in memory now
+  raises ``NotImplementedError`` that points to ``windowed_analysis``
+  for a genome scan and to ``.materialize(region=(lo, hi))`` for a
+  sub-region. ``mu_var``, which returned a value on a stream, now
+  rejects one too: the stream's variant count ignores its accessible
+  mask, while its span reads it. ``pca_dosage``,
+  ``randomized_pca_dosage`` and ``sigma_d2_geno`` raise the same error
+  in place of a ``TypeError`` about the matrix class.
 * ``pairwise_diffs_diploid`` (and so ``dist_moments`` on a
   ``GenotypeMatrix``) raised ``TypeError`` for a population given as a
   list of rows. It now selects rows as the haploid path does.

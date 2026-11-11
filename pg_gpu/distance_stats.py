@@ -10,7 +10,7 @@ import numpy as np
 import cupy as cp
 from .haplotype_matrix import HaplotypeMatrix
 from .genotype_matrix import GenotypeMatrix
-from ._utils import population_rows
+from ._utils import _eager_only, population_rows
 from ._warnings import _phase_dependent, _warn_unphased
 
 
@@ -97,6 +97,7 @@ def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
     return diffs_mat
 
 
+@_eager_only
 @_phase_dependent
 def pairwise_diffs_haploid(haplotype_matrix, population=None,
                            missing_data='include'):
@@ -146,6 +147,7 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
     return _extract_upper_triangle(diffs_mat)
 
 
+@_eager_only
 def pairwise_diffs_diploid(genotype_matrix, population=None,
                            missing_data='include'):
     """Compute pairwise genotype differences between diploid individuals.
@@ -191,6 +193,7 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
         _pairwise_diffs_matrix_gpu(geno, missing_data='normalize'))
 
 
+@_eager_only
 @_phase_dependent
 def dist_moments(matrix, population=None, missing_data='include'):
     """Compute variance, skewness, and kurtosis of pairwise distances.
@@ -253,6 +256,7 @@ def dist_moments(matrix, population=None, missing_data='include'):
     return var_val, skew_val, kurt_val
 
 
+@_eager_only
 @_phase_dependent
 def dist_var(matrix, population=None, missing_data='include'):
     """Variance of pairwise distance distribution.
@@ -266,6 +270,7 @@ def dist_var(matrix, population=None, missing_data='include'):
     return dist_moments(matrix, population, missing_data)[0]
 
 
+@_eager_only
 @_phase_dependent
 def dist_skew(matrix, population=None, missing_data='include'):
     """Skewness of pairwise distance distribution.
@@ -279,6 +284,7 @@ def dist_skew(matrix, population=None, missing_data='include'):
     return dist_moments(matrix, population, missing_data)[1]
 
 
+@_eager_only
 @_phase_dependent
 def dist_kurt(matrix, population=None, missing_data='include'):
     """Excess kurtosis of pairwise distance distribution.
@@ -292,6 +298,7 @@ def dist_kurt(matrix, population=None, missing_data='include'):
     return dist_moments(matrix, population, missing_data)[2]
 
 
+@_eager_only
 @_phase_dependent
 def pairwise_diffs(matrix, population=None, missing_data='include'):
     """Compute pairwise Hamming distances on GPU.
