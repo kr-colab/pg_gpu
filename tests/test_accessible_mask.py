@@ -729,8 +729,36 @@ class TestSiteCountProperties:
         ], dtype=np.int8)
         pos = np.array([1, 2, 3, 4, 5])
         hm = self._make_hm(hap, pos, chrom_start=1, chrom_end=5)
-        # Sites 1 and 3 are the only polymorphic ones (0 < derived < n_valid)
+        # Sites 1 and 3 are the only ones with two distinct alleles present
         assert hm.n_segregating_sites == 2
+
+    def test_n_segregating_multiallelic(self):
+        # Four sites, each with two or more distinct alleles present: {0,2}
+        # at low frequency, {0,2} at high frequency, {1,2}, {0,1,2}. A site
+        # where the derived allele codes happen to sum to >= n_valid (the
+        # high-frequency {0,2} and the {1,2} sites) must still count.
+        hap = np.array([
+            [2, 2, 1, 0], [0, 2, 1, 1], [0, 2, 1, 2], [0, 2, 1, 0], [0, 2, 1, 0],
+            [0, 2, 2, 0], [0, 2, 2, 0], [0, 2, 2, 0], [0, 0, 2, 0], [0, 0, 2, 0],
+        ], dtype=np.int8)
+        pos = np.array([100, 200, 300, 400])
+        hm = self._make_hm(hap, pos, chrom_start=1, chrom_end=1000,
+                           n_total_sites=100)
+        assert hm.n_segregating_sites == 4
+        assert hm.n_invariant_sites == 96
+
+    def test_n_segregating_cpu_resident(self):
+        # The property must give the correct count from a CPU-resident
+        # matrix too, not just a GPU one, and must not move the matrix to
+        # the GPU as a side effect of reading it.
+        hap = np.array([
+            [2, 2, 1, 0], [0, 2, 1, 1], [0, 2, 1, 2], [0, 2, 1, 0], [0, 2, 1, 0],
+            [0, 2, 2, 0], [0, 2, 2, 0], [0, 2, 2, 0], [0, 0, 2, 0], [0, 0, 2, 0],
+        ], dtype=np.int8)
+        hm = HaplotypeMatrix(hap, np.array([100, 200, 300, 400]), 1, 1000)
+        assert hm.device == 'CPU'
+        assert hm.n_segregating_sites == 4
+        assert hm.device == 'CPU'
 
     def test_n_invariant_identity(self):
         # Identity: n_total = n_segregating + n_invariant when n_total set.

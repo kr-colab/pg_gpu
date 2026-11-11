@@ -729,6 +729,12 @@ Bug fixes
   datasets. It now combines D with the normalized H*
   (``normalized_fay_wus_h``), matching the statistic Zeng et al. (2006)
   actually uses in their joint test.
+* ``HaplotypeMatrix.n_segregating_sites`` summed allele codes and called a
+  site polymorphic when the sum fell strictly between 0 and the valid
+  count, so a multiallelic site could be missed at some allele
+  frequencies (and so could ``n_invariant_sites``, which is computed from
+  it). It now counts a site as segregating when at least two distinct
+  alleles are present among the non-missing haplotypes.
 
 New warnings
 ~~~~~~~~~~~~

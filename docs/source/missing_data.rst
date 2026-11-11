@@ -365,8 +365,8 @@ load time), three properties decompose the analysis universe:
   positions its accessible mask, so this is the count of called bases
   (only those in the BED, if ``accessible_bed`` is given too). Each
   window then divides by its own called bases.
-* ``n_segregating_sites`` -- polymorphic sites in the matrix
-  (``0 < derived_count < n_valid``).
+* ``n_segregating_sites`` -- polymorphic sites in the matrix (at least
+  two distinct alleles present among the non-missing haplotypes).
 * ``n_invariant_sites`` -- ``n_callable_sites - n_segregating_sites``;
   may include implied invariants outside the matrix when the VCF was
   variants-only.
