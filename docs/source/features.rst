@@ -605,8 +605,11 @@ falls back to a slower route that produces the same numbers.
      - Number of mutations per window (a site with 3 alleles counts as 2)
    * - ``singletons``
      - Number of alternate alleles seen exactly once in the window
-   * - ``theta_h``, ``fay_wu_h``
-     - Fay & Wu's theta_H and H per window
+   * - ``theta_h``
+     - Fay & Wu's theta_H per window
+   * - ``fay_wu_h``
+     - Fay & Wu's H -- a difference of estimators, not a rate, so it has
+       no per-window span normalization
    * - ``max_daf``
      - Frequency of the most common alternate allele in the window
    * - ``fst``, ``fst_hudson``
@@ -642,10 +645,10 @@ falls back to a slower route that produces the same numbers.
 The rule to expect is that a windowed statistic gives the same answer
 as calling the plain function on just that window's variants. Alleles
 are counted separately here too, the same as everywhere else. This
-includes the neutrality tests (``tajimas_d``, ``normalized_fay_wu_h``,
-``zeng_e``, ``zeng_dh``): under missing data, each window uses the
-harmonic mean of its own per-site valid sample counts, the same
-quantity the plain functions use.
+includes the neutrality tests (``tajimas_d``, ``fay_wu_h``,
+``normalized_fay_wu_h``, ``zeng_e``, ``zeng_dh``): under missing data,
+each window uses the harmonic mean of its own per-site valid sample
+counts, the same quantity the plain functions use.
 
 One limit: the windowed kernels can handle at most 8 alleles at a
 single site. Anything beyond that is skipped, and a

@@ -335,7 +335,7 @@ span_normalized = true
 [windowed.fay_wu_h]
 scalar = "diversity.fay_wus_h"
 engines = ["thetas_scatter", "fused", "fused_chunked"]
-span_normalized = true
+span_normalized = false
 
 [windowed.normalized_fay_wu_h]
 scalar = "diversity.normalized_fay_wus_h"
@@ -350,8 +350,7 @@ span_normalized = false
 [windowed.zeng_dh]
 scalar = "diversity.zeng_dh"
 engines = ["thetas_scatter"]
-span_normalized = true
-notes = "The scatter engine combines Tajima's D with H divided by the window span; diversity.zeng_dh uses the raw H."
+span_normalized = false
 
 [windowed.max_daf]
 scalar = "diversity.max_daf"
@@ -697,7 +696,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "0.0 with no variants or fewer than two haplotypes"
 parallel = ["diversity.diversity_stats", "diversity.FrequencySpectrum.fay_wu_h", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "Returns the raw pi - theta_H sum, but the windowed 'fay_wu_h' column divides by the window span."
+notes = "Returns the raw pi - theta_H sum; the windowed 'fay_wu_h' column matches it exactly on each window's variants, with no span division."
 
 [functions."diversity.haplotype_diversity"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -760,9 +759,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN when Tajima's D is NaN (Fay-Wu H is always defined); 0.0 unless both are negative"
+undefined = "NaN when Tajima's D or the normalized H* is NaN; 0.0 unless both are negative"
 parallel = ["windowed_analysis._windowed_thetas_scatter"]
-notes = "Scalar multiplies D by the raw H; the scatter engine multiplies D by the span-normalized H."
+notes = "Multiplies D by normalized_fay_wus_h (H*), not the raw H; the scatter engine shares the same windowed_test call that serves normalized_fay_wu_h."
 
 [functions."diversity.max_daf"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -793,9 +792,9 @@ inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "all-zero histogram when no derived allele is present (HaplotypeMatrix)"
+undefined = "all-zero histogram when no derived allele is present"
 parallel = ["diversity._daf_histogram_diploid", "windowed_analysis.windowed_statistics_fused"]
-notes = "The GenotypeMatrix branch calls _daf_histogram_diploid, which drops missing_data and uses a different DAF rule (dosage sum, monomorphic sites binned at 0)."
+notes = "The GenotypeMatrix branch calls _daf_histogram_diploid (per-site dosage sum, biallelic by construction), sharing _daf_keep_mask with the haplotype branch's per-allele rule so both drop monomorphic and no-call sites and honor missing_data the same way."
 
 [functions."diversity.diplotype_frequency_spectrum"]
 # signature: (genotype_matrix, population, missing_data)
@@ -808,13 +807,13 @@ undefined = "(empty array, NaN) under 'include' when no diplotype is complete"
 parallel = []
 
 [functions."diversity.daf_histogram_diploid"]
-# signature: (genotype_matrix, n_bins, population)
-axis_kwargs = ["population"]
+# signature: (genotype_matrix, n_bins, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
 inputs = ["GenotypeMatrix"]
 streaming = "generic_error"
-missing_data = []
+missing_data = ["include", "exclude"]
 span = "none"
-undefined = "sites with no valid call are binned at frequency 0; all-zero histogram only with no sites"
+undefined = "all-zero histogram when no derived allele is present"
 parallel = []
 notes = "Alias of _daf_histogram_diploid, which daf_histogram calls for GenotypeMatrix input; the HaplotypeMatrix branch of daf_histogram computes the same histogram by a different rule (per derived allele, absent alleles not binned)."
 
