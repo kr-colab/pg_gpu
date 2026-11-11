@@ -671,6 +671,14 @@ Bug fixes
   ``accessible_bed`` on data with more than one contig and no ``region``
   raise ``ValueError``; ``from_vcf`` used to take the first variant's
   contig and drop the other contigs' intervals.
+* ``window_type='regions'`` now computes every windowed statistic. The theta
+  estimators and neutrality tests (``theta_l``, ``zeng_e``, ``zeng_dh``,
+  ``normalized_fay_wu_h``) and the per-site statistics (``mean_nsl``,
+  ``daf_hist``, ``mu_sfs``) used to raise ``NotImplementedError`` for region
+  windows; they are now served over regions by the scatter and fused engines.
+  Those engines share one window-membership rule that maps each window to its
+  contiguous variant range -- handling overlapping, nested or unordered
+  regions -- so a region's values match a bp grid of the same windows.
 * ``windowed_analysis`` ignored an unknown keyword argument when the
   scatter or fused engine served the request, so a misspelled name, or
   ``population=`` in place of ``populations=``, changed nothing and gave

@@ -95,8 +95,8 @@ check = "Names and row lists must give the same values. Two-population windowed 
 
 [axes.windowing]
 description = "How windows are formed. windowed_analysis picks one engine per request; see [engines]. Other functions make their own windows."
-values = ["bp windows (window_size, step_size)", "snp windows (window_type='snp'; the fallback and local_pca only)", "regions (window_type='regions' with a regions DataFrame of half-open [start, end) windows; the fused engines and the fallback; theta_l, zeng_e, zeng_dh, normalized_fay_wu_h, mean_nsl, daf_hist and mu_sfs raise NotImplementedError)", "bp_bins edges (windowed_statistics_fused*, LD bins)", "moving windows in variant counts (moving_*)"]
-check = "windowed_analysis._bp_window_grid makes the bp grid for the scatter and fused engines; for window_type='regions' the fused engines take regions['start'] and regions['end'] as window edges; windowed_analysis.WindowIterator makes the fallback windows. The fused engines give a row for an empty region, but the fallback gives none (#356). No engine reads a chrom column in regions to select variants; the fallback copies it into the output chrom column, and the fused engines write the chrom argument."
+values = ["bp windows (window_size, step_size)", "snp windows (window_type='snp'; the fallback and local_pca only)", "regions (window_type='regions' with a regions DataFrame of half-open [start, end) windows; served by the scatter engines, the fused engines and the fallback)", "bp_bins edges (windowed_statistics_fused*, LD bins)", "moving windows in variant counts (moving_*)"]
+check = "windowed_analysis._bp_window_grid makes the bp grid for the scatter and fused engines; for window_type='regions' the scatter and fused engines take regions['start'] and regions['end'] as window edges; windowed_analysis.WindowIterator makes the fallback windows. Every engine shares one membership rule: windowed_analysis._window_variant_ranges maps each window's [start, end) bounds to its contiguous variant range, so overlapping and unordered regions are handled per window. The fused and scatter engines give a row for an empty region, but the fallback gives none (#356). No engine reads a chrom column in regions to select variants; the fallback copies it into the output chrom column, and the fused engines write the chrom argument."
 
 [axes.streaming]
 description = "A streaming matrix has no array of its own. A function runs on it chunk by chunk (native) or rejects it with a NotImplementedError that names windowed_analysis and .materialize(): _utils._reject_streaming, called through the _utils._eager_only decorator or directly by the pairwise LD statistics. tests/test_streaming_guard.py calls every rejects row on a stream."
@@ -231,22 +231,22 @@ notes = ".genotypes raises. Chunks are eager GenotypeMatrix objects, with the sp
 [engines.thetas_scatter]
 function = "windowed_analysis._windowed_thetas_scatter"
 stats = "windowed_analysis._SCATTER_SINGLE_STATS"
-chosen = "window_type='bp', every requested name is in its set and at most one population is given. A mixed request of these and two-population names with two populations runs both scatter engines and joins the columns."
+chosen = "window_type is 'bp' or 'regions', every requested name is in its set and at most one population is given. A mixed request of these and two-population names with two populations runs both scatter engines and joins the columns."
 span = "windowed_analysis._compute_window_bases: the accessible mask, else a share of n_total_sites in proportion to the window length, else the window length."
 missing_data = ["include", "exclude"]
 
 [engines.twopop_scatter]
 function = "windowed_analysis._windowed_twopop_scatter"
 stats = "windowed_analysis._TWO_POP_STATS"
-chosen = "window_type='bp', every requested name is a two-population statistic and exactly two populations are given."
+chosen = "window_type is 'bp' or 'regions', every requested name is a two-population statistic and exactly two populations are given."
 span = "windowed_analysis._compute_window_bases, as thetas_scatter."
 missing_data = ["include", "exclude"]
 
 [engines.fused]
 function = "windowed_analysis.windowed_statistics_fused"
 stats = "windowed_analysis._FUSED_STATS"
-chosen = "No scatter engine takes the request, window_type is 'bp' or 'regions' (for regions, mean_nsl, daf_hist and mu_sfs raise NotImplementedError), every name is in its set, two-population names come with exactly two populations, and missing_data='include'. Under 'exclude' it runs only for a Garud-only request or a request with a name that the fallback does not know."
-span = "windowed_analysis._compute_window_bases, as thetas_scatter."
+chosen = "No scatter engine takes the request, window_type is 'bp' or 'regions', every name is in its set, two-population names come with exactly two populations, and missing_data='include'. Under 'exclude' it runs only for a Garud-only request or a request with a name that the fallback does not know."
+span = "windowed_analysis._compute_window_bases: the accessible mask, else the window length. It does not read n_total_sites."
 missing_data = ["include", "exclude"]
 
 [engines.fused_chunked]
@@ -361,7 +361,7 @@ span_normalized = false
 scalar = "diversity.heterozygosity_expected"
 engines = ["fused", "fallback"]
 span_normalized = false
-notes = "Per-window mean of per-site expected heterozygosity over the sites with a defined value (n_valid >= 2), NaN for a window with none; not span-normalized. Both engines reuse the per-site rule of diversity.heterozygosity_expected (its CuPy core diversity._heterozygosity_expected_sites) so it lives in one place: the fused engine takes each window's variant range [win_start, win_stop) and prefix-sums the non-NaN values and their count, which serves any window family including unordered or overlapping regions (unlike the site_win path mean_nsl uses); the chunked engine forwards the name to the fused engine; the fallback averages diversity.heterozygosity_expected over each window matrix. Under 'exclude' it is not a fused-only name, so the request falls to the fallback."
+notes = "Per-window mean of per-site expected heterozygosity over the sites with a defined value (n_valid >= 2), NaN for a window with none; not span-normalized. Both engines reuse the per-site rule of diversity.heterozygosity_expected (its CuPy core diversity._heterozygosity_expected_sites) so it lives in one place: the fused engine prefix-sums the non-NaN values of each window's variant range [win_start, win_stop) and their count via windowed_analysis._WindowAccumulator.mean (the shared range reducer that mean_nsl, daf_hist and mu_sfs also use), which serves any window family including unordered or overlapping regions; the chunked engine forwards the name to the fused engine; the fallback averages diversity.heterozygosity_expected over each window matrix. Under 'exclude' it is not a fused-only name, so the request falls to the fallback."
 
 [windowed.daf_hist]
 scalar = "diversity.daf_histogram"

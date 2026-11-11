@@ -9,6 +9,8 @@ from pg_gpu import HaplotypeMatrix, diversity, divergence
 from pg_gpu.windowed_analysis import (
     WindowedAnalyzer, windowed_analysis, WindowParams,
     WindowIterator, WindowData, CANONICAL_WINDOW_PREFIX,
+    _window_variant_ranges, _WindowAccumulator,
+    _windows_emptied_by_exclude,
 )
 
 
@@ -1693,6 +1695,204 @@ class TestWindowedGarudCorrectness:
                                         err_msg=f"H2H1 window {w}")
 
 
+class TestWindowVariantRanges:
+    """``_window_variant_ranges`` maps each window's bp bounds to its right-open
+    contiguous variant-index range ``[start, stop)`` -- the one membership rule
+    both fast engines share -- correctly for contiguous, overlapping, nested,
+    unordered, empty and boundary-exact windows.
+
+    Reference values are recomputed by brute force (a boolean membership mask
+    + ``searchsorted``), independent of any engine.
+    """
+
+    # Sorted variant positions, and a battery of windows exercising every
+    # membership shape at once (listed out of start order on purpose, so the
+    # unordered case is covered too).
+    POS = np.array([10, 20, 30, 40, 50, 60, 70, 80, 90, 100], dtype=np.int64)
+    WIN = np.array([
+        (0, 35), (35, 65), (65, 1000),   # a contiguous tiling
+        (0, 1000),                        # nested superset of every variant
+        (25, 55),                         # overlaps the first two
+        (20, 20),                         # zero-width -> empty
+        (200, 300),                       # out of range -> empty
+        (40, 60),                         # boundary-exact: 40 in, 60 out
+    ], dtype=np.float64)
+    STARTS = WIN[:, 0]
+    STOPS = WIN[:, 1]
+
+    @classmethod
+    def _member(cls):
+        """Brute-force right-open membership mask, shape (n_win, n_var)."""
+        return ((cls.POS[None, :] >= cls.STARTS[:, None])
+                & (cls.POS[None, :] < cls.STOPS[:, None]))
+
+    def test_ranges_match_bruteforce_membership(self):
+        start, stop = _window_variant_ranges(self.POS, self.STARTS, self.STOPS)
+        start, stop = start.get(), stop.get()
+        # Right-open bounds, found by searching each window edge into positions.
+        np.testing.assert_array_equal(
+            start, np.searchsorted(self.POS, self.STARTS, side='left'))
+        np.testing.assert_array_equal(
+            stop, np.searchsorted(self.POS, self.STOPS, side='left'))
+        # Membership is contiguous because positions are sorted, so the
+        # [start, stop) index slice is exactly the member variants -- for every
+        # window shape, empty windows (start == stop) included.
+        member = self._member()
+        for w in range(len(self.WIN)):
+            np.testing.assert_array_equal(
+                np.arange(start[w], stop[w]), np.where(member[w])[0],
+                err_msg=f"window {w} = {tuple(self.WIN[w])}")
+
+
+class TestWindowAccumulator:
+    """Every ``_WindowAccumulator`` reducer equals the brute-force numpy result
+    over each window's variant membership, across the contiguous / overlapping /
+    nested / unordered / empty / boundary-exact windows of
+    ``TestWindowVariantRanges``. This validates the helper directly, without an
+    engine's statistic math in the way.
+    """
+
+    POS = TestWindowVariantRanges.POS
+    WIN = TestWindowVariantRanges.WIN
+    STARTS = TestWindowVariantRanges.STARTS
+    STOPS = TestWindowVariantRanges.STOPS
+
+    @classmethod
+    def setup_class(cls):
+        cls.member = TestWindowVariantRanges._member()
+        cls.acc = _WindowAccumulator(cls.POS, cls.STARTS, cls.STOPS)
+
+    @staticmethod
+    def _host(a):
+        return np.asarray(a.get()) if hasattr(a, 'get') else np.asarray(a)
+
+    def test_counts(self):
+        # counts() == stop - start == the per-window variant count.
+        np.testing.assert_array_equal(self._host(self.acc.counts()),
+                                      self.member.sum(axis=1))
+
+    def test_sum(self):
+        rng = np.random.RandomState(0)
+        v = rng.randn(len(self.POS))
+        got = self._host(self.acc.sum(v))
+        exp = np.array([v[m].sum() for m in self.member])
+        np.testing.assert_allclose(got, exp, rtol=1e-12, atol=1e-12)
+
+    def test_sum2d(self):
+        rng = np.random.RandomState(1)
+        mat = rng.randn(len(self.POS), 3)
+        got = self._host(self.acc.sum2d(mat))
+        exp = np.array([mat[m].sum(axis=0) for m in self.member])
+        assert got.shape == (len(self.WIN), 3)
+        np.testing.assert_allclose(got, exp, rtol=1e-12, atol=1e-12)
+
+    def test_mean_1d_default_ignores_nan(self):
+        # The default valid mask is the finite entries, so a NaN inside a
+        # populated window is dropped, not propagated; an empty window is NaN.
+        v = np.arange(len(self.POS), dtype=float)
+        v[2] = np.nan
+        v[7] = np.nan
+        got = self._host(self.acc.mean(v))
+        exp = []
+        for m in self.member:
+            vals = v[m][np.isfinite(v[m])]
+            exp.append(vals.mean() if vals.size else np.nan)
+        np.testing.assert_allclose(got, np.array(exp), rtol=1e-12,
+                                   equal_nan=True)
+
+    def test_mean_1d_explicit_valid(self):
+        import cupy as cp
+        rng = np.random.RandomState(2)
+        v = rng.randn(len(self.POS))
+        valid = np.zeros(len(self.POS), dtype=bool)
+        valid[::2] = True      # only even-index variants count
+        got = self._host(self.acc.mean(v, valid=cp.asarray(valid)))
+        exp = []
+        for m in self.member:
+            sel = m & valid
+            exp.append(v[sel].mean() if sel.any() else np.nan)
+        np.testing.assert_allclose(got, np.array(exp), rtol=1e-12,
+                                   equal_nan=True)
+
+    def test_mean_2d_divides_by_valid_entries(self):
+        # A 2-D per_var averages over every valid (variant, item) entry, so a
+        # window's divisor is its number of valid entries, not its variant
+        # count; masked-out (NaN) entries never reach the sum.
+        mat = np.arange(len(self.POS) * 2, dtype=float).reshape(-1, 2)
+        mat[1, 0] = np.nan
+        mat[4, 1] = np.nan
+        got = self._host(self.acc.mean(mat))
+        exp = []
+        for m in self.member:
+            block = mat[m]
+            fin = block[np.isfinite(block)]
+            exp.append(fin.mean() if fin.size else np.nan)
+        np.testing.assert_allclose(got, np.array(exp), rtol=1e-12,
+                                   equal_nan=True)
+
+    def test_max_and_empty_init(self):
+        rng = np.random.RandomState(3)
+        v = rng.randn(len(self.POS))
+        got = self.acc.max(v, init=-np.inf)     # host reduction -> numpy
+        exp = np.array([v[m].max() if m.any() else -np.inf
+                        for m in self.member])
+        np.testing.assert_array_equal(got, exp)
+
+    def test_max_preserves_float64(self):
+        # cupy's indexed max reduces in float32, which is why this reducer runs
+        # on the host. Two values equal in float32 but distinct in float64,
+        # dropped into the same window: the float64-correct max must come back.
+        hi = 1.0 + 2.0 ** -30
+        assert np.float32(hi) == np.float32(1.0)   # they collapse in float32
+        v = np.ones(len(self.POS), dtype=np.float64)
+        v[0] = hi                                  # window 0 [0, 35) holds it
+        got = self.acc.max(v)
+        assert got[0] == hi                        # exact, not rounded to 1.0
+        assert got[0] > 1.0
+
+
+class TestWindowsEmptiedByExclude:
+    """``_windows_emptied_by_exclude`` flags only windows that held variants
+    before missing-data exclusion but none after -- the max_daf NaN-vs-0.0
+    distinction. A window that never held a variant, or that keeps at least one
+    after exclusion (even if partially excluded), is not flagged.
+    """
+
+    # Positions before exclusion, and the subset surviving it: the sites at
+    # bp 20 and 30 are the ones dropped by missing_data='exclude'.
+    PRE = np.array([10, 20, 30, 40, 50], dtype=np.int64)
+    POST = np.array([10, 40, 50], dtype=np.int64)
+    WIN = np.array([
+        (15, 35),    # had {20, 30}, both excluded -> emptied -> True
+        (0, 15),     # had {10}, keeps {10}                   -> False
+        (45, 55),    # had {50}, keeps {50}                   -> False
+        (100, 200),  # never held a variant                   -> False
+        (15, 45),    # had {20, 30, 40}, keeps {40}           -> False
+    ], dtype=np.float64)
+    STARTS = WIN[:, 0]
+    STOPS = WIN[:, 1]
+
+    def test_flags_only_fully_excluded_windows(self):
+        post = _WindowAccumulator(self.POST, self.STARTS, self.STOPS)
+        got = _windows_emptied_by_exclude(
+            self.PRE, post, self.STARTS, self.STOPS)
+        exp = np.array([True, False, False, False, False])
+        assert got.dtype == bool          # host numpy mask, not a device array
+        np.testing.assert_array_equal(got, exp)
+
+    def test_matches_bruteforce(self):
+        # Independent reference: emptied == (had any pre) AND (none post).
+        pre_member = ((self.PRE[None, :] >= self.STARTS[:, None])
+                      & (self.PRE[None, :] < self.STOPS[:, None]))
+        post_member = ((self.POST[None, :] >= self.STARTS[:, None])
+                       & (self.POST[None, :] < self.STOPS[:, None]))
+        exp = (pre_member.sum(axis=1) > 0) & (post_member.sum(axis=1) == 0)
+        post = _WindowAccumulator(self.POST, self.STARTS, self.STOPS)
+        got = _windows_emptied_by_exclude(
+            self.PRE, post, self.STARTS, self.STOPS)
+        np.testing.assert_array_equal(got, exp)
+
+
 class TestFusedPerSiteWindowMembership:
     """Per-site scatter stats land in the right-open [start, end) window
     that n_variants uses, and in every window covering them when windows
@@ -1867,48 +2067,71 @@ class TestEngineGridAgreement:
         assert int(r1['n_variants'].sum()) == in1
         assert int(r2['n_variants'].sum()) == in2
 
-    def test_region_windows_single_pop_fused_vs_fallback(self):
+    def test_region_windows_single_pop_all_engines(self):
         # window_type='regions' must honour the regions (one window each, not
-        # the default bp grid -- the reported bug) and route single-pop stats
-        # through the fused engine, whose raw values match the per-window
-        # fallback. pi's agreement also confirms both paths normalize by the
-        # region span (the second fault).
+        # the default bp grid -- the reported bug) and agree across all three
+        # engines on the single-pop stats. A pure shared-stat request runs the
+        # scatter engine; adding 'garud_h1' (fused-only) forces the fused
+        # engine; the per-window fallback is the scalar-library reference both
+        # are checked against. pi's agreement also confirms every path
+        # normalizes by the region span (the second fault).
         hm, regions = _region_case()
-        stats = ['pi', 'tajimas_d', 'segregating_sites', 'garud_h1']
+        shared = ['pi', 'theta_w', 'tajimas_d', 'segregating_sites']
+        scatter = windowed_analysis(hm, window_type='regions', regions=regions,
+                                    statistics=shared)
         fused = windowed_analysis(hm, window_type='regions', regions=regions,
-                                  statistics=stats)
+                                  statistics=shared + ['garud_h1'])
         fb = WindowedAnalyzer(window_type='regions', regions=regions,
-                              statistics=stats, progress_bar=False).compute(hm)
+                              statistics=shared + ['garud_h1'],
+                              progress_bar=False).compute(hm)
         # Regions honoured, not the default bp grid.
-        assert len(fused) == len(regions)
+        assert len(scatter) == len(fused) == len(fb) == len(regions)
         assert list(fused['start'].astype(int)) == list(regions['start'])
         assert list(fused['end'].astype(int)) == list(regions['end'])
-        # Same window order in both engines; raw values agree.
-        for k in stats:
+        # Raw values agree against the fallback reference: scatter on the shared
+        # stats, fused on those plus garud_h1 (which the scatter engine does
+        # not compute).
+        for k in shared + ['garud_h1']:
             np.testing.assert_allclose(fused[k].to_numpy(dtype=float),
                                        fb[k].to_numpy(dtype=float),
                                        rtol=1e-9, atol=1e-11, equal_nan=True,
-                                       err_msg=k)
+                                       err_msg=f"fused vs fallback: {k}")
+            if k in shared:
+                np.testing.assert_allclose(
+                    scatter[k].to_numpy(dtype=float),
+                    fb[k].to_numpy(dtype=float),
+                    rtol=1e-9, atol=1e-11, equal_nan=True,
+                    err_msg=f"scatter vs fallback: {k}")
 
-    def test_region_windows_two_pop_fused_vs_fallback(self):
-        # Two-pop stats over regions: the fused engine (bare column names) and
-        # the fallback (suffixed names) agree, and dxy's agreement confirms the
-        # region span normalization on the two-pop path too.
+    def test_region_windows_two_pop_all_engines(self):
+        # Two-pop stats over regions agree across all three engines, and dxy's
+        # agreement confirms the region span normalization on the two-pop path.
+        # The scatter and fused engines name a single pair after the bare
+        # statistic; the fallback suffixes it with the population pair.
+        # 'garud_h1' forces the fused engine off the pure-two-pop scatter path.
         hm, regions = _region_case(seed=1)
+        pops = ['p1', 'p2']
+        scatter = windowed_analysis(hm, window_type='regions', regions=regions,
+                                    statistics=['fst_hudson', 'dxy'],
+                                    populations=pops)
         fused = windowed_analysis(hm, window_type='regions', regions=regions,
-                                  statistics=['fst_hudson', 'dxy'],
-                                  populations=['p1', 'p2'])
+                                  statistics=['fst_hudson', 'dxy', 'garud_h1'],
+                                  populations=pops)
         fb = WindowedAnalyzer(window_type='regions', regions=regions,
                               statistics=['fst_hudson', 'dxy'],
-                              populations=['p1', 'p2'],
+                              populations=pops,
                               progress_bar=False).compute(hm)
-        assert len(fused) == len(regions)
+        assert len(scatter) == len(fused) == len(fb) == len(regions)
         for bare, suffixed in (('fst_hudson', 'fst_hudson_p1_p2'),
                                ('dxy', 'dxy_p1_p2')):
             np.testing.assert_allclose(fused[bare].to_numpy(dtype=float),
                                        fb[suffixed].to_numpy(dtype=float),
                                        rtol=1e-9, atol=1e-11, equal_nan=True,
-                                       err_msg=bare)
+                                       err_msg=f"fused vs fallback: {bare}")
+            np.testing.assert_allclose(scatter[bare].to_numpy(dtype=float),
+                                       fb[suffixed].to_numpy(dtype=float),
+                                       rtol=1e-9, atol=1e-11, equal_nan=True,
+                                       err_msg=f"scatter vs fallback: {bare}")
 
 
 def _host(a):
