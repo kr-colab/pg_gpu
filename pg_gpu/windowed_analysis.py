@@ -2783,9 +2783,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         nv = cp.maximum(nv_daf.astype(cp.float64), 1.0)[:, None]
         freq = derived.astype(cp.float64) / nv                   # per (site, allele)
         dbin = diversity._daf_bin_index(freq, N_DAF_BINS)
-        # One entry per present derived allele at a non-missing site, in
-        # every window the site belongs to.
-        keep = (((derived > 0) & (nv_daf[:, None] > 0))[None, :, :]
+        # One entry per segregating derived allele (present, not fixed) at
+        # a non-missing site, in every window the site belongs to.
+        keep = (((derived > 0) & (derived < nv_daf[:, None]))[None, :, :]
                 & site_ok[:, :, None])
         composite = site_win[:, :, None] * N_DAF_BINS + dbin[None, :, :]
         member = composite[keep]

@@ -792,9 +792,9 @@ inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
 streaming = "generic_error"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "all-zero histogram when no derived allele is present (HaplotypeMatrix)"
+undefined = "all-zero histogram when no derived allele is present"
 parallel = ["diversity._daf_histogram_diploid", "windowed_analysis.windowed_statistics_fused"]
-notes = "The GenotypeMatrix branch calls _daf_histogram_diploid, which drops missing_data and uses a different DAF rule (dosage sum, monomorphic sites binned at 0)."
+notes = "The GenotypeMatrix branch calls _daf_histogram_diploid (per-site dosage sum, biallelic by construction), sharing _daf_keep_mask with the haplotype branch's per-allele rule so both drop monomorphic and no-call sites and honor missing_data the same way."
 
 [functions."diversity.diplotype_frequency_spectrum"]
 # signature: (genotype_matrix, population, missing_data)
@@ -807,13 +807,13 @@ undefined = "(empty array, NaN) under 'include' when no diplotype is complete"
 parallel = []
 
 [functions."diversity.daf_histogram_diploid"]
-# signature: (genotype_matrix, n_bins, population)
-axis_kwargs = ["population"]
+# signature: (genotype_matrix, n_bins, population, missing_data)
+axis_kwargs = ["missing_data", "population"]
 inputs = ["GenotypeMatrix"]
 streaming = "generic_error"
-missing_data = []
+missing_data = ["include", "exclude"]
 span = "none"
-undefined = "sites with no valid call are binned at frequency 0; all-zero histogram only with no sites"
+undefined = "all-zero histogram when no derived allele is present"
 parallel = []
 notes = "Alias of _daf_histogram_diploid, which daf_histogram calls for GenotypeMatrix input; the HaplotypeMatrix branch of daf_histogram computes the same histogram by a different rule (per derived allele, absent alleles not binned)."
 
