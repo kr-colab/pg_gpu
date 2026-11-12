@@ -152,8 +152,10 @@ def test_two_pop_exclude_missing_drops_missing_sites():
 
 def test_exclude_missing_all_sites_yields_empty_windows():
     # Every call missing -> exclude drops all sites, but the window grid is
-    # still anchored, so each window is emitted with n_variants=0 and pi=0
-    # (a per-base rate over zero variants), rather than vanishing.
+    # still anchored, so each window is emitted with n_variants=0 rather than
+    # vanishing. Each window had sites before 'exclude' removed them all, so
+    # pi is undefined (NaN), not 0 -- 0 is reserved for a window with no
+    # variant to begin with.
     hap = np.full((8, 6), -1, dtype=np.int8)
     pos = (np.arange(1, 7) * 100).astype(np.int64)
     m = HaplotypeMatrix(hap, pos)
@@ -161,7 +163,7 @@ def test_exclude_missing_all_sites_yields_empty_windows():
                            missing_data="exclude")
     assert not df.empty
     assert (df["n_variants"] == 0).all()
-    assert (df["pi"] == 0).all()
+    assert df["pi"].isna().all()
 
 
 def test_two_pop_exclude_missing_all_sites_yields_empty_windows():
@@ -172,7 +174,7 @@ def test_two_pop_exclude_missing_all_sites_yields_empty_windows():
                            populations=["p1", "p2"], missing_data="exclude")
     assert not df.empty
     assert (df["n_variants"] == 0).all()
-    assert (df["dxy"] == 0).all()
+    assert df["dxy"].isna().all()
 
 
 # ── scatter path: the less-common single-pop stat outputs ──────────────

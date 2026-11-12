@@ -12,7 +12,7 @@ import numpy as np
 import cupy as cp
 from typing import Union, Tuple, Optional, Dict
 from .haplotype_matrix import HaplotypeMatrix
-from .diversity import _apply_span_normalize, pi as _diversity_pi
+from .diversity import _apply_span_normalize, _emptied_by_exclude, pi as _diversity_pi
 from ._warnings import _phase_dependent, _warn_unphased
 from ._utils import _eager_only, population_rows
 
@@ -627,8 +627,9 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
         ``'exclude'`` filters to sites with no missing data.
     span_normalize : bool
         ``True`` (default): per-base Dxy, from sites where each population
-        has at least one call; NaN with variants but none qualifying, 0.0
-        with no variants at all.
+        has at least one call; NaN with variants but none qualifying, or
+        if ``'exclude'`` empties a matrix that had variants; 0.0 with no
+        variants at all.
         ``False``: the raw sum.
 
     Returns
@@ -640,6 +641,7 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
+    orig_num_variants = haplotype_matrix.num_variants
     if missing_data == 'exclude':
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
@@ -658,6 +660,8 @@ def dxy(haplotype_matrix: HaplotypeMatrix,
 
     if per_site:
         return cp.where(valid, dxy_per_site, cp.nan).get()
+    elif _emptied_by_exclude(orig_num_variants, haplotype_matrix, missing_data):
+        return float('nan')
     else:
         n_sites_with_data = int(cp.sum(valid).get())
         dxy_sum = cp.sum(dxy_per_site)
@@ -690,8 +694,9 @@ def da(haplotype_matrix: HaplotypeMatrix,
         'exclude' - Only use sites with no missing data
     span_normalize : bool
         ``True`` (default): per-base Da, from sites where each population
-        has at least two calls; NaN with variants but none qualifying, 0.0
-        with no variants at all.
+        has at least two calls; NaN with variants but none qualifying, or
+        if ``'exclude'`` empties a matrix that had variants; 0.0 with no
+        variants at all.
         ``False``: the raw sum.
 
     Returns
@@ -702,9 +707,12 @@ def da(haplotype_matrix: HaplotypeMatrix,
     if haplotype_matrix.device == 'CPU':
         haplotype_matrix.transfer_to_gpu()
 
+    orig_num_variants = haplotype_matrix.num_variants
     if missing_data == 'exclude':
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
             populations=[pop1, pop2])
+    if _emptied_by_exclude(orig_num_variants, haplotype_matrix, missing_data):
+        return float('nan')
 
     pop1_idx = _get_population_indices(haplotype_matrix, pop1)
     pop2_idx = _get_population_indices(haplotype_matrix, pop2)

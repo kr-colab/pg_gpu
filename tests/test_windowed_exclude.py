@@ -9,9 +9,10 @@ complete sites.
 """
 import cupy as cp
 import numpy as np
+import pandas as pd
 import pytest
 
-from pg_gpu import HaplotypeMatrix, diversity, distance_stats, ld_statistics, selection
+from pg_gpu import HaplotypeMatrix, diversity, divergence, distance_stats, ld_statistics, selection
 from pg_gpu.windowed_analysis import (
     windowed_analysis, windowed_statistics_fused, windowed_statistics_fused_chunked,
 )
@@ -291,6 +292,174 @@ def test_max_daf_nan_when_exclude_empties_a_window_with_data():
     # Pinned against the scalar function directly, not just a mutual check.
     window0 = HaplotypeMatrix(hap, pos, 0, 100)
     assert np.isnan(diversity.max_daf(window0, missing_data='exclude'))
+
+
+def test_rate_stats_nan_when_exclude_empties_a_window_with_data():
+    # Same two-site, two-window matrix as the max_daf case above: window 0's
+    # two sites are each missing a call, so 'exclude' drops both -- NaN, not
+    # 0.0; window 1 never had a variant, and stays 0.0.
+    hap = np.array([[0, 1],
+                    [1, -1],
+                    [-1, 0],
+                    [1, 1]], dtype=np.int8)
+    pos = np.array([10, 20])
+    hm = HaplotypeMatrix(hap, pos, 0, 199)
+    rate_stats = ['pi', 'theta_w', 'theta_h', 'theta_l']
+
+    scatter = windowed_analysis(hm, window_size=100, step_size=100,
+                                statistics=rate_stats, missing_data='exclude',
+                                span_normalize=False)
+    assert scatter['n_variants'].tolist() == [0, 0]
+    for name in rate_stats:
+        assert np.isnan(scatter[name].iloc[0]), name
+        assert scatter[name].iloc[1] == 0.0, name
+
+    bp = np.array([0.0, 100.0, 200.0])
+    fused_stats = ['pi', 'theta_w', 'theta_h']  # theta_l has no fused path
+    fused = windowed_statistics_fused(hm, bp_bins=bp, statistics=tuple(fused_stats),
+                                      missing_data='exclude', per_base=False)
+    np.testing.assert_array_equal(fused['n_variants'], [0, 0])
+    for name in fused_stats:
+        assert np.isnan(fused[name][0]), name
+        assert fused[name][1] == 0.0, name
+
+    chunked = windowed_statistics_fused_chunked(
+        hm, bp_bins=bp, statistics=tuple(fused_stats), missing_data='exclude',
+        per_base=False)
+    np.testing.assert_array_equal(chunked['n_variants'], [0, 0])
+    for name in fused_stats:
+        assert np.isnan(chunked[name][0]), name
+        assert chunked[name][1] == 0.0, name
+
+    # Pinned against the scalar functions directly, not just a mutual check.
+    window0 = HaplotypeMatrix(hap, pos, 0, 100)
+    assert np.isnan(diversity.pi(window0, missing_data='exclude'))
+    assert np.isnan(diversity.theta_w(window0, missing_data='exclude'))
+    assert np.isnan(diversity.theta_h(window0, missing_data='exclude'))
+    assert np.isnan(diversity.theta_l(window0, missing_data='exclude'))
+
+
+def test_dxy_da_nan_when_exclude_empties_a_window_with_data():
+    # Two populations of two haplotypes each; window 0's two sites each have
+    # a missing call in one population, so 'exclude' drops both -- NaN, not
+    # 0.0; window 1 never had a variant, and stays 0.0.
+    hap = np.array([[0, 1],
+                    [1, -1],
+                    [-1, 0],
+                    [1, 1]], dtype=np.int8)
+    pos = np.array([10, 20])
+    hm = HaplotypeMatrix(hap, pos, 0, 199)
+    hm.sample_sets = {"p1": [0, 1], "p2": [2, 3]}
+
+    scatter = windowed_analysis(hm, window_size=100, step_size=100,
+                                statistics=['dxy', 'da'], populations=['p1', 'p2'],
+                                missing_data='exclude', span_normalize=False)
+    assert scatter['n_variants'].tolist() == [0, 0]
+    for name in ('dxy', 'da'):
+        assert np.isnan(scatter[name].iloc[0]), name
+        assert scatter[name].iloc[1] == 0.0, name
+
+    bp = np.array([0.0, 100.0, 200.0])
+    fused = windowed_statistics_fused(hm, bp_bins=bp, statistics=('dxy', 'da'),
+                                      pop1='p1', pop2='p2',
+                                      missing_data='exclude', per_base=False)
+    np.testing.assert_array_equal(fused['n_variants'], [0, 0])
+    for name in ('dxy', 'da'):
+        assert np.isnan(fused[name][0]), name
+        assert fused[name][1] == 0.0, name
+
+    chunked = windowed_statistics_fused_chunked(
+        hm, bp_bins=bp, statistics=('dxy', 'da'), pop1='p1', pop2='p2',
+        missing_data='exclude', per_base=False)
+    np.testing.assert_array_equal(chunked['n_variants'], [0, 0])
+    for name in ('dxy', 'da'):
+        assert np.isnan(chunked[name][0]), name
+        assert chunked[name][1] == 0.0, name
+
+    # Pinned against the scalar functions directly, not just a mutual check.
+    window0 = HaplotypeMatrix(hap, pos, 0, 100)
+    window0.sample_sets = {"p1": [0, 1], "p2": [2, 3]}
+    assert np.isnan(divergence.dxy(window0, "p1", "p2", missing_data='exclude'))
+    assert np.isnan(divergence.da(window0, "p1", "p2", missing_data='exclude'))
+
+
+def _unordered_overlapping_region_case():
+    # Two sites (10, 20) missing in every sample; three complete sites
+    # (30, 40, 50). Regions given out of order and overlapping:
+    #   [25, 100) -- complete data, 3 variants
+    #   [0, 30)   -- 2 variants (10, 20), both excluded -- emptied
+    #   [100, 200) -- no variant at all
+    #   [5, 25)   -- overlaps [0, 30), same 2 variants excluded -- emptied
+    rng = np.random.default_rng(3)
+    hap = rng.integers(0, 2, (8, 5)).astype(np.int8)
+    hap[:, 0] = -1
+    hap[:, 1] = -1
+    pos = np.array([10, 20, 30, 40, 50])
+    hm = HaplotypeMatrix(hap, pos, 0, 300)
+    hm.sample_sets = {"p1": [0, 1, 2, 3], "p2": [4, 5, 6, 7]}
+    regions = pd.DataFrame({'start': [25, 0, 100, 5], 'end': [100, 30, 200, 25]})
+    return hm, regions
+
+
+def test_rate_stats_nan_for_region_windows_emptied_by_exclude():
+    # Overlapping, unordered window_type='regions' windows on the scatter
+    # engine follow the same exclude-emptied rule as bp windows, for two
+    # windows that lose all their data to 'exclude' (rows 1 and 3, which
+    # overlap) at once.
+    hm, regions = _unordered_overlapping_region_case()
+    rate_stats = ['pi', 'theta_w', 'theta_h', 'theta_l']
+
+    scatter = windowed_analysis(hm, window_type='regions', regions=regions,
+                                statistics=rate_stats, missing_data='exclude',
+                                span_normalize=False)
+    assert scatter['n_variants'].tolist() == [3, 0, 0, 0]
+    for name in rate_stats:
+        assert np.isfinite(scatter[name].iloc[0]), name
+        assert np.isnan(scatter[name].iloc[1]), name
+        assert scatter[name].iloc[2] == 0.0, name
+        assert np.isnan(scatter[name].iloc[3]), name
+
+    ws = regions['start'].to_numpy(dtype=np.float64)
+    we = regions['end'].to_numpy(dtype=np.float64)
+    fused_stats = ['pi', 'theta_w', 'theta_h']  # theta_l has no fused path
+    for engine in (windowed_statistics_fused, windowed_statistics_fused_chunked):
+        out = engine(hm, statistics=tuple(fused_stats), _win_starts=ws, _win_stops=we,
+                     missing_data='exclude', per_base=False)
+        np.testing.assert_array_equal(out['n_variants'], [3, 0, 0, 0])
+        for name in fused_stats:
+            assert np.isfinite(out[name][0]), name
+            assert np.isnan(out[name][1]), name
+            assert out[name][2] == 0.0, name
+            assert np.isnan(out[name][3]), name
+
+
+def test_dxy_da_nan_for_region_windows_emptied_by_exclude():
+    # Same overlapping, unordered regions as the rate-stats case, for the
+    # two-population scatter and fused engines.
+    hm, regions = _unordered_overlapping_region_case()
+
+    scatter = windowed_analysis(hm, window_type='regions', regions=regions,
+                                statistics=['dxy', 'da'], populations=['p1', 'p2'],
+                                missing_data='exclude', span_normalize=False)
+    assert scatter['n_variants'].tolist() == [3, 0, 0, 0]
+    for name in ('dxy', 'da'):
+        assert np.isfinite(scatter[name].iloc[0]), name
+        assert np.isnan(scatter[name].iloc[1]), name
+        assert scatter[name].iloc[2] == 0.0, name
+        assert np.isnan(scatter[name].iloc[3]), name
+
+    ws = regions['start'].to_numpy(dtype=np.float64)
+    we = regions['end'].to_numpy(dtype=np.float64)
+    for engine in (windowed_statistics_fused, windowed_statistics_fused_chunked):
+        out = engine(hm, statistics=('dxy', 'da'), pop1='p1', pop2='p2',
+                     _win_starts=ws, _win_stops=we,
+                     missing_data='exclude', per_base=False)
+        np.testing.assert_array_equal(out['n_variants'], [3, 0, 0, 0])
+        for name in ('dxy', 'da'):
+            assert np.isfinite(out[name][0]), name
+            assert np.isnan(out[name][1]), name
+            assert out[name][2] == 0.0, name
+            assert np.isnan(out[name][3]), name
 
 
 def test_streaming_exclude_matches_scalar(tmp_path):
