@@ -246,7 +246,7 @@ missing_data = ["include", "exclude"]
 function = "windowed_analysis.windowed_statistics_fused"
 stats = "windowed_analysis._FUSED_STATS"
 chosen = "No scatter engine takes the request, window_type is 'bp' or 'regions', every name is in its set, two-population names come with exactly two populations, and missing_data='include'. Under 'exclude' it runs only for a Garud-only request or a request with a name that the fallback does not know."
-span = "windowed_analysis._compute_window_bases: the accessible mask, else the window length. It does not read n_total_sites."
+span = "windowed_analysis._compute_window_bases, as thetas_scatter. Under 'exclude' every engine reads the bounds for the n_total_sites share from the unfiltered matrix, as the window grid does."
 missing_data = ["include", "exclude"]
 
 [engines.fused_chunked]
