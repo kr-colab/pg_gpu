@@ -373,13 +373,15 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
-* Under ``missing_data='exclude'``, the fused windowed engines copied
-  every complete site into a new matrix before they started. The chunked
+* Under ``missing_data='exclude'``, the fused and scatter windowed
+  engines copied every complete site into a new matrix before they
+  started. The chunked
   engine runs when the matrix does not fit on the GPU twice, so a request
   could run out of memory under ``'exclude'`` at sizes where ``'include'``
   worked. The engines now keep an index of the kept sites and gather
   through it, one chunk at a time, so ``'exclude'`` needs about the
-  memory of ``'include'``. The allele-cap filter uses the same index, so
+  memory of ``'include'``. The scatter engines keep the complete sites'
+  entries of their per-site allele counts. The allele-cap filter uses the same index, so
   the kernels' input no longer needs a filtered copy either. Results do
   not change. A request with ``mean_nsl``, Garud's H next to other
   statistics, or the per-window LD and distance statistics still builds

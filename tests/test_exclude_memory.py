@@ -1,8 +1,9 @@
-"""The fused engines apply missing_data='exclude' without copying the matrix.
+"""The windowed engines apply missing_data='exclude' without copying the matrix.
 
 The chunked engine runs when the matrix does not fit on the GPU twice, so a
 filtered copy of the complete sites could fail before the first chunk. The
-engines keep an index of the kept sites instead and gather through it.
+fused engines keep an index of the kept sites instead and gather through it;
+the scatter engines keep the complete sites' entries of their per-site arrays.
 """
 
 import numpy as np
@@ -12,7 +13,8 @@ from cupy.cuda import memory_hook
 
 from pg_gpu import HaplotypeMatrix
 from pg_gpu.windowed_analysis import (
-    windowed_statistics_fused, windowed_statistics_fused_chunked)
+    windowed_analysis, windowed_statistics_fused,
+    windowed_statistics_fused_chunked)
 
 POPS = {'a': list(range(0, 40)), 'b': list(range(40, 80))}
 
@@ -128,3 +130,53 @@ def test_site_has_missing_reads_population_rows_in_blocks(monkeypatch):
                        ([[3, 50, 7]], [3, 50, 7])):
         np.testing.assert_array_equal(
             hm._site_has_missing(pops).get(), (hap[rows] < 0).any(axis=0))
+
+
+SCATTER_CASES = [
+    (['pi', 'theta_w', 'tajimas_d', 'theta_h', 'theta_l', 'max_daf',
+      'singletons', 'zeng_e'], None),
+    (['pi', 'theta_h', 'segregating_sites'], ['b']),
+    (['dxy', 'fst', 'fst_hudson', 'fst_wc', 'da'], ['a', 'b']),
+]
+SCATTER_IDS = ["single", "one-pop", "two-pop"]
+
+
+@pytest.mark.parametrize("stats, pops", SCATTER_CASES, ids=SCATTER_IDS)
+def test_scatter_exclude_peak_is_near_include(stats, pops):
+    hap, pos = _data(300_000)
+
+    def peak(missing_data):
+        hm = _hm(hap, pos)
+        cp.get_default_memory_pool().free_all_blocks()
+        with _PeakBytes() as hook:
+            windowed_analysis(hm, 100_000, statistics=stats, populations=pops,
+                              missing_data=missing_data)
+        return hook.peak
+
+    assert peak('exclude') - peak('include') < 0.25 * hap.nbytes
+
+
+@pytest.mark.parametrize("stats, pops", SCATTER_CASES, ids=SCATTER_IDS)
+def test_scatter_exclude_matches_prefiltered_include(stats, pops):
+    hap, pos = _data(4_000, seed=3)
+    # Allele 3 occurs only at sites where population b has a missing call
+    # (which every case drops), so the unfiltered allele counts are wider
+    # than the complete sites need.
+    b_rows = np.array(POPS['b'])
+    incomplete = np.flatnonzero((hap[b_rows] < 0).any(axis=0))[:20]
+    called = (hap[b_rows][:, incomplete] >= 0).argmax(axis=0)
+    hap[b_rows[called], incomplete] = 3
+    got = windowed_analysis(_hm(hap, pos), 4_000, statistics=stats,
+                            populations=pops, missing_data='exclude')
+
+    rows = slice(None) if pops is None else sum((POPS[p] for p in pops), [])
+    keep = ~(hap[rows] < 0).any(axis=0)
+    assert hap[:, keep].max() < 3 <= hap.max()
+    ref_hm = HaplotypeMatrix(cp.asarray(hap[:, keep]), cp.asarray(pos[keep]),
+                             1, int(pos[-1]) + 9, sample_sets=POPS)
+    ref = windowed_analysis(ref_hm, 4_000, statistics=stats, populations=pops,
+                            missing_data='include')
+    for name in stats + ['n_variants']:
+        np.testing.assert_allclose(got[name].to_numpy(float),
+                                   ref[name].to_numpy(float),
+                                   rtol=1e-12, equal_nan=True, err_msg=name)

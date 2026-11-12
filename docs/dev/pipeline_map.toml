@@ -81,7 +81,7 @@ see = "[matrices]"
 [axes.missing_data]
 description = "'include' uses each site with the calls it has; 'exclude' keeps only sites with no missing call in the rows the statistic reads. A few functions accept other values (for example 'scale' in distance_stats)."
 values = ["include", "exclude"]
-check = "Each engine applies 'exclude' on its own: windowed_analysis._FusedSites (fused; a keep index over the complete sites, with no filtered copy of the matrix except for mean_nsl, Garud's H next to other statistics, and the per-window LD and distance statistics), the scatter engines, windowed_analysis.StatisticsComputer._n_sites (fallback), and each scalar function."
+check = "Each engine applies 'exclude' on its own: windowed_analysis._FusedSites (fused; a keep index over the complete sites, with no filtered copy of the matrix except for mean_nsl, Garud's H next to other statistics, and the per-window LD and distance statistics), the scatter engines (they keep the complete sites' entries of their per-site arrays, also with no copy), windowed_analysis.StatisticsComputer._n_sites (fallback), and each scalar function."
 
 [axes.span]
 description = "The per-base denominator. HaplotypeMatrix.get_span('auto') uses the accessible-mask count, then n_total_sites, then chrom_end - chrom_start + 1 (both bounds are inclusive)."

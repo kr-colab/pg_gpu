@@ -993,18 +993,20 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     if chrom_end < chrom_start:
         return pd.DataFrame()
 
-    pos_cpu_pre_exclude = pos_cpu
-    if missing_data == 'exclude':
-        # Keep the already-anchored window grid even when exclusion removes
-        # every site: the scatter machinery renders empty windows as 0/NaN
-        # rows (the same way the include path does), so an eager all-missing
-        # region and a streaming empty chunk both yield dense windows rather
-        # than vanishing from the output.
-        matrix = matrix.exclude_missing_sites()
-        pos_cpu = cp.asnumpy(matrix.positions)
-
     from .diversity import _prepare_allele_counts, _ac_contribution
     ac, n_valid, n_hap = _prepare_allele_counts(matrix)
+    pos_cpu_pre_exclude = pos_cpu
+    if missing_data == 'exclude':
+        # This engine reads the matrix only through its per-site allele
+        # counts, so 'exclude' keeps the counts of the complete sites and
+        # never copies the matrix. The already-anchored window grid stays
+        # even when no site is complete: empty windows render as 0/NaN rows
+        # (as on the include path), so an eager all-missing region and a
+        # streaming empty chunk both yield dense windows.
+        complete = n_valid == n_hap
+        if not bool(complete.all()):
+            ac, n_valid = ac[complete], n_valid[complete]
+            pos_cpu = pos_cpu[complete.get()]
     # Per-allele intermediates (multiallelic-correct; match the scalar diversity
     # path). mut = per-variant mutation count = (#alleles present) - 1.
     n = n_valid.astype(cp.float64)
@@ -1209,20 +1211,28 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     if chrom_end < chrom_start:
         return pd.DataFrame()
 
-    pos_cpu_pre_exclude = pos_cpu
-    if missing_data == 'exclude':
-        # Keep the anchored grid even when exclusion empties the matrix, so
-        # empty windows render as 0/NaN rows instead of vanishing (mirrors
-        # the single-pop engine and the include path). get_population_matrix
-        # tolerates the zero-variant parent.
-        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
-            populations=[pop1_name, pop2_name])
-        mat1 = population_rows(haplotype_matrix, pop1_name)
-        mat2 = population_rows(haplotype_matrix, pop2_name)
-        pos_cpu = cp.asnumpy(haplotype_matrix.positions)
-
     hap1 = mat1.haplotypes
     hap2 = mat2.haplotypes
+
+    pos_cpu_pre_exclude = pos_cpu
+    complete = None
+    if missing_data == 'exclude':
+        # This engine reads the populations only through per-site arrays,
+        # so 'exclude' keeps the entries of the sites complete in both
+        # populations and never copies the matrix. The anchored grid stays
+        # even when no site is complete, so empty windows render as 0/NaN
+        # rows instead of vanishing (mirrors the single-pop engine).
+        complete = ~(column_has_missing(hap1) | column_has_missing(hap2))
+        if bool(complete.all()):
+            complete = None
+        else:
+            pos_cpu = pos_cpu[complete.get()]
+
+    def kept(*per_site):
+        """The complete sites' entries of per-site arrays."""
+        if complete is None:
+            return per_site
+        return tuple(v[complete] for v in per_site)
 
     if win_starts is None:
         win_starts, win_stops = _bp_window_grid(
@@ -1258,7 +1268,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     need_fst_da = stats_set & {'fst', 'fst_hudson', 'da'}
     need_dxy = 'dxy' in stats_set
     if need_fst_da or need_dxy:
-        ac1, ac2, nv1, nv2 = divergence._aligned_pop_counts(hap1, hap2)
+        ac1, ac2, nv1, nv2 = kept(*divergence._aligned_pop_counts(hap1, hap2))
         dxy_all_complete = cp.all((nv1 > 0) & (nv2 > 0))
         da_all_complete = cp.all((nv1 > 1) & (nv2 > 1))
         if need_fst_da:
@@ -1274,7 +1284,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         from .divergence import _wc_site_components
         k = max(int(hap1.max()) if hap1.size else 0,
                 int(hap2.max()) if hap2.size else 0, 0) + 1
-        wc_a, wc_abc = _wc_site_components(hap1, hap2, k)
+        wc_a, wc_abc = kept(*_wc_site_components(hap1, hap2, k))
         wc_a_sum = scatter_sum(wc_a)
         wc_abc_sum = scatter_sum(wc_abc)
 
