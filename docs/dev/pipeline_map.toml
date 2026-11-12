@@ -533,7 +533,7 @@ missing_data_rule = [
     "Every function row whose missing_data list holds the mode, and the GenotypeMatrix branch of each.",
 ]
 undefined_value_rule = [
-    "The scalar function, each engine in its [windowed] row, and the fallback rule (NaN for a window with no variant).",
+    "The scalar function, each engine in its [windowed] row, and the fallback, which runs the scalar function on an empty window matrix and gives a custom callable NaN.",
     "The consumers: decomposition.pcoa, the plotting functions, resampling.",
 ]
 window_grid = [
