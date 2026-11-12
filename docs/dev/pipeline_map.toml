@@ -20,6 +20,10 @@
 #   - the loaders and their parameters ([inputs]),
 #   - the public methods of each matrix class ([matrices]),
 #   - which engine computes each windowed statistic ([windowed], [engines]),
+#     and, for each engine family that lacks it, a `not_in` entry,
+#   - the names each batch dispatcher accepts, and an entry for each other
+#     public function of its module ([dispatch]),
+#   - which names of one statistic each dispatcher accepts ([[alias]]),
 #   - any dotted name that starts with a module or a matrix class, in any
 #     field: each must resolve in the code.
 # The test does not check the rest of the free text (`inputs`, `streaming`,
@@ -282,6 +286,12 @@ notes = "Rejects step_size != window_size and a window_size that does not divide
 # Windowed statistics: every name that windowed_analysis accepts.
 # `engines` is checked. `scalar` (checked to resolve) is the function that
 # should give the same value on one window; "" means none exists.
+# `not_in` (checked) names each engine family the statistic is missing from
+# (scatter, fused, fallback), with the issue that tracks the gap or
+# "untracked". No request runs unless one family computes every name in it
+# (the dispatcher adds conditions on populations, window type and
+# missing_data), so a name in one family only cannot be mixed with a name
+# outside that family.
 # ---------------------------------------------------------------------------
 
 [windowed.pi]
@@ -307,76 +317,90 @@ span_normalized = false
 [windowed.singletons]
 scalar = "diversity.singleton_count"
 engines = ["thetas_scatter", "fused", "fused_chunked"]
+not_in = { fallback = "#347" }
 span_normalized = false
 notes = "windowed_analysis._engine_statistics reads n_singletons as singletons for bp and regions windows, and the output keeps the name the caller asked for."
 
 [windowed.n_singletons]
 scalar = "diversity.singleton_count"
 engines = ["fallback"]
+not_in = { scatter = "#347", fused = "#347" }
 span_normalized = false
 notes = "The fallback's name for singletons; windowed_analysis._engine_statistics sends singletons here for snp windows, which only the fallback serves."
 
 [windowed.n_variants]
 scalar = ""
 engines = ["fallback"]
+not_in = { scatter = "#347", fused = "#347" }
 span_normalized = false
 notes = "A prefix column of every engine, so windowed_analysis._engine_statistics drops it from the request; under 'exclude' it counts the complete sites."
 
 [windowed.theta_h]
 scalar = "diversity.theta_h"
 engines = ["thetas_scatter", "fused", "fused_chunked"]
+not_in = { fallback = "#347" }
 span_normalized = true
 
 [windowed.theta_l]
 scalar = "diversity.theta_l"
 engines = ["thetas_scatter"]
+not_in = { fused = "#347", fallback = "#347" }
 span_normalized = true
 
 [windowed.fay_wu_h]
 scalar = "diversity.fay_wus_h"
 engines = ["thetas_scatter", "fused", "fused_chunked"]
+not_in = { fallback = "#347" }
 span_normalized = false
 
 [windowed.normalized_fay_wu_h]
 scalar = "diversity.normalized_fay_wus_h"
 engines = ["thetas_scatter"]
+not_in = { fused = "#412", fallback = "#412" }
 span_normalized = false
 
 [windowed.zeng_e]
 scalar = "diversity.zeng_e"
 engines = ["thetas_scatter"]
+not_in = { fused = "#412", fallback = "#412" }
 span_normalized = false
 
 [windowed.zeng_dh]
 scalar = "diversity.zeng_dh"
 engines = ["thetas_scatter"]
+not_in = { fused = "#412", fallback = "#412" }
 span_normalized = false
 
 [windowed.max_daf]
 scalar = "diversity.max_daf"
 engines = ["thetas_scatter", "fused", "fused_chunked"]
+not_in = { fallback = "#347" }
 span_normalized = false
 
 [windowed.het_expected]
 scalar = "diversity.heterozygosity_expected"
 engines = ["fused", "fallback"]
+not_in = { scatter = "untracked" }
 span_normalized = false
 notes = "Per-window mean of per-site expected heterozygosity over the sites with a defined value (n_valid >= 2), NaN for a window with none; not span-normalized. Both engines reuse the per-site rule of diversity.heterozygosity_expected (its CuPy core diversity._heterozygosity_expected_sites) so it lives in one place: the fused engine prefix-sums the non-NaN values of each window's variant range [win_start, win_stop) and their count via windowed_analysis._WindowAccumulator.mean (the shared range reducer that mean_nsl, daf_hist and mu_sfs also use), which serves any window family including unordered or overlapping regions; the chunked engine forwards the name to the fused engine; the fallback averages diversity.heterozygosity_expected over each window matrix. Under 'exclude' it is not a fused-only name, so the request falls to the fallback."
 
 [windowed.daf_hist]
 scalar = "diversity.daf_histogram"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 notes = "Gives the columns daf_bin_0 .. daf_bin_19 (windowed_analysis.N_DAF_BINS)."
 
 [windowed.mu_sfs]
 scalar = "diversity.mu_sfs"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.mu_var]
 scalar = "diversity.mu_var"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = true
 
 [windowed.dxy]
@@ -408,95 +432,113 @@ span_normalized = false
 [windowed.garud_h1]
 scalar = "selection.garud_h"
 engines = ["fused", "fallback"]
+not_in = { scatter = "untracked" }
 span_normalized = false
 notes = "Every Garud name and haplotype_count come from _haplotype_hash.garud_h_windows on every path, and add n_complete_haplotypes columns."
 
 [windowed.garud_h12]
 scalar = "selection.garud_h"
 engines = ["fused", "fallback"]
+not_in = { scatter = "untracked" }
 span_normalized = false
 
 [windowed.garud_h123]
 scalar = "selection.garud_h"
 engines = ["fused", "fallback"]
+not_in = { scatter = "untracked" }
 span_normalized = false
 
 [windowed.garud_h2h1]
 scalar = "selection.garud_h"
 engines = ["fused", "fallback"]
+not_in = { scatter = "untracked" }
 span_normalized = false
 
 [windowed.haplotype_count]
 scalar = "diversity.haplotype_count"
 engines = ["fused", "fallback"]
+not_in = { scatter = "untracked" }
 span_normalized = false
 
 [windowed.mean_nsl]
 scalar = "selection.nsl"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 notes = "nSL is computed over the whole matrix, then averaged per window; on the streaming path it is cut at chunk edges."
 
 [windowed.zns]
 scalar = "ld_statistics.zns"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.omega]
 scalar = "ld_statistics.omega"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.mu_ld]
 scalar = "ld_statistics.mu_ld"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.dist_var]
 scalar = "distance_stats.dist_var"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.dist_skew]
 scalar = "distance_stats.dist_skew"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.dist_kurt]
 scalar = "distance_stats.dist_kurt"
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.snp_dist_mean]
 scalar = ""
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 notes = "The snp_dist names exist only in the fused engine: the distances between adjacent variants in the window."
 
 [windowed.snp_dist_var]
 scalar = ""
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.snp_dist_min]
 scalar = ""
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.snp_dist_max]
 scalar = ""
 engines = ["fused"]
+not_in = { scatter = "untracked", fallback = "#347" }
 span_normalized = false
 
 [windowed.ld_decay]
 scalar = "HaplotypeMatrix.pairwise_r2"
 engines = ["fallback"]
+not_in = { scatter = "#347", fused = "#347" }
 span_normalized = false
 notes = "Needs custom_stat_kwargs={'ld_decay': {'max_distance': ...}}; without it the call raises TypeError."
 
 [windowed.mean_r2]
 scalar = "HaplotypeMatrix.pairwise_r2"
 engines = ["fallback"]
+not_in = { scatter = "#347", fused = "#347" }
 span_normalized = false
 notes = "Needs custom_stat_kwargs={'mean_r2': {'max_dist': ...}}; without it the call raises TypeError."
 
@@ -511,13 +553,138 @@ engines = ["local_pca"]
 span_normalized = false
 
 # ---------------------------------------------------------------------------
+# Batch dispatchers: functions that take a list of statistic names. The keys
+# of `names` are checked against `names_from`, the table in the code; each
+# value is the scalar function that gives the same value ("" means none
+# exists) and is checked only to be a function row. `not_named` (checked)
+# lists every other public function of the module, with the issue that
+# tracks its absence, "untracked", or "n/a" for a function that is not a
+# scalar statistic of the dispatcher's kind.
+# ---------------------------------------------------------------------------
+
+[dispatch."diversity.diversity_stats"]
+names_from = "diversity._DIVERSITY_STATS_NAMES"
+
+[dispatch."diversity.diversity_stats".names]
+pi = "diversity.pi"
+theta_w = "diversity.theta_w"
+theta_h = "diversity.theta_h"
+theta_l = "diversity.theta_l"
+eta1 = ""
+eta1_star = ""
+minus_eta1 = ""
+minus_eta1_star = ""
+tajimas_d = "diversity.tajimas_d"
+fay_wus_h = "diversity.fay_wus_h"
+normalized_fay_wus_h = "diversity.normalized_fay_wus_h"
+zeng_e = "diversity.zeng_e"
+segregating_sites = "diversity.segregating_sites"
+singletons = "diversity.singleton_count"
+n_variants = ""
+haplotype_diversity = "diversity.haplotype_diversity"
+
+[dispatch."diversity.diversity_stats".not_named]
+"diversity.compute_sigma_ij" = "n/a"
+"diversity.daf_histogram" = "n/a"
+"diversity.daf_histogram_diploid" = "n/a"
+"diversity.diplotype_frequency_spectrum" = "n/a"
+"diversity.haplotype_count" = "untracked"
+"diversity.heterozygosity_expected" = "untracked"
+"diversity.heterozygosity_observed" = "untracked"
+"diversity.inbreeding_coefficient" = "untracked"
+"diversity.max_daf" = "untracked"
+"diversity.mu_sfs" = "untracked"
+"diversity.mu_var" = "untracked"
+"diversity.neutrality_tests" = "n/a"
+"diversity.pi_components" = "n/a"
+"diversity.project_sfs" = "n/a"
+"diversity.zeng_dh" = "#412"
+
+[dispatch."divergence.divergence_stats"]
+names_from = "divergence._DIVERGENCE_STATS"
+
+[dispatch."divergence.divergence_stats".names]
+fst = "divergence.fst"
+fst_hudson = "divergence.fst_hudson"
+fst_tskit = "divergence.fst_tskit"
+fst_wc = "divergence.fst_weir_cockerham"
+fst_nei = "divergence.fst_nei"
+dxy = "divergence.dxy"
+da = "divergence.da"
+pi1 = "divergence.pi_within_population"
+pi2 = "divergence.pi_within_population"
+
+[dispatch."divergence.divergence_stats".not_named]
+"divergence.dd" = "untracked"
+"divergence.dd_rank" = "untracked"
+"divergence.distance_based_stats" = "n/a"
+"divergence.dxy_components" = "n/a"
+"divergence.dxy_min" = "untracked"
+"divergence.gmin" = "untracked"
+"divergence.pairwise_distance_matrix" = "n/a"
+"divergence.pairwise_fst" = "n/a"
+"divergence.pbs" = "untracked"
+"divergence.snn" = "untracked"
+"divergence.zx" = "untracked"
+
+[dispatch."ld_statistics.compute_ld_statistics"]
+names_from = "ld_statistics._LD_STATISTICS"
+
+[dispatch."ld_statistics.compute_ld_statistics".names]
+dd = "ld_statistics.dd"
+dz = "ld_statistics.dz"
+pi2 = "ld_statistics.pi2"
+r = "ld_statistics.r"
+r_squared = "ld_statistics.r_squared"
+
+[dispatch."ld_statistics.compute_ld_statistics".not_named]
+"ld_statistics.d_prime" = "n/a"
+"ld_statistics.dd_between" = "n/a"
+"ld_statistics.dd_within" = "n/a"
+"ld_statistics.mu_ld" = "n/a"
+"ld_statistics.omega" = "n/a"
+"ld_statistics.omega_diploid" = "n/a"
+"ld_statistics.r2_matrix_diploid" = "n/a"
+"ld_statistics.rogers_huff_r" = "n/a"
+"ld_statistics.rogers_huff_r_squared" = "n/a"
+"ld_statistics.zns" = "n/a"
+"ld_statistics.zns_diploid" = "n/a"
+
+# ---------------------------------------------------------------------------
+# One statistic under more than one name. `known` (checked) lists, for each
+# dispatcher, which of the names it accepts; a dispatcher that is not listed
+# accepts none of them.
+# ---------------------------------------------------------------------------
+
+[[alias]]
+scalar = "diversity.fay_wus_h"
+names = ["fay_wus_h", "fay_wu_h"]
+known = { windowed = ["fay_wu_h"], "diversity.diversity_stats" = ["fay_wus_h"] }
+
+[[alias]]
+scalar = "diversity.normalized_fay_wus_h"
+names = ["normalized_fay_wus_h", "normalized_fay_wu_h"]
+known = { windowed = ["normalized_fay_wu_h"], "diversity.diversity_stats" = ["normalized_fay_wus_h"] }
+
+[[alias]]
+scalar = "diversity.singleton_count"
+names = ["singleton_count", "singletons", "n_singletons"]
+known = { windowed = ["n_singletons", "singletons"], "diversity.diversity_stats" = ["singletons"] }
+
+[[alias]]
+scalar = "divergence.fst_weir_cockerham"
+names = ["fst_weir_cockerham", "fst_wc"]
+known = { windowed = ["fst_wc"], "divergence.divergence_stats" = ["fst_wc"] }
+
+# ---------------------------------------------------------------------------
 # Checklists: when you change X, also check Y.
 # ---------------------------------------------------------------------------
 
 [checklists]
 new_windowed_statistic = [
     "Add the name to the set of each engine that computes it (windowed_analysis module constants, windowed_analysis.StatisticsComputer for the fallback).",
-    "Add a [windowed] row here and run tests/test_pipeline_map.py.",
+    "Add a [windowed] row here, with a `not_in` entry for each engine family (scatter, fused, fallback) that does not compute it, and run tests/test_pipeline_map.py.",
+    "Add the name to the batch dispatcher of its module if it has one, and to its `names` in [dispatch]; otherwise add the function to that dispatcher's `not_named`.",
     "Test it alone, together with a name from each other engine family, with two populations, under 'include' and 'exclude', with and without a mask, and on a StreamingHaplotypeMatrix.",
     "Compare each engine with the scalar function on one window.",
 ]

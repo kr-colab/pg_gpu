@@ -761,6 +761,25 @@ def pi_within_population(haplotype_matrix: HaplotypeMatrix,
                span_normalize=span_normalize, missing_data=missing_data)
 
 
+# The statistics divergence_stats accepts: each name with the call that
+# computes it from (matrix, pop1, pop2, missing_data, span_normalize).
+_DIVERGENCE_STATS = {
+    'fst': lambda hm, p1, p2, md, sn: fst(hm, p1, p2, missing_data=md),
+    'fst_hudson': lambda hm, p1, p2, md, sn: fst_hudson(hm, p1, p2, missing_data=md),
+    'fst_tskit': lambda hm, p1, p2, md, sn: fst_tskit(hm, p1, p2, missing_data=md),
+    'fst_wc': lambda hm, p1, p2, md, sn: fst_weir_cockerham(hm, p1, p2, missing_data=md),
+    'fst_nei': lambda hm, p1, p2, md, sn: fst_nei(hm, p1, p2, missing_data=md),
+    'dxy': lambda hm, p1, p2, md, sn: dxy(
+        hm, p1, p2, missing_data=md, span_normalize=sn),
+    'da': lambda hm, p1, p2, md, sn: da(
+        hm, p1, p2, missing_data=md, span_normalize=sn),
+    'pi1': lambda hm, p1, p2, md, sn: pi_within_population(
+        hm, p1, missing_data=md, span_normalize=sn),
+    'pi2': lambda hm, p1, p2, md, sn: pi_within_population(
+        hm, p2, missing_data=md, span_normalize=sn),
+}
+
+
 @_eager_only
 def divergence_stats(haplotype_matrix: HaplotypeMatrix,
                     pop1: Union[str, list],
@@ -792,35 +811,12 @@ def divergence_stats(haplotype_matrix: HaplotypeMatrix,
     dict
         Dictionary of statistic names to values
     """
-    results = {}
-
-    for stat in statistics:
-        if stat == 'fst':
-            results['fst'] = fst(haplotype_matrix, pop1, pop2, missing_data=missing_data)
-        elif stat == 'fst_hudson':
-            results['fst_hudson'] = fst_hudson(haplotype_matrix, pop1, pop2, missing_data=missing_data)
-        elif stat == 'fst_tskit':
-            results['fst_tskit'] = fst_tskit(haplotype_matrix, pop1, pop2, missing_data=missing_data)
-        elif stat == 'fst_wc':
-            results['fst_wc'] = fst_weir_cockerham(haplotype_matrix, pop1, pop2, missing_data=missing_data)
-        elif stat == 'fst_nei':
-            results['fst_nei'] = fst_nei(haplotype_matrix, pop1, pop2, missing_data=missing_data)
-        elif stat == 'dxy':
-            results['dxy'] = dxy(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                               span_normalize=span_normalize)
-        elif stat == 'da':
-            results['da'] = da(haplotype_matrix, pop1, pop2, missing_data=missing_data,
-                             span_normalize=span_normalize)
-        elif stat == 'pi1':
-            results['pi1'] = pi_within_population(haplotype_matrix, pop1, missing_data=missing_data,
-                                                span_normalize=span_normalize)
-        elif stat == 'pi2':
-            results['pi2'] = pi_within_population(haplotype_matrix, pop2, missing_data=missing_data,
-                                                span_normalize=span_normalize)
-        else:
-            raise ValueError(f"Unknown statistic: {stat}")
-
-    return results
+    unknown = [s for s in statistics if s not in _DIVERGENCE_STATS]
+    if unknown:
+        raise ValueError(f"Unknown statistic: {', '.join(map(str, unknown))}")
+    return {stat: _DIVERGENCE_STATS[stat](haplotype_matrix, pop1, pop2,
+                                         missing_data, span_normalize)
+            for stat in statistics}
 
 
 @_eager_only

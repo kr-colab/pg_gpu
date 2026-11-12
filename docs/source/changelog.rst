@@ -398,6 +398,10 @@ Bug fixes
   statistic gets NaN on an empty window, without a call. With two or
   more populations, its empty rows also use the per-population column
   names, as its other rows do.
+* ``diversity_stats``, ``divergence_stats`` and ``compute_ld_statistics``
+  check the requested names before they compute anything, and the
+  ``Unknown statistic`` error names every unknown name, not only the
+  first.
 * A scalar statistic given a streaming matrix failed deep inside with a
   bare ``AttributeError`` (no attribute ``device``), which did not say
   what to do. Every function that needs the whole matrix in memory now

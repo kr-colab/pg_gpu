@@ -1086,6 +1086,41 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
     return int(cp.sum((derived == 1) & (derived < n_valid[:, None])).get())
 
 
+# The names diversity_stats accepts, by how it computes them.
+# Theta estimators: the name of each one's _compute_thetas estimator.
+_THETA_STATS = {'pi': 'pi', 'theta_w': 'watterson', 'theta_h': 'theta_h',
+                'theta_l': 'theta_l', 'eta1': 'eta1',
+                'eta1_star': 'eta1_star', 'minus_eta1': 'minus_eta1',
+                'minus_eta1_star': 'minus_eta1_star'}
+# Neutrality tests that divide a theta difference by its variance:
+# (w1, w2) weight pairs. They need a minimum S and n.
+_TEST_SPECS = {
+    'tajimas_d': ('pi', 'watterson'),
+    'normalized_fay_wus_h': ('pi', 'theta_h'),
+    'zeng_e': ('theta_l', 'watterson'),
+}
+# Plain theta differences: no variance term, so no minimum S or n.
+_DIFFERENCE_STATS = {'fay_wus_h': ('pi', 'theta_h')}
+# Statistics that do not come from the theta batch: each name with the call
+# that computes it from (matrix, population, missing_data).
+_COUNT_STATS = {
+    'segregating_sites': lambda hm, pop, md: segregating_sites(hm, pop, md),
+    'singletons': lambda hm, pop, md: singleton_count(hm, pop, md),
+    'n_variants': lambda hm, pop, md: _prepare_matrix(hm, pop, md).num_variants,
+    'haplotype_diversity': lambda hm, pop, md: _haplotype_diversity_stat(hm, pop, md),
+}
+_DIVERSITY_STATS_NAMES = (frozenset(_THETA_STATS) | frozenset(_TEST_SPECS)
+                          | frozenset(_DIFFERENCE_STATS) | frozenset(_COUNT_STATS))
+
+
+def _haplotype_diversity_stat(haplotype_matrix, population, missing_data):
+    """haplotype_diversity for diversity_stats, which warns on unphased data
+    under its own name."""
+    _warn_unphased(haplotype_matrix,
+                   context="diversity_stats (haplotype_diversity)")
+    return haplotype_diversity(haplotype_matrix, population, missing_data)
+
+
 @_eager_only
 @_phase_dependent
 def diversity_stats(haplotype_matrix: HaplotypeMatrix,
@@ -1128,22 +1163,10 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     dict
         Dictionary mapping statistic names to values
     """
-    # Map stat names to estimator names for batched computation
-    theta_stats = {'pi': 'pi', 'theta_w': 'watterson', 'theta_h': 'theta_h',
-                   'theta_l': 'theta_l', 'eta1': 'eta1',
-                   'eta1_star': 'eta1_star', 'minus_eta1': 'minus_eta1',
-                   'minus_eta1_star': 'minus_eta1_star'}
-    # Neutrality tests that divide a theta difference by its variance:
-    # (w1, w2) weight pairs. They need a minimum S and n.
-    test_specs = {
-        'tajimas_d': ('pi', 'watterson'),
-        'normalized_fay_wus_h': ('pi', 'theta_h'),
-        'zeng_e': ('theta_l', 'watterson'),
-    }
-    # Plain theta differences: no variance term, so no minimum S or n.
-    difference_stats = {'fay_wus_h': ('pi', 'theta_h')}
-    needs_thetas = {s for s in statistics
-                    if s in theta_stats or s in test_specs or s in difference_stats}
+    unknown = [s for s in statistics if s not in _DIVERSITY_STATS_NAMES]
+    if unknown:
+        raise ValueError(f"Unknown statistic: {', '.join(map(str, unknown))}")
+    needs_thetas = {s for s in statistics if s not in _COUNT_STATS}
 
     results = {}
 
@@ -1156,22 +1179,22 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
         # the empty case.
         estimators = set()
         for s in needs_thetas:
-            if s in theta_stats:
-                estimators.add(theta_stats[s])
+            if s in _THETA_STATS:
+                estimators.add(_THETA_STATS[s])
             else:
-                estimators.update(test_specs.get(s) or difference_stats[s])
+                estimators.update(_TEST_SPECS.get(s) or _DIFFERENCE_STATS[s])
         ct = _compute_thetas(matrix, tuple(estimators))
 
         for s in needs_thetas:
-            if s in theta_stats:
+            if s in _THETA_STATS:
                 results[s] = (float('nan') if emptied else _apply_span_normalize(
-                    ct['thetas'][theta_stats[s]], matrix, span_normalize,
+                    ct['thetas'][_THETA_STATS[s]], matrix, span_normalize,
                     ct['n_sites_with_data']))
-            elif s in difference_stats:
-                w1, w2 = difference_stats[s]
+            elif s in _DIFFERENCE_STATS:
+                w1, w2 = _DIFFERENCE_STATS[s]
                 results[s] = float(ct['thetas'][w1] - ct['thetas'][w2])
             else:
-                w1, w2 = test_specs[s]
+                w1, w2 = _TEST_SPECS[s]
                 S = ct['S']
                 n = ct['n_harmonic_mean']
                 if S < 3 or n < 3:
@@ -1181,23 +1204,10 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                     num = ct['thetas'][w1] - ct['thetas'][w2]
                     results[s] = float(num / math.sqrt(var)) if var > 0 else float('nan')
 
-    # Non-theta stats
     for stat in statistics:
-        if stat in results:
-            continue
-        if stat == 'segregating_sites':
-            results['segregating_sites'] = segregating_sites(haplotype_matrix, population, missing_data)
-        elif stat == 'singletons':
-            results['singletons'] = singleton_count(haplotype_matrix, population, missing_data)
-        elif stat == 'n_variants':
-            m = _prepare_matrix(haplotype_matrix, population, missing_data)
-            results['n_variants'] = m.num_variants
-        elif stat == 'haplotype_diversity':
-            _warn_unphased(haplotype_matrix,
-                           context="diversity_stats (haplotype_diversity)")
-            results['haplotype_diversity'] = haplotype_diversity(haplotype_matrix, population, missing_data)
-        else:
-            raise ValueError(f"Unknown statistic: {stat}")
+        if stat in _COUNT_STATS and stat not in results:
+            results[stat] = _COUNT_STATS[stat](haplotype_matrix, population,
+                                               missing_data)
 
     # Give back keys in the caller's order; the theta batch above fills
     # results in set-iteration order, which varies with the hash seed.
