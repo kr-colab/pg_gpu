@@ -394,6 +394,10 @@ Bug fixes
   single-population scatter engine use the span of every site. When the
   first or last site had a missing call, the engines disagreed. All now
   use the span of every site.
+* ``diversity_stats``, ``divergence_stats`` and ``compute_ld_statistics``
+  check the requested names before they compute anything, and the
+  ``Unknown statistic`` error names every unknown name, not only the
+  first.
 * A scalar statistic given a streaming matrix failed deep inside with a
   bare ``AttributeError`` (no attribute ``device``), which did not say
   what to do. Every function that needs the whole matrix in memory now

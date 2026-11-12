@@ -179,3 +179,80 @@ def test_every_named_path_resolves():
         except (AttributeError, ModuleNotFoundError):
             broken.append(name)
     assert not broken, "names in the map that the code does not have:\n  " + "\n  ".join(broken)
+
+
+# Engine families. No request runs unless one family computes every name in
+# it, so two statistics with no common family cannot be mixed, and one of
+# such a pair is always in a single family. The two scatter engines count as
+# one, because a mixed request runs both, and the chunked fused engine hands
+# what it lacks to the fused one.
+FAMILIES = {"thetas_scatter": "scatter", "twopop_scatter": "scatter",
+            "fused": "fused", "fused_chunked": "fused", "fallback": "fallback"}
+
+
+def _families(name):
+    """The engine families whose code computes a windowed statistic."""
+    return {FAMILIES[e] for e in ENGINES
+            if e in FAMILIES and name in _engine_stats(e)}
+
+
+def _dispatched_names():
+    """The windowed statistics that the engine families serve."""
+    return sorted(n for n in MAP["windowed"] if _families(n))
+
+
+@pytest.mark.parametrize("name", _dispatched_names())
+def test_engine_gaps_are_recorded(name):
+    # A statistic that an engine family lacks is a gap someone decided to
+    # leave, or one nobody saw. `not_in` records each one, so a new gap
+    # cannot appear without an edit here.
+    missing = set(FAMILIES.values()) - _families(name)
+    recorded = MAP["windowed"][name].get("not_in", {})
+    assert set(recorded) == missing, _diff(
+        f"engine families that lack {name!r} (`not_in` of [windowed.{name}])",
+        missing, set(recorded))
+    for family, why in recorded.items():
+        assert re.fullmatch(r"#\d+|untracked", why), (
+            f"not_in.{family} of [windowed.{name}] must be an issue number "
+            f"like \"#412\" or \"untracked\", not {why!r}")
+
+
+@pytest.mark.parametrize("dispatcher", sorted(MAP["dispatch"]))
+def test_batch_dispatcher_names(dispatcher):
+    row = MAP["dispatch"][dispatcher]
+    assert dispatcher in MAP["functions"], f"[dispatch] names no function row: {dispatcher}"
+    in_code = set(_resolve(row["names_from"]))
+    in_map = set(row["names"])
+    assert in_code == in_map, _diff(
+        f"names that {dispatcher} accepts ([dispatch])", in_code, in_map)
+    unknown = sorted(s for s in row["names"].values() if s and s not in MAP["functions"])
+    assert not unknown, f"scalars of {dispatcher} with no function row: {unknown}"
+    # Every other public function of the module is a statistic the dispatcher
+    # could name and does not; `not_named` says why, so a new function cannot
+    # stay out of the dispatcher unseen.
+    module = dispatcher.split(".")[0]
+    others = (_public_functions(module) - {dispatcher}
+              - {s for s in row["names"].values() if s})
+    assert others == set(row["not_named"]), _diff(
+        f"functions of {module} that {dispatcher} does not name (`not_named`)",
+        others, set(row["not_named"]))
+    for func, why in row["not_named"].items():
+        assert re.fullmatch(r"#\d+|untracked|n/a", why), (
+            f"not_named.{func} of {dispatcher} must be an issue number, "
+            f"\"untracked\" or \"n/a\", not {why!r}")
+
+
+@pytest.mark.parametrize("group", MAP["alias"], ids=lambda g: g["scalar"])
+def test_alias_names_are_known_as_recorded(group):
+    # One statistic under several names: the map records which names each
+    # dispatcher accepts, so a dispatcher that learns or drops one shows here.
+    assert group["scalar"] in MAP["functions"]
+    accepts = {"windowed": set(_dispatched_names())}
+    for dispatcher, row in MAP["dispatch"].items():
+        accepts[dispatcher] = set(_resolve(row["names_from"]))
+    in_code = {d: sorted(names & set(group["names"]))
+               for d, names in accepts.items() if names & set(group["names"])}
+    in_map = {d: sorted(names) for d, names in group["known"].items()}
+    assert in_code == in_map, (
+        f"names of {group['scalar']} that each dispatcher accepts: the code "
+        f"has {in_code}, the map has {in_map}")

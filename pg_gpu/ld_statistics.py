@@ -1139,6 +1139,17 @@ zns_diploid = zns
 omega_diploid = omega
 
 
+# The statistics compute_ld_statistics accepts: each name with the call that
+# computes it from (counts, its population configuration, n_valid).
+_LD_STATISTICS = {
+    'dd': lambda counts, pops, n_valid: dd(counts, pops, n_valid),
+    'dz': lambda counts, pops, n_valid: dz(counts, pops, n_valid),
+    'pi2': lambda counts, pops, n_valid: pi2(counts, pops, n_valid),
+    'r': lambda counts, pops, n_valid: r(counts, n_valid),
+    'r_squared': lambda counts, pops, n_valid: r_squared(counts, n_valid),
+}
+
+
 def compute_ld_statistics(counts: cp.ndarray,
                          statistics: List[str] = ['dd', 'dz', 'pi2'],
                          populations: Optional[Dict[str, Union[Tuple, None]]] = None,
@@ -1163,29 +1174,13 @@ def compute_ld_statistics(counts: cp.ndarray,
     dict
         Dictionary mapping statistic names to computed values
     """
+    unknown = [s for s in statistics if s not in _LD_STATISTICS]
+    if unknown:
+        raise ValueError(f"Unknown statistic: {', '.join(map(str, unknown))}")
     if populations is None:
         populations = {}
-
-    results = {}
-
-    for stat in statistics:
-        if stat == 'dd':
-            pop_config = populations.get('dd', None)
-            results['dd'] = dd(counts, pop_config, n_valid)
-        elif stat == 'dz':
-            pop_config = populations.get('dz', None)
-            results['dz'] = dz(counts, pop_config, n_valid)
-        elif stat == 'pi2':
-            pop_config = populations.get('pi2', None)
-            results['pi2'] = pi2(counts, pop_config, n_valid)
-        elif stat == 'r':
-            results['r'] = r(counts, n_valid)
-        elif stat == 'r_squared':
-            results['r_squared'] = r_squared(counts, n_valid)
-        else:
-            raise ValueError(f"Unknown statistic: {stat}")
-
-    return results
+    return {stat: _LD_STATISTICS[stat](counts, populations.get(stat), n_valid)
+            for stat in statistics}
 
 
 # Internal implementation functions
