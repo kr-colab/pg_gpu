@@ -1893,41 +1893,6 @@ def _warn_fused_allele_cap(n_over):
         MultiallelicCapWarning, stacklevel=3)
 
 
-def _filter_fused_allele_cap_raw(hap_raw, positions, cap_source=None):
-    """Cap filter for an un-transposed (n_hap, n_var) matrix.
-
-    Reduces over the haplotype axis (axis 0) to get per-variant max allele
-    indices without a full transpose, then slices variants (axis 1) and
-    positions consistently. Drops variants whose max allele index
-    >= _FUSED_MAX_ALLELES and emits a ``MultiallelicCapWarning``; missing (-1)
-    never triggers the cap.
-
-    ``cap_source`` is the matrix the reduction runs over; it defaults to
-    ``hap_raw`` but must be the original matrix whenever the kernels will
-    read rows beyond ``hap_raw`` -- otherwise an over-cap allele in those
-    rows survives the filter and is silently dropped from the tallies. It
-    must share ``hap_raw``'s variant axis.
-
-    Also returns the kept variants' column indices into the unfiltered
-    matrix, or ``None`` when nothing was dropped. The two-population block
-    reads rows from the original matrix, so it needs these to select the
-    same variants the filtered axis holds.
-    """
-    src = hap_raw if cap_source is None else cap_source
-    overcap = src.max(axis=0) >= _FUSED_MAX_ALLELES
-    n_over = int(overcap.sum())
-    keep_idx = None
-    if n_over:
-        _warn_fused_allele_cap(n_over)
-        keep = ~overcap
-        hap_raw = hap_raw[:, keep]
-        positions = positions[keep]
-        # int32 is enough: the kernel already receives the variant count as
-        # an int32, so a matrix this path accepts cannot exceed that range.
-        keep_idx = cp.where(keep)[0].astype(cp.int32)
-    return hap_raw, positions, keep_idx
-
-
 def _fused_tajimas_d(mpd_sum, seg_count, sum_inv_w, count_valid_w,
                      watterson_num_w):
     """Tajima (1989) D for the fused-kernel engines.
@@ -2341,58 +2306,162 @@ void fused_windowed_twopop(const signed char* hap1_t,
 ''', 'fused_windowed_twopop')
 
 
-def _window_site_counts(hap, windows, missing_data):
-    """Sites per window: every site, or under 'exclude' the complete ones.
+def _window_site_counts(windows, incomplete=None):
+    """Sites per window: every site, or only the complete ones.
 
     The base count is ``windows.counts()`` -- each window's variant-range
-    length. Only a Garud-only request reaches an engine still under 'exclude'
-    (see ``_apply_exclude``); its sites are counted here because
-    ``garud_h_windows`` skips the incomplete ones without a filtered copy, so
-    the incomplete sites in each range are subtracted off.
+    length. ``incomplete`` flags the sites with a missing call, for a request
+    still under 'exclude' (Garud-only, see ``_FusedSites``):
+    ``garud_h_windows`` skips those sites without a filtered copy, so they
+    are subtracted from each range here.
     """
     base = windows.counts()
-    if missing_data != 'exclude':
+    if incomplete is None:
         return base
     n_miss = cp.concatenate([cp.zeros(1, dtype=cp.int64),
-                             cp.cumsum(column_has_missing(hap), dtype=cp.int64)])
+                             cp.cumsum(incomplete, dtype=cp.int64)])
     return base - (n_miss[windows.stop] - n_miss[windows.start])
 
 
-def _apply_exclude(haplotype_matrix, missing_data, statistics, population,
-                   pop1, pop2):
-    """The matrix and missing-data mode a fused engine computes on.
+class _FusedSites:
+    """The sites and rows a fused engine computes on, with no filtered copy.
 
-    Under 'exclude' the matrix is restricted to sites with no missing call,
-    and the mode becomes 'include' because every row the engine reads is
-    then complete; a later step must not filter again over other rows.
+    Two filters pick the sites. Under 'exclude', only sites with no missing
+    call stay, and the engine's mode becomes 'include', because every row it
+    reads is then complete. Completeness is judged over the rows the request
+    reads: both populations when a two-population statistic is requested, so
+    single-population statistics in the same request see only sites complete
+    in both; else the single population; else every row. A site's
+    completeness does not depend on the window, so one filter equals
+    dropping each window's incomplete sites. A Garud-only request stays
+    under 'exclude': ``garud_h_windows`` skips incomplete columns itself.
+    The second filter drops sites with an allele index the fused kernels
+    cannot count (``MultiallelicCapWarning``).
 
-    A site's completeness does not depend on the window, so filtering once
-    equals dropping each window's incomplete sites; the caller's window grid
-    comes from the bin edges and does not move. Completeness is judged over
-    the rows the request reads: both populations when a two-population
-    statistic is requested, so single-population statistics in the same
-    request see only sites complete in both; else the single population;
-    else every row.
+    Neither filter copies the matrix. ``keep`` holds the indices of the
+    kept sites (None when every site stays), and each consumer gathers what
+    it needs through it: a chunk of columns, a per-site array, the
+    transposed kernel input. So an engine under 'exclude' holds no more
+    than under 'include', unless a statistic reads ``matrix``.
 
-    A Garud-only request is returned unchanged, still under 'exclude':
-    ``garud_h_windows`` drops incomplete columns itself, with no copy.
-    Otherwise the filter copies the complete sites, so under 'exclude' an
-    engine holds one extra copy of the matrix next to the caller's.
-
-    A two-population statistic without ``pop1`` and ``pop2`` raises here,
-    before the filter reads the populations.
+    Attributes
+    ----------
+    rows : HaplotypeMatrix
+        The rows of the single-population statistics, every site.
+    keep : cupy.ndarray of int32, or None
+        Indices of the kept sites on the variant axis.
+    positions : cupy.ndarray
+        Positions of the kept sites; window ranges index this axis.
+    missing_data : str
+        The mode the engine computes under.
+    capped : bool
+        Whether the allele cap dropped a site.
     """
-    if _TWO_POP_STATS & set(statistics) and (pop1 is None or pop2 is None):
-        raise ValueError("pop1 and pop2 required for fst/dxy/da")
-    if missing_data != 'exclude' or set(statistics) <= set(_FUSED_GARUD_STATS):
-        return haplotype_matrix, missing_data
-    if _TWO_POP_STATS & set(statistics):
-        pops = [pop1, pop2]
-    elif population is not None:
-        pops = [population]
-    else:
-        pops = None
-    return haplotype_matrix.exclude_missing_sites(populations=pops), 'include'
+
+    def __init__(self, haplotype_matrix, missing_data, statistics,
+                 population=None, pop1=None, pop2=None):
+        stats = set(statistics)
+        two_pop = bool(_TWO_POP_STATS & stats)
+        if two_pop and (pop1 is None or pop2 is None):
+            raise ValueError("pop1 and pop2 required for fst/dxy/da")
+        if haplotype_matrix.device == 'CPU':
+            haplotype_matrix.transfer_to_gpu()
+        self.rows = (haplotype_matrix if population is None
+                     else population_rows(haplotype_matrix, population))
+        if self.rows.device == 'CPU':
+            self.rows.transfer_to_gpu()
+        self.missing_data = missing_data
+        self._matrix = None
+
+        keep_mask = None
+        if missing_data == 'exclude' and not stats <= set(_FUSED_GARUD_STATS):
+            if two_pop:
+                keep_mask = ~haplotype_matrix._site_has_missing([pop1, pop2])
+            else:
+                # self.rows already holds exactly the rows to judge.
+                keep_mask = ~column_has_missing(self.rows.haplotypes)
+            self.missing_data = 'include'
+
+        # The two-population kernels read pop1 and pop2 rows of the caller's
+        # matrix, which the single-population rows need not cover, so the
+        # cap is then judged over every row.
+        cap_source = haplotype_matrix if two_pop else self.rows
+        overcap = cap_source.haplotypes.max(axis=0) >= _FUSED_MAX_ALLELES
+        if keep_mask is not None:
+            overcap &= keep_mask
+        n_over = int(overcap.sum())
+        self.capped = n_over > 0
+        if self.capped:
+            _warn_fused_allele_cap(n_over)
+            keep_mask = ~overcap if keep_mask is None else keep_mask & ~overcap
+
+        positions = self.rows.positions
+        if not isinstance(positions, cp.ndarray):
+            positions = cp.asarray(positions)
+        self.keep = None
+        if keep_mask is not None and not bool(keep_mask.all()):
+            # int32 is enough: the kernels take the variant count as an int32.
+            self.keep = cp.where(keep_mask)[0].astype(cp.int32)
+            positions = positions[self.keep]
+        self.positions = positions
+
+    def columns(self, start=None, stop=None):
+        """Selector on the unfiltered variant axis for kept sites
+        ``[start, stop)``, by default all of them."""
+        return slice(start, stop) if self.keep is None else self.keep[start:stop]
+
+    def transposed(self, hap, start=None, stop=None, rows=None):
+        """Kernel input for ``hap``: the kept sites ``[start, stop)`` (default
+        all) of ``rows`` (default all) as a contiguous (n_sites, n_rows) int8
+        array. This is the one copy the kernels need, taken straight from
+        the unfiltered matrix."""
+        if rows is None:
+            return cp.ascontiguousarray(hap.T[self.columns(start, stop)],
+                                        dtype=cp.int8)
+        # Selecting sites and rows takes two gathers, and the first one
+        # copies every row of its sites. So fill the block a few sites at a
+        # time, sized to keep that copy at a quarter of the block.
+        n_sites = stop - start
+        out = cp.empty((n_sites, len(rows)), dtype=cp.int8)
+        step = max(1, n_sites * len(rows) // (4 * hap.shape[0]))
+        for lo in range(0, n_sites, step):
+            hi = min(lo + step, n_sites)
+            out[lo:hi] = hap.T[self.columns(start + lo, start + hi)][:, rows]
+        return out
+
+    def per_site(self, func):
+        """``func(matrix)`` for the kept sites, where ``func`` gives one value
+        (or a tuple of arrays with one row) per site and a site's value does
+        not depend on the other sites. It runs on the unfiltered rows and
+        the result is gathered, so the matrix is not copied. After an allele
+        cap it runs on the filtered matrix, because ``func`` may size its
+        work by the largest allele index."""
+        if self.capped or self.keep is None:
+            return func(self.matrix)
+        out = func(self.rows)
+        if isinstance(out, tuple):
+            return tuple(v[self.keep] for v in out)
+        return out[self.keep]
+
+    def incomplete(self):
+        """Per kept site, whether a row of ``rows`` has a missing call; None
+        unless the engine is still under 'exclude' (a Garud-only request),
+        the one case where incomplete sites stay in the window ranges."""
+        if self.missing_data != 'exclude':
+            return None
+        flags = column_has_missing(self.rows.haplotypes)
+        return flags if self.keep is None else flags[self.keep]
+
+    @property
+    def matrix(self):
+        """``rows`` restricted to the kept sites. The first use copies the
+        kept sites, so only statistics that need them as one matrix (nSL,
+        Garud's H next to other statistics, the per-window LD and distance
+        blocks) read it."""
+        if self._matrix is None:
+            self._matrix = (self.rows if self.keep is None
+                            else self.rows._keep_sites(self.keep))
+        return self._matrix
 
 
 @_eager_only
@@ -2409,7 +2478,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                               _win_starts=None,
                               _win_stops=None,
                               missing_data='include',
-                              chrom=None):
+                              chrom=None,
+                              _sites=None):
     """GPU-native windowed statistics using fused CUDA kernels.
 
     One kernel launch processes ALL windows in parallel. Each thread block
@@ -2443,7 +2513,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     missing_data : {'include', 'exclude'}
         'include' uses every site with the calls it has. 'exclude' keeps
         only sites with no missing call in the rows the request reads (see
-        ``_apply_exclude``), so ``n_variants`` counts those sites.
+        ``_FusedSites``), so ``n_variants`` counts those sites.
     chrom : str or int, optional
         Chromosome label emitted in the ``chrom`` output column.
 
@@ -2463,9 +2533,6 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     if phase_ctx:
         _warn_unphased(haplotype_matrix, context=phase_ctx)
 
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
-
     # Pre-filter positions: a window exclusion emptied (NaN for max_daf)
     # looks identical to one with no variant to begin with (0.0) once
     # filtering below removes the distinction.
@@ -2474,41 +2541,16 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     if not isinstance(orig_positions_gpu, cp.ndarray):
         orig_positions_gpu = cp.asarray(orig_positions_gpu)
 
-    haplotype_matrix, missing_data = _apply_exclude(
+    # The sites to compute on: under 'exclude' the complete ones, less any
+    # the kernels' allele capacity cannot count. Window ranges index these
+    # kept sites. Only the statistics that read sites.matrix copy them.
+    sites = _sites if _sites is not None else _FusedSites(
         haplotype_matrix, missing_data, statistics, population, pop1, pop2)
-
-    if population is not None:
-        matrix = population_rows(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    hap_raw = matrix.haplotypes
-    n_hap = hap_raw.shape[0]
-
-    positions = matrix.positions
-    if not isinstance(positions, cp.ndarray):
-        positions = cp.asarray(positions)
-
-    # Drop sites the fused kernel's per-allele capacity can't represent (rare;
-    # nucleotide data has <= 4 alleles). Must precede window indexing so the
-    # variant-index ranges are computed against the retained sites. The kept
-    # indices let the two-pop path slice hap1/hap2 to the same variants. When
-    # two-population statistics are requested the kernel reads pop1 and pop2
-    # rows of the original matrix, which the single-population subset need
-    # not cover, so the reduction runs over the original.
+    missing_data = sites.missing_data
+    n_hap = sites.rows.haplotypes.shape[0]
+    positions = sites.positions
     two_pop_requested = bool(_TWO_POP_STATS & set(statistics))
-    hap_raw, positions, cap_keep = _filter_fused_allele_cap_raw(
-        hap_raw, positions,
-        cap_source=haplotype_matrix.haplotypes if two_pop_requested else None)
-    if cap_keep is not None:
-        # Everything below that slices by variant-index ranges or counts
-        # per site (Garud, per-window LD, the per-site scatter stats) must
-        # see the same variant set the kernel arrays hold.
-        matrix = matrix.get_subset(cap_keep)
-    n_total_var = hap_raw.shape[1]
+    n_total_var = int(positions.shape[0])
 
     # Window bounds in bp: either explicit start/stop arrays (overlapping bp
     # grids and custom regions) or contiguous bp bin edges.
@@ -2540,8 +2582,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
     # overwrite below with a missing-data-aware count.
-    n_variants_raw = _window_site_counts(hap_raw, windows,
-                                         missing_data).get()
+    n_variants_raw = _window_site_counts(windows, sites.incomplete()).get()
     results = _init_window_results(
         chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
 
@@ -2559,7 +2600,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         # Only this kernel needs the transposed (n_total_var, n_hap) int8
         # copy for coalesced access; Garud-only and scatter-only requests
         # skip the extra matrix-sized allocation.
-        hap = cp.ascontiguousarray(hap_raw.T, dtype=cp.int8)
+        hap = sites.transposed(sites.rows.haplotypes)
         out_mpd = cp.zeros(n_windows, dtype=cp.float64)
         out_seg = cp.zeros(n_windows, dtype=cp.float64)
         out_sing = cp.zeros(n_windows, dtype=cp.float64)
@@ -2654,13 +2695,10 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
         n1 = m1.haplotypes.shape[0]
         n2 = m2.haplotypes.shape[0]
-        hap1 = cp.ascontiguousarray(m1.haplotypes.T.astype(cp.int8))
-        hap2 = cp.ascontiguousarray(m2.haplotypes.T.astype(cp.int8))
-        # Align to the variants retained by the allele-cap filter above, so the
-        # variant axis matches positions/win_start/win_stop/n_total_var.
-        if cap_keep is not None:
-            hap1 = hap1[cap_keep]
-            hap2 = hap2[cap_keep]
+        # The kept sites only, so the variant axis matches
+        # positions/win_start/win_stop/n_total_var.
+        hap1 = sites.transposed(m1.haplotypes)
+        hap2 = sites.transposed(m2.haplotypes)
 
         out_fst_num = cp.zeros(n_windows, dtype=cp.float64)
         out_fst_den = cp.zeros(n_windows, dtype=cp.float64)
@@ -2733,8 +2771,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
     # Garud's H: exact per-window haplotype hashing, batched to GPU memory
     if any(s in statistics for s in _FUSED_GARUD_STATS):
-        _compute_fused_garud_h(matrix, win_start, win_stop, statistics, results,
-                               missing_data=missing_data)
+        _compute_fused_garud_h(sites.matrix, win_start, win_stop, statistics,
+                               results, missing_data=missing_data)
 
     # Per-site stats binned into windows. A variant belongs to window w iff
     # ws[w] <= pos < we[w] -- the same right-open variant range win_start /
@@ -2747,21 +2785,23 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # so the windowed values equal the scalar over each window (include mode).
     if any(s in statistics for s in ('daf_hist', 'mu_sfs')):
         from ._memutil import allele_counts
-        ac_daf, nv_daf = allele_counts(matrix.haplotypes)   # (n_var, K), (n_var,)
+        ac_daf, nv_daf = sites.per_site(                    # (n_var, K), (n_var,)
+            lambda m: allele_counts(m.haplotypes))
         derived = ac_daf[:, 1:]                             # (n_var, K-1)
 
     if 'mean_nsl' in statistics:
         from . import selection as sel
-        # matrix is already population-subsetted upstream; don't re-subset.
-        # nSL is scanned once over this whole (eager) matrix, so each per-site
-        # score sees the full region before being binned into windows. Over a
+        # sites.matrix is already population-subsetted; don't re-subset. nSL
+        # extends haplotypes across sites, so it needs the kept sites as one
+        # matrix (the filtered copy). It is scanned once over this whole
+        # (eager) matrix, so each per-site score sees the full region before being binned into windows. Over a
         # StreamingHaplotypeMatrix this runs per chunk, truncating the scan at
         # chunk boundaries (see _stream_windowed_analysis).
         # nsl() returns (n_var,) for biallelic data and (n_var, n_derived)
         # when multiallelic focal sites are present; average every finite
         # (site, allele) score in every window the site belongs to -- the
         # 2-D per-site mean the accumulator reduces over its finite entries.
-        nsl_2d = cp.asarray(sel.nsl(matrix)).reshape(matrix.num_variants, -1)
+        nsl_2d = cp.asarray(sel.nsl(sites.matrix)).reshape(n_total_var, -1)
         results['mean_nsl'] = windows.mean(nsl_2d).get()
 
     if 'het_expected' in statistics:
@@ -2769,11 +2809,12 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         # with a defined value, NaN for a window with none -- the per-site-range
         # mean (``windows.mean``) every other per-site stat here now shares,
         # serving any window family including unordered or overlapping regions.
-        # matrix is already population-subsetted and allele-cap-filtered
-        # upstream; missing_data is 'include' here (see _apply_exclude). Reuses
-        # the scalar's per-site rule via the CuPy helper, with no host round trip.
-        he = diversity._heterozygosity_expected_sites(
-            matrix, missing_data=missing_data)                # (n_var,) CuPy
+        # The rows are already population-subsetted; missing_data is 'include'
+        # here (see _FusedSites). Reuses the scalar's per-site rule via the
+        # CuPy helper, with no host round trip.
+        he = sites.per_site(
+            lambda m: diversity._heterozygosity_expected_sites(
+                m, missing_data=missing_data))                # (n_var,) CuPy
         results['het_expected'] = windows.mean(he, valid=~cp.isnan(he)).get()
 
     # SNP distance stats per window
@@ -2827,7 +2868,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         # tallied into a per-site histogram; the window histogram is the
         # range sum.
         keep = (derived > 0) & (derived < nv_daf[:, None])       # (n_var, K-1)
-        site_hist = cp.zeros((matrix.num_variants, N_DAF_BINS), dtype=cp.float64)
+        site_hist = cp.zeros((n_total_var, N_DAF_BINS), dtype=cp.float64)
         kv, ka = cp.where(keep)
         cp.add.at(site_hist, (kv, dbin[kv, ka]), 1.0)
         hist_matrix = windows.sum2d(site_hist).get()            # (n_windows, N)
@@ -2860,6 +2901,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         from . import ld_statistics
         from . import distance_stats
         ws_np, we_np = win_start.get(), win_stop.get()
+        # These blocks slice the kept sites by window range, and ZnS builds
+        # arrays the size of the matrix, so they read the filtered copy.
+        matrix = sites.matrix
 
         stat_arrays = {s: np.full(n_windows, np.nan) for s in perwin_stats}
         need_dist = bool(perwin_stats & _DIST_MOMENT_STATS)
@@ -2961,9 +3005,6 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     if phase_ctx:
         _warn_unphased(haplotype_matrix, context=phase_ctx)
 
-    if haplotype_matrix.device == 'CPU':
-        haplotype_matrix.transfer_to_gpu()
-
     # Pre-filter positions: a window exclusion emptied (NaN for max_daf)
     # looks identical to one with no variant to begin with (0.0) once
     # filtering below removes the distinction.
@@ -2972,34 +3013,17 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     if not isinstance(orig_positions_gpu, cp.ndarray):
         orig_positions_gpu = cp.asarray(orig_positions_gpu)
 
-    haplotype_matrix, missing_data = _apply_exclude(
+    # The sites to compute on (see _FusedSites). Each chunk gathers its own
+    # columns of the kept sites, so 'exclude' costs one chunk, not a copy of
+    # the matrix.
+    sites = _FusedSites(
         haplotype_matrix, missing_data, statistics, population, pop1, pop2)
-
-    if population is not None:
-        matrix = population_rows(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    hap_raw = matrix.haplotypes
-    n_hap = hap_raw.shape[0]
-
-    positions = matrix.positions
-    if not isinstance(positions, cp.ndarray):
-        positions = cp.asarray(positions)
-
-    # Drop sites the fused kernel's per-allele capacity can't represent. Must
-    # precede window indexing so variant-index ranges match the retained
-    # sites. When two-population statistics are requested the kernels read
-    # pop1 and pop2 rows of the original matrix, which the single-population
-    # subset need not cover, so the cap reduction runs over the original.
+    missing_data = sites.missing_data
+    hap_rows = sites.rows.haplotypes
+    n_hap = hap_rows.shape[0]
+    positions = sites.positions
     two_pop_requested = bool(_TWO_POP_STATS & set(statistics))
-    hap_raw, positions, cap_keep_idx = _filter_fused_allele_cap_raw(
-        hap_raw, positions,
-        cap_source=haplotype_matrix.haplotypes if two_pop_requested else None)
-    n_total_var = hap_raw.shape[1]
+    n_total_var = int(positions.shape[0])
 
     # Window ranges (same membership rule as non-chunked)
     if _win_starts is not None and _win_stops is not None:
@@ -3028,7 +3052,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
     # overwrite below with a missing-data-aware count.
-    n_variants_raw = _window_site_counts(hap_raw, windows, missing_data).get()
+    n_variants_raw = _window_site_counts(windows, sites.incomplete()).get()
     results = _init_window_results(
         chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
 
@@ -3076,8 +3100,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             n_overlap = len(w_idx)
 
             # Transpose chunk
-            hap_chunk_t = cp.ascontiguousarray(
-                hap_raw[:, c_start:c_end].T.astype(cp.int8))
+            hap_chunk_t = sites.transposed(hap_rows, c_start, c_end)
             n_chunk_var = c_end - c_start
 
             # Per-chunk outputs
@@ -3166,15 +3189,13 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             results['max_daf'] = max_daf_arr
 
     # ── Two-pop stats via chunked fused kernel ───────────────────────────
-    # two_pop_requested was computed above, before the cap filter, which
-    # needs it to pick its reduction source.
     if two_pop_requested:
-        # The population row numbers index the original matrix, but hap_raw
+        # The population row numbers index the original matrix, but hap_rows
         # can be the single-population subset (the dispatcher passes
         # population=pop1 alongside pop1/pop2). CuPy fancy indexing does not
         # bounds-check, so applying these rows to the subset would silently
         # read the wrong haplotypes. Read the rows from the original matrix,
-        # and select the same variant columns the cap filter kept.
+        # and select the kept sites' columns.
         need_wc = 'fst_wc' in statistics
 
         # A population is a sample_sets name or a row list, the same as the
@@ -3234,17 +3255,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             clipped_stop = cp.minimum(win_stop[w_idx], c_end) - c_start
             n_overlap = len(w_idx)
 
-            def pop_chunk_t(rows):
-                # Chunk columns count filtered variants; map them back to
-                # original columns when the cap filter dropped sites.
-                if cap_keep_idx is None:
-                    blk = orig_hap[rows, c_start:c_end]
-                else:
-                    blk = orig_hap[cp.ix_(rows, cap_keep_idx[c_start:c_end])]
-                return cp.ascontiguousarray(blk.T.astype(cp.int8))
-
-            hap1_t = pop_chunk_t(pop1_rows)
-            hap2_t = pop_chunk_t(pop2_rows)
+            hap1_t = sites.transposed(orig_hap, c_start, c_end, pop1_rows)
+            hap2_t = sites.transposed(orig_hap, c_start, c_end, pop2_rows)
             n_chunk_var = c_end - c_start
 
             out_fst_num = cp.zeros(n_overlap, dtype=cp.float64)
@@ -3334,7 +3346,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             population=population, pop1=pop1, pop2=pop2,
             per_base=per_base, is_accessible=is_accessible,
             _win_starts=_win_starts, _win_stops=_win_stops,
-            missing_data=missing_data, chrom=chrom)
+            missing_data=orig_missing_data, chrom=chrom, _sites=sites)
         for k, v in extra.items():
             if k not in results:
                 results[k] = v

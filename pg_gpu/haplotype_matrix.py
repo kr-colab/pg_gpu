@@ -211,6 +211,10 @@ def _decide_streaming_mode(zarr_path, region, streaming, pop_assignment,
     return "streaming", source
 
 
+# Bytes of haplotype rows that a blockwise read copies at one time.
+_ROW_BLOCK_BYTES = 256 * 1024 ** 2
+
+
 def _bp_grid_bounds(matrix, positions=None):
     """Bounds of the bp window grid.
 
@@ -1665,16 +1669,24 @@ class HaplotypeMatrix:
         from ._haplotype_groups import column_has_missing
 
         hap = self.haplotypes
-        if populations is not None:
-            idx = []
-            for pop in populations:
-                if isinstance(pop, str):
-                    idx.extend(self.sample_sets[pop])
-                else:
-                    idx.extend(list(pop))
-            hap = hap[idx]
-        # One pass and one byte per site, with no matrix-sized boolean.
-        return column_has_missing(hap)
+        if populations is None:
+            # One pass and one byte per site, with no matrix-sized boolean.
+            return column_has_missing(hap)
+        idx = []
+        for pop in populations:
+            if isinstance(pop, str):
+                idx.extend(self.sample_sets[pop])
+            else:
+                idx.extend(list(pop))
+        # Selecting rows copies them, so read the populations' rows a block
+        # of sites at a time: the copy stays small however large the matrix.
+        rows = cp.asarray(idx, dtype=cp.int64)
+        n_var = hap.shape[1]
+        step = max(1, _ROW_BLOCK_BYTES // max(1, len(idx)))
+        out = cp.empty(n_var, dtype=cp.bool_)
+        for lo in range(0, n_var, step):
+            out[lo:lo + step] = column_has_missing(hap[rows, lo:lo + step])
+        return out
 
     def filter_variants_by_missing(self, max_missing_freq=0.1):
         """

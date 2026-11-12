@@ -373,6 +373,18 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* Under ``missing_data='exclude'``, the fused windowed engines copied
+  every complete site into a new matrix before they started. The chunked
+  engine runs when the matrix does not fit on the GPU twice, so a request
+  could run out of memory under ``'exclude'`` at sizes where ``'include'``
+  worked. The engines now keep an index of the kept sites and gather
+  through it, one chunk at a time, so ``'exclude'`` needs about the
+  memory of ``'include'``. The allele-cap filter uses the same index, so
+  the kernels' input no longer needs a filtered copy either. Results do
+  not change. A request with ``mean_nsl``, Garud's H next to other
+  statistics, or the per-window LD and distance statistics still builds
+  the filtered copy, and so do ``mu_sfs``, ``daf_hist`` and
+  ``het_expected`` when the allele cap drops a site.
 * A scalar statistic given a streaming matrix failed deep inside with a
   bare ``AttributeError`` (no attribute ``device``), which did not say
   what to do. Every function that needs the whole matrix in memory now
