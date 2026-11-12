@@ -180,3 +180,28 @@ def test_scatter_exclude_matches_prefiltered_include(stats, pops):
         np.testing.assert_allclose(got[name].to_numpy(float),
                                    ref[name].to_numpy(float),
                                    rtol=1e-12, equal_nan=True, err_msg=name)
+
+
+@pytest.mark.parametrize("stats, pops", [
+    (['pi'], None), (['dxy'], ['a', 'b']),
+    (['pi', 'mu_sfs'], None), (['dxy', 'mu_sfs'], ['a', 'b']),
+], ids=["scatter-1pop", "scatter-2pop", "fused-1pop", "fused-2pop"])
+def test_exclude_share_uses_the_grid_bounds(stats, pops):
+    # No chromosome bounds, n_total_sites set, and both terminal sites
+    # incomplete: the window grid is anchored on every site, so each
+    # window's share of n_total_sites is taken over that same span on every
+    # engine, not over the span of the complete sites.
+    rng = np.random.default_rng(0)
+    hap = rng.integers(0, 2, (80, 40)).astype(np.int8)
+    hap[0, 0] = hap[0, 39] = hap[41, 0] = hap[41, 39] = -1
+    pos = np.arange(40) * 100 + 1
+
+    def run(**kw):
+        hm = HaplotypeMatrix(hap.copy(), pos.copy(), n_total_sites=2000,
+                             sample_sets=POPS)
+        return windowed_analysis(hm, 2000, statistics=stats, populations=pops,
+                                 missing_data='exclude', **kw)[stats[0]]
+
+    shares = (run(span_normalize=False) / run()).to_numpy()
+    lengths = np.array([2000, 3901 - 2000])
+    np.testing.assert_allclose(shares, 2000 * lengths / 3901, rtol=1e-12)

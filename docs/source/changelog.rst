@@ -387,6 +387,13 @@ Bug fixes
   statistics, or the per-window LD and distance statistics still builds
   the filtered copy, and so do ``mu_sfs``, ``daf_hist`` and
   ``het_expected`` when the allele cap drops a site.
+* Under ``missing_data='exclude'``, with ``n_total_sites`` set and no
+  chromosome bounds or mask, the fused engines and the two-population
+  scatter engine took each window's share of ``n_total_sites`` over the
+  span of the complete sites, while the window grid and the
+  single-population scatter engine use the span of every site. When the
+  first or last site had a missing call, the engines disagreed. All now
+  use the span of every site.
 * A scalar statistic given a streaming matrix failed deep inside with a
   bare ``AttributeError`` (no attribute ``device``), which did not say
   what to do. Every function that needs the whole matrix in memory now

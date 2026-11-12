@@ -1007,11 +1007,13 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
         if not bool(complete.all()):
             ac, n_valid = ac[complete], n_valid[complete]
             pos_cpu = pos_cpu[complete.get()]
+        all_complete = True
+    else:
+        all_complete = cp.all(n_valid == n_hap)
     # Per-allele intermediates (multiallelic-correct; match the scalar diversity
     # path). mut = per-variant mutation count = (#alleles present) - 1.
     n = n_valid.astype(cp.float64)
     has_data = n_valid >= 2
-    all_complete = cp.all(n_valid == n_hap)
     alleles_present = (ac > 0).sum(axis=1)
     mut = cp.where(has_data, cp.maximum(alleles_present - 1, 0), 0).astype(cp.float64)
 
@@ -1219,7 +1221,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     if missing_data == 'exclude':
         # This engine reads the populations only through per-site arrays,
         # so 'exclude' keeps the entries of the sites complete in both
-        # populations and never copies the matrix. The anchored grid stays
+        # populations and does not copy the rows again. The anchored grid stays
         # even when no site is complete, so empty windows render as 0/NaN
         # rows instead of vanishing (mirrors the single-pop engine).
         complete = ~(column_has_missing(hap1) | column_has_missing(hap2))
