@@ -1026,12 +1026,6 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
 
     # Compute requested per-variant contributions and scatter
     n_variants_per_window = windows.counts().get()
-    # A window that lost every site to 'exclude' is undefined for max_daf
-    # (NaN); one with no variant to begin with stays 0.0.
-    excluded_to_empty = None
-    if missing_data == 'exclude' and 'max_daf' in statistics:
-        excluded_to_empty = _windows_emptied_by_exclude(pos_cpu_pre_exclude, windows, win_starts, win_stops)
-
     results = _init_window_results(
         chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
@@ -1040,6 +1034,14 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
                                       span_normalize)
 
     stats_set = set(statistics)
+    rate_stats = {'pi', 'theta_w', 'theta_h', 'theta_l'}
+
+    # A window that lost every site to 'exclude' is undefined (NaN) for the
+    # statistics below; one with no variant to begin with stays 0.0.
+    excluded_to_empty = None
+    if missing_data == 'exclude' and (stats_set & (rate_stats | {'max_daf'})):
+        excluded_to_empty = _windows_emptied_by_exclude(
+            pos_cpu_pre_exclude, windows, win_starts, win_stops)
 
     # Determine which theta estimators are needed as intermediates
     needs = {
@@ -1058,7 +1060,6 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
 
     # Without this, a site with too few calls to contribute would still
     # count toward the span, reading as invariant rather than unmeasured.
-    rate_stats = {'pi', 'theta_w', 'theta_h', 'theta_l'}
     rescale = None
     if bool(stats_set & rate_stats):
         rescale = _missing_data_rescale(
@@ -1090,7 +1091,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             vals = raw[est_name].get()
             if rescale is not None:
                 vals = vals * rescale
-            results[out_name] = vals / spans
+            vals = vals / spans
+            if excluded_to_empty is not None:
+                vals = np.where(excluded_to_empty, np.nan, vals)
+            results[out_name] = vals
 
     if 'segregating_sites' in stats_set:
         results['segregating_sites'] = seg_count.get()
@@ -1205,6 +1209,7 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     if chrom_end < chrom_start:
         return pd.DataFrame()
 
+    pos_cpu_pre_exclude = pos_cpu
     if missing_data == 'exclude':
         # Keep the anchored grid even when exclusion empties the matrix, so
         # empty windows render as 0/NaN rows instead of vanishing (mirrors
@@ -1237,6 +1242,13 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
 
     spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
                                       span_normalize)
+
+    # A window that lost every site to 'exclude' is undefined (NaN) for
+    # dxy/da; one with no variant to begin with stays 0.0.
+    excluded_to_empty = None
+    if missing_data == 'exclude' and (stats_set & {'dxy', 'da'}):
+        excluded_to_empty = _windows_emptied_by_exclude(
+            pos_cpu_pre_exclude, windows, win_starts, win_stops)
 
     # Compute per-site components (single pass over the data). Only needed
     # for the gamete statistics, not a pure fst_wc request. dxy and the
@@ -1318,6 +1330,11 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         for name in ('dxy', 'da'):
             if name in results:
                 results[name] = np.where(zero_span, np.nan, results[name])
+
+    if excluded_to_empty is not None:
+        for name in ('dxy', 'da'):
+            if name in results:
+                results[name] = np.where(excluded_to_empty, np.nan, results[name])
 
     return pd.DataFrame(results)
 
@@ -2512,9 +2529,13 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     win_start, win_stop = windows.start, windows.stop
     n_windows = windows.n_windows
 
+    # A window that lost every site to 'exclude' is undefined (NaN) for the
+    # statistics below; one with no variant to begin with stays 0.0.
     excluded_to_empty = None
-    if orig_missing_data == 'exclude' and 'max_daf' in statistics:
-        excluded_to_empty = _windows_emptied_by_exclude(orig_positions_gpu, windows, ws_gpu, we_gpu)
+    if orig_missing_data == 'exclude' and (
+            set(statistics) & {'pi', 'theta_w', 'theta_h', 'dxy', 'da', 'max_daf'}):
+        excluded_to_empty = _windows_emptied_by_exclude(
+            orig_positions_gpu, windows, ws_gpu, we_gpu)
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
     # Raw variant-index span is the fallback n_variants; single-pop kernels
@@ -2603,6 +2624,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             # A difference of two estimators, not a rate: no span-normalized
             # form, so it never goes through _rate.
             results['fay_wu_h'] = mpd_sum - theta_h_sum
+
+        if excluded_to_empty is not None:
+            for name in ('pi', 'theta_w', 'theta_h'):
+                if name in results:
+                    results[name] = np.where(excluded_to_empty, np.nan, results[name])
 
         if 'max_daf' in statistics:
             if excluded_to_empty is not None:
@@ -2699,6 +2725,11 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                                          da_sum / wb, cp.nan).get()
             else:
                 results['da'] = da_sum.get()
+
+        if excluded_to_empty is not None:
+            for name in ('dxy', 'da'):
+                if name in results:
+                    results[name] = np.where(excluded_to_empty, np.nan, results[name])
 
     # Garud's H: exact per-window haplotype hashing, batched to GPU memory
     if any(s in statistics for s in _FUSED_GARUD_STATS):
@@ -2985,9 +3016,13 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     win_start, win_stop = windows.start, windows.stop
     n_windows = windows.n_windows
 
+    # A window that lost every site to 'exclude' is undefined (NaN) for the
+    # statistics below; one with no variant to begin with stays 0.0.
     excluded_to_empty = None
-    if orig_missing_data == 'exclude' and 'max_daf' in statistics:
-        excluded_to_empty = _windows_emptied_by_exclude(orig_positions_gpu, windows, ws_gpu, we_gpu)
+    if orig_missing_data == 'exclude' and (
+            set(statistics) & {'pi', 'theta_w', 'theta_h', 'dxy', 'da', 'max_daf'}):
+        excluded_to_empty = _windows_emptied_by_exclude(
+            orig_positions_gpu, windows, ws_gpu, we_gpu)
 
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
     we_cpu = we_gpu.get() if hasattr(we_gpu, 'get') else we_gpu
@@ -3119,6 +3154,11 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             # A difference of two estimators, not a rate: no span-normalized
             # form, so it never goes through _rate.
             results['fay_wu_h'] = mpd_sum - theta_h_sum
+
+        if excluded_to_empty is not None:
+            for name in ('pi', 'theta_w', 'theta_h'):
+                if name in results:
+                    results[name] = np.where(excluded_to_empty, np.nan, results[name])
 
         if 'max_daf' in statistics:
             if excluded_to_empty is not None:
@@ -3280,6 +3320,11 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                                          da_sum / wb, cp.nan).get()
             else:
                 results['da'] = da_sum.get()
+
+        if excluded_to_empty is not None:
+            for name in ('dxy', 'da'):
+                if name in results:
+                    results[name] = np.where(excluded_to_empty, np.nan, results[name])
 
     remaining = (set(statistics) & _FUSED_STATS) - _CHUNKED_OWN_STATS
     if remaining:

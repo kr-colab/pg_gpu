@@ -296,6 +296,27 @@ class TestSpanNormalizedRescale:
                                  "minus_eta1_star"])
         assert all(np.isnan(v) for v in stats.values())
 
+    def test_diversity_stats_nan_when_exclude_empties_a_matrix_with_data(self):
+        # diversity_stats has its own _prepare_matrix + _compute_thetas path,
+        # separate from pi/theta_w/theta_h/theta_l themselves, so it needs
+        # its own emptied-by-exclude check: the matrix had variants, but
+        # 'exclude' removed every one of them -- NaN, not 0.0.
+        rng = np.random.default_rng(5)
+        n_hap, n_var = 10, 50
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[-4:] = -1  # population b missing at every site
+        hm = self._pop_b(hap, n_var)
+        stats = diversity.diversity_stats(
+            hm, "b", statistics=["pi", "theta_w", "theta_h", "theta_l", "eta1"],
+            missing_data='exclude')
+        assert all(np.isnan(v) for v in stats.values())
+        # A window with no variant to begin with stays 0.0, not NaN.
+        empty = hm.get_subset_from_range(n_var * 10, n_var * 10 + 1)
+        empty.sample_sets = hm.sample_sets
+        stats_empty = diversity.diversity_stats(
+            empty, "b", statistics=["pi", "theta_w"], missing_data='exclude')
+        assert all(v == 0.0 for v in stats_empty.values())
+
 
 class TestDivergenceSpanNormalizedRescale:
     """dxy/da rescale their raw sum to the sites where each population has
@@ -378,16 +399,17 @@ class TestDivergenceSpanNormalizedRescale:
         np.testing.assert_allclose(divergence.da(hm, "a", "b"),
                                    da_raw / hm.get_span(), rtol=1e-12)
 
-    def test_exclude_to_empty_is_zero_not_nan(self):
-        # No variants at all survive exclude, so dxy/da are 0 by definition
-        # (not undefined), matching the windowed engines' convention.
+    def test_exclude_to_empty_is_nan_not_zero(self):
+        # The matrix had variants, but 'exclude' removed every one of them --
+        # undefined (NaN), not 0 (which stays for a matrix with no variant
+        # to begin with).
         rng = np.random.default_rng(16)
         n_hap, n_var = 16, 30
         hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
         hap[0, :] = -1  # population a missing at every site
         hm = self._hm(hap, n_var)
-        assert divergence.dxy(hm, "a", "b", missing_data='exclude') == 0.0
-        assert divergence.da(hm, "a", "b", missing_data='exclude') == 0.0
+        assert np.isnan(divergence.dxy(hm, "a", "b", missing_data='exclude'))
+        assert np.isnan(divergence.da(hm, "a", "b", missing_data='exclude'))
 
 
 class TestWindowedSpanNormalizedRescale:
@@ -611,11 +633,10 @@ class TestWindowedDivergenceSpanNormalizedRescale:
         np.testing.assert_allclose(df["da"].iloc[0], divergence.da(hm, "a", "b"),
                                    rtol=1e-9)
 
-    def test_exclude_to_empty_is_zero_not_nan(self):
-        # Mirrors the single-pop windowed convention: a window with literally
-        # zero variants (the whole matrix excluded to empty) gives 0, not
-        # NaN -- NaN is reserved for a window that has variants but no
-        # population-pair overlap among them.
+    def test_exclude_to_empty_is_nan_not_zero(self):
+        # The window had variants, but 'exclude' removed every one of them --
+        # undefined (NaN), not 0 (which stays for a window with no variant
+        # to begin with).
         from pg_gpu.windowed_analysis import windowed_analysis
         n_hap, n_var = 16, 6
         hap = np.full((n_hap, n_var), -1, dtype=np.int8)
@@ -624,7 +645,7 @@ class TestWindowedDivergenceSpanNormalizedRescale:
                                statistics=["dxy", "da"], populations=["a", "b"],
                                missing_data='exclude')
         assert (df["n_variants"] == 0).all()
-        assert (df["dxy"] == 0).all() and (df["da"] == 0).all()
+        assert df["dxy"].isna().all() and df["da"].isna().all()
 
     def test_zero_variant_window_is_zero_not_nan_amid_missing_data(self):
         # A window with no variants at all gives 0, even when some other
@@ -724,9 +745,10 @@ class TestFusedSinglePopSpanNormalizedRescale:
             assert np.isnan(out['theta_w'][0])
             assert np.isnan(out['theta_h'][0])
 
-    def test_zero_variant_window_is_zero_not_nan(self):
-        # Mirrors the scatter engine's convention: a window with literally
-        # no variants gives 0, not NaN.
+    def test_exclude_to_empty_is_nan_not_zero(self):
+        # The window had variants, but 'exclude' removed every one of them
+        # (every call is missing) -- undefined (NaN), not 0 (which stays for
+        # a window with no variant to begin with).
         n_hap, n_var = 6, 10
         hap = np.zeros((n_hap, n_var), dtype=np.int8)
         hap[:, :] = -1
@@ -736,8 +758,8 @@ class TestFusedSinglePopSpanNormalizedRescale:
             out = engine(hm, bp_bins=bp_bins, statistics=('pi', 'theta_w'),
                          missing_data='exclude')
             assert out['n_variants'][0] == 0
-            assert out['pi'][0] == 0.0
-            assert out['theta_w'][0] == 0.0
+            assert np.isnan(out['pi'][0])
+            assert np.isnan(out['theta_w'][0])
 
     def test_complete_data_unaffected(self):
         rng = np.random.default_rng(26)
