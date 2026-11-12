@@ -396,10 +396,12 @@ class StatisticsComputer:
                 kwargs['bins'] = self.ld_bins
             results[stat] = self.LD_STATS[stat](window, **kwargs)
 
-        # Custom statistics. A window with no variant gives NaN without a
-        # call, so user code never has to handle an empty matrix.
+        # Custom statistics. The callable gets the window's matrix as it is,
+        # before any 'exclude' filter, and decides what to do with it; only a
+        # window whose matrix has no variant gives NaN without a call, so
+        # user code never has to handle an empty matrix.
         for stat in self.custom_stats:
-            if window.n_variants == 0:
+            if window.matrix.num_variants == 0:
                 results[stat.__name__] = np.nan
                 continue
             kwargs = self.custom_stat_kwargs.get(stat.__name__, {})

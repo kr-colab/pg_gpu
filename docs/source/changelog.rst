@@ -395,9 +395,12 @@ Bug fixes
   row, so the rows of a request depended on the engine. The fallback now
   gives every window a row, with the values the other engines give an
   empty window (for example ``pi`` 0.0, ``tajimas_d`` NaN). A custom
-  statistic gets NaN on an empty window, without a call. With two or
-  more populations, its empty rows also use the per-population column
-  names, as its other rows do.
+  statistic gets NaN on a window with no variant, without a call; on
+  any other window it is called with the unfiltered window, as before.
+  With two or more populations, its empty rows also use the
+  per-population column names, as its other rows do. The fallback now
+  computes every statistic on each empty window (about 1 to 3 ms per
+  window), so a fallback scan with many empty windows takes longer.
 * ``diversity_stats``, ``divergence_stats`` and ``compute_ld_statistics``
   check the requested names before they compute anything, and the
   ``Unknown statistic`` error names every unknown name, not only the

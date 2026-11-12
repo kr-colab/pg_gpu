@@ -2464,3 +2464,21 @@ class TestMixedRequests:
     def test_unknown_name_is_called_unknown(self):
         with pytest.raises(ValueError, match="Unknown statistic: pie"):
             windowed_analysis(self._hm(), 1000, statistics=['pi', 'pie'])
+
+
+def test_custom_statistic_sees_the_unfiltered_window():
+    # A callable gets the window's matrix before any 'exclude' filter. It is
+    # called on a window that 'exclude' emptied (n_variants 0, but two sites
+    # in the matrix), and skipped only on a window with no variant at all.
+    hap = np.array([[0, 1, -1, -1, 0],
+                    [1, 0, 0, 0, -1]], dtype=np.int8)
+    hm = HaplotypeMatrix(hap, np.array([10, 30, 50, 110, 130]), 1, 300)
+
+    def matrix_variants_seen(window):
+        return window.matrix.num_variants
+
+    df = windowed_analysis(hm, window_size=100,
+                           statistics=[matrix_variants_seen],
+                           missing_data='exclude')
+    assert df['n_variants'].tolist() == [2, 0, 0]
+    np.testing.assert_array_equal(df['matrix_variants_seen'], [3, 2, np.nan])
