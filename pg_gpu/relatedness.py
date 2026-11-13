@@ -762,16 +762,13 @@ def _accumulate_ibs_chunk(geno, ibs2_host, ibs1_host, n_joint_host, *,
 
 
 def _stream_n_ind(streaming_matrix, population):
-    """Best-effort individual count for the empty-source fallback. Uses
-    the streaming source's diploid count (halved for haplotype-layout)
-    and a population subset if requested."""
-    from .streaming_matrix import StreamingHaplotypeMatrix
-    is_hap = isinstance(streaming_matrix, StreamingHaplotypeMatrix)
+    """Individual count of a genotype stream, or of one population of it,
+    for the empty-source fallback of the streaming GRM and IBS. Only a
+    genotype stream reaches them: ``grm`` and ``ibs`` reject a haplotype
+    stream before they dispatch."""
     if population is None:
-        return (streaming_matrix.num_haplotypes // 2 if is_hap
-                else streaming_matrix.num_individuals)
-    pop_set = streaming_matrix.sample_sets[population]
-    return len(pop_set) // 2 if is_hap else len(pop_set)
+        return streaming_matrix.num_individuals
+    return len(streaming_matrix.sample_sets[population])
 
 
 # ---------------------------------------------------------------------------

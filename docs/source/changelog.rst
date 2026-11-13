@@ -373,6 +373,12 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``average_patterson_f3`` and ``average_patterson_d`` raised
+  ``ZeroDivisionError`` in two undefined cases. When the jackknife
+  standard error is exactly 0 (for example, all sites monomorphic), ``z``
+  is now NaN or an infinity, as in scikit-allel. When
+  ``missing_data='exclude'`` leaves no site, both return NaN for the
+  estimate, the standard error and ``z``, with empty block arrays.
 * Under ``missing_data='exclude'``, the fused and scatter windowed
   engines copied every complete site into a new matrix before they
   started. The chunked
