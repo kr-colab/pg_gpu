@@ -89,6 +89,15 @@ _FUSED_STATS = (_FUSED_SINGLE_STATS | _TWO_POP_STATS
                 | _PER_SITE_RANGE_STATS
                 | _SNP_DIST_STATS | _PAIRWISE_LD_STATS | _DIST_MOMENT_STATS)
 
+# Fused statistics that the per-window fallback serves under 'exclude' when a
+# request holds nothing else. Its columns differ from the fused engine's with
+# populations (one column per population, where the fused engine gives the
+# first population only), so which engine serves a request is part of its
+# output. Do not add a name here when the fallback learns to compute it.
+_EXCLUDE_FALLBACK_FIRST = (frozenset({'pi', 'theta_w', 'tajimas_d',
+                                      'segregating_sites', 'het_expected'})
+                           | frozenset(_FUSED_GARUD_STATS) | _TWO_POP_STATS)
+
 # Statistics that windowed_statistics_fused_chunked computes itself, in
 # chunks. It hands every other fused statistic to windowed_statistics_fused,
 # because those do not need the transposed matrix that the chunking bounds.
@@ -294,9 +303,14 @@ class StatisticsComputer:
                 w.matrix, span_normalize=sn,
                 missing_data=self.missing_data),
             'tajimas_d': lambda w: diversity.tajimas_d(w.matrix, missing_data=self.missing_data),
+            'theta_h': lambda w: diversity.theta_h(
+                w.matrix, span_normalize=sn,
+                missing_data=self.missing_data),
             'theta_l': lambda w: diversity.theta_l(
                 w.matrix, span_normalize=sn,
                 missing_data=self.missing_data),
+            'fay_wu_h': lambda w: diversity.fay_wus_h(w.matrix, missing_data=self.missing_data),
+            'max_daf': lambda w: diversity.max_daf(w.matrix, missing_data=self.missing_data),
             'normalized_fay_wu_h': lambda w: diversity.normalized_fay_wus_h(
                 w.matrix, missing_data=self.missing_data),
             'zeng_e': lambda w: diversity.zeng_e(w.matrix, missing_data=self.missing_data),
@@ -1787,13 +1801,11 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
 
     # Fused CUDA kernel path for more complex stat combinations.
 
-    # Under 'exclude' the fused engine serves Garud-only requests and any
-    # request with a statistic only it computes (the per-window fallback
-    # does not know them); every other 'exclude' request keeps the
-    # per-window fallback.
-    fused_only = _FUSED_STATS - _fallback_stats()
+    # Under 'exclude' the per-window fallback serves a request made only of
+    # _EXCLUDE_FALLBACK_FIRST names (Garud-only requests excepted); the
+    # fused engine serves every other request it can.
     can_fuse = ((missing_data == 'include' or requested.issubset(_FUSED_GARUD_STATS)
-                 or bool(requested & fused_only))
+                 or not requested <= _EXCLUDE_FALLBACK_FIRST)
                 and requested <= _FUSED_STATS
                 # The fused engine tiles bp grids and custom regions; snp
                 # windows are variant-index ranges that only the per-window
