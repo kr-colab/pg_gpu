@@ -373,6 +373,12 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* The SFS functions on a ``StreamingHaplotypeMatrix`` had two errors.
+  Over a region with no variants, ``sfs``, ``sfs_folded``, ``joint_sfs``
+  and ``joint_sfs_folded`` returned ``None``, and their scaled forms
+  returned ``[nan]`` or raised; each now returns zeros of its usual
+  shape. ``sfs_folded_scaled`` with ``population=`` raised
+  ``NotImplementedError``; it now returns the eager value.
 * ``average_patterson_f3`` and ``average_patterson_d`` raised
   ``ZeroDivisionError`` in two undefined cases. When the jackknife
   standard error is exactly 0 (for example, all sites monomorphic), ``z``
