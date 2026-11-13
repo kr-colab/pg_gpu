@@ -373,6 +373,17 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``ld_statistics.dd`` and ``ld_statistics.pi2`` raised
+  ``AttributeError`` when ``n_valid`` was a tuple of per-population
+  arrays and the statistic was for one population. ``dd`` between two
+  populations read the tuple by position, not by population index, so
+  with three or more populations a pair such as ``(1, 2)`` used the
+  sample sizes of populations 0 and 1 and gave a wrong value. A tuple,
+  an ``(N, P)`` array and one ``(N,)`` array now give the same value in
+  ``dd``, ``dz`` and ``pi2``, and ``dd_within``, ``r``, ``r_squared``
+  and ``d_prime`` read each form for the first population. A tuple with
+  no entry for a requested population now raises ``IndexError``; ``dz``
+  and ``pi2`` took that population's size from its counts.
 * ``average_patterson_f3`` and ``average_patterson_d`` raised
   ``ZeroDivisionError`` in two undefined cases. When the jackknife
   standard error is exactly 0 (for example, all sites monomorphic), ``z``
