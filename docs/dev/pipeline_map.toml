@@ -100,7 +100,7 @@ check = "Names and row lists must give the same values. Two-population windowed 
 [axes.windowing]
 description = "How windows are formed. windowed_analysis picks one engine per request; see [engines]. Other functions make their own windows."
 values = ["bp windows (window_size, step_size)", "snp windows (window_type='snp'; the fallback and local_pca only)", "regions (window_type='regions' with a regions DataFrame of half-open [start, end) windows; served by the scatter engines, the fused engines and the fallback)", "bp_bins edges (windowed_statistics_fused*, LD bins)", "moving windows in variant counts (moving_*)"]
-check = "windowed_analysis._bp_window_grid makes the bp grid for the scatter and fused engines; for window_type='regions' the scatter and fused engines take regions['start'] and regions['end'] as window edges; windowed_analysis.WindowIterator makes the fallback windows. Every engine shares one membership rule: windowed_analysis._window_variant_ranges maps each window's [start, end) bounds to its contiguous variant range, so overlapping and unordered regions are handled per window. The fused and scatter engines give a row for an empty region, but the fallback gives none (#356). No engine reads a chrom column in regions to select variants; the fallback copies it into the output chrom column, and the fused engines write the chrom argument."
+check = "windowed_analysis._bp_window_grid makes the bp grid for the scatter and fused engines; for window_type='regions' the scatter and fused engines take regions['start'] and regions['end'] as window edges; windowed_analysis.WindowIterator makes the fallback windows. Every engine shares one membership rule: windowed_analysis._window_variant_ranges maps each window's [start, end) bounds to its contiguous variant range, so overlapping and unordered regions are handled per window. Every engine gives a row for a window or region with no variant; the fallback keeps them through WindowIterator(skip_empty=False), and local PCA skips them. No engine reads a chrom column in regions to select variants; the fallback copies it into the output chrom column, and the fused engines write the chrom argument."
 
 [axes.streaming]
 description = "A streaming matrix has no array of its own. A function runs on it chunk by chunk (native) or rejects it with a NotImplementedError that names windowed_analysis and .materialize(): _utils._reject_streaming, called through the _utils._eager_only decorator or directly by the pairwise LD statistics. tests/test_streaming_guard.py calls every rejects row on a stream."
@@ -266,7 +266,7 @@ stats = "windowed_analysis._fallback_stats"
 chosen = "No other engine takes the request. It is the only engine for window_type='snp', where a name it does not know raises NotImplementedError. It also accepts callables as custom statistics."
 span = "The scalar function on each window matrix. windowed_analysis.WindowIterator slices it with get_subset, and windowed_analysis.WindowIterator._set_window_bases sets the window's n_total_sites by windowed_analysis._compute_window_bases (a snp window spans its first to its last variant, inclusive)."
 missing_data = ["include", "exclude"]
-notes = "A window with no variant gives NaN for every statistic. A request whose names no single engine covers (for example theta_l with zns) reaches this engine and fails with 'Unknown statistic'."
+notes = "A window with no variant gets each scalar function on an empty window matrix, which gives the scatter and fused engines' values; a custom callable gets NaN uncalled. A request whose names no single engine covers (for example theta_l with zns) reaches this engine, and windowed_analysis._check_fallback_covers raises a ValueError that names the engine of each name it lacks."
 
 [engines.local_pca]
 function = "decomposition.local_pca"
@@ -319,21 +319,21 @@ scalar = "diversity.singleton_count"
 engines = ["thetas_scatter", "fused", "fused_chunked"]
 not_in = { fallback = "#347" }
 span_normalized = false
-notes = "The fallback calls the same count n_singletons."
+notes = "windowed_analysis._engine_statistics reads n_singletons as singletons for bp and regions windows, and the output keeps the name the caller asked for."
 
 [windowed.n_singletons]
 scalar = "diversity.singleton_count"
 engines = ["fallback"]
 not_in = { scatter = "#347", fused = "#347" }
 span_normalized = false
-notes = "The scatter and fused engines call it singletons."
+notes = "The fallback's name for singletons; windowed_analysis._engine_statistics sends singletons here for snp windows, which only the fallback serves."
 
 [windowed.n_variants]
 scalar = ""
 engines = ["fallback"]
 not_in = { scatter = "#347", fused = "#347" }
 span_normalized = false
-notes = "Also a prefix column of every engine; under 'exclude' it counts the complete sites."
+notes = "A prefix column of every engine, so windowed_analysis._engine_statistics drops it from the request; under 'exclude' it counts the complete sites."
 
 [windowed.theta_h]
 scalar = "diversity.theta_h"
@@ -700,7 +700,7 @@ missing_data_rule = [
     "Every function row whose missing_data list holds the mode, and the GenotypeMatrix branch of each.",
 ]
 undefined_value_rule = [
-    "The scalar function, each engine in its [windowed] row, and the fallback rule (NaN for a window with no variant).",
+    "The scalar function, each engine in its [windowed] row, and the fallback, which runs the scalar function on an empty window matrix and gives a custom callable NaN.",
     "The consumers: decomposition.pcoa, the plotting functions, resampling.",
 ]
 window_grid = [

@@ -246,10 +246,10 @@ def test_fallback_groups_once_per_window(windowed_case, monkeypatch):
                         lambda *a, **k: calls.append(1) or real(*a, **k))
     size = 100 * SPACING
     # 'pi' with 'exclude' sends the request to the per-window fallback.
-    windowed_analysis(_hm(hap), window_size=size, step_size=size,
-                      statistics=GARUD + ["haplotype_count", "pi"],
-                      missing_data="exclude")
-    assert len(calls) == len(win)
+    df = windowed_analysis(_hm(hap), window_size=size, step_size=size,
+                           statistics=GARUD + ["haplotype_count", "pi"],
+                           missing_data="exclude")
+    assert len(calls) == len(df) >= len(win)
 
 
 def test_windowed_exclude_matches_scalar(windowed_case):
