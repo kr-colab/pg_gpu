@@ -1,9 +1,10 @@
-"""theta_l and the Achaz neutrality tests on every windowed engine.
+"""The frequency-spectrum statistics on every windowed engine.
 
-theta_l, normalized_fay_wu_h, zeng_e and zeng_dh are computed by the scatter
-engine, both fused engines and the per-window fallback, and diversity_stats
-knows zeng_dh. Each path must give the scalar function's value on the
-window, so a request can mix these names with any other.
+theta_h, theta_l, fay_wu_h, max_daf and the Achaz tests normalized_fay_wu_h,
+zeng_e and zeng_dh are computed by the scatter engine, both fused engines and
+the per-window fallback, and diversity_stats knows zeng_dh. Each path must
+give the scalar function's value on the window, so a request can mix these
+names with any other.
 """
 
 import functools
@@ -18,6 +19,9 @@ from pg_gpu.windowed_analysis import (
     WindowedAnalyzer, windowed_analysis, windowed_statistics_fused_chunked)
 
 SCALAR = {
+    'theta_h': diversity.theta_h,
+    'fay_wu_h': diversity.fay_wus_h,
+    'max_daf': diversity.max_daf,
     'theta_l': diversity.theta_l,
     'normalized_fay_wu_h': diversity.normalized_fay_wus_h,
     'zeng_e': diversity.zeng_e,
@@ -72,9 +76,8 @@ def _check(got, name, missing_data, mask=False):
 @pytest.mark.parametrize("extra", [None, "mu_var", "garud_h1"],
                          ids=["alone", "with-mu_var", "with-garud_h1"])
 def test_bp_windows_match_scalar(extra, mask, missing_data):
-    # Alone, the scatter engine serves the names. mu_var sends the request
-    # to the fused engine under both modes; garud_h1 sends it to the fused
-    # engine under 'include' and to the fallback under 'exclude'.
+    # Alone, the scatter engine serves the names; with mu_var or garud_h1
+    # the fused engine does, under both modes.
     stats = NAMES + ([extra] if extra else [])
     df = windowed_analysis(_hm(mask), WINDOW, statistics=stats,
                            missing_data=missing_data)

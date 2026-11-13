@@ -379,7 +379,10 @@ Bug fixes
   Garud statistic, ``mean_nsl``, ``zns``, ...) raised an error, and so
   did ``snp`` windows. Every windowed engine now computes them, with the
   scalar function's value on each window, so they can be mixed with any
-  other statistic and used with every window type.
+  other statistic and used with every window type. The per-window
+  fallback also computes ``theta_h``, ``fay_wu_h`` and ``max_daf`` now,
+  so ``snp`` windows accept them. Which engine serves a request under
+  ``missing_data='exclude'`` does not change.
 * ``diversity_stats`` now accepts ``zeng_dh``.
 * ``average_patterson_f3`` and ``average_patterson_d`` raised
   ``ZeroDivisionError`` in two undefined cases. When the jackknife

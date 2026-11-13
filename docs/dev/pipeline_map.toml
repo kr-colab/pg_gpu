@@ -249,7 +249,7 @@ missing_data = ["include", "exclude"]
 [engines.fused]
 function = "windowed_analysis.windowed_statistics_fused"
 stats = "windowed_analysis._FUSED_STATS"
-chosen = "No scatter engine takes the request, window_type is 'bp' or 'regions', every name is in its set, two-population names come with exactly two populations, and missing_data='include'. Under 'exclude' it runs only for a Garud-only request or a request with a name that the fallback does not know."
+chosen = "No scatter engine takes the request, window_type is 'bp' or 'regions', every name is in its set, two-population names come with exactly two populations, and missing_data='include'. Under 'exclude' it runs for a Garud-only request and for every request with a name outside windowed_analysis._EXCLUDE_FALLBACK_FIRST; a request made only of those names goes to the fallback, whose columns differ with populations (#200)."
 span = "windowed_analysis._compute_window_bases, as thetas_scatter. Under 'exclude' every engine reads the bounds for the n_total_sites share from the unfiltered matrix, as the window grid does."
 missing_data = ["include", "exclude"]
 
@@ -337,8 +337,7 @@ notes = "A prefix column of every engine, so windowed_analysis._engine_statistic
 
 [windowed.theta_h]
 scalar = "diversity.theta_h"
-engines = ["thetas_scatter", "fused", "fused_chunked"]
-not_in = { fallback = "#347" }
+engines = ["thetas_scatter", "fused", "fused_chunked", "fallback"]
 span_normalized = true
 
 [windowed.theta_l]
@@ -348,8 +347,7 @@ span_normalized = true
 
 [windowed.fay_wu_h]
 scalar = "diversity.fay_wus_h"
-engines = ["thetas_scatter", "fused", "fused_chunked"]
-not_in = { fallback = "#347" }
+engines = ["thetas_scatter", "fused", "fused_chunked", "fallback"]
 span_normalized = false
 
 [windowed.normalized_fay_wu_h]
@@ -369,8 +367,7 @@ span_normalized = false
 
 [windowed.max_daf]
 scalar = "diversity.max_daf"
-engines = ["thetas_scatter", "fused", "fused_chunked"]
-not_in = { fallback = "#347" }
+engines = ["thetas_scatter", "fused", "fused_chunked", "fallback"]
 span_normalized = false
 
 [windowed.het_expected]
