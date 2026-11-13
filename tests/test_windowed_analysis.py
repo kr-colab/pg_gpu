@@ -2452,7 +2452,7 @@ class TestMixedRequests:
         assert not any(str(c).startswith('singletons') for c in alias.columns)
 
     @pytest.mark.parametrize("stats, names", [
-        (['theta_l', 'zns'], ['theta_l (scatter engine)', 'zns (fused engine)']),
+        (['mean_r2', 'mu_var'], ['mu_var (fused engine)']),
         (['ld_decay', 'zns'], ['zns (fused engine)']),
     ])
     def test_mix_no_engine_computes_names_the_engines(self, stats, names):

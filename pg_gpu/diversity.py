@@ -1101,6 +1101,8 @@ _TEST_SPECS = {
 }
 # Plain theta differences: no variance term, so no minimum S or n.
 _DIFFERENCE_STATS = {'fay_wus_h': ('pi', 'theta_h')}
+# Zeng's DH is combined from these two tests of _TEST_SPECS.
+_ZENG_DH_TESTS = ('tajimas_d', 'normalized_fay_wus_h')
 # Statistics that do not come from the theta batch: each name with the call
 # that computes it from (matrix, population, missing_data).
 _COUNT_STATS = {
@@ -1110,7 +1112,8 @@ _COUNT_STATS = {
     'haplotype_diversity': lambda hm, pop, md: _haplotype_diversity_stat(hm, pop, md),
 }
 _DIVERSITY_STATS_NAMES = (frozenset(_THETA_STATS) | frozenset(_TEST_SPECS)
-                          | frozenset(_DIFFERENCE_STATS) | frozenset(_COUNT_STATS))
+                          | frozenset(_DIFFERENCE_STATS)
+                          | frozenset(_COUNT_STATS) | {'zeng_dh'})
 
 
 def _haplotype_diversity_stat(haplotype_matrix, population, missing_data):
@@ -1145,7 +1148,7 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
         ``theta_w``, ``theta_h``, ``theta_l``, and the Achaz eta-family
         ``eta1``, ``eta1_star``, ``minus_eta1``, ``minus_eta1_star``.
         Neutrality tests: ``tajimas_d``, ``fay_wus_h``,
-        ``normalized_fay_wus_h``, ``zeng_e``. Also ``segregating_sites``,
+        ``normalized_fay_wus_h``, ``zeng_e``, ``zeng_dh``. Also ``segregating_sites``,
         ``singletons``, ``n_variants``, ``haplotype_diversity``.
     span_normalize : bool
         ``True`` (default): per-base rates for ``pi``, ``theta_w``,
@@ -1167,6 +1170,10 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     if unknown:
         raise ValueError(f"Unknown statistic: {', '.join(map(str, unknown))}")
     needs_thetas = {s for s in statistics if s not in _COUNT_STATS}
+    want_dh = 'zeng_dh' in needs_thetas
+    if want_dh:
+        # DH needs its two tests in the batch, requested or not.
+        needs_thetas = (needs_thetas - {'zeng_dh'}).union(_ZENG_DH_TESTS)
 
     results = {}
 
@@ -1203,6 +1210,10 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                     var = _achaz_variance(w1, w2, n, S)
                     num = ct['thetas'][w1] - ct['thetas'][w2]
                     results[s] = float(num / math.sqrt(var)) if var > 0 else float('nan')
+
+    if want_dh:
+        results['zeng_dh'] = float(_zeng_dh_combine(
+            *(results[t] for t in _ZENG_DH_TESTS)))
 
     for stat in statistics:
         if stat in _COUNT_STATS and stat not in results:

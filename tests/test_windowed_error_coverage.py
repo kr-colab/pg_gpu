@@ -73,8 +73,7 @@ def test_fused_transfers_cpu_matrix():
 
 # snp windows route to the per-window fallback, so stats that aren't
 # implemented there still raise.
-_SNP_UNSUPPORTED = ["theta_l", "zeng_e", "theta_h", "max_daf", "mean_nsl",
-                    "zns"]
+_SNP_UNSUPPORTED = ["theta_h", "max_daf", "mean_nsl", "zns"]
 
 
 @pytest.mark.parametrize("window_type,stat",
