@@ -49,6 +49,11 @@ def _phase_scan_context(name, statistics):
 # Statistics that read the rows of two populations.
 _TWO_POP_STATS = frozenset({'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'})
 
+# Single-population statistics that are per-base rates: divided by the
+# window's bases, rescaled for missing data, and NaN where 'exclude' leaves a
+# window that had variants with none.
+_RATE_STATS = frozenset({'pi', 'theta_w', 'theta_h', 'theta_l'})
+
 # Single-population statistics that the scatter-add engine
 # (_windowed_thetas_scatter) computes from per-allele counts.
 _SCATTER_SINGLE_STATS = frozenset({
@@ -57,10 +62,8 @@ _SCATTER_SINGLE_STATS = frozenset({
     'max_daf'})
 
 # Single-population statistics of the main fused kernel, in both the
-# fused and the chunked engine.
-_FUSED_SINGLE_STATS = frozenset({
-    'pi', 'theta_w', 'tajimas_d', 'segregating_sites', 'singletons',
-    'theta_h', 'fay_wu_h', 'max_daf'})
+# fused and the chunked engine: the same names, from the kernel's own sums.
+_FUSED_SINGLE_STATS = _SCATTER_SINGLE_STATS
 
 # Fused per-site stats binned into windows by reducing each window's variant
 # range [win_start, win_stop) with _WindowAccumulator (prefix-sum sum/mean, a
@@ -291,6 +294,13 @@ class StatisticsComputer:
                 w.matrix, span_normalize=sn,
                 missing_data=self.missing_data),
             'tajimas_d': lambda w: diversity.tajimas_d(w.matrix, missing_data=self.missing_data),
+            'theta_l': lambda w: diversity.theta_l(
+                w.matrix, span_normalize=sn,
+                missing_data=self.missing_data),
+            'normalized_fay_wu_h': lambda w: diversity.normalized_fay_wus_h(
+                w.matrix, missing_data=self.missing_data),
+            'zeng_e': lambda w: diversity.zeng_e(w.matrix, missing_data=self.missing_data),
+            'zeng_dh': lambda w: diversity.zeng_dh(w.matrix, missing_data=self.missing_data),
             'n_variants': lambda w: w.n_variants,
             'n_singletons': lambda w: diversity.singleton_count(w.matrix, missing_data=self.missing_data),
             'segregating_sites': lambda w: diversity.segregating_sites(w.matrix, missing_data=self.missing_data),
@@ -1046,12 +1056,11 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
                                       span_normalize)
 
     stats_set = set(statistics)
-    rate_stats = {'pi', 'theta_w', 'theta_h', 'theta_l'}
 
     # A window that lost every site to 'exclude' is undefined (NaN) for the
     # statistics below; one with no variant to begin with stays 0.0.
     excluded_to_empty = None
-    if missing_data == 'exclude' and (stats_set & (rate_stats | {'max_daf'})):
+    if missing_data == 'exclude' and (stats_set & (_RATE_STATS | {'max_daf'})):
         excluded_to_empty = _windows_emptied_by_exclude(
             pos_cpu_pre_exclude, windows, win_starts, win_stops)
 
@@ -1073,7 +1082,7 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     # Without this, a site with too few calls to contribute would still
     # count toward the span, reading as invariant rather than unmeasured.
     rescale = None
-    if bool(stats_set & rate_stats):
+    if bool(stats_set & _RATE_STATS):
         rescale = _missing_data_rescale(
             n_variants_per_window, span_normalize, all_complete,
             lambda: scatter_sum(has_data.astype(cp.float64)).get())
@@ -1122,14 +1131,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     if 'fay_wu_h' in stats_set:
         results['fay_wu_h'] = (raw['pi'] - raw['theta_h']).get()
 
-    # Neutrality tests — Achaz (2009) variance framework, with the effective
-    # sample size the per-window harmonic mean of n_valid rather than the
-    # nominal n_hap.
-    need_variance = stats_set & {'tajimas_d', 'normalized_fay_wu_h', 'zeng_e', 'zeng_dh'}
-    if need_variance:
-        from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
-        S = seg_count.get()
-
+    # Neutrality tests, with the effective sample size the per-window
+    # harmonic mean of n_valid rather than the nominal n_hap.
+    if stats_set & _ACHAZ_STATS:
+        from .diversity import _harmonic_mean_n
         if bool(all_complete):
             # No missing data anywhere: every window's harmonic mean is
             # trivially n_hap, so skip the two scatter passes entirely.
@@ -1139,41 +1144,9 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
             sum_inv_w, count_valid_w = cp.stack([
                 scatter_sum(inv_valid), scatter_sum(has_data.astype(cp.float64))
             ]).get()
-            n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
-
-        a1, a2 = _harmonic_a1_a2_array(n_harm_w)
-        with np.errstate(invalid='ignore', divide='ignore'):
-            theta_est = S / a1
-            theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
-
-        uniq_n, inv_idx = np.unique(n_harm_w, return_inverse=True)
-
-        def windowed_test(w1, w2, numerator_arr):
-            alpha, beta = _achaz_coeffs_per_window(uniq_n, inv_idx, w1, w2)
-            with np.errstate(invalid='ignore', divide='ignore'):
-                var = alpha * theta_est + beta * theta_sq_est
-                return np.where((var > 0) & (S >= 3) & (n_harm_w >= 3),
-                                numerator_arr / np.sqrt(var), np.nan)
-
-    if stats_set & {'tajimas_d', 'zeng_dh'}:
-        tajd = windowed_test('pi', 'watterson',
-                             raw['pi'].get() - raw['watterson'].get())
-        if 'tajimas_d' in stats_set:
-            results['tajimas_d'] = tajd
-
-    if stats_set & {'normalized_fay_wu_h', 'zeng_dh'}:
-        h_star = windowed_test('pi', 'theta_h',
-                               raw['pi'].get() - raw['theta_h'].get())
-        if 'normalized_fay_wu_h' in stats_set:
-            results['normalized_fay_wu_h'] = h_star
-
-    if 'zeng_e' in stats_set:
-        results['zeng_e'] = windowed_test(
-            'theta_l', 'watterson',
-            raw['theta_l'].get() - raw['watterson'].get())
-
-    if 'zeng_dh' in stats_set:
-        results['zeng_dh'] = diversity._zeng_dh_combine(tajd, h_star)
+            n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w)
+        _achaz_test_columns(results, stats_set, seg_count.get(), n_harm_w,
+                            lambda name: raw[name].get())
 
     # Windows with no accessible bases get NaN for every per-base rate.
     # fay_wu_h and zeng_dh have no span-normalized form, so a zero-span
@@ -1507,7 +1480,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     statistics : list
         Statistics to compute. ``n_variants`` is a column of every result,
         and ``n_singletons`` is another name for ``singletons``. Statistics
-        that no single engine computes (for example ``theta_l`` with
+        that no single engine computes (for example ``ld_decay`` with
         ``zns``) raise ValueError; request them in separate calls. A custom
         callable gets NaN on a window with no variant, without a call.
     populations : list, optional
@@ -1974,46 +1947,122 @@ def _warn_fused_allele_cap(n_over):
         MultiallelicCapWarning, stacklevel=3)
 
 
-def _fused_tajimas_d(mpd_sum, seg_count, sum_inv_w, count_valid_w,
-                     watterson_num_w):
-    """Tajima (1989) D for the fused-kernel engines.
+# Achaz (2009) neutrality tests: the weight pair of each windowed name.
+_ACHAZ_TESTS = {'tajimas_d': ('pi', 'watterson'),
+                'normalized_fay_wu_h': ('pi', 'theta_h'),
+                'zeng_e': ('theta_l', 'watterson')}
+# Zeng's DH is combined from these two tests.
+_ZENG_DH_TESTS = ('tajimas_d', 'normalized_fay_wu_h')
+_ACHAZ_STATS = frozenset(_ACHAZ_TESTS) | {'zeng_dh'}
 
-    Uses the per-window harmonic mean of ``n_valid`` over sites with
-    ``n_valid >= 2`` in place of the nominal ``n_hap`` for the variance term,
-    matching the scalar reference's ``_compute_neutrality_test``, and the
-    same ``_achaz_coeffs_per_window`` the scatter and generic engines use
-    (Achaz's alpha/beta for the ``('pi', 'watterson')`` pair are Tajima's
-    original c1/c2). The numerator uses ``watterson_num_w`` directly rather
-    than ``seg_count / a1(harmonic_mean_n)``, since the scalar Watterson
-    estimator sums each site's own ``a1_inv[n_valid]`` contribution rather
-    than normalizing the window total by one shared n.
+
+def _achaz_test_columns(results, stats, seg_count, n_harm_w, thetas):
+    """Fill ``results`` with the requested Achaz neutrality tests.
+
+    Each test divides a per-window theta difference by its standard
+    deviation under the neutral model. The variance uses ``n_harm_w``, the
+    per-window harmonic mean of ``n_valid`` over sites with two calls, in
+    place of the nominal sample size, as the scalar
+    ``_compute_neutrality_test`` does. Shared by the scatter and the fused
+    engines, so they compute the tests alike.
 
     Parameters
     ----------
-    mpd_sum, seg_count, sum_inv_w, count_valid_w, watterson_num_w
-        numpy.ndarray, float64, shape (n_windows,). All from
-        ``_fused_windowed_kernel_v2``'s per-window outputs.
-
-    Returns
-    -------
-    numpy.ndarray, float64, shape (n_windows,)
+    stats : set of str
+        The requested statistics.
+    seg_count, n_harm_w : numpy.ndarray, shape (n_windows,)
+        Segregating-site count and harmonic-mean sample size (int64).
+    thetas : callable
+        ``thetas(name)`` gives the per-window raw sum (numpy) of the
+        estimator 'pi', 'watterson', 'theta_h' or 'theta_l'; each is summed
+        from its sites' own contributions at their own ``n_valid``.
     """
-    from .diversity import _harmonic_a1_a2_array, _harmonic_mean_n
-
-    n_harm_w = _harmonic_mean_n(count_valid_w, sum_inv_w).astype(np.int64)
-    a1, a2 = _harmonic_a1_a2_array(n_harm_w)
-    uniq_n, inv_idx = np.unique(n_harm_w, return_inverse=True)
-    alpha, beta = _achaz_coeffs_per_window(uniq_n, inv_idx, 'pi', 'watterson')
+    wanted = {name for name in _ACHAZ_TESTS if name in stats}
+    if 'zeng_dh' in stats:
+        wanted.update(_ZENG_DH_TESTS)
+    if not wanted:
+        return
+    from .diversity import _harmonic_a1_a2_array
 
     S = seg_count
-    d_num = mpd_sum - watterson_num_w
+    a1, a2 = _harmonic_a1_a2_array(n_harm_w)
+    uniq_n, inv_idx = np.unique(n_harm_w, return_inverse=True)
     with np.errstate(invalid='ignore', divide='ignore'):
         theta_est = S / a1
         theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
-        var = alpha * theta_est + beta * theta_sq_est
-        tajd = np.where((var > 0) & (S >= 3) & (n_harm_w >= 3),
-                        d_num / np.sqrt(var), np.nan)
-    return tajd
+
+    tests = {}
+    for name in sorted(wanted):
+        w1, w2 = _ACHAZ_TESTS[name]
+        alpha, beta = _achaz_coeffs_per_window(uniq_n, inv_idx, w1, w2)
+        with np.errstate(invalid='ignore', divide='ignore'):
+            var = alpha * theta_est + beta * theta_sq_est
+            tests[name] = np.where((var > 0) & (S >= 3) & (n_harm_w >= 3),
+                                   (thetas(w1) - thetas(w2)) / np.sqrt(var),
+                                   np.nan)
+        if name in stats:
+            results[name] = tests[name]
+    if 'zeng_dh' in stats:
+        results['zeng_dh'] = diversity._zeng_dh_combine(
+            *(tests[name] for name in _ZENG_DH_TESTS))
+
+
+# The per-window sums of _fused_windowed_kernel_v2. The order is the order of
+# the kernel's output arguments: the engines pass one array per name.
+_FUSED_KERNEL_SUMS = ('mpd', 'seg', 'sing', 'count', 'theta_h', 'max_daf',
+                      'sum_inv', 'count_valid', 'watterson', 'theta_l')
+
+
+def _fused_single_pop_columns(results, statistics, sums, per_base,
+                              window_bases, excluded_to_empty):
+    """Fill ``results`` with the single-population columns of a fused engine.
+
+    ``sums`` maps each name in ``_FUSED_KERNEL_SUMS`` to its per-window
+    numpy array. The single-shot engine gets them from one kernel launch and
+    the chunked engine adds them up over chunks; from here on the two
+    compute alike.
+    """
+    stats = set(statistics)
+    pi, theta_h = sums['mpd'], sums['theta_h']
+    watterson, theta_l = sums['watterson'], sums['theta_l']
+    results['n_variants'] = sums['count'].astype(int)
+
+    # Per-base rates: rescaled for the sites a population's own missing
+    # calls dropped from the sum, then divided by the window's bases. A
+    # window that lost every site to 'exclude' is undefined.
+    rescale = _missing_data_rescale(sums['count'], per_base, False,
+                                    lambda: sums['count_valid'])
+    for name, total in (('pi', pi), ('theta_w', watterson),
+                        ('theta_h', theta_h), ('theta_l', theta_l)):
+        if name in stats:
+            vals = total * rescale if rescale is not None else total
+            vals = _rate(vals, window_bases, per_base)
+            if excluded_to_empty is not None:
+                vals = np.where(excluded_to_empty, np.nan, vals)
+            results[name] = vals
+
+    if 'segregating_sites' in stats:
+        results['segregating_sites'] = sums['seg'].astype(int)
+    if 'singletons' in stats:
+        results['singletons'] = sums['sing'].astype(int)
+    if 'fay_wu_h' in stats:
+        # A difference of two estimators, not a rate: no span-normalized
+        # form, so it never goes through _rate.
+        results['fay_wu_h'] = pi - theta_h
+
+    if stats & _ACHAZ_STATS:
+        from .diversity import _harmonic_mean_n
+        raw = {'pi': pi, 'watterson': watterson, 'theta_h': theta_h,
+               'theta_l': theta_l}
+        _achaz_test_columns(
+            results, stats, sums['seg'],
+            _harmonic_mean_n(sums['count_valid'], sums['sum_inv']), raw.get)
+
+    if 'max_daf' in stats:
+        max_daf = sums['max_daf']
+        if excluded_to_empty is not None:
+            max_daf = np.where(excluded_to_empty, np.nan, max_daf)
+        results['max_daf'] = max_daf
 
 
 _fused_windowed_kernel_v2 = cp.RawKernel(r'''
@@ -2032,7 +2081,8 @@ void fused_windowed_stats_v2(const signed char* hap_t,
                              double* out_max_daf,
                              double* out_sum_inv,
                              double* out_count_valid,
-                             double* out_watterson_num) {
+                             double* out_watterson_num,
+                             double* out_theta_l_sum) {
     int wid = blockIdx.x;
     if (wid >= n_windows) return;
 
@@ -2050,6 +2100,7 @@ void fused_windowed_stats_v2(const signed char* hap_t,
             out_sum_inv[wid] = 0.0;
             out_count_valid[wid] = 0.0;
             out_watterson_num[wid] = 0.0;
+            out_theta_l_sum[wid] = 0.0;
         }
         return;
     }
@@ -2057,6 +2108,7 @@ void fused_windowed_stats_v2(const signed char* hap_t,
     double t_mpd = 0.0, t_seg = 0.0, t_sing = 0.0;
     double t_count = 0.0, t_theta_h = 0.0, t_max_daf = 0.0;
     double t_sum_inv = 0.0, t_count_valid = 0.0, t_watterson_num = 0.0;
+    double t_theta_l = 0.0;
 
     for (int vi = threadIdx.x; vi < n_vars; vi += blockDim.x) {
         int v = v_start + vi;
@@ -2077,6 +2129,7 @@ void fused_windowed_stats_v2(const signed char* hap_t,
 
         double same = 0.0;      /* sum_a cnt_a*(cnt_a-1) : same-allele pairs */
         double th = 0.0;        /* theta_h numerator: sum_{a>=1,0<c<nv} 2 c^2 */
+        double tl = 0.0;        /* theta_l numerator: sum_{a>=1,0<c<nv} c */
         double mdaf = 0.0;      /* max derived-allele frequency */
         int n_present = 0;
         for (int a = 0; a < MAX_ALLELES; a++) {
@@ -2087,21 +2140,25 @@ void fused_windowed_stats_v2(const signed char* hap_t,
                 if (c == 1) t_sing += 1.0;            /* per-derived-allele singleton */
                 double freq = (double)c / dn;
                 if (freq > mdaf) mdaf = freq;
-                if (c < nv) th += 2.0 * (double)c * (double)c;
+                if (c < nv) {
+                    th += 2.0 * (double)c * (double)c;
+                    tl += (double)c;
+                }
             }
         }
         /* pi = 1 - sum_a C(c,2)/C(n,2); seg = mutation count (alleles present - 1) */
         t_mpd += 1.0 - same / (dn * (dn - 1.0));
         t_seg += (double)(n_present - 1);
         t_theta_h += th / (dn * (dn - 1.0));
+        t_theta_l += tl / (dn - 1.0);
         if (mdaf > t_max_daf) t_max_daf = mdaf;
         t_sum_inv += 1.0 / dn;
         t_count_valid += 1.0;
         t_watterson_num += (double)(n_present - 1) * a1_inv_table[nv];
     }
 
-    // Sum reduction for 8 accumulators (plus max_daf)
-    __shared__ double smem[9 * 256];
+    // Sum reduction for 9 accumulators (plus max_daf)
+    __shared__ double smem[10 * 256];
     int tid = threadIdx.x;
     smem[tid]          = t_mpd;
     smem[256 + tid]    = t_seg;
@@ -2112,6 +2169,7 @@ void fused_windowed_stats_v2(const signed char* hap_t,
     smem[1536 + tid]   = t_sum_inv;
     smem[1792 + tid]   = t_count_valid;
     smem[2048 + tid]   = t_watterson_num;
+    smem[2304 + tid]   = t_theta_l;
     __syncthreads();
 
     for (int s = blockDim.x / 2; s > 0; s >>= 1) {
@@ -2127,6 +2185,7 @@ void fused_windowed_stats_v2(const signed char* hap_t,
             smem[1536 + tid]   += smem[1536 + tid + s];
             smem[1792 + tid]   += smem[1792 + tid + s];
             smem[2048 + tid]   += smem[2048 + tid + s];
+            smem[2304 + tid]   += smem[2304 + tid + s];
         }
         __syncthreads();
     }
@@ -2141,6 +2200,7 @@ void fused_windowed_stats_v2(const signed char* hap_t,
         out_sum_inv[wid]      = smem[1536];
         out_count_valid[wid]  = smem[1792];
         out_watterson_num[wid] = smem[2048];
+        out_theta_l_sum[wid]   = smem[2304];
     }
 }
 ''', 'fused_windowed_stats_v2')
@@ -2656,7 +2716,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # statistics below; one with no variant to begin with stays 0.0.
     excluded_to_empty = None
     if orig_missing_data == 'exclude' and (
-            set(statistics) & {'pi', 'theta_w', 'theta_h', 'dxy', 'da', 'max_daf'}):
+            set(statistics) & (_RATE_STATS | {'dxy', 'da', 'max_daf'})):
         excluded_to_empty = _windows_emptied_by_exclude(
             orig_positions_gpu, windows, ws_gpu, we_gpu)
     ws_cpu = ws_gpu.get() if hasattr(ws_gpu, 'get') else ws_gpu
@@ -2682,15 +2742,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         # copy for coalesced access; Garud-only and scatter-only requests
         # skip the extra matrix-sized allocation.
         hap = sites.transposed(sites.rows.haplotypes)
-        out_mpd = cp.zeros(n_windows, dtype=cp.float64)
-        out_seg = cp.zeros(n_windows, dtype=cp.float64)
-        out_sing = cp.zeros(n_windows, dtype=cp.float64)
-        out_count = cp.zeros(n_windows, dtype=cp.float64)
-        out_theta_h = cp.zeros(n_windows, dtype=cp.float64)
-        out_max_daf = cp.zeros(n_windows, dtype=cp.float64)
-        out_sum_inv = cp.zeros(n_windows, dtype=cp.float64)
-        out_count_valid = cp.zeros(n_windows, dtype=cp.float64)
-        out_watterson_num = cp.zeros(n_windows, dtype=cp.float64)
+        outs = [cp.zeros(n_windows, dtype=cp.float64)
+                for _ in _FUSED_KERNEL_SUMS]
         a1_inv_table = _get_a1_inv(n_hap)
 
         block = 256
@@ -2700,62 +2753,15 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             (grid,), (block,),
             (hap, win_start, win_stop,
              np.int32(n_hap), np.int32(n_total_var), np.int32(n_windows),
-             a1_inv_table,
-             out_mpd, out_seg, out_sing, out_count, out_theta_h, out_max_daf,
-             out_sum_inv, out_count_valid, out_watterson_num))
+             a1_inv_table, *outs))
 
-        (mpd_sum, seg_count, sing_count, var_count, theta_h_sum, max_daf,
-         sum_inv_w, count_valid_w, watterson_num_w) = cp.stack([
-            out_mpd, out_seg, out_sing, out_count, out_theta_h, out_max_daf,
-            out_sum_inv, out_count_valid, out_watterson_num,
-        ]).get()
+        sums = dict(zip(_FUSED_KERNEL_SUMS, cp.stack(outs).get()))
         # The later stages read the un-transposed matrix; release the copy
         # so their batches can use the memory.
         del hap
 
-        results['n_variants'] = var_count.astype(int)
-
-        rescale = _missing_data_rescale(var_count, per_base, False,
-                                        lambda: count_valid_w)
-
-        if 'pi' in statistics:
-            vals = mpd_sum * rescale if rescale is not None else mpd_sum
-            results['pi'] = _rate(vals, window_bases, per_base)
-
-        if 'theta_w' in statistics:
-            vals = (watterson_num_w * rescale if rescale is not None
-                    else watterson_num_w)
-            results['theta_w'] = _rate(vals, window_bases, per_base)
-
-        if 'segregating_sites' in statistics:
-            results['segregating_sites'] = seg_count.astype(int)
-
-        if 'singletons' in statistics:
-            results['singletons'] = sing_count.astype(int)
-
-        if 'tajimas_d' in statistics:
-            results['tajimas_d'] = _fused_tajimas_d(
-                mpd_sum, seg_count, sum_inv_w, count_valid_w,
-                watterson_num_w)
-
-        if 'theta_h' in statistics:
-            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
-            results['theta_h'] = _rate(vals, window_bases, per_base)
-
-        if 'fay_wu_h' in statistics:
-            # A difference of two estimators, not a rate: no span-normalized
-            # form, so it never goes through _rate.
-            results['fay_wu_h'] = mpd_sum - theta_h_sum
-
-        if excluded_to_empty is not None:
-            for name in ('pi', 'theta_w', 'theta_h'):
-                if name in results:
-                    results[name] = np.where(excluded_to_empty, np.nan, results[name])
-
-        if 'max_daf' in statistics:
-            if excluded_to_empty is not None:
-                max_daf = np.where(excluded_to_empty, np.nan, max_daf)
-            results['max_daf'] = max_daf
+        _fused_single_pop_columns(results, statistics, sums, per_base,
+                                  window_bases, excluded_to_empty)
 
     # two-pop stats via fused kernel
     if two_pop_requested:
@@ -3125,7 +3131,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     # statistics below; one with no variant to begin with stays 0.0.
     excluded_to_empty = None
     if orig_missing_data == 'exclude' and (
-            set(statistics) & {'pi', 'theta_w', 'theta_h', 'dxy', 'da', 'max_daf'}):
+            set(statistics) & (_RATE_STATS | {'dxy', 'da', 'max_daf'})):
         excluded_to_empty = _windows_emptied_by_exclude(
             orig_positions_gpu, windows, ws_gpu, we_gpu)
 
@@ -3154,16 +3160,9 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     if single_pop_requested:
         from .diversity import _get_a1_inv
 
-        # Accumulators
-        acc_mpd = cp.zeros(n_windows, dtype=cp.float64)
-        acc_seg = cp.zeros(n_windows, dtype=cp.float64)
-        acc_sing = cp.zeros(n_windows, dtype=cp.float64)
-        acc_count = cp.zeros(n_windows, dtype=cp.float64)
-        acc_theta_h = cp.zeros(n_windows, dtype=cp.float64)
-        acc_max_daf = cp.zeros(n_windows, dtype=cp.float64)
-        acc_sum_inv = cp.zeros(n_windows, dtype=cp.float64)
-        acc_count_valid = cp.zeros(n_windows, dtype=cp.float64)
-        acc_watterson_num = cp.zeros(n_windows, dtype=cp.float64)
+        # Accumulators, one per kernel sum
+        acc = [cp.zeros(n_windows, dtype=cp.float64)
+               for _ in _FUSED_KERNEL_SUMS]
         a1_inv_table = _get_a1_inv(n_hap)
 
         for c_start in range(0, n_total_var, chunk_size):
@@ -3185,89 +3184,28 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             n_chunk_var = c_end - c_start
 
             # Per-chunk outputs
-            out_mpd = cp.zeros(n_overlap, dtype=cp.float64)
-            out_seg = cp.zeros(n_overlap, dtype=cp.float64)
-            out_sing = cp.zeros(n_overlap, dtype=cp.float64)
-            out_count = cp.zeros(n_overlap, dtype=cp.float64)
-            out_theta_h = cp.zeros(n_overlap, dtype=cp.float64)
-            out_max_daf = cp.zeros(n_overlap, dtype=cp.float64)
-            out_sum_inv = cp.zeros(n_overlap, dtype=cp.float64)
-            out_count_valid = cp.zeros(n_overlap, dtype=cp.float64)
-            out_watterson_num = cp.zeros(n_overlap, dtype=cp.float64)
+            outs = [cp.zeros(n_overlap, dtype=cp.float64)
+                    for _ in _FUSED_KERNEL_SUMS]
 
             _fused_windowed_kernel_v2(
                 (int(n_overlap),), (256,),
                 (hap_chunk_t, clipped_start, clipped_stop,
                  np.int32(n_hap), np.int32(n_chunk_var), np.int32(n_overlap),
-                 a1_inv_table,
-                 out_mpd, out_seg, out_sing, out_count, out_theta_h,
-                 out_max_daf, out_sum_inv, out_count_valid,
-                 out_watterson_num))
+                 a1_inv_table, *outs))
 
             # Accumulate (all additive except max_daf)
-            cp.add.at(acc_mpd, w_idx, out_mpd)
-            cp.add.at(acc_seg, w_idx, out_seg)
-            cp.add.at(acc_sing, w_idx, out_sing)
-            cp.add.at(acc_count, w_idx, out_count)
-            cp.add.at(acc_theta_h, w_idx, out_theta_h)
-            acc_max_daf[w_idx] = cp.maximum(acc_max_daf[w_idx], out_max_daf)
-            cp.add.at(acc_sum_inv, w_idx, out_sum_inv)
-            cp.add.at(acc_count_valid, w_idx, out_count_valid)
-            cp.add.at(acc_watterson_num, w_idx, out_watterson_num)
+            for name, total, out in zip(_FUSED_KERNEL_SUMS, acc, outs):
+                if name == 'max_daf':
+                    total[w_idx] = cp.maximum(total[w_idx], out)
+                else:
+                    cp.add.at(total, w_idx, out)
 
             del hap_chunk_t
             free_gpu_pool()
 
-        # Post-processing (identical to non-chunked)
-        (mpd_sum, seg_count, sing_count, var_count, theta_h_sum, max_daf_arr,
-         sum_inv_w, count_valid_w, watterson_num_w) = cp.stack([
-            acc_mpd, acc_seg, acc_sing, acc_count, acc_theta_h, acc_max_daf,
-            acc_sum_inv, acc_count_valid, acc_watterson_num,
-        ]).get()
-
-        results['n_variants'] = var_count.astype(int)
-
-        rescale = _missing_data_rescale(var_count, per_base, False,
-                                        lambda: count_valid_w)
-
-        if 'pi' in statistics:
-            vals = mpd_sum * rescale if rescale is not None else mpd_sum
-            results['pi'] = _rate(vals, window_bases, per_base)
-
-        if 'theta_w' in statistics:
-            vals = (watterson_num_w * rescale if rescale is not None
-                    else watterson_num_w)
-            results['theta_w'] = _rate(vals, window_bases, per_base)
-
-        if 'segregating_sites' in statistics:
-            results['segregating_sites'] = seg_count.astype(int)
-
-        if 'singletons' in statistics:
-            results['singletons'] = sing_count.astype(int)
-
-        if 'tajimas_d' in statistics:
-            results['tajimas_d'] = _fused_tajimas_d(
-                mpd_sum, seg_count, sum_inv_w, count_valid_w,
-                watterson_num_w)
-
-        if 'theta_h' in statistics:
-            vals = theta_h_sum * rescale if rescale is not None else theta_h_sum
-            results['theta_h'] = _rate(vals, window_bases, per_base)
-
-        if 'fay_wu_h' in statistics:
-            # A difference of two estimators, not a rate: no span-normalized
-            # form, so it never goes through _rate.
-            results['fay_wu_h'] = mpd_sum - theta_h_sum
-
-        if excluded_to_empty is not None:
-            for name in ('pi', 'theta_w', 'theta_h'):
-                if name in results:
-                    results[name] = np.where(excluded_to_empty, np.nan, results[name])
-
-        if 'max_daf' in statistics:
-            if excluded_to_empty is not None:
-                max_daf_arr = np.where(excluded_to_empty, np.nan, max_daf_arr)
-            results['max_daf'] = max_daf_arr
+        sums = dict(zip(_FUSED_KERNEL_SUMS, cp.stack(acc).get()))
+        _fused_single_pop_columns(results, statistics, sums, per_base,
+                                  window_bases, excluded_to_empty)
 
     # ── Two-pop stats via chunked fused kernel ───────────────────────────
     if two_pop_requested:

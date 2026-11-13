@@ -612,9 +612,14 @@ falls back to a slower route that produces the same numbers.
      - Number of alternate alleles seen exactly once in the window
    * - ``theta_h``
      - Fay & Wu's theta_H per window
+   * - ``theta_l``
+     - Zeng's theta_L per window
    * - ``fay_wu_h``
      - Fay & Wu's H -- a difference of estimators, not a rate, so it has
        no per-window span normalization
+   * - ``normalized_fay_wu_h``, ``zeng_e``, ``zeng_dh``
+     - Normalized Fay & Wu's H, Zeng's E and the D-with-H* composite per
+       window
    * - ``max_daf``
      - Frequency of the most common alternate allele in the window
    * - ``fst``, ``fst_hudson``

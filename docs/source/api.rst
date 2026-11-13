@@ -386,6 +386,9 @@ Single-population (one kernel launch for all):
 - ``tajimas_d`` -- Tajima's D
 - ``segregating_sites`` -- count of segregating sites
 - ``singletons`` -- count of singletons
+- ``theta_h``, ``theta_l`` -- Fay & Wu's theta_H and Zeng's theta_L
+- ``fay_wu_h``, ``normalized_fay_wu_h``, ``zeng_e``, ``zeng_dh`` -- neutrality tests
+- ``max_daf`` -- frequency of the most common alternate allele
 
 Two-population (one kernel launch for all):
 
