@@ -513,7 +513,7 @@ automatically routes through fused kernels when possible.
 
 Supported fused windowed statistics:
 
-- **Single-pop**: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``, ``theta_h``, ``fay_wu_h``, ``max_daf``
+- **Single-pop**: ``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``, ``singletons``, ``theta_h``, ``theta_l``, ``fay_wu_h``, ``normalized_fay_wu_h``, ``zeng_e``, ``zeng_dh``, ``max_daf``
 - **Two-pop**: ``fst``, ``fst_hudson``, ``fst_wc``, ``dxy``, ``da``
 - **Selection**: ``garud_h1``†, ``garud_h12``†, ``garud_h123``†, ``garud_h2h1``†, ``haplotype_count``†, ``mean_nsl``†
 - **LD**: ``zns``†, ``omega``†, ``mu_ld``†
