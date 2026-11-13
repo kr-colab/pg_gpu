@@ -7,8 +7,8 @@ n / (n - 1) at n = 1), so the statistic must return NaN; 0.0 would read as
 import numpy as np
 import pytest
 
-from pg_gpu import (GenotypeMatrix, HaplotypeMatrix, distance_stats, diversity,
-                    divergence, ld_statistics)
+from pg_gpu import (GenotypeMatrix, HaplotypeMatrix, admixture, distance_stats,
+                    diversity, divergence, ld_statistics)
 from pg_gpu.windowed_analysis import windowed_analysis
 
 
@@ -201,3 +201,45 @@ def test_windowed_small_window_matches_scalar(n_var):
     # these must be real values and not a NaN on both sides.
     finite = [*_DIST, *(["zns", "mu_ld"] if n_var >= 2 else [])]
     assert np.isfinite(df[finite].iloc[0]).all()
+
+
+# ── block-averaged f3 and D ────────────────────────────────────────────
+_ADMIX_POPS = {'A': list(range(6)), 'B': list(range(6, 12)),
+               'C': list(range(12, 18)), 'D': list(range(18, 24))}
+
+
+def _admix_hm(hap):
+    hm = _hm(hap, spacing=10)
+    hm.sample_sets = _ADMIX_POPS
+    return hm
+
+
+def _average_f3(hm, **kw):
+    return admixture.average_patterson_f3(hm, 'C', 'A', 'B', blen=5, **kw)
+
+
+def _average_d(hm, **kw):
+    return admixture.average_patterson_d(hm, 'A', 'B', 'C', 'D', blen=5, **kw)
+
+
+def test_average_patterson_f3_z_nan_when_estimate_and_se_are_zero():
+    # A monomorphic matrix gives 0 at every site, so the jackknife SE is
+    # exactly 0 and z is 0/0. (Equal non-zero blocks leave rounding error in
+    # the SE, so _z_score is checked directly for the infinite case.)
+    estimate, se, z, _, _ = _average_f3(_admix_hm(np.zeros((24, 20), dtype=np.int8)), normed=False)
+    assert estimate == 0 and se == 0
+    assert np.isnan(z)
+
+
+def test_z_score_is_infinite_for_nonzero_estimate_and_zero_se():
+    assert admixture._z_score(0.25, 0.0) == np.inf
+    assert admixture._z_score(-0.25, 0.0) == -np.inf
+
+
+@pytest.mark.parametrize("average", [_average_f3, _average_d], ids=["f3", "d"])
+def test_average_patterson_nan_when_exclude_leaves_no_site(average):
+    hap = np.random.default_rng(0).integers(0, 2, (24, 20)).astype(np.int8)
+    hap[0, :] = -1
+    estimate, se, z, vb, vj = average(_admix_hm(hap), missing_data='exclude')
+    assert np.isnan(estimate) and np.isnan(se) and np.isnan(z)
+    assert vb.size == 0 and vj.size == 0

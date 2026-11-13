@@ -1506,7 +1506,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN or inf when sum(B) == 0 (normed, no guard); raises ZeroDivisionError when the jackknife SE is exactly 0 or when no full block exists"
+undefined = "NaN or inf when sum(B) == 0 (normed, no guard); z is NaN or +/-inf when the jackknife SE is exactly 0; (nan, nan, nan, empty, empty) when no site is left; raises ZeroDivisionError when there are sites but no full block"
 parallel = []
 notes = "The point estimate uses every variant but the jackknife blocks drop the trailing n % blen variants, the same as scikit-allel."
 
@@ -1517,7 +1517,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN when sum(den) == 0; raises ZeroDivisionError when the jackknife SE is exactly 0 or when no full block exists"
+undefined = "NaN when sum(den) == 0; z is NaN or +/-inf when the jackknife SE is exactly 0; (nan, nan, nan, empty, empty) when no site is left; raises ZeroDivisionError when there are sites but no full block"
 parallel = []
 notes = "The point estimate uses every variant but the jackknife blocks drop the trailing n % blen variants, the same as scikit-allel."
 

@@ -392,6 +392,20 @@ def moving_patterson_d(haplotype_matrix: HaplotypeMatrix,
 # Public API: Block-jackknife averaged variants
 # ---------------------------------------------------------------------------
 
+def _no_sites():
+    """What the block-averaged statistics return when no site is left to
+    estimate from (for example after 'exclude'): nothing is defined."""
+    return (float('nan'), float('nan'), float('nan'),
+            np.empty(0), np.empty(0))
+
+
+def _z_score(estimate, se):
+    """``estimate / se`` as a float. A zero SE gives NaN (0/0) or an
+    infinity, as in scikit-allel, where plain float division would raise."""
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return float(np.float64(estimate) / np.float64(se))
+
+
 @_eager_only
 def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
                          pop_c: Union[str, list],
@@ -419,14 +433,22 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     se : float
         Standard error.
     z : float
-        Z-score.
+        Z-score. NaN or an infinity when ``se`` is 0.
     vb : ndarray
         Per-block values.
     vj : ndarray
         Jackknife resampled values.
+
+    Notes
+    -----
+    When no site is left to estimate from (for example after
+    ``missing_data='exclude'``), the three floats are NaN and the two
+    arrays are empty.
     """
     T, B = _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
                               missing_data=missing_data)
+    if T.size == 0:
+        return _no_sites()
 
     if normed:
         T_finite = cp.where(cp.isfinite(T), T, 0.0)
@@ -445,8 +467,7 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
         vb = _moving_nanmean(T, blen).get()
         _, se, vj = block_jackknife(vb, statistic=np.mean)
 
-    z = f3 / se
-    return f3, se, z, vb, vj
+    return f3, se, _z_score(f3, se), vb, vj
 
 
 @_eager_only
@@ -474,14 +495,22 @@ def average_patterson_d(haplotype_matrix: HaplotypeMatrix,
     se : float
         Standard error.
     z : float
-        Z-score.
+        Z-score. NaN or an infinity when ``se`` is 0.
     vb : ndarray
         Per-block values.
     vj : ndarray
         Jackknife resampled values.
+
+    Notes
+    -----
+    When no site is left to estimate from (for example after
+    ``missing_data='exclude'``), the three floats are NaN and the two
+    arrays are empty.
     """
     num, den = _patterson_d_gpu(haplotype_matrix, pop_a, pop_b, pop_c, pop_d,
                                 missing_data=missing_data)
+    if num.size == 0:
+        return _no_sites()
 
     num_f = cp.where(cp.isfinite(num), num, 0.0)
     den_f = cp.where(cp.isfinite(den), den, 0.0)
@@ -496,5 +525,4 @@ def average_patterson_d(haplotype_matrix: HaplotypeMatrix,
         statistic=lambda n, d: np.sum(n) / np.sum(d)
     )
 
-    z = d_avg / se
-    return d_avg, se, z, vb, vj
+    return d_avg, se, _z_score(d_avg, se), vb, vj
