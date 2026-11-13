@@ -1055,7 +1055,7 @@ inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
 streaming = "native"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "all-zero array with no segregating derived allele; None on streaming input with no non-empty chunk"
+undefined = "all-zero array with no segregating derived allele; all-zero array of the full shape on streaming input with no variant in its chunks; None when the stream has no chunk (a contig with no variant and no region end, zarr_source.ZarrGenotypeSource.iter_chunks)"
 parallel = ["diversity.FrequencySpectrum.__init__"]
 notes = "FrequencySpectrum builds its own per-n SFS with the same 0 < count < n rule; streaming sums per-chunk results with _stream_sum."
 
@@ -1066,7 +1066,7 @@ inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
 streaming = "native"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "all-zero array with no polymorphic allele; None on streaming input with no non-empty chunk"
+undefined = "all-zero array with no polymorphic allele; all-zero array of the full shape on streaming input with no variant in its chunks; None when the stream has no chunk (a contig with no variant and no region end, zarr_source.ZarrGenotypeSource.iter_chunks)"
 parallel = ["sfs.fold_sfs"]
 notes = "Per allele with weight 1/2 (tskit rule); fold_sfs applied to sfs() gives a different result for even n, also on biallelic data."
 
@@ -1090,7 +1090,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "all-zero array with no polymorphic allele"
 parallel = []
-notes = "Streaming works only with population=None: sfs_folded_scaled calls population_rows on the stream, which fails on .haplotypes."
+notes = "n comes from sfs._population_size (the row list), not from a population matrix, so a stream works with population=."
 
 [functions."sfs.joint_sfs"]
 # signature: (haplotype_matrix, pop1, pop2, missing_data)
@@ -1099,7 +1099,7 @@ inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
 streaming = "native"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "all-zero array with no allele segregating in the pooled cohort; None on streaming input with no non-empty chunk"
+undefined = "all-zero array with no allele segregating in the pooled cohort; all-zero array of the full shape on streaming input with no variant in its chunks; None when the stream has no chunk (a contig with no variant and no region end, zarr_source.ZarrGenotypeSource.iter_chunks)"
 parallel = ["sfs.project_joint_sfs"]
 notes = "project_joint_sfs shares _joint_per_allele_counts; its streaming branch has its own chunk loop."
 
@@ -1112,7 +1112,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "raises ValueError when a target exceeds its population size; all-zero array with no allele"
 parallel = ["sfs.joint_sfs", "diversity._projection_matrix"]
-notes = "Streaming branch reads population sizes from sample_sets itself and loops chunks with _project_joint_sfs_chunk_gpu, not _stream_sum."
+notes = "Streaming branch reads population sizes with sfs._population_size and loops chunks with _project_joint_sfs_chunk_gpu, not _stream_sum."
 
 [functions."sfs.joint_sfs_folded"]
 # signature: (haplotype_matrix, pop1, pop2, missing_data)
@@ -1121,7 +1121,7 @@ inputs = ["HaplotypeMatrix", "StreamingHaplotypeMatrix"]
 streaming = "native"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "all-zero array with no allele segregating in the pooled cohort; None on streaming input with no non-empty chunk"
+undefined = "all-zero array with no allele segregating in the pooled cohort; all-zero array of the full shape on streaming input with no variant in its chunks; None when the stream has no chunk (a contig with no variant and no region end, zarr_source.ZarrGenotypeSource.iter_chunks)"
 parallel = ["sfs.fold_joint_sfs"]
 notes = "Folds each allele by the global minor (tskit rule), not per axis; fold_joint_sfs gives a different array."
 
