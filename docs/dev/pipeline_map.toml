@@ -85,7 +85,7 @@ see = "[matrices]"
 [axes.missing_data]
 description = "'include' uses each site with the calls it has; 'exclude' keeps only sites with no missing call in the rows the statistic reads. A few functions accept other values (for example 'scale' in distance_stats)."
 values = ["include", "exclude"]
-check = "Each engine applies 'exclude' on its own: windowed_analysis._apply_exclude (fused), the scatter engines, windowed_analysis.StatisticsComputer._n_sites (fallback), and each scalar function."
+check = "Each engine applies 'exclude' on its own: windowed_analysis._FusedSites (fused; a keep index over the complete sites, with no filtered copy of the matrix except for mean_nsl, Garud's H next to other statistics, and the per-window LD and distance statistics), the scatter engines (they keep the complete sites' entries of their per-site arrays, also with no copy), windowed_analysis.StatisticsComputer._n_sites (fallback), and each scalar function."
 
 [axes.span]
 description = "The per-base denominator. HaplotypeMatrix.get_span('auto') uses the accessible-mask count, then n_total_sites, then chrom_end - chrom_start + 1 (both bounds are inclusive)."
@@ -115,7 +115,7 @@ check = "The scalar function, each windowed engine and the fallback must agree. 
 [axes.alleles]
 description = "Biallelic and multiallelic sites. Allele codes are 0..k, and -1 is missing."
 values = ["biallelic", "multiallelic"]
-check = "The fused engines drop sites above an allele cap (windowed_analysis._filter_fused_allele_cap_raw, MultiallelicCapWarning). Some functions call HaplotypeMatrix.restrict_to_biallelic."
+check = "The fused engines drop sites above an allele cap (windowed_analysis._FusedSites, MultiallelicCapWarning). Some functions call HaplotypeMatrix.restrict_to_biallelic."
 
 # ---------------------------------------------------------------------------
 # Inputs: every loader. `params` is checked against the signature.
@@ -250,7 +250,7 @@ missing_data = ["include", "exclude"]
 function = "windowed_analysis.windowed_statistics_fused"
 stats = "windowed_analysis._FUSED_STATS"
 chosen = "No scatter engine takes the request, window_type is 'bp' or 'regions', every name is in its set, two-population names come with exactly two populations, and missing_data='include'. Under 'exclude' it runs only for a Garud-only request or a request with a name that the fallback does not know."
-span = "windowed_analysis._compute_window_bases: the accessible mask, else the window length. It does not read n_total_sites."
+span = "windowed_analysis._compute_window_bases, as thetas_scatter. Under 'exclude' every engine reads the bounds for the n_total_sites share from the unfiltered matrix, as the window grid does."
 missing_data = ["include", "exclude"]
 
 [engines.fused_chunked]
@@ -696,7 +696,7 @@ span_rule = [
     "Every function row with span other than \"none\".",
 ]
 missing_data_rule = [
-    "windowed_analysis._apply_exclude (fused), the 'exclude' code of each scatter engine, windowed_analysis.StatisticsComputer._n_sites (fallback).",
+    "windowed_analysis._FusedSites (fused), the 'exclude' code of each scatter engine, windowed_analysis.StatisticsComputer._n_sites (fallback).",
     "Every function row whose missing_data list holds the mode, and the GenotypeMatrix branch of each.",
 ]
 undefined_value_rule = [
@@ -734,7 +734,7 @@ parallel = []
 notes = "The dispatcher. It picks one engine per request ([engines]); the streaming path runs it once per chunk. accessible_bed uses chrom, else the stream's own contig; an eager matrix needs chrom for a BED with more than one contig. It raises TypeError for a keyword argument that no engine reads (windowed_analysis._check_windowed_kwargs), ValueError for an unknown window_type or missing_data, for regions without window_type='regions' and the reverse, and NotImplementedError for window_type 'snp' or 'regions' on a StreamingHaplotypeMatrix and for names that no engine computes on those window types."
 
 [functions."windowed_analysis.windowed_statistics_fused"]
-# signature: (haplotype_matrix, bp_bins, statistics, population, pop1, pop2, per_base, is_accessible, _win_starts, _win_stops, missing_data, chrom)
+# signature: (haplotype_matrix, bp_bins, statistics, population, pop1, pop2, per_base, is_accessible, _win_starts, _win_stops, missing_data, chrom, _sites)
 axis_kwargs = ["missing_data", "population", "pop1", "pop2", "per_base", "is_accessible", "bp_bins"]
 inputs = ["HaplotypeMatrix"]
 streaming = "rejects"

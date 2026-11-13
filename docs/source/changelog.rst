@@ -373,6 +373,27 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* Under ``missing_data='exclude'``, the fused and scatter windowed
+  engines copied every complete site into a new matrix before they
+  started. The chunked
+  engine runs when the matrix does not fit on the GPU twice, so a request
+  could run out of memory under ``'exclude'`` at sizes where ``'include'``
+  worked. The engines now keep an index of the kept sites and gather
+  through it, one chunk at a time, so ``'exclude'`` needs about the
+  memory of ``'include'``. The scatter engines keep the complete sites'
+  entries of their per-site allele counts. The allele-cap filter uses the same index, so
+  the kernels' input no longer needs a filtered copy either. Results do
+  not change. A request with ``mean_nsl``, Garud's H next to other
+  statistics, or the per-window LD and distance statistics still builds
+  the filtered copy, and so do ``mu_sfs``, ``daf_hist`` and
+  ``het_expected`` when the allele cap drops a site.
+* Under ``missing_data='exclude'``, with ``n_total_sites`` set and no
+  chromosome bounds or mask, the fused engines and the two-population
+  scatter engine took each window's share of ``n_total_sites`` over the
+  span of the complete sites, while the window grid and the
+  single-population scatter engine use the span of every site. When the
+  first or last site had a missing call, the engines disagreed. All now
+  use the span of every site.
 * ``windowed_analysis`` raised ``Unknown statistic`` when a request
   mixed statistics that no single engine computes, even for
   ``n_variants`` (a column of every result) and ``n_singletons``
