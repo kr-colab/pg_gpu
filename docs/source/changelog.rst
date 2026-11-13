@@ -373,6 +373,34 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``windowed_analysis`` raised ``Unknown statistic`` when a request
+  mixed statistics that no single engine computes, even for
+  ``n_variants`` (a column of every result) and ``n_singletons``
+  (another name for ``singletons``). Naming ``n_variants`` no longer
+  sends a request to the per-window fallback, and ``n_singletons`` and
+  ``singletons`` are one statistic on every engine, with the column named
+  as requested. So ``['n_variants', 'pi']`` now gives the same rows as
+  ``['pi']``, empty windows included. A mix that still has no single
+  engine (for example ``theta_l`` with ``zns``) raises a ``ValueError``
+  that names the engine of each statistic; a misspelled name says
+  ``Unknown statistic`` for every window type. A request with
+  ``n_singletons`` that a fast engine can now serve gets that engine's
+  columns: with two populations, single-population statistics for the
+  first population only, where the fallback gave one column per
+  population (which rule every engine should follow is open in #200).
+* The per-window fallback of ``windowed_analysis`` (used under
+  ``missing_data='exclude'`` for most statistics, for ``snp`` windows,
+  and for requests the fast engines cannot serve) skipped a window or
+  region with no variant, while the scatter and fused engines gave it a
+  row, so the rows of a request depended on the engine. The fallback now
+  gives every window a row, with the values the other engines give an
+  empty window (for example ``pi`` 0.0, ``tajimas_d`` NaN). A custom
+  statistic gets NaN on a window with no variant, without a call; on
+  any other window it is called with the unfiltered window, as before.
+  With two or more populations, its empty rows also use the
+  per-population column names, as its other rows do. The fallback now
+  computes every statistic on each empty window (about 1 to 3 ms per
+  window), so a fallback scan with many empty windows takes longer.
 * ``diversity_stats``, ``divergence_stats`` and ``compute_ld_statistics``
   check the requested names before they compute anything, and the
   ``Unknown statistic`` error names every unknown name, not only the

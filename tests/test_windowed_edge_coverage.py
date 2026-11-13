@@ -86,8 +86,10 @@ def test_statistics_computer_empty_window_callable_name_fallback():
     def my_stat(window):
         return 1.0
 
+    # A custom statistic gets NaN on a window with no variant, uncalled.
+    empty = m.get_subset(np.arange(0))
     res = StatisticsComputer(statistics=[my_stat]).compute(
-        WindowData("1", 0, 100, 50, m, 0, 0))
+        WindowData("1", 0, 100, 50, empty, 0, 0))
     assert "my_stat" in res and np.isnan(res["my_stat"])
 
 
