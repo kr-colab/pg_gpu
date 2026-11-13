@@ -28,43 +28,22 @@ def dd(counts: cp.ndarray,
     populations : tuple of int, optional
         Population indices. None for single population,
         (i, j) for between populations i and j
-    n_valid : cp.ndarray, optional
-        Valid sample counts per population. Shape depends on configuration:
-        - Single pop: shape (N,)
-        - Two pops: shape (N, 2) or tuple of (N,) arrays
+    n_valid : cp.ndarray or tuple, optional
+        Valid sample counts: a tuple with one ``(N,)`` array (or None) per
+        population, an ``(N, P)`` array with one column per population, or
+        one ``(N,)`` array that holds for every population. A population
+        with no size given takes it from its counts.
 
     Returns
     -------
     cp.ndarray
         D² values for each locus
     """
-    # Handle different input formats
-    if populations is None:
-        # Single population case
-        if counts.shape[1] == 4:
-            return _dd_single(counts, n_valid)
-        else:
-            # Default to first population if counts has multiple
-            return _dd_single(counts[:, :4], n_valid[:, 0] if n_valid is not None and n_valid.ndim == 2 else n_valid)
-
-    # Two population case
-    pop1, pop2 = populations
+    # With no populations given, the statistic is for the first population.
+    pop1, pop2 = (0, 0) if populations is None else populations
     if pop1 == pop2:
-        # Within population
-        start_idx = pop1 * 4
-        pop_counts = counts[:, start_idx:start_idx + 4]
-        pop_n_valid = None
-        if n_valid is not None:
-            if n_valid.ndim == 2:
-                pop_n_valid = n_valid[:, pop1]
-            elif isinstance(n_valid, tuple):
-                pop_n_valid = n_valid[pop1]
-            else:
-                pop_n_valid = n_valid
-        return _dd_single(pop_counts, pop_n_valid)
-    else:
-        # Between populations
-        return _dd_between(counts, pop1, pop2, n_valid)
+        return _dd_single(counts[:, pop1 * 4:pop1 * 4 + 4], _pop_n_valid(n_valid, pop1))
+    return _dd_between(counts, pop1, pop2, n_valid)
 
 
 def dz(counts: cp.ndarray,
@@ -80,23 +59,18 @@ def dz(counts: cp.ndarray,
     populations : tuple of int, optional
         Three population indices (i, j, k) for Dz(i,j,k).
         None defaults to single population (0, 0, 0)
-    n_valid : cp.ndarray, optional
-        Valid sample counts per population
+    n_valid : cp.ndarray or tuple, optional
+        Valid sample counts: a tuple with one ``(N,)`` array (or None) per
+        population, an ``(N, P)`` array with one column per population, or
+        one ``(N,)`` array that holds for every population. A population
+        with no size given takes it from its counts.
 
     Returns
     -------
     cp.ndarray
         Dz values for each locus
     """
-    if populations is None:
-        # Single population case
-        if counts.shape[1] == 4:
-            return _dz_single(counts, n_valid)
-        else:
-            # Default to first population
-            populations = (0, 0, 0)
-
-    return _dz_multi(counts, populations, n_valid)
+    return _dz_multi(counts, (0, 0, 0) if populations is None else populations, n_valid)
 
 
 def pi2(counts: cp.ndarray,
@@ -112,8 +86,11 @@ def pi2(counts: cp.ndarray,
     populations : tuple of int, optional
         Four population indices (i, j, k, l) for pi2(i,j,k,l).
         None defaults to single population (0, 0, 0, 0)
-    n_valid : cp.ndarray, optional
-        Valid sample counts per population
+    n_valid : cp.ndarray or tuple, optional
+        Valid sample counts: a tuple with one ``(N,)`` array (or None) per
+        population, an ``(N, P)`` array with one column per population, or
+        one ``(N,)`` array that holds for every population. A population
+        with no size given takes it from its counts.
 
     Returns
     -------
@@ -123,15 +100,7 @@ def pi2(counts: cp.ndarray,
         patterns (e.g. ``(i, j, k, l)`` and ``(k, l, i, j)``) return the same
         value.
     """
-    if populations is None:
-        # Single population case
-        if counts.shape[1] == 4:
-            return _pi2_single(counts, n_valid)
-        else:
-            # Default to first population
-            populations = (0, 0, 0, 0)
-
-    return _pi2_multi(counts, populations, n_valid)
+    return _pi2_multi(counts, (0, 0, 0, 0) if populations is None else populations, n_valid)
 
 
 def dd_within(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
@@ -140,7 +109,7 @@ def dd_within(counts: cp.ndarray, n_valid: Optional[cp.ndarray] = None) -> cp.nd
 
     Convenience function equivalent to dd(counts, populations=None)
     """
-    return _dd_single(counts, n_valid)
+    return dd(counts, None, n_valid)
 
 
 def dd_between(counts: cp.ndarray,
@@ -157,11 +126,13 @@ def dd_between(counts: cp.ndarray,
 
 def _hap_count_inputs(counts, n_valid):
     """Unpack a (N,4) counts array into the 5 contiguous float64 arrays
-    the haplotype r/r_squared/d_prime kernels expect."""
+    the haplotype r/r_squared/d_prime kernels expect. These statistics are
+    for one population, so n_valid is read for the first."""
     c11 = cp.ascontiguousarray(counts[:, 0].astype(cp.float64))
     c10 = cp.ascontiguousarray(counts[:, 1].astype(cp.float64))
     c01 = cp.ascontiguousarray(counts[:, 2].astype(cp.float64))
     c00 = cp.ascontiguousarray(counts[:, 3].astype(cp.float64))
+    n_valid = _pop_n_valid(n_valid, 0)
     if n_valid is None:
         n = c11 + c10 + c01 + c00
     else:
@@ -1166,8 +1137,11 @@ def compute_ld_statistics(counts: cp.ndarray,
     populations : dict, optional
         Population configurations for each statistic.
         E.g., {'dd': (0, 1), 'dz': (0, 0, 1), 'pi2': (0, 0, 1, 1)}
-    n_valid : cp.ndarray, optional
-        Valid sample counts per population
+    n_valid : cp.ndarray or tuple, optional
+        Valid sample counts: a tuple with one ``(N,)`` array (or None) per
+        population, an ``(N, P)`` array with one column per population, or
+        one ``(N,)`` array that holds for every population. A population
+        with no size given takes it from its counts.
 
     Returns
     -------
@@ -1186,6 +1160,26 @@ def compute_ld_statistics(counts: cp.ndarray,
 # Internal implementation functions
 
 
+def _pop_n_valid(n_valid, pop_idx):
+    """Valid sample size of one population, or None when ``n_valid`` does
+    not give it.
+
+    ``n_valid`` has three forms: a tuple with one ``(N,)`` array (or None)
+    per population, an ``(N, P)`` array with one column per population, and
+    one ``(N,)`` array that holds for every population. Every statistic
+    reads it here, so the forms give the same value. A tuple or an
+    ``(N, P)`` array with no entry for ``pop_idx`` raises ``IndexError``:
+    sizes given for other populations must not be dropped in silence.
+    """
+    if n_valid is None:
+        return None
+    if isinstance(n_valid, tuple):
+        return n_valid[pop_idx]
+    if n_valid.ndim == 2:
+        return n_valid[:, pop_idx]
+    return n_valid
+
+
 def _get_pop_data(counts, n_valid, pop_idx):
     """Extract counts and valid sample size for one population.
 
@@ -1193,8 +1187,8 @@ def _get_pop_data(counts, n_valid, pop_idx):
     ----------
     counts : cp.ndarray, shape (N, 4*P)
         Concatenated haplotype counts for P populations.
-    n_valid : tuple of cp.ndarray, cp.ndarray with ndim==2, or None
-        Per-population valid sample counts.
+    n_valid : tuple, cp.ndarray or None
+        Valid sample counts, in any form that ``_pop_n_valid`` reads.
     pop_idx : int
         Population index (0-based).
 
@@ -1205,17 +1199,8 @@ def _get_pop_data(counts, n_valid, pop_idx):
     """
     start = pop_idx * 4
     pop_counts = counts[:, start:start+4]
-    if n_valid is not None:
-        if isinstance(n_valid, tuple):
-            if pop_idx < len(n_valid) and n_valid[pop_idx] is not None:
-                pop_n = n_valid[pop_idx]
-            else:
-                pop_n = cp.sum(pop_counts, axis=1)
-        elif hasattr(n_valid, 'ndim') and n_valid.ndim == 2:
-            pop_n = n_valid[:, pop_idx]
-        else:
-            pop_n = n_valid
-    else:
+    pop_n = _pop_n_valid(n_valid, pop_idx)
+    if pop_n is None:
         pop_n = cp.sum(pop_counts, axis=1)
     return pop_counts[:, 0], pop_counts[:, 1], pop_counts[:, 2], pop_counts[:, 3], pop_n
 
@@ -1248,28 +1233,8 @@ def _dd_between(counts: cp.ndarray,
                 pop2_idx: int,
                 n_valid: Optional[cp.ndarray] = None) -> cp.ndarray:
     """Compute D² between two populations."""
-    # Extract counts for each population
-    start1 = pop1_idx * 4
-    start2 = pop2_idx * 4
-
-    c11, c12, c13, c14 = counts[:, start1], counts[:, start1+1], counts[:, start1+2], counts[:, start1+3]
-    c21, c22, c23, c24 = counts[:, start2], counts[:, start2+1], counts[:, start2+2], counts[:, start2+3]
-
-    # Get valid sample sizes
-    if n_valid is not None:
-        if isinstance(n_valid, tuple):
-            n1 = n_valid[0] if n_valid[0] is not None else cp.sum(counts[:, start1:start1+4], axis=1)
-            n2 = n_valid[1] if n_valid[1] is not None else cp.sum(counts[:, start2:start2+4], axis=1)
-        elif hasattr(n_valid, 'ndim') and n_valid.ndim == 2:
-            n1 = n_valid[:, pop1_idx]
-            n2 = n_valid[:, pop2_idx]
-        else:
-            # Assume n_valid is for between-population pairs
-            n1 = n_valid
-            n2 = n_valid
-    else:
-        n1 = cp.sum(counts[:, start1:start1+4], axis=1)
-        n2 = cp.sum(counts[:, start2:start2+4], axis=1)
+    c11, c12, c13, c14, n1 = _get_pop_data(counts, n_valid, pop1_idx)
+    c21, c22, c23, c24, n2 = _get_pop_data(counts, n_valid, pop2_idx)
 
     D1 = c12 * c13 - c11 * c14
     D2 = c22 * c23 - c21 * c24
@@ -1313,14 +1278,7 @@ def _dz_multi(counts: cp.ndarray,
 
     if pop1 == pop2 == pop3:
         # Single population
-        if n_valid is not None and isinstance(n_valid, tuple):
-            # Handle tuple case
-            pop_n_valid = n_valid[pop1] if pop1 < len(n_valid) and n_valid[pop1] is not None else None
-        elif n_valid is not None and hasattr(n_valid, 'ndim') and n_valid.ndim == 2:
-            pop_n_valid = n_valid[:, pop1]
-        else:
-            pop_n_valid = n_valid
-        return _dz_single(counts[:, pop1*4:(pop1+1)*4], pop_n_valid)
+        return _dz_single(counts[:, pop1*4:(pop1+1)*4], _pop_n_valid(n_valid, pop1))
 
     elif pop1 == pop2:  # Dz(i,i,j)
         c11, c12, c13, c14, n1 = get_pop_data(pop1)
@@ -1447,8 +1405,7 @@ def _pi2_single_term(counts: cp.ndarray,
 
     if n_unique == 1:
         # All same population
-        return _pi2_single(counts[:, i*4:(i+1)*4],
-                          n_valid[:, i] if n_valid is not None and n_valid.ndim == 2 else n_valid)
+        return _pi2_single(counts[:, i*4:(i+1)*4], _pop_n_valid(n_valid, i))
 
     elif max_count == 3:
         # Three same, one different -- normalize to (single, triple, triple, triple)

@@ -167,3 +167,68 @@ def test_degenerate_fixture_actually_hits_the_undefined_regime(
     assert np.all(np.isnan(cp.asnumpy(ld_statistics.dz(counts, (0, 1, 2), n_valid))))
     assert np.all(np.isnan(cp.asnumpy(
         ld_statistics.pi2(counts, (0, 1, 2, 3), n_valid))))
+
+
+# ── the forms of n_valid ───────────────────────────────────────────────
+DD_CONFIGS = [None, (0, 0), (2, 2), (0, 1), (1, 2), (3, 1)]
+_N_VALID_CASES = ([(ld_statistics.dd, c) for c in DD_CONFIGS]
+                  + [(ld_statistics.dz, c) for c in [None] + DZ_CONFIGS]
+                  + [(ld_statistics.pi2, c) for c in [None] + PI2_CONFIGS])
+
+
+@pytest.fixture(scope="module")
+def uneven_n_valid(counts_and_pops):
+    """Sample sizes that differ between populations and from the count
+    totals, so a size read from the wrong population, or from the counts,
+    changes the value."""
+    _, n_valid, _ = counts_and_pops
+    return n_valid + cp.arange(1, N_POPS + 1, dtype=n_valid.dtype)
+
+
+@pytest.mark.parametrize("stat,cfg", _N_VALID_CASES,
+                         ids=[f"{s.__name__}{c}" for s, c in _N_VALID_CASES])
+def test_tuple_n_valid_equals_two_dimensional(counts_and_pops, uneven_n_valid, stat, cfg):
+    counts, n_valid, _ = counts_and_pops
+    as_tuple = tuple(uneven_n_valid[:, p] for p in range(N_POPS))
+    expected = stat(counts, cfg, uneven_n_valid)
+    _agree(stat(counts, cfg, as_tuple), expected)
+    # The sizes are in use: the count totals give another value.
+    assert not np.allclose(cp.asnumpy(expected), cp.asnumpy(stat(counts, cfg, n_valid)))
+
+
+@pytest.mark.parametrize("stat", [ld_statistics.dd, ld_statistics.dz, ld_statistics.pi2],
+                         ids=lambda s: s.__name__)
+def test_tuple_n_valid_on_one_population_counts(counts_and_pops, uneven_n_valid, stat):
+    counts, _, _ = counts_and_pops
+    one = counts[:, :4]
+    _agree(stat(one, None, (uneven_n_valid[:, 0],)), stat(one, None, uneven_n_valid[:, 0]))
+
+
+@pytest.mark.parametrize("stat,cfg", [(ld_statistics.dd, (1, 2)), (ld_statistics.dd, (1, 1)),
+                                      (ld_statistics.dz, (1, 1, 2)), (ld_statistics.pi2, (1, 1, 2, 2))],
+                         ids=["dd_between", "dd_within", "dz", "pi2"])
+def test_tuple_n_valid_none_entry_uses_count_total(counts_and_pops, uneven_n_valid, stat, cfg):
+    # A population with None in the tuple takes its size from its counts.
+    counts, n_valid, _ = counts_and_pops
+    mixed = uneven_n_valid.copy()
+    mixed[:, 1] = n_valid[:, 1]
+    as_tuple = tuple(None if p == 1 else uneven_n_valid[:, p] for p in range(N_POPS))
+    _agree(stat(counts, cfg, as_tuple), stat(counts, cfg, mixed))
+
+
+def test_tuple_n_valid_without_the_population_raises(counts_and_pops, uneven_n_valid):
+    # A tuple for two populations says nothing about population 2.
+    counts, _, _ = counts_and_pops
+    short = (uneven_n_valid[:, 0], uneven_n_valid[:, 1])
+    with pytest.raises(IndexError):
+        ld_statistics.dd(counts, (1, 2), short)
+
+
+@pytest.mark.parametrize("stat", [ld_statistics.r, ld_statistics.r_squared, ld_statistics.dd_within],
+                         ids=lambda s: s.__name__)
+def test_one_population_statistics_read_every_n_valid_form(counts_and_pops, uneven_n_valid, stat):
+    counts, _, _ = counts_and_pops
+    one = counts[:, :4]
+    expected = stat(one, uneven_n_valid[:, 0])
+    _agree(stat(one, (uneven_n_valid[:, 0],)), expected)
+    _agree(stat(one, uneven_n_valid), expected)
