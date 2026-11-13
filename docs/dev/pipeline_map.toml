@@ -1662,7 +1662,7 @@ missing_data = []
 span = "none"
 undefined = "NaN where n < 4 (within) or n < 2 in either population (between)"
 parallel = ["haplotype_kernels.compute_all_dd_hap", "genotype_kernels.compute_all_dd_geno", "ld_statistics._tile_sigma_d2"]
-notes = "Counts are (N, 4*P) haplotype counts; a tuple n_valid raises AttributeError on the within-population branches."
+notes = "Counts are (N, 4*P) haplotype counts. Every statistic of this module that takes counts reads n_valid (a tuple by population, an (N, P) array, or one (N,) array) through ld_statistics._pop_n_valid."
 
 [functions."ld_statistics.dz"]
 # signature: (counts, populations, n_valid)
