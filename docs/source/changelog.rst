@@ -373,6 +373,17 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``theta_l``, ``normalized_fay_wu_h``, ``zeng_e`` and ``zeng_dh`` were
+  computed by one windowed engine only, so a ``windowed_analysis``
+  request that mixed one of them with a statistic of another engine (a
+  Garud statistic, ``mean_nsl``, ``zns``, ...) raised an error, and so
+  did ``snp`` windows. Every windowed engine now computes them, with the
+  scalar function's value on each window, so they can be mixed with any
+  other statistic and used with every window type. The per-window
+  fallback also computes ``theta_h``, ``fay_wu_h`` and ``max_daf`` now,
+  so ``snp`` windows accept them. Which engine serves a request under
+  ``missing_data='exclude'`` does not change.
+* ``diversity_stats`` now accepts ``zeng_dh``.
 * ``ld_statistics.dd`` and ``ld_statistics.pi2`` raised
   ``AttributeError`` when ``n_valid`` was a tuple of per-population
   arrays and the statistic was for one population. ``dd`` between two
