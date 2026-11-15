@@ -373,6 +373,15 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``sfs.fold_sfs`` paired bin ``i`` with bin ``n - 1 - i`` instead of
+  bin ``n - i``. For an even ``n`` -- every diploid sample size -- this
+  never read the top bin, merged the middle bin into its neighbor, and
+  returned ``n // 2`` bins instead of ``n // 2 + 1``; ``fold_joint_sfs``
+  made the same error on each even axis. Odd ``n`` was already correct.
+  Both now return the correct bins and shape for every ``n``; ``fold_sfs``
+  applied to ``sfs()`` now agrees with ``sfs_folded`` on biallelic data.
+  scikit-allel's own ``fold_sfs``/``fold_joint_sfs`` have the same
+  even-``n`` error, so they are no longer used as a reference there.
 * ``theta_l``, ``normalized_fay_wu_h``, ``zeng_e`` and ``zeng_dh`` were
   computed by one windowed engine only, so a ``windowed_analysis``
   request that mixed one of them with a statistic of another engine (a
