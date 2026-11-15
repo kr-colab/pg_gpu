@@ -15,6 +15,15 @@ from ._utils import population_rows
 from .streaming_matrix import StreamingHaplotypeMatrix, _stream_sum
 
 
+def _population_size(matrix, population):
+    """Number of haplotypes in ``population`` (a name in ``sample_sets`` or a
+    row list). It reads the row list only, so it also serves a stream, which
+    has no population matrix to build."""
+    if isinstance(population, str):
+        return len(matrix.sample_sets[population])
+    return len(population)
+
+
 def _per_allele_counts(matrix, n_alleles=None):
     """Per-allele counts (n_var, K) and per-site n_valid via the fused kernel.
 
@@ -189,11 +198,11 @@ def sfs_folded_scaled(haplotype_matrix: HaplotypeMatrix,
     """
     # sfs_folded already handles streaming / population subsetting and is pinned
     # to tskit; scaling is a fixed transform on top of it (no tskit analogue).
-    if population is not None:
-        n = population_rows(haplotype_matrix, population).num_haplotypes
-    else:
-        n = haplotype_matrix.num_haplotypes
+    # n cannot come from the length of s: 2m and 2m + 1 haplotypes fold to
+    # the same number of bins.
     s = sfs_folded(haplotype_matrix, population, missing_data=missing_data)
+    n = (haplotype_matrix.num_haplotypes if population is None
+         else _population_size(haplotype_matrix, population))
     return scale_sfs_folded(s, n)
 
 
@@ -409,10 +418,8 @@ def project_joint_sfs(haplotype_matrix: HaplotypeMatrix,
     ndarray, float64, shape ``(target_n1 + 1, target_n2 + 1)``
     """
     if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
-        sample_sets = haplotype_matrix.sample_sets or {}
-        pop1_list = sample_sets[pop1] if isinstance(pop1, str) else pop1
-        pop2_list = sample_sets[pop2] if isinstance(pop2, str) else pop2
-        n1, n2 = len(pop1_list), len(pop2_list)
+        n1 = _population_size(haplotype_matrix, pop1)
+        n2 = _population_size(haplotype_matrix, pop2)
         if target_n1 > n1 or target_n2 > n2:
             raise ValueError(
                 f"Cannot project up: target_n1={target_n1} > n1={n1} "

@@ -56,7 +56,9 @@ def _stream_sum(streaming_hm, kernel_fn):
     it an extra bin along that axis).
     """
     total = None
-    for _, _, chunk in streaming_hm.iter_gpu_chunks():
+    # A chunk with no variants still goes to the kernel: it gives zeros of
+    # the full shape, so a stream with no variant at all returns that array.
+    for _, _, chunk in streaming_hm.iter_gpu_chunks(skip_empty=False):
         # Preserve the kernel's own dtype: integer bincounts (sfs, joint_sfs)
         # stay int64; the folded SFS carries half-integer weights, so it must
         # accumulate in float (a forced int64 cast would truncate per chunk).
