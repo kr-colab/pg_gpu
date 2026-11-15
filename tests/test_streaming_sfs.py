@@ -1,9 +1,10 @@
 """The SFS functions on a stream, against the eager matrix of the same store.
 
 The store has no variant between 20 kb and 60 kb, so a stream over the whole
-contig meets chunks with no variants, and a stream over that gap has no
-variant at all. In both cases every function must return an array of its
-usual shape: the eager value for the whole contig, zeros for the gap.
+contig meets chunks with no variants, and a stream over that gap, or past the
+last variant, has no variant at all. In each case every function must return
+an array of its usual shape: the eager value for the whole contig, zeros for
+a region with no variants.
 """
 import numpy as np
 import pytest
@@ -11,7 +12,10 @@ import pytest
 from pg_gpu import HaplotypeMatrix, sfs
 
 POPS = {"A": [0, 1, 2, 3], "B": [4, 5, 6, 7]}
+# Two regions with no variants. The second has no end, so there is no span to
+# tile and the stream has no chunk at all.
 GAP = "1:25000-55000"
+PAST_THE_LAST_VARIANT = "1:90000-"
 
 CALLS = {
     "sfs": lambda m, md: sfs.sfs(m, missing_data=md),
@@ -61,10 +65,11 @@ def test_stream_matches_eager(store, name, missing_data):
 
 
 @pytest.mark.parametrize("missing_data", ["include", "exclude"])
+@pytest.mark.parametrize("region", [GAP, PAST_THE_LAST_VARIANT], ids=["empty_chunks", "no_chunk"])
 @pytest.mark.parametrize("name", CALLS)
-def test_stream_with_no_variants_gives_zeros(store, name, missing_data):
+def test_stream_with_no_variants_gives_zeros(store, name, region, missing_data):
     full = CALLS[name](_load(store, "always"), missing_data)
-    got = CALLS[name](_load(store, "always", region=GAP), missing_data)
+    got = CALLS[name](_load(store, "always", region=region), missing_data)
     assert isinstance(got, np.ndarray)
     assert got.shape == full.shape and got.dtype == full.dtype
     assert not got.any()
