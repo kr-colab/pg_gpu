@@ -1673,7 +1673,7 @@ missing_data = []
 span = "none"
 undefined = "NaN where a population's n is below its falling-factorial order (n < 4 for one population)"
 parallel = ["haplotype_kernels.compute_all_dz_hap", "genotype_kernels.compute_all_dz_geno"]
-notes = "Returns the raw (i, j, k) term; callers average (i, j, k) and (i, k, j) to get the moments Dz."
+notes = "Returns the raw (i, j, k) term; callers average (i, j, k) and (i, k, j) to get the moments Dz. n_valid is read through ld_statistics._pop_n_valid, as in dd."
 
 [functions."ld_statistics.pi2"]
 # signature: (counts, populations, n_valid)
@@ -1684,7 +1684,7 @@ missing_data = []
 span = "none"
 undefined = "NaN where a population's n is below its falling-factorial order (n < 4 for one population)"
 parallel = ["haplotype_kernels.compute_all_pi2_hap", "genotype_kernels.compute_all_pi2_geno", "ld_pipeline.generate_stat_specs", "ld_statistics._tile_sigma_d2"]
-notes = "Averages over the symmetry orbit internally; generate_stat_specs encodes the same weights for the kernel path."
+notes = "Averages over the symmetry orbit internally; generate_stat_specs encodes the same weights for the kernel path. n_valid is read through ld_statistics._pop_n_valid, as in dd."
 
 [functions."ld_statistics.dd_within"]
 # signature: (counts, n_valid)

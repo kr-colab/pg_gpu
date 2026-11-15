@@ -32,7 +32,7 @@ def dd(counts: cp.ndarray,
         Valid sample counts: a tuple with one ``(N,)`` array (or None) per
         population, an ``(N, P)`` array with one column per population, or
         one ``(N,)`` array that holds for every population. A population
-        with no size given takes it from its counts.
+        with no size given (``None``) takes it from its counts.
 
     Returns
     -------
@@ -63,7 +63,7 @@ def dz(counts: cp.ndarray,
         Valid sample counts: a tuple with one ``(N,)`` array (or None) per
         population, an ``(N, P)`` array with one column per population, or
         one ``(N,)`` array that holds for every population. A population
-        with no size given takes it from its counts.
+        with no size given (``None``) takes it from its counts.
 
     Returns
     -------
@@ -90,7 +90,7 @@ def pi2(counts: cp.ndarray,
         Valid sample counts: a tuple with one ``(N,)`` array (or None) per
         population, an ``(N, P)`` array with one column per population, or
         one ``(N,)`` array that holds for every population. A population
-        with no size given takes it from its counts.
+        with no size given (``None``) takes it from its counts.
 
     Returns
     -------
@@ -1141,7 +1141,7 @@ def compute_ld_statistics(counts: cp.ndarray,
         Valid sample counts: a tuple with one ``(N,)`` array (or None) per
         population, an ``(N, P)`` array with one column per population, or
         one ``(N,)`` array that holds for every population. A population
-        with no size given takes it from its counts.
+        with no size given (``None``) takes it from its counts.
 
     Returns
     -------
