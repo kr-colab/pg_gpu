@@ -1061,7 +1061,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "all-zero array with no polymorphic allele; all-zero array of the full shape on streaming input with no variant in its chunks; None when the stream has no chunk (a contig with no variant and no region end, zarr_source.ZarrGenotypeSource.iter_chunks)"
 parallel = ["sfs.fold_sfs"]
-notes = "Per allele with weight 1/2 (tskit rule); fold_sfs applied to sfs() gives a different result for even n, also on biallelic data."
+notes = "Per allele with weight 1/2 (tskit rule); fold_sfs matches it on biallelic data (scikit-allel's fold_sfs does not, for even n)."
 
 [functions."sfs.sfs_scaled"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -1193,7 +1193,7 @@ missing_data = []
 span = "none"
 undefined = "n/a"
 parallel = ["sfs.sfs_folded"]
-notes = "numpy only; a copy of scikit-allel fold_sfs. For even n it pairs bin i with bin n-1-i and returns n//2 bins, so it does not equal sfs_folded (n//2+1 bins); for odd n the two agree. tests/test_sfs_allel_comparison.py checks parity with scikit-allel."
+notes = "numpy only (sfs._fold_axis); matches sfs_folded on biallelic data. scikit-allel's own fold_sfs has the same even-n error this used to, so it is a reference only for odd n."
 
 [functions."sfs.fold_joint_sfs"]
 # signature: (s, n1, n2)
@@ -1204,7 +1204,7 @@ missing_data = []
 span = "none"
 undefined = "n/a"
 parallel = ["sfs.joint_sfs_folded"]
-notes = "numpy only; per-axis fold with the same n-1-i pairing as fold_sfs, not the global-minor fold of joint_sfs_folded."
+notes = "numpy only; folds each axis with fold_sfs's rule, not the global-minor fold of joint_sfs_folded."
 
 [functions."divergence.dxy_components"]
 # signature: (pop1_haps, pop2_haps)

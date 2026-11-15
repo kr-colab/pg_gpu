@@ -593,6 +593,18 @@ def scale_joint_sfs_folded(s, n1, n2):
     return s * i * j * (n1 - i) * (n2 - j)
 
 
+def _fold_axis(s, n, axis):
+    """Fold one axis of length ``n + 1`` to ``n // 2 + 1``: bin ``k`` gets
+    bin ``n - k`` added to it, except the self-paired middle bin (``k = n /
+    2``, only when ``n`` is even), which stays alone."""
+    m = n // 2
+    s = np.moveaxis(s, axis, 0)
+    o = s[:m + 1].copy()
+    tail = s[n:m:-1]
+    o[:len(tail)] += tail
+    return np.moveaxis(o, 0, axis)
+
+
 def fold_sfs(s, n):
     """Fold an unfolded SFS.
 
@@ -605,7 +617,7 @@ def fold_sfs(s, n):
 
     Returns
     -------
-    ndarray
+    ndarray, shape (n // 2 + 1,)
         Folded SFS.
     """
     s = np.asarray(s)
@@ -616,14 +628,11 @@ def fold_sfs(s, n):
         sn[:s.shape[0]] = s
         s = sn
 
-    nf = (n + 1) // 2
-    n_even = nf * 2
-    o = s[:nf] + s[nf:n_even][::-1]
-    return o
+    return _fold_axis(s, n, axis=0)
 
 
 def fold_joint_sfs(s, n1, n2):
-    """Fold a joint SFS.
+    """Fold a joint SFS, each axis on its own.
 
     Parameters
     ----------
@@ -632,7 +641,7 @@ def fold_joint_sfs(s, n1, n2):
 
     Returns
     -------
-    ndarray
+    ndarray, shape (n1 // 2 + 1, n2 // 2 + 1)
         Folded joint SFS.
     """
     s = np.asarray(s)
@@ -647,13 +656,6 @@ def fold_joint_sfs(s, n1, n2):
         sn[:, :s.shape[1]] = s
         s = sn
 
-    mf = (n1 + 1) // 2
-    nf = (n2 + 1) // 2
-    m_even = mf * 2
-    n_even = nf * 2
-
-    o = (s[:mf, :nf] +
-         s[mf:m_even, :nf][::-1] +
-         s[:mf, nf:n_even][:, ::-1] +
-         s[mf:m_even, nf:n_even][::-1, ::-1])
-    return o
+    s = _fold_axis(s, n1, axis=0)
+    s = _fold_axis(s, n2, axis=1)
+    return s

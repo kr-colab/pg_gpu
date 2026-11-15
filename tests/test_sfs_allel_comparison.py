@@ -189,12 +189,25 @@ class TestScalingComparison:
         np.testing.assert_array_equal(
             sfs.scale_joint_sfs(s), allel.scale_joint_sfs(s))
 
-    def test_fold_sfs(self):
-        for n in [8, 10, 20]:
+    def test_fold_sfs_odd_n_matches_allel(self):
+        # scikit-allel's fold_sfs is correct for odd n; even n is not,
+        # so it is not a reference there -- see test_fold_sfs_even_n below.
+        for n in [7, 9, 21]:
             np.random.seed(42)
             s = np.random.randint(0, 20, size=n + 1)
             np.testing.assert_array_equal(
                 sfs.fold_sfs(s, n), allel.fold_sfs(s, n))
+
+    def test_fold_sfs_even_n_matches_sfs_folded(self):
+        # sfs_folded computes the fold directly from per-site allele counts,
+        # independently of fold_sfs's array manipulation; the two must agree
+        # on biallelic data, where fold_sfs(sfs(hm), n) is the same quantity.
+        rng = np.random.default_rng(1)
+        for n_hap in [8, 20]:
+            hap = (rng.random((n_hap, 60)) < 0.4).astype(np.int8)
+            hm = HaplotypeMatrix(hap, np.arange(60) * 10 + 1, 1, 1000)
+            np.testing.assert_array_equal(
+                sfs.fold_sfs(sfs.sfs(hm), n_hap), sfs.sfs_folded(hm))
 
     def test_fold_sfs_pads_short_input(self):
         # A short unfolded SFS is zero-padded to n+1 before folding.
@@ -205,12 +218,27 @@ class TestScalingComparison:
         np.testing.assert_array_equal(sfs.fold_sfs(short, n),
                                       sfs.fold_sfs(padded, n))
 
+    @staticmethod
+    def _ref_fold_joint_sfs(s, n1, n2):
+        """Brute-force per-cell reference: bin (i, j) reflects past the
+        midpoint of each axis independently, the definition fold_joint_sfs
+        implements. scikit-allel is not a reference for an even axis."""
+        m1, m2 = n1 // 2, n2 // 2
+        o = np.zeros((m1 + 1, m2 + 1), dtype=np.asarray(s).dtype)
+        for i in range(n1 + 1):
+            for j in range(n2 + 1):
+                oi = i if i <= m1 else n1 - i
+                oj = j if j <= m2 else n2 - j
+                o[oi, oj] += s[i, j]
+        return o
+
     def test_fold_joint_sfs(self):
         rng = np.random.default_rng(0)
-        for n1, n2 in [(6, 5), (7, 4), (8, 8)]:
+        for n1, n2 in [(6, 5), (7, 4), (8, 8), (7, 5), (9, 9)]:
             s = rng.integers(0, 20, size=(n1 + 1, n2 + 1))
-            np.testing.assert_array_equal(sfs.fold_joint_sfs(s, n1, n2),
-                                          allel.fold_joint_sfs(s, n1, n2))
+            np.testing.assert_array_equal(
+                sfs.fold_joint_sfs(s, n1, n2),
+                self._ref_fold_joint_sfs(s, n1, n2))
 
     def test_fold_joint_sfs_pads_short_input(self):
         # A short joint SFS is zero-padded on both axes before folding.
