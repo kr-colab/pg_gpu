@@ -2003,6 +2003,9 @@ def _achaz_test_columns(results, stats, seg_count, n_harm_w, thetas):
         theta_est = S / a1
         theta_sq_est = S * (S - 1) / (a1 ** 2 + a2)
 
+    # Two tests can share an estimator, and thetas() can be a copy from the
+    # device, so each estimator is read once.
+    theta = {w: thetas(w) for w in set().union(*(_ACHAZ_TESTS[name] for name in wanted))}
     tests = {}
     for name in sorted(wanted):
         w1, w2 = _ACHAZ_TESTS[name]
@@ -2010,7 +2013,7 @@ def _achaz_test_columns(results, stats, seg_count, n_harm_w, thetas):
         with np.errstate(invalid='ignore', divide='ignore'):
             var = alpha * theta_est + beta * theta_sq_est
             tests[name] = np.where((var > 0) & (S >= 3) & (n_harm_w >= 3),
-                                   (thetas(w1) - thetas(w2)) / np.sqrt(var),
+                                   (theta[w1] - theta[w2]) / np.sqrt(var),
                                    np.nan)
         if name in stats:
             results[name] = tests[name]
