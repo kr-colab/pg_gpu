@@ -134,19 +134,21 @@ def test_snp_windows_accept_the_names():
 
 
 @pytest.mark.parametrize("missing_data", ["include", "exclude"])
-def test_two_population_request_uses_the_first_population(missing_data):
-    # With a two-population statistic the fused engine serves the request;
-    # single-population columns are for the first population, on the sites
-    # the request keeps (complete in both populations under 'exclude').
+def test_two_population_request_gives_each_population_a_column(missing_data):
+    # Each population's column is the scalar function on that population:
+    # under 'exclude' on the sites complete in it, whatever the sites of
+    # the two-population statistic in the same request.
     df = windowed_analysis(_hm(), WINDOW, statistics=NAMES + ['dxy', 'mu_var'],
                            populations=['a', 'b'], missing_data=missing_data)
-    hm = _hm()
-    if missing_data == 'exclude':
-        hm = hm.exclude_missing_sites(populations=['a', 'b'])
-    for name in NAMES:
-        np.testing.assert_allclose(
-            df[name].to_numpy(float), _expected(name, hm, population='a'),
-            rtol=1e-9, atol=1e-12, equal_nan=True, err_msg=name)
+    assert 'dxy' in df.columns
+    for pop in ('a', 'b'):
+        hm = _hm()
+        if missing_data == 'exclude':
+            hm = hm.exclude_missing_sites(populations=[pop])
+        for name in NAMES:
+            np.testing.assert_allclose(
+                df[f"{name}_{pop}"].to_numpy(float), _expected(name, hm, population=pop),
+                rtol=1e-9, atol=1e-12, equal_nan=True, err_msg=f"{name}_{pop}")
 
 
 def test_stream_matches_eager(tmp_path):

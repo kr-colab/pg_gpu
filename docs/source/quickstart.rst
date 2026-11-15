@@ -510,6 +510,9 @@ automatically routes through fused kernels when possible.
                    'garud_h1', 'garud_h12', 'mean_nsl'],
        populations=['pop1', 'pop2']
    )
+   # With two or more populations, each single-population statistic has
+   # one column for each: pi_pop1, pi_pop2, garud_h1_pop1, ... The
+   # two-population statistics keep one column: fst, fst_wc, dxy, da.
 
 Supported fused windowed statistics:
 

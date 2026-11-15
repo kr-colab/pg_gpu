@@ -292,6 +292,6 @@ class TestMultipleStats:
             statistics=['pi', 'fst', 'dxy'],
             populations=['pop1', 'pop2'])
 
-        assert 'pi' in result.columns
+        assert 'pi_pop1' in result.columns and 'pi_pop2' in result.columns
         assert 'fst' in result.columns
         assert 'dxy' in result.columns

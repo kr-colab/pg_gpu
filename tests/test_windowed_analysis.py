@@ -662,9 +662,8 @@ class TestTwoPopColumnNaming:
     """One request, one column set, whichever engine serves it (#193)."""
 
     def test_mixed_single_and_fst_wc_matches_scalar(self):
-        """A mixed single+two-pop request including fst_wc routes through
-        the generic mixed-dispatch path (_windowed_thetas_scatter +
-        _windowed_twopop_scatter)."""
+        """A mixed single+two-pop request gives pi for each population next
+        to fst_wc, each equal to its scalar function on the window."""
         from pg_gpu import diversity, divergence
 
         rng = np.random.RandomState(11)
@@ -679,9 +678,9 @@ class TestTwoPopColumnNaming:
                                step_size=window_size,
                                statistics=['pi', 'fst_wc'],
                                populations=['p1', 'p2'], span_normalize=False)
-        assert 'pi' in df.columns and 'fst_wc' in df.columns
+        assert {'pi_p1', 'pi_p2', 'fst_wc'} <= set(df.columns)
 
-        for start, pi_w, wc_w in zip(df['start'], df['pi'], df['fst_wc']):
+        for start, pi_w, pi2_w, wc_w in zip(df['start'], df['pi_p1'], df['pi_p2'], df['fst_wc']):
             stop = start + window_size
             mask = (pos >= start) & (pos < stop)
             if not mask.any():
@@ -691,6 +690,9 @@ class TestTwoPopColumnNaming:
             sub.sample_sets = {'p1': list(range(20)), 'p2': list(range(20, 40))}
             assert np.isclose(pi_w, diversity.pi(sub, population='p1',
                                                  span_normalize=False),
+                              rtol=1e-9, atol=1e-12)
+            assert np.isclose(pi2_w, diversity.pi(sub, population='p2',
+                                                  span_normalize=False),
                               rtol=1e-9, atol=1e-12)
             wc_ref = divergence.fst_weir_cockerham(sub, 'p1', 'p2')
             if np.isnan(wc_w):
@@ -2249,7 +2251,7 @@ class TestOneGridAllModes:
                                   missing_data='include')
         assert list(wa_ex['start']) == list(wa_in['start'])
         assert list(wa_ex['end']) == list(wa_in['end'])
-        assert 'fst_hudson' in wa_ex.columns and 'pi' in wa_ex.columns
+        assert {'fst_hudson', 'pi_p1', 'pi_p2'} <= set(wa_ex.columns)
 
     def test_exclude_fst_lands_on_labeled_window(self):
         from pg_gpu import divergence
@@ -2442,9 +2444,8 @@ class TestMixedRequests:
         both = windowed_analysis(self._hm(), size,
                                  statistics=['singletons', 'n_singletons'], **kw)
         cols = [c for c in both.columns if 'singletons' in str(c)]
-        assert sorted(cols) == sorted(
-            [n + (f"_{pops[0]}" if pops and window_type == 'snp' else "")
-             for n in ('singletons', 'n_singletons')])
+        # One named population gives bare columns on every window type.
+        assert sorted(cols) == ['n_singletons', 'singletons']
         pairs = [(c, 'n_' + c) for c in cols if c.startswith('singletons')]
         for a, b in pairs:
             np.testing.assert_array_equal(both[a], both[b])
