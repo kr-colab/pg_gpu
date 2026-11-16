@@ -466,11 +466,7 @@ Bug fixes
   ``['pi']``, empty windows included. A mix that still has no single
   engine (for example ``theta_l`` with ``zns``) raises a ``ValueError``
   that names the engine of each statistic; a misspelled name says
-  ``Unknown statistic`` for every window type. A request with
-  ``n_singletons`` that a fast engine can now serve gets that engine's
-  columns: with two populations, single-population statistics for the
-  first population only, where the fallback gave one column per
-  population (which rule every engine should follow is open in #200).
+  ``Unknown statistic`` for every window type.
 * The per-window fallback of ``windowed_analysis`` (used under
   ``missing_data='exclude'`` for most statistics, for ``snp`` windows,
   and for requests the fast engines cannot serve) skipped a window or

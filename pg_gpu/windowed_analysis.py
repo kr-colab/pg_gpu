@@ -90,10 +90,11 @@ _FUSED_STATS = (_FUSED_SINGLE_STATS | _TWO_POP_STATS
                 | _SNP_DIST_STATS | _PAIRWISE_LD_STATS | _DIST_MOMENT_STATS)
 
 # Fused statistics that the per-window fallback serves under 'exclude' when a
-# request holds nothing else. Its columns differ from the fused engine's with
-# populations (one column per population, where the fused engine gives the
-# first population only), so which engine serves a request is part of its
-# output. Do not add a name here when the fallback learns to compute it.
+# request holds nothing else. The fused engine gives the same values, but
+# for Garud's H next to other statistics it holds a filtered copy of the
+# matrix, which the choice of the chunked engine does not count, and it
+# drops sites over its allele cap. Do not add a name here when the fallback
+# learns to compute it.
 _EXCLUDE_FALLBACK_FIRST = (frozenset({'pi', 'theta_w', 'tajimas_d',
                                       'segregating_sites', 'het_expected'})
                            | frozenset(_FUSED_GARUD_STATS) | _TWO_POP_STATS)
