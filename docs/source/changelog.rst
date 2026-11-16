@@ -98,6 +98,25 @@ Results that change even for two-allele data
 
 Read this section if you are comparing against older pg_gpu results.
 
+* ``windowed_analysis`` with two or more populations returns one column
+  for each population for every single-population statistic, named
+  ``<statistic>_<population>`` (``pi_pop1``, ``pi_pop2``,
+  ``garud_h1_pop1``, ...). It used to return one bare column that held
+  the first population only, or the per-population columns, by
+  ``missing_data`` mode and by the other statistics in the request. A
+  request that reads ``df['pi']`` with two populations must now read
+  ``df['pi_pop1']``. With one named population the columns keep the
+  bare name on every window type; ``snp`` windows used to add the
+  population there.
+* Under ``missing_data='exclude'``, a windowed statistic now uses the
+  sites where its own populations have no missing call: ``pi`` of
+  ``pop1`` looks at ``pop1`` only, ``fst`` of ``pop1`` and ``pop2`` at
+  both. This is what the scalar functions do. Before, a request with a
+  two-population statistic could compute ``pi`` on the sites complete in
+  both populations, so ``pi`` changed with the other statistics in the
+  request. ``n_variants`` is one column for each window, and with two or
+  more populations it counts the sites complete in every named
+  population.
 * Haplotype identity with missing calls has one rule on every path.
   ``garud_h``, ``moving_garud_h``, the windowed Garud's H columns,
   ``haplotype_count``, ``haplotype_diversity``,
@@ -447,11 +466,7 @@ Bug fixes
   ``['pi']``, empty windows included. A mix that still has no single
   engine (for example ``theta_l`` with ``zns``) raises a ``ValueError``
   that names the engine of each statistic; a misspelled name says
-  ``Unknown statistic`` for every window type. A request with
-  ``n_singletons`` that a fast engine can now serve gets that engine's
-  columns: with two populations, single-population statistics for the
-  first population only, where the fallback gave one column per
-  population (which rule every engine should follow is open in #200).
+  ``Unknown statistic`` for every window type.
 * The per-window fallback of ``windowed_analysis`` (used under
   ``missing_data='exclude'`` for most statistics, for ``snp`` windows,
   and for requests the fast engines cannot serve) skipped a window or

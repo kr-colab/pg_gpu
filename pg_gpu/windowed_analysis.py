@@ -90,10 +90,11 @@ _FUSED_STATS = (_FUSED_SINGLE_STATS | _TWO_POP_STATS
                 | _SNP_DIST_STATS | _PAIRWISE_LD_STATS | _DIST_MOMENT_STATS)
 
 # Fused statistics that the per-window fallback serves under 'exclude' when a
-# request holds nothing else. Its columns differ from the fused engine's with
-# populations (one column per population, where the fused engine gives the
-# first population only), so which engine serves a request is part of its
-# output. Do not add a name here when the fallback learns to compute it.
+# request holds nothing else. The fused engine gives the same values, but
+# for Garud's H next to other statistics it holds a filtered copy of the
+# matrix, which the choice of the chunked engine does not count, and it
+# drops sites over its allele cap. Do not add a name here when the fallback
+# learns to compute it.
 _EXCLUDE_FALLBACK_FIRST = (frozenset({'pi', 'theta_w', 'tajimas_d',
                                       'segregating_sites', 'het_expected'})
                            | frozenset(_FUSED_GARUD_STATS) | _TWO_POP_STATS)
@@ -1495,13 +1496,24 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         Statistics to compute. ``n_variants`` is a column of every result,
         and ``n_singletons`` is another name for ``singletons``. Statistics
         that no single engine computes (for example ``ld_decay`` with
-        ``zns``) raise ValueError; request them in separate calls. A custom
+        ``zns``) raise ValueError; request them in separate calls. (With
+        two or more populations the single-population statistics run in a
+        request of their own, so such a mix can then be served.) A custom
         callable gets NaN on a window with no variant, without a call.
     populations : list, optional
-        Population names
+        Populations, each a name in ``sample_sets`` or a list of rows. With
+        one population, each statistic is computed on its rows and keeps
+        its bare column name. With two or more, each single-population
+        statistic gets one column for each population, named
+        ``<statistic>_<population>``; a two-population statistic gets one
+        column named after the statistic with exactly two populations, and
+        one column for each pair, ``<statistic>_<pop1>_<pop2>``, with more.
     missing_data : str
         'include' - Use all sites, calculate from available data per site
-        'exclude' - Only use sites with no missing data
+        'exclude' - Only use sites with no missing data. A site counts for
+        a statistic when the populations of that statistic (every row, when
+        no population is given) have no missing call there, and
+        ``n_variants`` counts the sites complete in every named population.
     span_normalize : bool
         ``True`` (default): divide each window by its accessible bases if
         the matrix has a mask; else by its share of ``n_total_sites``, in
@@ -1657,6 +1669,86 @@ def _check_fallback_covers(requested, window_type):
                      f"engine computes {where}. Request it separately.")
 
 
+def _is_per_population(stat):
+    """Whether ``stat`` is computed on the rows of one population.
+
+    The two-population statistics take a pair, and the fallback's LD
+    statistics and custom callables take the window as it is.
+    """
+    return (isinstance(stat, str) and stat not in _TWO_POP_STATS
+            and stat not in StatisticsComputer.LD_STATS)
+
+
+def _windowed_per_population(haplotype_matrix, statistics, populations,
+                             missing_data, **dispatch):
+    """Serve a request that names two or more populations.
+
+    Each single-population statistic is computed in a request of its own for
+    each population, and its columns are named ``<column>_<population>``. So
+    whichever engine serves a population, the statistic sees that
+    population's rows only: under 'exclude' a site counts when that
+    population has no missing call there, as in the scalar function, and the
+    value does not depend on what else was requested. The other statistics
+    go together in one request with every population.
+
+    ``n_variants`` is one column for the row, so it cannot follow each
+    statistic's own sites. Under 'exclude' it counts the sites that are
+    complete in every named population; under 'include', every site.
+    """
+    def run(stats, pops):
+        return _windowed_analysis(
+            haplotype_matrix, statistics=stats, populations=pops,
+            missing_data=missing_data, **dispatch)
+
+    if len({str(pop) for pop in populations}) < len(populations):
+        raise ValueError(f"populations must be distinct; got {populations}")
+    per_population = [s for s in statistics if _is_per_population(s)]
+    rest = [s for s in statistics if not _is_per_population(s)]
+    frames = [run(per_population, [pop]) for pop in populations]
+    grid = frames[0]
+    if len(grid) == 0:
+        return grid
+    prefix = list(CANONICAL_WINDOW_PREFIX)
+    suffixed = []
+    for pop, frame in zip(populations, frames):
+        _check_same_windows(grid, frame)
+        suffixed.append(frame.drop(columns=prefix).add_suffix(f"_{pop}"))
+    # Statistic by statistic, each with its populations in order, as the
+    # per-window fallback names them.
+    order = [f"{column}_{pop}" for column in grid.columns.drop(prefix)
+             for pop in populations]
+    parts = [grid[prefix], pd.concat(suffixed, axis=1)[order]]
+    if rest:
+        frame = run(rest, populations)
+        _check_same_windows(grid, frame)
+        parts.append(frame.drop(columns=prefix))
+    # The rows were checked by position, so join them by position too.
+    out = pd.concat([part.reset_index(drop=True) for part in parts], axis=1)
+
+    windows = _WindowAccumulator(
+        cp.asarray(haplotype_matrix.positions),
+        cp.asarray(out['start'].to_numpy(), dtype=cp.float64),
+        cp.asarray(out['end'].to_numpy(), dtype=cp.float64))
+    incomplete = (haplotype_matrix._site_has_missing(populations)
+                  if missing_data == 'exclude' else None)
+    out['n_variants'] = _window_site_counts(windows, incomplete).get().astype(int)
+    return out
+
+
+def _check_same_windows(frame, other):
+    """Raise unless the rows of ``other`` are the windows of ``frame``.
+
+    Two requests on one matrix can be served by different engines, and their
+    columns can be joined by row only when each engine made the same windows.
+    """
+    if not (len(frame) == len(other)
+            and np.array_equal(frame['start'].to_numpy(), other['start'].to_numpy())
+            and np.array_equal(frame['end'].to_numpy(), other['end'].to_numpy())):
+        raise RuntimeError(
+            "windowed_analysis: two engines gave different windows for one "
+            "request; the per-population columns cannot be joined.")
+
+
 def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                       window_size: int = 50000,
                       step_size: Optional[int] = None,
@@ -1758,6 +1850,19 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         if len(win_starts) == 0:
             return pd.DataFrame()
 
+    # With two or more populations, each single-population statistic is
+    # computed for each of them. snp windows go to the per-window fallback,
+    # which does that itself.
+    # A request with no statistic left (n_variants alone) goes this way too,
+    # for its n_variants column.
+    if (window_type in ('bp', 'regions') and len(populations or []) >= 2
+            and (not statistics or any(_is_per_population(s) for s in statistics))):
+        return _windowed_per_population(
+            haplotype_matrix, statistics, populations, missing_data,
+            window_size=window_size, step_size=step_size,
+            span_normalize=span_normalize, chrom=chrom,
+            window_type=window_type, **kwargs)
+
     if window_type in ('bp', 'regions'):
         # Pure single-pop request
         if requested <= _SCATTER_SINGLE_STATS and len(populations or []) <= 1:
@@ -1776,28 +1881,6 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 chrom=chrom, win_starts=win_starts, win_stops=win_stops)
             if result is not None:
                 return result
-
-        # Mixed single + two-pop request
-        single_stats = sorted(requested & _SCATTER_SINGLE_STATS)
-        twopop_stats = sorted(requested & _TWO_POP_STATS)
-        if (single_stats and twopop_stats
-                and requested <= (_SCATTER_SINGLE_STATS | _TWO_POP_STATS)
-                and len(populations or []) == 2):
-            df1 = _windowed_thetas_scatter(
-                haplotype_matrix, window_size, step_size,
-                single_stats, [populations[0]], missing_data, span_normalize,
-                chrom=chrom, win_starts=win_starts, win_stops=win_stops)
-            df2 = _windowed_twopop_scatter(
-                haplotype_matrix, window_size, step_size,
-                twopop_stats, populations, missing_data, span_normalize,
-                chrom=chrom, win_starts=win_starts, win_stops=win_stops)
-            if df1 is not None and df2 is not None:
-                # Both DataFrames share the canonical prefix; copy only the
-                # per-stat columns from df2 into df1.
-                for col in df2.columns:
-                    if col not in CANONICAL_WINDOW_PREFIX:
-                        df1[col] = df2[col].values
-                return df1
 
     # Fused CUDA kernel path for more complex stat combinations.
 
@@ -1841,9 +1924,8 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         if len(win_starts) == 0:
             return pd.DataFrame()
 
-        pop1 = populations[0] if populations and len(populations) >= 1 else None
+        pop1 = populations[0] if populations else None
         pop2 = populations[1] if populations and len(populations) >= 2 else None
-        population = pop1  # single-pop stats use the first population
 
         # Chunk the fused engine when its transposed int8 copy would not fit.
         # A Garud-only request never builds that copy (it batches its own
@@ -1861,7 +1943,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             haplotype_matrix,
             bp_bins=bp_bins,
             statistics=tuple(statistics),
-            population=population,
+            population=pop1,
             pop1=pop1,
             pop2=pop2,
             per_base=(span_normalize is not False),
@@ -1892,20 +1974,19 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
             df = df.rename(columns=lambda c: ours + c[len(theirs):]
                            if str(c) == theirs or str(c).startswith(theirs + '_')
                            else c)
-    # The analyzer names two-population columns "<stat>_<pop1>_<pop2>"
-    # because it computes every pair. The fused and scatter engines name
-    # them after the statistic alone when exactly two populations are
-    # given, and a two-population request must name those columns the
-    # same whichever engine serves it. With one pair the bare name is
-    # unambiguous, so rename on the way out; direct analyzer use and
-    # requests with three or more populations keep the suffixed form.
-    if populations is not None and len(populations) == 2:
-        p1, p2 = populations
-        df = df.rename(columns={
-            f"{stat}_{p1}_{p2}": stat
-            for stat in statistics
-            if isinstance(stat, str) and f"{stat}_{p1}_{p2}" in df.columns
-        })
+    # The analyzer names a single-population column "<stat>_<pop>" and a
+    # two-population column "<stat>_<pop1>_<pop2>", because it computes
+    # every population and every pair. The scatter and fused engines give
+    # the bare name where it is unambiguous: a single-population statistic
+    # with one population named, a two-population statistic with exactly
+    # two. A request must get the same names whichever engine serves it,
+    # so those columns lose the suffix here; requests with more
+    # populations, and direct analyzer use, keep the suffixed form.
+    if populations is not None and len(populations) in (1, 2):
+        suffix = "_" + "_".join(str(pop) for pop in populations)
+        named = [s for s in statistics if isinstance(s, str)] + ['n_complete_haplotypes']
+        df = df.rename(columns={name + suffix: name for name in named
+                                if name + suffix in df.columns})
     return df
 
 
@@ -2487,7 +2568,8 @@ class _FusedSites:
     reads is then complete. Completeness is judged over the rows the request
     reads: both populations when a two-population statistic is requested, so
     single-population statistics in the same request see only sites complete
-    in both; else the single population; else every row. A site's
+    in both (direct engine calls only; ``windowed_analysis`` never mixes
+    them); else the single population; else every row. A site's
     completeness does not depend on the window, so one filter equals
     dropping each window's incomplete sites. A Garud-only request stays
     under 'exclude': ``garud_h_windows`` skips incomplete columns itself.

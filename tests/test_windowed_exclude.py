@@ -137,19 +137,20 @@ def test_exclude_daf_hist_matches_scalar(case):
 
 
 @pytest.mark.parametrize("stat", ["theta_h", "singletons", "fay_wu_h", "max_daf"])
-def test_exclude_single_population_statistics_outside_the_fallback(case, stat):
-    # With a Garud statistic, or with two populations and no two-population
-    # statistic, these requests skip the scatter engine; the fallback does not
-    # know them, so the fused engine serves them on the complete sites.
+def test_exclude_single_population_statistics_with_garud_and_with_two_populations(case, stat):
+    # With a Garud statistic the request skips the scatter engine, and the
+    # statistic keeps its value on the complete sites. With two populations
+    # each one gets a column, on the sites complete in that population.
     hap, complete, _ = case
     with_garud = _exclude(hap, [stat, "garud_h1"])
     np.testing.assert_allclose(with_garud[stat], _include(complete, [stat])[stat], rtol=1e-12)
 
     two_pops = _exclude(hap, [stat], sample_sets=POPS, populations=["p1", "p2"])
-    p1_complete = _hm(hap, POPS).exclude_missing_sites(populations=["p1"])
-    np.testing.assert_allclose(two_pops[stat],
-                               _include(p1_complete, [stat], populations=["p1"])[stat],
-                               rtol=1e-12)
+    for pop in ("p1", "p2"):
+        pop_complete = _hm(hap, POPS).exclude_missing_sites(populations=[pop])
+        np.testing.assert_allclose(two_pops[f"{stat}_{pop}"],
+                                   _include(pop_complete, [stat], populations=[pop])[stat],
+                                   rtol=1e-12, equal_nan=True)
 
 
 @pytest.mark.parametrize("engine", [windowed_statistics_fused, windowed_statistics_fused_chunked])
@@ -186,8 +187,8 @@ def test_chunked_and_unchunked_agree_with_two_populations(case):
 
 def test_exclude_judges_completeness_within_the_population(case):
     # Site 7 is complete for p1 but not for p1 and p2 together. A
-    # single-population request on p1 keeps it; a request that also reads
-    # p2 through a two-population statistic drops it.
+    # single-population statistic on p1 keeps it, also in a request that
+    # reads p2; a two-population statistic drops it.
     hap, _, _ = case
     hm = _hm(hap, POPS)
     p1_complete = hm.exclude_missing_sites(populations=["p1"])
@@ -202,9 +203,11 @@ def test_exclude_judges_completeness_within_the_population(case):
     np.testing.assert_array_equal(single["n_variants"], ref1["n_variants"])
 
     mixed = _exclude(hap, ["zns", "fst"], sample_sets=POPS, populations=["p1", "p2"])
-    ref2 = _include(both_complete, ["zns", "fst"], populations=["p1", "p2"])
-    np.testing.assert_allclose(mixed["zns"], ref2["zns"], rtol=1e-12)
+    np.testing.assert_allclose(mixed["zns_p1"], ref1["zns"], rtol=1e-12)
+    ref2 = _include(both_complete, ["fst"], populations=["p1", "p2"])
     np.testing.assert_allclose(mixed["fst"], ref2["fst"], rtol=1e-12, equal_nan=True)
+    # One count for the row: the sites complete in every named population.
+    np.testing.assert_array_equal(mixed["n_variants"], ref2["n_variants"])
 
 
 @pytest.mark.parametrize("populations", [None, ["p1"]], ids=["all-rows", "p1"])

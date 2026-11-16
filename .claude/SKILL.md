@@ -469,12 +469,13 @@ df = windowed_analysis(
     missing_data='include',        # 'include' or 'exclude'
     span_normalize=True,           # bool; True auto-detects best denominator
 )
-# Columns: chrom, start, end, center, n_variants, window_id, then one
-# column per requested statistic with the bare stat name ('pi', 'fst',
-# 'dxy', ...). The fused kernels emit bare names regardless of how
-# populations= is set — don't expect 'pi_pop1' / 'fst_pop1_pop2' suffixes
-# here. (Those only appear in the slow per-window WindowedAnalyzer.compute
-# path, which fires for non-fused stats like LD-bin stats.) If
+# Columns: chrom, start, end, center, n_variants, window_id, then the
+# statistics. With two or more populations, every single-population
+# statistic has one column per population ('pi_pop1', 'pi_pop2',
+# 'tajimas_d_pop1', ...), and a two-population statistic has one bare
+# column with exactly two populations ('fst', 'dxy') or one per pair
+# with more ('fst_pop1_pop2'). With one population or none, every column
+# has the bare stat name ('pi'). If
 # accessible_bed= is passed (or the matrix already has a mask attached),
 # span_normalize uses the per-window accessible-base count as the
 # denominator.

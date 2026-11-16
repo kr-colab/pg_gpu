@@ -241,6 +241,7 @@ Compute multiple statistics across thousands of windows without Python loops:
        statistics=['pi', 'fst', 'dxy'],
        populations=['CEU', 'YRI']
    )
+   # pi has one column for each population: pi_CEU and pi_YRI
 
 For end-to-end command-line workflows (``vcf_to_zarr.py``,
 ``genome_scan.py``), see :doc:`workflows`.
