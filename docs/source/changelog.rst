@@ -400,6 +400,22 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``distance_stats.dist_moments`` (and ``dist_var``, ``dist_skew``,
+  ``dist_kurt``) gave a variance near 1e-33 and a skewness of rounding
+  noise for some samples in which every pairwise distance is the same
+  (for example three distances of 0.1): the mean of equal values can
+  round away from them. It now finds equal distances by their range and
+  returns exactly ``(0.0, 0.0, 0.0)``.
+* ``dist_moments`` copied every pairwise distance to the host and
+  computed the moments there with NumPy. The distances now stay on the
+  GPU and six scalars come to the host. A call takes about 1 ms for 100
+  to 1,000 haplotypes, where it took 1 ms at 100 and 35 ms at 1,000. The
+  windowed ``dist_var``, ``dist_skew`` and ``dist_kurt`` gain with it: a
+  scan of 1,000 windows went from 24 s to about 1 s with 1,000
+  haplotypes. The values agree to rounding.
+* ``pairwise_diffs_haploid`` and ``pairwise_diffs_diploid`` raise
+  ``TypeError`` for a matrix of the other class. They raised
+  ``AttributeError``.
 * Four defects in ``pg_gpu.plotting``. Every plot function now takes a
   CuPy array; ``plot_pairwise_ld`` raised ``TypeError`` on the output of
   ``HaplotypeMatrix.pairwise_r2()``, the input that its docstring names.

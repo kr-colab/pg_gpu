@@ -3,23 +3,45 @@ GPU-accelerated pairwise distance distribution statistics.
 
 Computes pairwise Hamming distances and their distributional moments
 (variance, skewness, kurtosis) for haploid and diploid data.
-All computation stays on GPU until final scalar results.
+All computation stays on GPU until the final results.
 """
 
 import numpy as np
 import cupy as cp
 from .haplotype_matrix import HaplotypeMatrix
 from .genotype_matrix import GenotypeMatrix
+from ._haplotype_groups import complete_sites
 from ._utils import _eager_only, population_rows
 from ._warnings import _phase_dependent, _warn_unphased
 
 
-def _extract_upper_triangle(mat):
-    """Extract upper triangle of a square matrix as condensed numpy vector."""
-    n = mat.shape[0]
-    idx_i, idx_j = cp.triu_indices(n, k=1)
-    result = mat[idx_i, idx_j]
-    return result.get() if hasattr(result, 'get') else result
+def _upper_triangle(mat):
+    """The upper triangle of a square CuPy matrix as a condensed CuPy
+    vector, row by row."""
+    idx_i, idx_j = cp.triu_indices(mat.shape[0], k=1)
+    return mat[idx_i, idx_j]
+
+
+def _diffs_matrix_gpu(matrix, kind, population, missing_data):
+    """Per-site differences between every two rows of ``matrix``, as a
+    square CuPy matrix; NaN for two rows with no site called in both.
+
+    ``kind`` is the class that the caller takes: its rows are haplotypes
+    (allele indices) or individuals (0/1/2 genotypes), and both count
+    differing values with one-hot indicators. A matrix of the other class
+    raises, because its rows would be read as something they are not.
+    """
+    if not isinstance(matrix, kind):
+        raise TypeError(
+            f"expected a {kind.__name__}, got {type(matrix).__name__}")
+    if population is not None:
+        matrix = population_rows(matrix, population)
+    if matrix.device == 'CPU':
+        matrix.transfer_to_gpu()
+    calls = matrix.genotypes if kind is GenotypeMatrix else matrix.haplotypes
+    if missing_data == 'exclude':
+        calls = complete_sites(calls)
+    return _pairwise_diffs_matrix_gpu(calls, missing_data='normalize')
 
 
 def _pairwise_diffs_matrix_gpu(hap, missing_data='include'):
@@ -128,23 +150,8 @@ def pairwise_diffs_haploid(haplotype_matrix, population=None,
                    alternative="use pairwise_diffs_diploid for individual-"
                    "level distances on a GenotypeMatrix")
 
-    if population is not None:
-        matrix = population_rows(haplotype_matrix, population)
-    else:
-        matrix = haplotype_matrix
-
-    if matrix.device == 'CPU':
-        matrix.transfer_to_gpu()
-
-    hap = matrix.haplotypes
-
-    if missing_data == 'exclude':
-        missing_per_var = cp.sum(hap < 0, axis=0)
-        complete = missing_per_var == 0
-        hap = hap[:, complete]
-
-    diffs_mat = _pairwise_diffs_matrix_gpu(hap, missing_data='normalize')
-    return _extract_upper_triangle(diffs_mat)
+    return cp.asnumpy(_upper_triangle(_diffs_matrix_gpu(
+        haplotype_matrix, HaplotypeMatrix, population, missing_data)))
 
 
 @_eager_only
@@ -177,20 +184,8 @@ def pairwise_diffs_diploid(genotype_matrix, population=None,
     diffs : ndarray, float64, condensed form (n_pairs,)
         NaN for a pair with no site called in both individuals.
     """
-
-    if population is not None:
-        genotype_matrix = population_rows(genotype_matrix, population)
-    if genotype_matrix.device == 'CPU':
-        genotype_matrix.transfer_to_gpu()
-    geno = genotype_matrix.genotypes
-
-    if missing_data == 'exclude':
-        missing_per_var = cp.sum(geno < 0, axis=0)
-        complete = missing_per_var == 0
-        geno = geno[:, complete]
-
-    return _extract_upper_triangle(
-        _pairwise_diffs_matrix_gpu(geno, missing_data='normalize'))
+    return cp.asnumpy(_upper_triangle(_diffs_matrix_gpu(
+        genotype_matrix, GenotypeMatrix, population, missing_data)))
 
 
 @_eager_only
@@ -217,42 +212,46 @@ def dist_moments(matrix, population=None, missing_data='include'):
     skew : float
     kurt : float
         A moment needs enough defined pairs (var 2, skew 3, kurt 4). With
-        fewer, it is NaN when some pair has no distance, else 0.0. Skew
-        and kurt are also 0.0 when every defined distance is the same.
+        fewer, it is NaN when some pair has no distance, else 0.0. A
+        moment with enough pairs is exactly 0.0 when every defined
+        distance is the same.
     """
     _warn_unphased(matrix, context="dist_moments",
                    alternative="pass a GenotypeMatrix for individual-level "
                    "distances")
-    diffs = np.asarray(_get_diffs(matrix, population, missing_data))
-    finite = np.isfinite(diffs)
-    fill = 0.0 if finite.all() else np.nan
-    diffs = diffs[finite]
-    n = diffs.shape[0]
+    kind = GenotypeMatrix if isinstance(matrix, GenotypeMatrix) else HaplotypeMatrix
+    diffs = _diffs_matrix_gpu(matrix, kind, population, missing_data)
+    n_rows = diffs.shape[0]
 
+    # The matrix is symmetric, so each pair is there twice. The reductions
+    # run over the whole matrix, without its diagonal, and the count and
+    # the sums are halved; that needs no index of the upper triangle. Only
+    # six scalars come to the host, in one copy.
+    cp.fill_diagonal(diffs, cp.nan)
+    defined = cp.isfinite(diffs)
+    count = defined.sum()
+    mean = cp.where(defined, diffs, 0.0).sum() / count
+    centered = cp.where(defined, diffs - mean, 0.0)
+    c2 = centered * centered
+    count, sum_c2, sum_c3, sum_c4, low, high = cp.stack([
+        count, c2.sum(), (c2 * centered).sum(), (c2 * c2).sum(),
+        cp.where(defined, diffs, cp.inf).min(),
+        cp.where(defined, diffs, -cp.inf).max()]).get()
+
+    n = int(count) // 2
+    fill = 0.0 if n == n_rows * (n_rows - 1) // 2 else np.nan
     if n < 2:
         return fill, fill, fill
 
-    mean = np.mean(diffs)
-    centered = diffs - mean
-    c2 = centered ** 2
-    m2 = np.mean(c2)
-
-    var_val = float(np.sum(c2) / (n - 1))
-
-    if n < 3:
-        return var_val, fill, fill
-    if m2 == 0:
-        return var_val, 0.0, (0.0 if n >= 4 else fill)
-
-    m3 = np.mean(centered ** 3)
-    skew_val = float(m3 / (m2 ** 1.5))
-
-    if n < 4:
-        return var_val, skew_val, fill
-
-    m4 = np.mean(centered ** 4)
-    kurt_val = float(m4 / (m2 ** 2) - 3.0)
-
+    # Equal distances have no spread. The range says so exactly: each
+    # distance is one division of two whole counts, so equal ratios are
+    # equal bit for bit. The mean of equal values can round away from
+    # them, which leaves centered sums that are tiny, not 0.
+    same = low == high
+    m2 = sum_c2 / (2 * n)
+    var_val = 0.0 if same else float(sum_c2 / 2 / (n - 1))
+    skew_val = fill if n < 3 else 0.0 if same else float(sum_c3 / (2 * n) / m2 ** 1.5)
+    kurt_val = fill if n < 4 else 0.0 if same else float(sum_c4 / (2 * n) / m2 ** 2 - 3.0)
     return var_val, skew_val, kurt_val
 
 
@@ -328,7 +327,3 @@ def pairwise_diffs(matrix, population=None, missing_data='include'):
                    alternative="pass a GenotypeMatrix for individual-level "
                    "distances")
     return pairwise_diffs_haploid(matrix, population, missing_data)
-
-
-# internal alias
-_get_diffs = pairwise_diffs

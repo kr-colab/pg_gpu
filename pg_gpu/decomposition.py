@@ -522,8 +522,7 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
             "pairwise_distance supports metric in "
             "{'euclidean', 'sqeuclidean', 'cityblock'}; got %r" % (metric,))
 
-    from .distance_stats import (_pairwise_diffs_matrix_gpu,
-                                 _extract_upper_triangle)
+    from .distance_stats import _pairwise_diffs_matrix_gpu, _upper_triangle
 
     hap = matrix.haplotypes
 
@@ -540,7 +539,7 @@ def pairwise_distance(haplotype_matrix: HaplotypeMatrix,
     d = _pairwise_diffs_matrix_gpu(hap, missing_data='scale')
     if metric == 'euclidean':
         d = cp.sqrt(d)
-    return _extract_upper_triangle(d)
+    return cp.asnumpy(_upper_triangle(d))
 
 
 def pcoa(dist, n_components: Optional[int] = None):

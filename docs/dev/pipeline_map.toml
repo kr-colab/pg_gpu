@@ -2168,7 +2168,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "NaN for a pair with no site called in both; every pair is NaN under exclude when no site is complete"
 parallel = ["decomposition.pairwise_distance", "divergence.pairwise_distance_matrix", "distance_stats.pairwise_diffs_diploid"]
-notes = "Per-site mean ('normalize' mode of _pairwise_diffs_matrix_gpu), not the scaled count of pairwise_distance; a GenotypeMatrix fails with AttributeError haplotypes."
+notes = "Per-site mean ('normalize' mode of _pairwise_diffs_matrix_gpu), not the scaled count of pairwise_distance; a GenotypeMatrix raises TypeError (distance_stats._diffs_matrix_gpu)."
 
 [functions."distance_stats.pairwise_diffs_diploid"]
 # signature: (genotype_matrix, population, missing_data)
@@ -2179,7 +2179,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "NaN for a pair with no site called in both; every pair is NaN under exclude when no site is complete"
 parallel = ["distance_stats.pairwise_diffs_haploid"]
-notes = "Same helper and exclude filter as the haploid form, run on 0/1/2 values; a HaplotypeMatrix fails with AttributeError genotypes."
+notes = "Same helper and exclude filter as the haploid form, run on 0/1/2 values; a HaplotypeMatrix raises TypeError (distance_stats._diffs_matrix_gpu)."
 
 [functions."distance_stats.dist_moments"]
 # signature: (matrix, population, missing_data)
@@ -2188,9 +2188,9 @@ inputs = ["HaplotypeMatrix", "GenotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "skips NaN pairs; with too few defined pairs (var 2, skew 3, kurt 4) NaN if some pair is NaN, else 0.0; skew and kurt 0.0 when all distances are equal"
+undefined = "skips NaN pairs; with too few defined pairs (var 2, skew 3, kurt 4) NaN if some pair is NaN, else 0.0; every moment with enough pairs is exactly 0.0 when all distances are equal"
 parallel = ["windowed_analysis.windowed_statistics_fused"]
-notes = "Moments are computed on the host with numpy; the fused windowed loop calls this per window and leaves NaN only for a window with no variant."
+notes = "The distance matrix stays on the device (distance_stats._diffs_matrix_gpu, which pairwise_diffs_haploid and pairwise_diffs_diploid also call). The reductions run over the whole symmetric matrix without its diagonal and are halved; the count, the sums of powers and the range come to the host in one copy. Equal distances are found by the range, not by a zero variance. The fused windowed loop calls this per window and leaves NaN only for a window with no variant."
 
 [functions."distance_stats.dist_var"]
 # signature: (matrix, population, missing_data)
