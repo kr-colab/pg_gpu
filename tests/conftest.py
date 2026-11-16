@@ -227,3 +227,25 @@ def garud_reference(hap):
     return (h1, np.sum(f[:2]) ** 2 + np.sum(f[2:] ** 2),
             np.sum(f[:3]) ** 2 + np.sum(f[3:] ** 2), (h1 - f[0] ** 2) / h1,
             len(counts))
+
+
+def force_chunked_engine(monkeypatch, chunk):
+    """Make ``windowed_analysis`` use the chunked fused engine, with chunks of
+    ``chunk`` variants, for every request that reaches the fused engine.
+
+    The dispatcher takes the chunked engine only for a matrix that does not
+    fit on the GPU. The chunked engine hands some statistics back to the
+    single-shot one, with its site set; those calls go through.
+    """
+    import importlib
+    # pg_gpu.windowed_analysis names the function, so the module needs its path.
+    wa = importlib.import_module("pg_gpu.windowed_analysis")
+    monkeypatch.setattr("pg_gpu._memutil.estimate_fused_chunk_size",
+                        lambda n, memory_fraction=0.35: chunk)
+    single_shot = wa.windowed_statistics_fused
+
+    def fused(*args, **kwargs):
+        engine = single_shot if "_sites" in kwargs else wa.windowed_statistics_fused_chunked
+        return engine(*args, **kwargs)
+
+    monkeypatch.setattr(wa, "windowed_statistics_fused", fused)

@@ -469,7 +469,10 @@ df = windowed_analysis(
     missing_data='include',        # 'include' or 'exclude'
     span_normalize=True,           # bool; True auto-detects best denominator
 )
-# Columns: chrom, start, end, center, n_variants, window_id, then the
+# Columns: chrom, start, end, center, n_variants, n_accessible,
+# window_id (n_accessible is the window's base count, the denominator of
+# the per-base statistics; filter on it to drop poorly covered windows),
+# then the
 # statistics. With two or more populations, every single-population
 # statistic has one column per population ('pi_pop1', 'pi_pop2',
 # 'tajimas_d_pop1', ...), and a two-population statistic has one bare
@@ -495,7 +498,8 @@ df = wa.compute(h)
 
 # Lower-level fused — bin edges instead of size/step. Returns a dict
 # mapping column names to numpy arrays of shape (n_windows,). The first
-# six columns are always chrom, start, end, center, n_variants, window_id.
+# seven columns are always chrom, start, end, center, n_variants,
+# n_accessible, window_id.
 from pg_gpu.windowed_analysis import windowed_statistics_fused
 fused = windowed_statistics_fused(
     h, bp_bins=np.arange(0, 1_000_001, 10_000),

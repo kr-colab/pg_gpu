@@ -421,7 +421,11 @@ to missing data handling.
   accessible bases in the window; else the window's share of
   ``n_total_sites``, in proportion to its length (the shares of windows
   that tile the region add up to ``n_total_sites``); else the window
-  length. Every engine uses this rule.
+  length. Every engine uses this rule, and the ``n_accessible`` column
+  of the result holds that denominator for each window. A per-base
+  statistic times ``n_accessible`` is not always the raw sum: when a
+  window has sites where every call is missing, the per-base value is
+  rescaled for those sites. For raw sums, pass ``span_normalize=False``.
 * ``False``: return raw sum (used internally by composite statistics like
   Tajima's D, and by advanced users who need custom normalization).
 
