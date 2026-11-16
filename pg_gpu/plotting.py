@@ -5,6 +5,7 @@ Provides publication-quality plots for SFS, LD, haplotype structure,
 PCA, distance matrices, and windowed statistics using matplotlib and seaborn.
 """
 
+import cupy as cp
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
@@ -12,6 +13,15 @@ import seaborn as sns
 from typing import Optional, Union, Tuple
 
 from .windowed_analysis import CANONICAL_WINDOW_PREFIX
+
+
+def _to_numpy(values, dtype=None):
+    """``values`` as a NumPy array.
+
+    Some statistics return CuPy arrays (``HaplotypeMatrix.pairwise_r2``),
+    and ``np.asarray`` refuses one, so a CuPy array is copied to the host.
+    """
+    return np.asarray(cp.asnumpy(values), dtype=dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +56,7 @@ def plot_sfs(s, ax=None, folded=False, scaled=False, clip_endpoints=True,
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 4))
 
-    s = np.asarray(s, dtype=float)
+    s = _to_numpy(s, dtype=float)
 
     if clip_endpoints:
         s = s[1:-1] if not folded else s[1:]
@@ -81,7 +91,8 @@ def plot_joint_sfs(s, ax=None, log_scale=True, cmap='YlOrRd',
         Joint SFS array (from pg_gpu.sfs.joint_sfs, etc.).
     ax : matplotlib.axes.Axes, optional
     log_scale : bool
-        If True, use log color scale.
+        If True, use log color scale. A spectrum with no positive cell has
+        no range for it and is drawn empty on a linear scale.
     cmap : str
         Colormap name.
     clip_endpoints : bool
@@ -94,15 +105,20 @@ def plot_joint_sfs(s, ax=None, log_scale=True, cmap='YlOrRd',
     if ax is None:
         fig, ax = plt.subplots(figsize=(6, 5))
 
-    s = np.asarray(s, dtype=float)
+    s = _to_numpy(s, dtype=float)
 
     if clip_endpoints:
         s = s[1:, 1:]
 
-    # mask zeros for log scale
-    s_plot = np.ma.masked_equal(s, 0)
+    # Only a positive count has a place on a log scale, so every other cell
+    # (zero or NaN) is left blank.
+    s_plot = np.ma.masked_where(~(s > 0), s)
 
-    norm = mcolors.LogNorm(vmin=max(1, s_plot.min()), vmax=s_plot.max()) if log_scale else None
+    # A spectrum with no positive cell (for example when one population is
+    # monomorphic) has no range for a log scale, so it is drawn empty on a
+    # linear one.
+    norm = (mcolors.LogNorm(vmin=max(1, s_plot.min()), vmax=s_plot.max())
+            if log_scale and s_plot.count() else None)
 
     im = ax.pcolormesh(s_plot, norm=norm, cmap=cmap, **kwargs)
     plt.colorbar(im, ax=ax, label='Count')
@@ -142,14 +158,14 @@ def plot_pairwise_ld(r2_matrix, ax=None, cmap='Greys', vmin=0, vmax=1,
     if ax is None:
         fig, ax = plt.subplots(figsize=(7, 6))
 
-    r2 = np.asarray(r2_matrix)
+    r2 = _to_numpy(r2_matrix)
 
     im = ax.imshow(r2, cmap=cmap, vmin=vmin, vmax=vmax,
                    interpolation='none', origin='lower', **kwargs)
     plt.colorbar(im, ax=ax, label='$r^2$')
 
     if positions is not None:
-        positions = np.asarray(positions)
+        positions = _to_numpy(positions)
         n_ticks = min(6, len(positions))
         tick_idx = np.linspace(0, len(positions) - 1, n_ticks, dtype=int)
         ax.set_xticks(tick_idx)
@@ -176,7 +192,9 @@ def plot_ld_decay(distances, r2_values, ax=None, bins=50, color=None,
         Pairwise r-squared values.
     ax : matplotlib.axes.Axes, optional
     bins : int or array_like
-        Number of distance bins or explicit bin edges.
+        Number of distance bins, from the smallest to the largest distance,
+        or explicit bin edges. The last bin includes its right edge, as in
+        ``np.histogram``; a pair outside explicit edges is not plotted.
     color : str, optional
     percentile : float
         Percentile of r-squared to plot per bin (default: median).
@@ -188,18 +206,28 @@ def plot_ld_decay(distances, r2_values, ax=None, bins=50, color=None,
     if ax is None:
         fig, ax = plt.subplots(figsize=(8, 4))
 
-    distances = np.asarray(distances)
-    r2_values = np.asarray(r2_values)
+    distances = _to_numpy(distances)
+    r2_values = _to_numpy(r2_values)
 
-    valid = ~np.isnan(r2_values)
+    valid = ~(np.isnan(r2_values) | np.isnan(distances))
     distances = distances[valid]
     r2_values = r2_values[valid]
+    if distances.size == 0:
+        raise ValueError(
+            "plot_ld_decay: no pair with a defined r-squared to plot (the "
+            "input is empty, or every r-squared is NaN, as for monomorphic "
+            "sites).")
 
-    if isinstance(bins, int):
+    if isinstance(bins, (int, np.integer)):
         bins = np.linspace(distances.min(), distances.max(), bins + 1)
+    else:
+        bins = _to_numpy(bins)
 
     bin_idx = np.digitize(distances, bins) - 1
     n_bins = len(bins) - 1
+    # The last bin is closed on the right, as in np.histogram, so a pair at
+    # the top edge (the largest distance, with an int ``bins``) is counted.
+    bin_idx[distances == bins[-1]] = n_bins - 1
     bin_centers = (bins[:-1] + bins[1:]) / 2
     bin_vals = np.full(n_bins, np.nan)
 
@@ -253,10 +281,10 @@ def plot_pca(coords, ax=None, pc_x=0, pc_y=1, explained_variance=None,
     if ax is None:
         fig, ax = plt.subplots(figsize=(7, 6))
 
-    coords = np.asarray(coords)
+    coords = _to_numpy(coords)
 
     if labels is not None:
-        labels = np.asarray(labels)
+        labels = _to_numpy(labels)
         unique_labels = np.unique(labels)
         colors = sns.color_palette(palette, len(unique_labels))
         for i, label in enumerate(unique_labels):
@@ -271,7 +299,7 @@ def plot_pca(coords, ax=None, pc_x=0, pc_y=1, explained_variance=None,
                    s=s, alpha=alpha, **kwargs)
 
     if explained_variance is not None:
-        ev = np.asarray(explained_variance)
+        ev = _to_numpy(explained_variance)
         ax.set_xlabel(f'PC{pc_x + 1} ({ev[pc_x]:.1%})')
         ax.set_ylabel(f'PC{pc_y + 1} ({ev[pc_y]:.1%})')
     else:
@@ -309,7 +337,7 @@ def plot_pairwise_distance(dist, ax=None, labels=None, cmap='viridis',
     if ax is None:
         fig, ax = plt.subplots(figsize=(7, 6))
 
-    dist = np.asarray(dist, dtype=float)
+    dist = _to_numpy(dist, dtype=float)
     if dist.ndim == 1:
         D = squareform(dist)
     else:
@@ -320,7 +348,7 @@ def plot_pairwise_distance(dist, ax=None, labels=None, cmap='viridis',
     plt.colorbar(im, ax=ax, label='Distance')
 
     if labels is not None:
-        labels = np.asarray(labels)
+        labels = _to_numpy(labels)
         ax.set_xticks(range(len(labels)))
         ax.set_xticklabels(labels, rotation=90, fontsize=8)
         ax.set_yticks(range(len(labels)))
@@ -357,8 +385,8 @@ def plot_windowed(window_start, values, ax=None, stat_name='',
     if ax is None:
         fig, ax = plt.subplots(figsize=(10, 3))
 
-    window_start = np.asarray(window_start)
-    values = np.asarray(values, dtype=float)
+    window_start = _to_numpy(window_start)
+    values = _to_numpy(values, dtype=float)
 
     if color is None:
         color = sns.color_palette()[0]
@@ -459,7 +487,7 @@ def plot_haplotype_frequencies(freqs, ax=None, palette='Paired',
         fig, ax = plt.subplots(figsize=(width, width / 10))
         sns.despine(ax=ax, left=True)
 
-    freqs = np.asarray(freqs, dtype=float)
+    freqs = _to_numpy(freqs, dtype=float)
     n_colors = np.sum(freqs > 1.0 / len(freqs)) if len(freqs) > 0 else 0
     n_colors = max(n_colors, 1)
     colors = sns.color_palette(palette, n_colors)
@@ -500,7 +528,7 @@ def plot_variant_locator(positions, ax=None, step=None, color=None):
         width = plt.rcParams['figure.figsize'][0]
         fig, ax = plt.subplots(figsize=(width, width / 7))
 
-    positions = np.asarray(positions)
+    positions = _to_numpy(positions)
 
     if step is not None:
         positions = positions[::step]

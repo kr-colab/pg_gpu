@@ -373,6 +373,18 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* Four defects in ``pg_gpu.plotting``. Every plot function now takes a
+  CuPy array; ``plot_pairwise_ld`` raised ``TypeError`` on the output of
+  ``HaplotypeMatrix.pairwise_r2()``, the input that its docstring names.
+  ``plot_joint_sfs`` raised ``ValueError`` at draw time for a spectrum
+  with no positive cell (for example when one population is
+  monomorphic) or with a NaN cell; it now leaves those cells blank and
+  draws the plot. ``plot_ld_decay`` with an
+  int ``bins`` left the pair at the largest distance out of the last
+  bin; that bin is now closed on the right, as in ``np.histogram``.
+  ``plot_ld_decay`` raised a NumPy reduction error for empty input or
+  when every r-squared is NaN; it now raises a ``ValueError`` that says
+  so, and it drops a pair with a NaN distance.
 * ``sfs.fold_sfs`` paired bin ``i`` with bin ``n - 1 - i`` instead of
   bin ``n - i``. For an even ``n`` -- every diploid sample size -- this
   never read the top bin, merged the middle bin into its neighbor, and
