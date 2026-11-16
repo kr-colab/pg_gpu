@@ -54,18 +54,17 @@ def _stream_sum(streaming_hm, kernel_fn):
     where two chunks have different shapes (e.g. one chunk's population
     has strictly more valid samples after masking than another, giving
     it an extra bin along that axis).
+
+    The result is always an array: a stream with no variant, or with no
+    chunk at all, gives zeros of the kernel's full shape.
     """
-    total = None
-    # A chunk with no variants still goes to the kernel: it gives zeros of
-    # the full shape, so a stream with no variant at all returns that array.
-    for _, _, chunk in streaming_hm.iter_gpu_chunks(skip_empty=False):
-        # Preserve the kernel's own dtype: integer bincounts (sfs, joint_sfs)
-        # stay int64; the folded SFS carries half-integer weights, so it must
-        # accumulate in float (a forced int64 cast would truncate per chunk).
+    # The sum starts from the kernel's result on a matrix with no variants:
+    # zeros of the full shape, in the kernel's own dtype. Integer bincounts
+    # (sfs, joint_sfs) stay int64; the folded SFS carries half-integer
+    # weights, so it must accumulate in float.
+    total = np.array(kernel_fn(streaming_hm._empty_chunk()))
+    for _, _, chunk in streaming_hm.iter_gpu_chunks():
         s = np.asarray(kernel_fn(chunk))
-        if total is None:
-            total = s.copy()
-            continue
         if s.shape == total.shape:
             total += s
             continue
@@ -552,6 +551,24 @@ class _StreamingMatrixBase:
             )
             self._attach_span(m, int(left), int(right))
             yield int(left), int(right), m
+
+    def _empty_chunk(self):
+        """An eager matrix with this stream's rows and sample sets, no
+        variants and no bases.
+
+        It is the zero of a sum over chunks, so it must add nothing to a
+        span either. Its bounds are the stream's, which alone would give it
+        the whole stream's span; ``n_total_sites = 0`` takes precedence and
+        makes the span 0.
+        """
+        m = self._build_chunk(
+            cp.empty((0, self._source.num_diploids, 2), cp.int8),
+            np.empty(0, np.int64),
+            chrom_start=self.chrom_start, chrom_end=self.chrom_end,
+            sample_sets=self._sample_sets,
+        )
+        m.n_total_sites = 0.0
+        return m
 
     def _attach_span(self, m, left, right):
         """Give an eager matrix over ``[left, right]`` this stream's span.
