@@ -636,7 +636,8 @@ class LocalPCAResult:
     Attributes
     ----------
     windows : pandas.DataFrame
-        One row per window (chrom, start, end, center, n_variants, window_id).
+        One row per window (chrom, start, end, center, n_variants,
+        n_accessible, window_id).
     eigvals : numpy.ndarray, float64, shape (n_windows, k)
         Top-k eigenvalues of each window's sample-sample covariance matrix,
         descending. NaN for windows with fewer than k variants.
@@ -826,6 +827,8 @@ def _local_pca_streaming(matrix, iterator, k, missing_data,
     if not given). It does not affect numerics; lowering it reduces
     peak fragmentation at a small per-call cost.
     """
+    from .windowed_analysis import _window_prefix
+
     n_samples = matrix.num_haplotypes
     # Global allele width, computed once, so the per-window standardization does
     # not pay an int(hap.max()) host sync per window.
@@ -855,10 +858,7 @@ def _local_pca_streaming(matrix, iterator, k, missing_data,
     n_processed = 0
     for window in iterator:
         is_valid = window.n_variants >= max(k, 2)
-        window_meta.append((
-            window.chrom, window.start, window.end, window.center,
-            window.n_variants, window.window_id, is_valid,
-        ))
+        window_meta.append((_window_prefix(window), is_valid))
 
         if not is_valid:
             eigvals_gpu_chunks.append(cp.full(k, cp.nan, dtype=cp.float64))
@@ -904,23 +904,14 @@ def _local_pca_streaming(matrix, iterator, k, missing_data,
     cp.get_default_memory_pool().free_all_blocks()
 
     valid_mask = np.array(
-        [meta[6] for meta in window_meta], dtype=bool)
+        [is_valid for _, is_valid in window_meta], dtype=bool)
 
     eigvals_host[~valid_mask] = np.nan
     eigvecs_host[~valid_mask] = np.nan
     _sign_align_windows(eigvecs_host)
     sumsq_host[~valid_mask] = np.nan
 
-    chrom_col, start_col, end_col, center_col, nvar_col, wid_col, _ = zip(
-        *window_meta)
-    windows_df = pd.DataFrame({
-        'chrom': list(chrom_col),
-        'start': list(start_col),
-        'end': list(end_col),
-        'center': list(center_col),
-        'n_variants': list(nvar_col),
-        'window_id': list(wid_col),
-    })
+    windows_df = pd.DataFrame([prefix for prefix, _ in window_meta])
 
     return LocalPCAResult(
         windows=windows_df,
@@ -1139,7 +1130,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     -------
     LocalPCAResult
     """
-    from .windowed_analysis import WindowIterator
+    from .windowed_analysis import WindowIterator, _window_prefix
 
     _warn_unphased(haplotype_matrix, context="local_pca")
 
@@ -1160,7 +1151,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
         matrix.transfer_to_gpu()
 
     n_samples = matrix.num_haplotypes
-    iterator = WindowIterator(matrix, window_params)
+    iterator = WindowIterator(matrix, window_params, span_source=haplotype_matrix)
 
     if engine == 'auto':
         engine = _pick_dense_engine(matrix, window_params)
@@ -1188,7 +1179,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     valid_flags = []
 
     for window in iterator:
-        window_meta.append(window)
+        window_meta.append(_window_prefix(window))
         if window.n_variants < max(k, 2):
             gram_list.append(identity_placeholder)
             sumsq_list.append(nan_scalar)
@@ -1215,14 +1206,7 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     _sign_align_windows(eigvecs_host)
     sumsq_host[~valid_mask] = np.nan
 
-    windows_df = pd.DataFrame({
-        'chrom': [w.chrom for w in window_meta],
-        'start': [w.start for w in window_meta],
-        'end': [w.end for w in window_meta],
-        'center': [w.center for w in window_meta],
-        'n_variants': [w.n_variants for w in window_meta],
-        'window_id': [w.window_id for w in window_meta],
-    })
+    windows_df = pd.DataFrame(window_meta)
 
     return LocalPCAResult(
         windows=windows_df,
@@ -1258,7 +1242,7 @@ def _local_pca_with_jackknife(
     but too few for jackknife (``< max(k, 2) * n_blocks``) get valid
     eigvals/eigvecs but NaN ``jackknife_se``.
     """
-    from .windowed_analysis import WindowIterator
+    from .windowed_analysis import WindowIterator, _window_prefix
 
     window_params = _resolve_window_params(
         window_params, window_size, step_size, window_type, regions,
@@ -1272,7 +1256,7 @@ def _local_pca_with_jackknife(
         matrix.transfer_to_gpu()
 
     n_samples = matrix.num_haplotypes
-    iterator = WindowIterator(matrix, window_params)
+    iterator = WindowIterator(matrix, window_params, span_source=haplotype_matrix)
     identity_placeholder = cp.eye(n_samples, dtype=cp.float64)
     nan_scalar = cp.asarray(np.nan, dtype=cp.float64)
     identity_blocks = cp.broadcast_to(
@@ -1289,7 +1273,7 @@ def _local_pca_with_jackknife(
     valid_jk = []
 
     for window in iterator:
-        window_meta.append(window)
+        window_meta.append(_window_prefix(window))
 
         if window.n_variants < min_pca:
             # Too few variants for PCA or jackknife.
@@ -1365,14 +1349,7 @@ def _local_pca_with_jackknife(
     else:
         raise ValueError(f"Unknown aggregate: {aggregate}")
 
-    windows_df = pd.DataFrame({
-        'chrom': [w.chrom for w in window_meta],
-        'start': [w.start for w in window_meta],
-        'end': [w.end for w in window_meta],
-        'center': [w.center for w in window_meta],
-        'n_variants': [w.n_variants for w in window_meta],
-        'window_id': [w.window_id for w in window_meta],
-    })
+    windows_df = pd.DataFrame(window_meta)
 
     return LocalPCAResult(
         windows=windows_df,
@@ -1948,7 +1925,7 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
     """
     _warn_unphased(haplotype_matrix, context="local_pca_jackknife")
 
-    from .windowed_analysis import WindowIterator
+    from .windowed_analysis import WindowIterator, _window_prefix
 
     window_params = _resolve_window_params(
         window_params, window_size, step_size, window_type, regions,
@@ -1962,7 +1939,7 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
         matrix.transfer_to_gpu()
 
     n_samples = matrix.num_haplotypes
-    iterator = WindowIterator(matrix, window_params)
+    iterator = WindowIterator(matrix, window_params, span_source=haplotype_matrix)
     identity_blocks = cp.broadcast_to(
         cp.eye(n_samples, dtype=cp.float64),
         (n_blocks, n_samples, n_samples))

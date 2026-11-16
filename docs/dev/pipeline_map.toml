@@ -90,7 +90,7 @@ check = "Each engine applies 'exclude' on its own: windowed_analysis._FusedSites
 [axes.span]
 description = "The per-base denominator. HaplotypeMatrix.get_span('auto') uses the accessible-mask count, then n_total_sites, then chrom_end - chrom_start + 1 (both bounds are inclusive)."
 values = ["accessible mask", "n_total_sites", "region length", "raw (span_normalize=False)"]
-check = "Scalar: HaplotypeMatrix.get_span. Windowed: windowed_analysis._compute_window_bases is the one rule for every engine (mask, else the window's share of n_total_sites in proportion to its length, else window length); the scatter and fused engines call it, and the fallback sets each window matrix's n_total_sites with it (windowed_analysis.WindowIterator._set_window_bases). Streaming: streaming_matrix._StreamingMatrixBase.get_span."
+check = "Scalar: HaplotypeMatrix.get_span. Windowed: windowed_analysis._compute_window_bases is the one rule for every engine (mask, else the window's share of n_total_sites in proportion to its length, else window length); windowed_analysis._init_window_results calls it once for the scatter and fused engines, which divide by the n_accessible column it gives, and the fallback sets each window matrix's n_total_sites with it and reports the same count (windowed_analysis.WindowIterator._apply_window_bases). Streaming: streaming_matrix._StreamingMatrixBase.get_span."
 
 [axes.population]
 description = "Which rows a statistic reads. A population is a name in sample_sets or a list of row indices; _utils.population_rows resolves both."
@@ -264,7 +264,7 @@ missing_data = ["include", "exclude"]
 function = "windowed_analysis.StatisticsComputer.compute"
 stats = "windowed_analysis._fallback_stats"
 chosen = "No other engine takes the request. It is the only engine for window_type='snp', where a name it does not know raises NotImplementedError. It also accepts callables as custom statistics."
-span = "The scalar function on each window matrix. windowed_analysis.WindowIterator slices it with get_subset, and windowed_analysis.WindowIterator._set_window_bases sets the window's n_total_sites by windowed_analysis._compute_window_bases (a snp window spans its first to its last variant, inclusive)."
+span = "The scalar function on each window matrix. windowed_analysis.WindowIterator slices it with get_subset, and windowed_analysis.WindowIterator._apply_window_bases sets the window's n_total_sites by windowed_analysis._compute_window_bases (a snp window spans its first to its last variant, inclusive)."
 missing_data = ["include", "exclude"]
 notes = "A window with no variant gets each scalar function on an empty window matrix, which gives the scatter and fused engines' values; a custom callable gets NaN uncalled. A request whose names no single engine covers (for example ld_decay with zns) reaches this engine, and windowed_analysis._check_fallback_covers raises a ValueError that names the engine of each name it lacks. With two or more populations the single-population names run in requests of their own (windowed_analysis._windowed_per_population), so such a mix can have an engine for each part."
 
@@ -683,7 +683,7 @@ new_windowed_statistic = [
 ]
 span_rule = [
     "HaplotypeMatrix.get_span and streaming_matrix._StreamingMatrixBase.get_span.",
-    "windowed_analysis._compute_window_bases (every windowed engine; the fallback through WindowIterator._set_window_bases).",
+    "windowed_analysis._compute_window_bases (every windowed engine; the fallback through WindowIterator._apply_window_bases).",
     "accessible._called_sites_mask (include_invariant in HaplotypeMatrix.from_vcf, GenotypeMatrix.from_vcf and both GenotypeMatrix.from_zarr paths).",
     "GenotypeMatrix, which has its own n_total_sites code and no get_span.",
     "Every function row with span other than \"none\".",

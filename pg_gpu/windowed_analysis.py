@@ -161,18 +161,18 @@ def _compute_window_bases(haplotype_matrix, win_starts, win_stops,
     return we - ws
 
 
-def _scatter_spans(haplotype_matrix, win_starts, win_stops, span_normalize):
+def _scatter_spans(window_bases, span_normalize):
     """Per-window denominators of the scatter engines, and which are zero.
 
-    A window with no base (fully inaccessible) divides to NaN, not 0: its
-    per-base rate is undefined. The spans are clamped to 1 for a safe
-    division and the zero-span flags go back for that post-processing.
+    ``window_bases`` is the ``n_accessible`` column. A window with no base
+    (fully inaccessible) divides to NaN, not 0: its per-base rate is
+    undefined. The spans are clamped to 1 for a safe division and the
+    zero-span flags go back for that post-processing.
     """
     if span_normalize is False:
-        n = len(win_starts)
+        n = len(window_bases)
         return np.ones(n), np.zeros(n, dtype=bool)
-    spans = _compute_window_bases(haplotype_matrix, win_starts, win_stops)
-    return np.maximum(spans, 1.0), spans <= 0
+    return np.maximum(window_bases, 1.0), window_bases <= 0
 
 
 def _windowed_rescale(n_variants, n_sites_with_data):
@@ -200,17 +200,24 @@ def _missing_data_rescale(n_variants_per_window, normalize, all_complete, count_
 
 
 CANONICAL_WINDOW_PREFIX = (
-    'chrom', 'start', 'end', 'center', 'n_variants', 'window_id')
+    'chrom', 'start', 'end', 'center', 'n_variants', 'n_accessible',
+    'window_id')
 
 # Frequency bins of the windowed daf_hist columns (daf_bin_0 .. daf_bin_19).
 N_DAF_BINS = 20
 
 
-def _init_window_results(chrom, win_starts_bp, win_stops_bp, n_variants):
+def _init_window_results(haplotype_matrix, chrom, win_starts_bp, win_stops_bp,
+                         n_variants, is_accessible=None):
     """Canonical window prefix columns, shared by every dispatch path.
 
-    Inserts ``chrom, start, end, center, n_variants, window_id`` in that
-    order. Dict insertion order drives column order in the final DataFrame.
+    Inserts ``chrom, start, end, center, n_variants, n_accessible,
+    window_id`` in that order. Dict insertion order drives column order in
+    the final DataFrame.
+
+    ``n_accessible`` is each window's base count by ``_compute_window_bases``.
+    The engines divide their per-base statistics by this array, so the
+    column is the denominator that was used, not a second count of it.
     """
     start = np.asarray(win_starts_bp).astype(int)
     end = np.asarray(win_stops_bp).astype(int)
@@ -221,6 +228,8 @@ def _init_window_results(chrom, win_starts_bp, win_stops_bp, n_variants):
         'end': end,
         'center': (start + end) // 2,
         'n_variants': np.asarray(n_variants).astype(int),
+        'n_accessible': _compute_window_bases(
+            haplotype_matrix, start, end, is_accessible),
         'window_id': np.arange(n, dtype=int),
     }
 
@@ -234,6 +243,11 @@ class WindowParams:
     regions: Optional[pd.DataFrame] = None
 
 
+def _window_prefix(window):
+    """The canonical prefix columns of one ``WindowData``, as a dict."""
+    return {name: getattr(window, name) for name in CANONICAL_WINDOW_PREFIX}
+
+
 @dataclass
 class WindowData:
     """Data for a single genomic window."""
@@ -244,6 +258,8 @@ class WindowData:
     matrix: HaplotypeMatrix
     n_variants: int
     window_id: int
+    # The window's base count, the denominator of its per-base statistics.
+    n_accessible: float = float('nan')
     # Results that several statistics share, computed once per window.
     cache: Dict = field(default_factory=dict)
 
@@ -359,14 +375,7 @@ class StatisticsComputer:
 
     def compute(self, window: WindowData) -> Dict[str, float]:
         """Compute all requested statistics for a window."""
-        results = {
-            'chrom': window.chrom,
-            'start': window.start,
-            'end': window.end,
-            'center': window.center,
-            'n_variants': window.n_variants,
-            'window_id': window.window_id,
-        }
+        results = _window_prefix(window)
 
         # One n_variants column serves every population, so under 'exclude'
         # it counts the sites complete in all of them, as the fused engines do.
@@ -476,8 +485,13 @@ class WindowIterator:
     """Iterates over genomic windows."""
 
     def __init__(self, haplotype_matrix: HaplotypeMatrix,
-                 window_params: WindowParams, skip_empty: bool = True):
+                 window_params: WindowParams, skip_empty: bool = True,
+                 span_source: Optional[HaplotypeMatrix] = None):
         self.matrix = haplotype_matrix
+        # The matrix whose mask and n_total_sites give each window's base
+        # count. A population subset has the parent's n_total_sites but not
+        # its mask, so a caller that windows a subset names the parent.
+        self.span_source = haplotype_matrix if span_source is None else span_source
         self.params = window_params
         # The windowed fallback keeps windows with no variant, so it gives
         # the same rows as the scatter and fused engines; local PCA, which
@@ -491,16 +505,21 @@ class WindowIterator:
         else:
             self.positions_np = self.positions
 
-    def _set_window_bases(self, window_matrix, start, end):
-        """Set the window's n_total_sites to its base count in the parent.
+    def _apply_window_bases(self, window_matrix, start, end):
+        """Set the window's n_total_sites to its base count in the parent,
+        and return that count.
 
         get_subset copies the parent's n_total_sites, which counts the
         whole region; the window needs its own count, by the rule that
-        every engine uses (_compute_window_bases).
+        every engine uses (_compute_window_bases). With no mask and no
+        n_total_sites the count is the window length, which the window's
+        own bounds already give the scalar functions.
         """
-        if self.matrix.has_accessible_mask or self.matrix.n_total_sites is not None:
-            window_matrix.n_total_sites = float(
-                _compute_window_bases(self.matrix, [start], [end])[0])
+        source = self.span_source
+        bases = float(_compute_window_bases(source, [start], [end])[0])
+        if source.has_accessible_mask or source.n_total_sites is not None:
+            window_matrix.n_total_sites = bases
+        return bases
 
     def __iter__(self) -> Iterator[WindowData]:
         """Iterate over windows based on window type."""
@@ -533,7 +552,7 @@ class WindowIterator:
                 # Set correct chromosome coordinates for span normalization
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1  # end is exclusive in our window definition
-                self._set_window_bases(window_matrix, start, end)
+                bases = self._apply_window_bases(window_matrix, start, end)
 
                 yield WindowData(
                     chrom=1,  # TODO: Handle multiple chromosomes
@@ -542,7 +561,8 @@ class WindowIterator:
                     center=(start + end) // 2,
                     matrix=window_matrix,
                     n_variants=hi - lo,
-                    window_id=window_id
+                    window_id=window_id,
+                    n_accessible=bases,
                 )
 
     def _iter_snp_windows(self) -> Iterator[WindowData]:
@@ -565,7 +585,7 @@ class WindowIterator:
             # Set correct chromosome coordinates for span normalization
             window_matrix.chrom_start = window_start
             window_matrix.chrom_end = window_end
-            self._set_window_bases(window_matrix, window_start, window_end + 1)
+            bases = self._apply_window_bases(window_matrix, window_start, window_end + 1)
 
             yield WindowData(
                 chrom=1,  # TODO: Handle multiple chromosomes
@@ -574,7 +594,8 @@ class WindowIterator:
                 center=center,
                 matrix=window_matrix,
                 n_variants=len(variant_indices),
-                window_id=window_id
+                window_id=window_id,
+                n_accessible=bases,
             )
 
             window_id += 1
@@ -598,7 +619,7 @@ class WindowIterator:
                 window_matrix = self.matrix.get_subset(variant_indices)
                 window_matrix.chrom_start = start
                 window_matrix.chrom_end = end - 1 # TODO: treat region bounds as inclusive.
-                self._set_window_bases(window_matrix, start, end)
+                bases = self._apply_window_bases(window_matrix, start, end)
 
                 yield WindowData(
                     chrom=region.get('chrom', 1),
@@ -607,7 +628,8 @@ class WindowIterator:
                     center=center,
                     matrix=window_matrix,
                     n_variants=len(variant_indices),
-                    window_id=window_id
+                    window_id=window_id,
+                    n_accessible=bases,
                 )
 
     def _has_grid(self):
@@ -1064,11 +1086,10 @@ def _windowed_thetas_scatter(haplotype_matrix, window_size, step_size,
     # Compute requested per-variant contributions and scatter
     n_variants_per_window = windows.counts().get()
     results = _init_window_results(
-        chrom, win_starts, win_stops,
+        haplotype_matrix, chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
-    spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
-                                      span_normalize)
+    spans, zero_span = _scatter_spans(results['n_accessible'], span_normalize)
 
     stats_set = set(statistics)
 
@@ -1245,11 +1266,10 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
     n_variants_per_window = windows.counts().get()
 
     results = _init_window_results(
-        chrom, win_starts, win_stops,
+        haplotype_matrix, chrom, win_starts, win_stops,
         n_variants=n_variants_per_window)
 
-    spans, zero_span = _scatter_spans(haplotype_matrix, win_starts, win_stops,
-                                      span_normalize)
+    spans, zero_span = _scatter_spans(results['n_accessible'], span_normalize)
 
     # A window that lost every site to 'exclude' is undefined (NaN) for
     # dxy/da; one with no variant to begin with stays 0.0.
@@ -1493,8 +1513,9 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     step_size : int, optional
         Step size. If None, uses window_size
     statistics : list
-        Statistics to compute. ``n_variants`` is a column of every result,
-        and ``n_singletons`` is another name for ``singletons``. Statistics
+        Statistics to compute. ``n_variants`` and ``n_accessible`` are
+        columns of every result, and ``n_singletons`` is another name for
+        ``singletons``. Statistics
         that no single engine computes (for example ``ld_decay`` with
         ``zns``) raise ValueError; request them in separate calls. (With
         two or more populations the single-population statistics run in a
@@ -1554,7 +1575,13 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     pd.DataFrame
-        Windowed statistics results. A request with a Garud statistic or
+        Windowed statistics results. The first columns are ``chrom``,
+        ``start``, ``end``, ``center``, ``n_variants``, ``n_accessible``
+        and ``window_id``. ``n_accessible`` is the window's base count,
+        the denominator of the per-base statistics: the accessible bases
+        when the matrix has a mask, else the window's share of
+        ``n_total_sites``, else the window length. It is there for every
+        ``span_normalize`` value. A request with a Garud statistic or
         ``haplotype_count`` also gets ``n_complete_haplotypes``, the number
         of haplotypes with no missing call in each window (suffixed by
         population where the Garud columns are).
@@ -1589,13 +1616,14 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
 def _engine_statistics(statistics):
     """The request as the engines take it.
 
-    ``n_variants`` is dropped, since every engine returns that column, so
-    naming it does not send the request to the per-window fallback.
+    ``n_variants`` and ``n_accessible`` are dropped, since every engine
+    returns those columns, so naming one does not send the request to the
+    per-window fallback.
     ``n_singletons`` is another name for ``singletons``.
     """
     return list(dict.fromkeys(
         'singletons' if s == 'n_singletons' else s
-        for s in statistics if s != 'n_variants'))
+        for s in statistics if s not in ('n_variants', 'n_accessible')))
 
 
 def _name_singletons_as_requested(df, statistics):
@@ -2746,8 +2774,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     per_base : bool
         Normalize by window size in base pairs.
     is_accessible : array_like of bool or AccessibleMask, optional
-        Accessibility for per-base normalization, in place of the matrix's
-        mask; a bool array has element 0 at position 1, as in scikit-allel.
+        Accessibility for per-base normalization and the ``n_accessible``
+        column, in place of the matrix's mask; a bool array has element 0
+        at position 1, as in scikit-allel.
     missing_data : {'include', 'exclude'}
         'include' uses every site with the calls it has. 'exclude' keeps
         only sites with no missing call in the rows the request reads (see
@@ -2759,8 +2788,10 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     -------
     dict
         Maps column names to numpy arrays of shape (n_windows,). The first
-        six columns are always ``chrom, start, end, center, n_variants,
-        window_id``, followed by one column per requested statistic. A
+        seven columns are always ``chrom, start, end, center, n_variants,
+        n_accessible, window_id``, followed by one column per requested
+        statistic. ``n_accessible`` is the denominator of the per-base
+        statistics (``_compute_window_bases``). A
         haplotype statistic adds ``n_complete_haplotypes``, the number of
         haplotypes with no missing call in each window. Unlike
         ``windowed_analysis``, this function neither warns about windows
@@ -2822,13 +2853,9 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
     # overwrite below with a missing-data-aware count.
     n_variants_raw = _window_site_counts(windows, sites.incomplete()).get()
     results = _init_window_results(
-        chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
-
-    window_bases = None
-    if per_base:
-        window_bases = _compute_window_bases(
-            haplotype_matrix, results['start'],
-            results['end'], is_accessible)
+        haplotype_matrix, chrom, ws_cpu, we_cpu, n_variants=n_variants_raw,
+        is_accessible=is_accessible)
+    window_bases = results['n_accessible']
 
     # single-pop stats via fused kernel
     single_pop_requested = not _FUSED_SINGLE_STATS.isdisjoint(statistics)
@@ -3238,13 +3265,9 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     # overwrite below with a missing-data-aware count.
     n_variants_raw = _window_site_counts(windows, sites.incomplete()).get()
     results = _init_window_results(
-        chrom, ws_cpu, we_cpu, n_variants=n_variants_raw)
-
-    window_bases = None
-    if per_base:
-        window_bases = _compute_window_bases(
-            haplotype_matrix, results['start'],
-            results['end'], is_accessible)
+        haplotype_matrix, chrom, ws_cpu, we_cpu, n_variants=n_variants_raw,
+        is_accessible=is_accessible)
+    window_bases = results['n_accessible']
 
     # Determine chunk size
     chunk_size = estimate_fused_chunk_size(n_hap)

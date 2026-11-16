@@ -439,7 +439,8 @@ regions). All four steps of the pipeline are available:
    # 1. Per-window top-k eigendecomposition (GPU-batched eigh)
    result = local_pca(h, window_size=500, window_type='snp', k=2)
    # result is a LocalPCAResult with:
-   #   result.windows  -> DataFrame (chrom, start, end, center, n_variants, window_id)
+   #   result.windows  -> DataFrame (chrom, start, end, center, n_variants,
+   #                                 n_accessible, window_id)
    #   result.eigvals  -> (n_windows, k)
    #   result.eigvecs  -> (n_windows, k, n_samples)
    #   result.sumsq    -> (n_windows,)
@@ -493,7 +494,7 @@ automatically routes through fused kernels when possible.
        statistics=['pi', 'theta_w', 'tajimas_d']
    )
    # results is a DataFrame with columns: chrom, start, end, center,
-   # n_variants, window_id, pi, theta_w, tajimas_d
+   # n_variants, n_accessible, window_id, pi, theta_w, tajimas_d
 
    # Two-population divergence stats
    results = windowed_analysis(
@@ -636,6 +637,10 @@ the regions you can actually see.
                                    statistics=["pi"])
    df_masked   = windowed_analysis(hm_masked,   window_size=10_000,
                                    statistics=["pi"])
+
+   # n_accessible is each window's accessible base count. Use it to drop
+   # windows with too little sequence behind them.
+   well_covered = df_masked[df_masked["n_accessible"] >= 5_000]
 
 For an end-to-end demo (with simulated data and a side-by-side plot)
 see ``examples/accessibility_mask.py``. See :doc:`missing_data` for

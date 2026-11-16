@@ -1620,9 +1620,9 @@ class TestCanonicalWindowSchema:
     def test_prefix_is_canonical(self, hm, stats):
         df = windowed_analysis(hm, window_size=50_000, step_size=25_000,
                                statistics=stats, window_type='bp')
-        assert tuple(df.columns[:6]) == CANONICAL_WINDOW_PREFIX, (
+        assert tuple(df.columns[:len(CANONICAL_WINDOW_PREFIX)]) == CANONICAL_WINDOW_PREFIX, (
             f"statistics={stats}: expected prefix {CANONICAL_WINDOW_PREFIX}, "
-            f"got {tuple(df.columns[:6])}")
+            f"got {tuple(df.columns[:len(CANONICAL_WINDOW_PREFIX)])}")
         for stat in stats:
             assert stat in df.columns
 
@@ -1631,14 +1631,14 @@ class TestCanonicalWindowSchema:
         df = windowed_analysis(hm, window_size=50_000, step_size=25_000,
                                statistics=['fst', 'dxy'],
                                populations=['a', 'b'])
-        assert tuple(df.columns[:6]) == CANONICAL_WINDOW_PREFIX
+        assert tuple(df.columns[:len(CANONICAL_WINDOW_PREFIX)]) == CANONICAL_WINDOW_PREFIX
 
     def test_mixed_singlepop_twopop_prefix_is_canonical(self, hm):
         hm.sample_sets = {"a": list(range(10)), "b": list(range(10, 20))}
         df = windowed_analysis(hm, window_size=50_000, step_size=25_000,
                                statistics=['pi', 'fst'],
                                populations=['a', 'b'])
-        assert tuple(df.columns[:6]) == CANONICAL_WINDOW_PREFIX
+        assert tuple(df.columns[:len(CANONICAL_WINDOW_PREFIX)]) == CANONICAL_WINDOW_PREFIX
 
     def test_center_equals_midpoint(self, hm):
         df = windowed_analysis(hm, window_size=50_000, step_size=25_000,

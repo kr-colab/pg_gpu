@@ -98,6 +98,14 @@ Results that change even for two-allele data
 
 Read this section if you are comparing against older pg_gpu results.
 
+* Every ``windowed_analysis`` result has a new column, ``n_accessible``,
+  after ``n_variants``. It is the window's base count, the denominator of
+  the per-base statistics in that window: the accessible bases when the
+  matrix has a mask, else the window's share of ``n_total_sites``, else
+  the window length. Use it to filter windows with too little accessible
+  sequence. ``LocalPCAResult.windows`` and the dict that
+  ``windowed_statistics_fused`` returns have it too. Code that reads the
+  statistic columns by position must move by one column.
 * ``windowed_analysis`` with two or more populations returns one column
   for each population for every single-population statistic, named
   ``<statistic>_<population>`` (``pi_pop1``, ``pi_pop2``,

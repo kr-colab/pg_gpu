@@ -22,6 +22,8 @@ import pytest
 
 from pg_gpu import HaplotypeMatrix, divergence, diversity, windowed_analysis
 
+from .conftest import force_chunked_engine
+
 # pg_gpu.windowed_analysis names the function, so the module needs its path.
 wa = importlib.import_module("pg_gpu.windowed_analysis")
 WindowedAnalyzer = wa.WindowedAnalyzer
@@ -56,21 +58,6 @@ def _scalar(fn, population, missing_data, **kw):
                         missing_data=missing_data, **kw) for lo, hi in WINDOWS])
 
 
-def _force_chunked(monkeypatch):
-    """Send the dispatcher's fused requests to the chunked engine, with
-    chunks smaller than the matrix. The chunked engine hands some statistics
-    back to the single-shot one, with its site set; those calls go through."""
-    monkeypatch.setattr("pg_gpu._memutil.estimate_fused_chunk_size",
-                        lambda n, memory_fraction=0.35: 40)
-    single_shot = wa.windowed_statistics_fused
-
-    def fused(*args, **kwargs):
-        engine = single_shot if "_sites" in kwargs else wa.windowed_statistics_fused_chunked
-        return engine(*args, **kwargs)
-
-    monkeypatch.setattr(wa, "windowed_statistics_fused", fused)
-
-
 # Requests with pi and a companion. The companion decides which engine
 # serves pi for one population, or adds a two-population statistic to the
 # request; pi must not notice either.
@@ -92,7 +79,7 @@ CASES = ([(name, False) for name in REQUESTS]
                          ids=[n + ("-chunked" if c else "") for n, c in CASES])
 def test_pi_of_each_population_is_the_scalar_value(request_name, chunked, missing_data, monkeypatch):
     if chunked:
-        _force_chunked(monkeypatch)
+        force_chunked_engine(monkeypatch, chunk=40)
     df = windowed_analysis(_hm(), WINDOW, statistics=REQUESTS[request_name],
                            populations=["p1", "p2"], missing_data=missing_data,
                            span_normalize=False)
