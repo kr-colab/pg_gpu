@@ -1721,7 +1721,8 @@ def _windowed_per_population(haplotype_matrix, statistics, populations,
         frame = run(rest, populations)
         _check_same_windows(grid, frame)
         parts.append(frame.drop(columns=prefix))
-    out = pd.concat(parts, axis=1)
+    # The rows were checked by position, so join them by position too.
+    out = pd.concat([part.reset_index(drop=True) for part in parts], axis=1)
 
     windows = _WindowAccumulator(
         cp.asarray(haplotype_matrix.positions),

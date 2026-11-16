@@ -17,12 +17,14 @@ import importlib
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from pg_gpu import HaplotypeMatrix, divergence, diversity, windowed_analysis
 
 # pg_gpu.windowed_analysis names the function, so the module needs its path.
 wa = importlib.import_module("pg_gpu.windowed_analysis")
+WindowedAnalyzer = wa.WindowedAnalyzer
 
 N_VAR, SPACING, WINDOW = 120, 100, 3000
 POPS = {"p1": list(range(8)), "p2": list(range(8, 16))}
@@ -127,6 +129,40 @@ def test_n_variants_counts_sites_complete_in_every_named_population(stats):
     include = windowed_analysis(_hm(), WINDOW, statistics=stats, populations=["p1", "p2"],
                                 missing_data="include")
     np.testing.assert_array_equal(include["n_variants"], [w.sum() for w in in_window])
+
+
+# The single-population statistics that the fused engine and the per-window
+# fallback both compute.
+SHARED = sorted((wa._FUSED_STATS - wa._TWO_POP_STATS) & wa._fallback_stats())
+REGIONS = pd.DataFrame({"start": [0, 2500, 7000], "end": [2000, 6500, 12000]})
+
+
+@pytest.mark.parametrize("missing_data", ["include", "exclude"])
+@pytest.mark.parametrize("mask", [False, True], ids=["no-mask", "mask"])
+@pytest.mark.parametrize("window_type", ["bp", "regions"])
+def test_two_populations_match_the_per_window_fallback(window_type, mask, missing_data, tmp_path):
+    # The per-window fallback computes every population from the scalar
+    # functions, and counts n_variants over every named population. The
+    # split request must give its columns, each from a fast engine.
+    def matrix():
+        hm = _hm()
+        if mask:
+            bed = tmp_path / "accessible.bed"
+            bed.write_text("1\t0\t4300\n1\t5100\t12000\n")
+            hm.set_accessible_mask(str(bed), chrom="1")
+        return hm
+
+    kw = dict(statistics=SHARED + ["fst"], populations=["p1", "p2"], missing_data=missing_data)
+    kw |= (dict(window_type="regions", regions=REGIONS) if window_type == "regions"
+           else dict(window_size=WINDOW))
+    split = windowed_analysis(matrix(), **({"window_size": WINDOW} | kw))
+    fallback = WindowedAnalyzer(progress_bar=False, **kw).compute(matrix())
+    fallback = fallback.rename(columns={"fst_p1_p2": "fst"})
+    assert len(split) == len(fallback)
+    assert sorted(split.columns) == sorted(fallback.columns)
+    for column in split.columns.drop("chrom"):
+        np.testing.assert_allclose(split[column].to_numpy(float), fallback[column].to_numpy(float),
+                                   rtol=1e-9, atol=1e-12, equal_nan=True, err_msg=column)
 
 
 def test_three_populations():
