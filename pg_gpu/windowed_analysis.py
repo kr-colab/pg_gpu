@@ -333,6 +333,7 @@ class StatisticsComputer:
             'zeng_e': lambda w: diversity.zeng_e(w.matrix, missing_data=self.missing_data),
             'zeng_dh': lambda w: diversity.zeng_dh(w.matrix, missing_data=self.missing_data),
             'n_variants': lambda w: w.n_variants,
+            'n_accessible': lambda w: w.n_accessible,
             'n_singletons': lambda w: diversity.singleton_count(w.matrix, missing_data=self.missing_data),
             'segregating_sites': lambda w: diversity.segregating_sites(w.matrix, missing_data=self.missing_data),
             'het_expected': lambda w: _window_mean_het_expected(

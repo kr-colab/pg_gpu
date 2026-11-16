@@ -1925,7 +1925,7 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
     """
     _warn_unphased(haplotype_matrix, context="local_pca_jackknife")
 
-    from .windowed_analysis import WindowIterator, _window_prefix
+    from .windowed_analysis import WindowIterator
 
     window_params = _resolve_window_params(
         window_params, window_size, step_size, window_type, regions,

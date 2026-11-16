@@ -206,3 +206,11 @@ def test_stream_matches_eager(kind, tmp_path):
     eager, stream = frames
     np.testing.assert_array_equal(eager[["start", "end"]], stream[["start", "end"]])
     np.testing.assert_allclose(stream["n_accessible"], eager["n_accessible"], rtol=1e-12)
+
+
+def test_the_fallback_takes_the_name_as_a_statistic(tmp_path):
+    # windowed_analysis drops the name, because the column is always there;
+    # the analyzer, used directly, must know it as it knows n_variants.
+    df = wa.WindowedAnalyzer(window_size=WINDOW, step_size=WINDOW, progress_bar=False,
+                             statistics=["n_accessible", "n_variants"]).compute(_hm("mask", tmp_path))
+    np.testing.assert_array_equal(df["n_accessible"], _expected("mask"))

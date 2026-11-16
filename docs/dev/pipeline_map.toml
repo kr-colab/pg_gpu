@@ -335,6 +335,13 @@ not_in = { scatter = "#347", fused = "#347" }
 span_normalized = false
 notes = "A prefix column of every engine, so windowed_analysis._engine_statistics drops it from the request; under 'exclude' it counts the sites complete in the rows the request names: every row, the one population, or every named population (windowed_analysis._windowed_per_population, and StatisticsComputer.compute for snp windows)."
 
+[windowed.n_accessible]
+scalar = ""
+engines = ["fallback"]
+not_in = { scatter = "untracked", fused = "untracked" }
+span_normalized = false
+notes = "A prefix column of every engine, so windowed_analysis._engine_statistics drops it from the request. It is the window's base count by windowed_analysis._compute_window_bases (the mask's accessible bases, else the window's share of n_total_sites, else the window length), and the scatter and fused engines divide by the array they report. Caveats: (1) a per-base statistic times n_accessible is the raw sum only when no site of the window has every call missing, because the engines rescale the per-base value for such sites (windowed_analysis._missing_data_rescale); (2) on the fallback the scalar functions divide by the window matrix's own span, which equals this count through WindowIterator._apply_window_bases; (3) a window with no accessible base has 0 here and NaN for every per-base rate; (4) local PCA windows a population's rows, so it names the whole matrix as WindowIterator's span_source."
+
 [windowed.theta_h]
 scalar = "diversity.theta_h"
 engines = ["thetas_scatter", "fused", "fused_chunked", "fallback"]
