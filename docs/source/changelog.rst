@@ -412,6 +412,19 @@ Bug fixes
   ``plot_ld_decay`` raised a NumPy reduction error for empty input or
   when every r-squared is NaN; it now raises a ``ValueError`` that says
   so, and it drops a pair with a NaN distance.
+* ``xpnsl`` and ``xpehh`` with ``missing_data='exclude'`` dropped a site
+  for a missing call anywhere in the matrix, not only in ``pop1`` or
+  ``pop2``, so a missing call in a population neither function reads
+  removed a site it should have kept, shifting the scores at every
+  other site too. Both now filter on ``pop1`` and ``pop2`` only, as
+  every other two-population statistic does.
+* ``ihs`` and ``xpehh`` with ``map_pos`` and ``missing_data='exclude'``
+  cut ``pos`` to the complete sites but left ``map_pos`` at its
+  original length, which raised ``IndexError`` with the default gap
+  settings and gave wrong gaps with ``gap_scale=None, max_gap=None``.
+  ``map_pos`` is now cut the same way; a ``map_pos`` that does not have
+  one entry per variant before the cut now raises a ``ValueError`` that
+  names it.
 * ``sfs.fold_sfs`` paired bin ``i`` with bin ``n - 1 - i`` instead of
   bin ``n - i``. For an even ``n`` -- every diploid sample size -- this
   never read the top bin, merged the middle bin into its neighbor, and

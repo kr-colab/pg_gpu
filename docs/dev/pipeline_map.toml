@@ -1619,7 +1619,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "NaN when a population has fewer than two haplotypes"
 parallel = []
-notes = "Under 'exclude' sites are dropped on missing calls in every row of the matrix, not only pop1 and pop2."
+notes = "Under 'exclude' sites are dropped on a missing call in pop1 or pop2 (HaplotypeMatrix.exclude_missing_sites), not elsewhere in the matrix."
 
 [functions."selection.ihs"]
 # signature: (haplotype_matrix, pos, map_pos, min_ehh, min_maf, include_edges, gap_scale, max_gap, is_accessible, population, missing_data)
@@ -1630,7 +1630,7 @@ missing_data = ["include", "exclude"]
 span = "none (gaps scaled by is_accessible, a bool array with element 0 at position 1 as in scikit-allel, else the matrix mask with its offset, else gap_scale)"
 undefined = "NaN where MAF < min_maf, EHH does not decay below min_ehh (unless include_edges), or past a gap > max_gap; all NaN with no alternate allele"
 parallel = []
-notes = "Under 'exclude' pos is subset but map_pos is not, so a map_pos with dropped sites raises IndexError."
+notes = "Under 'exclude' map_pos is subset with pos; a map_pos that does not have one entry per variant before the cut raises ValueError."
 
 [functions."selection.xpehh"]
 # signature: (haplotype_matrix, pop1, pop2, pos, map_pos, min_ehh, include_edges, gap_scale, max_gap, is_accessible, missing_data)
@@ -1641,7 +1641,7 @@ missing_data = ["include", "exclude"]
 span = "none (gaps scaled by is_accessible, a bool array with element 0 at position 1 as in scikit-allel, else the matrix mask with its offset, else gap_scale)"
 undefined = "NaN where EHH does not decay below min_ehh (unless include_edges) or past a gap > max_gap"
 parallel = []
-notes = "Under 'exclude' sites are dropped on every row of the matrix, and map_pos is not subset (IndexError)."
+notes = "Under 'exclude' sites are dropped on a missing call in pop1 or pop2, not elsewhere in the matrix; map_pos is subset with pos, and a map_pos that does not have one entry per variant before the cut raises ValueError."
 
 [functions."selection.ehh_decay"]
 # signature: (haplotype_matrix, truncate, population, missing_data)

@@ -196,19 +196,56 @@ def test_ihs_exclude(hm, hm_complete):
            selection.ihs(hm_complete))
 
 
+def test_ihs_exclude_with_map_pos(hm, hm_complete):
+    # map_pos is cut the same way pos is: one call with the full map_pos
+    # under exclude must equal the same call on the complete-site matrix,
+    # under include, with map_pos pre-cut to match.
+    mp = _host(hm.positions).astype(float) * 1.3
+    keep = np.where((_host(hm.haplotypes) >= 0).all(axis=0))[0]
+    kw = dict(min_maf=0.0, include_edges=True, gap_scale=None, max_gap=None)
+    _agree(selection.ihs(hm, map_pos=mp, missing_data="exclude", **kw),
+           selection.ihs(hm_complete, map_pos=mp[keep], missing_data="include", **kw))
+
+
+def test_ihs_exclude_rejects_mismatched_map_pos(hm):
+    with pytest.raises(ValueError, match="map_pos"):
+        selection.ihs(hm, map_pos=np.ones(hm.num_variants - 1),
+                     missing_data="exclude")
+
+
 def test_ehh_decay_exclude(hm, hm_complete):
     _agree(selection.ehh_decay(hm, missing_data="exclude"),
            selection.ehh_decay(hm_complete))
 
 
-def test_xpehh_exclude(hm, hm_complete):
-    _agree(selection.xpehh(hm, "p1", "p2", missing_data="exclude"),
-           selection.xpehh(hm_complete, "p1", "p2"))
+def test_xpehh_exclude(hm4):
+    # A third and fourth population carry missing calls too, so this catches
+    # a filter that reads rows outside pop1/pop2.
+    hc = _complete_hm_over(hm4, ["A", "B"])
+    _agree(selection.xpehh(hm4, "A", "B", missing_data="exclude"),
+           selection.xpehh(hc, "A", "B"))
 
 
-def test_xpnsl_exclude(hm, hm_complete):
-    _agree(selection.xpnsl(hm, "p1", "p2", missing_data="exclude"),
-           selection.xpnsl(hm_complete, "p1", "p2"))
+def test_xpehh_exclude_with_map_pos(hm4):
+    hc = _complete_hm_over(hm4, ["A", "B"])
+    mp = _host(hm4.positions).astype(float) * 1.3
+    rows = sorted(hm4.sample_sets["A"] + hm4.sample_sets["B"])
+    keep = np.where((_host(hm4.haplotypes)[rows] >= 0).all(axis=0))[0]
+    kw = dict(min_ehh=0.0, include_edges=True, gap_scale=None, max_gap=None)
+    _agree(selection.xpehh(hm4, "A", "B", map_pos=mp, missing_data="exclude", **kw),
+           selection.xpehh(hc, "A", "B", map_pos=mp[keep], missing_data="include", **kw))
+
+
+def test_xpehh_exclude_rejects_mismatched_map_pos(hm4):
+    with pytest.raises(ValueError, match="map_pos"):
+        selection.xpehh(hm4, "A", "B", map_pos=np.ones(hm4.num_variants - 1),
+                        missing_data="exclude")
+
+
+def test_xpnsl_exclude(hm4):
+    hc = _complete_hm_over(hm4, ["A", "B"])
+    _agree(selection.xpnsl(hm4, "A", "B", missing_data="exclude"),
+           selection.xpnsl(hc, "A", "B"))
 
 
 # ── distance statistics ─────────────────────────────────────────────────
