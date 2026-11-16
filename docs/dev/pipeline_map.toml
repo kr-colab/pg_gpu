@@ -2271,7 +2271,7 @@ missing_data = []
 span = "none"
 undefined = "a NaN bar is not drawn; log y-scale only when some value is above 0"
 parallel = []
-notes = "Needs a numpy array (sfs.* return numpy); a cupy array raises TypeError in np.asarray."
+notes = "Every plotting function reads its array arguments through plotting._to_numpy, which copies a cupy array to the host."
 
 [functions."plotting.plot_joint_sfs"]
 # signature: (s, ax, log_scale, cmap, clip_endpoints, kwargs)
@@ -2280,7 +2280,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "masks zeros only; any NaN, or an all-zero matrix, raises ValueError under log_scale"
+undefined = "a zero or NaN cell is left blank; a matrix with no positive cell is drawn empty on a linear scale"
 parallel = []
 notes = "clip_endpoints drops only row 0 and column 0, though the docstring says the last ones too."
 
@@ -2293,7 +2293,7 @@ missing_data = []
 span = "none"
 undefined = "imshow shows a NaN cell as blank (bad color)"
 parallel = []
-notes = "HaplotypeMatrix.pairwise_r2, the producer the docstring names, returns a cupy array, which np.asarray rejects with TypeError."
+notes = "Takes the cupy array that HaplotypeMatrix.pairwise_r2 returns."
 
 [functions."plotting.plot_ld_decay"]
 # signature: (distances, r2_values, ax, bins, color, percentile, kwargs)
@@ -2302,9 +2302,9 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "drops NaN r2 (not NaN distances); NaN for an empty bin; raises ValueError when no r2 is finite and bins is an int"
+undefined = "drops a pair with a NaN r2 or a NaN distance; NaN for an empty bin; raises ValueError when the input is empty or no r2 is defined"
 parallel = []
-notes = "With an int bins the pair at the largest distance falls outside the last bin (np.digitize); a numpy integer bins is taken as edges and fails."
+notes = "The last bin is closed on the right, as in np.histogram, so with an int bins the pair at the largest distance is counted. A numpy integer bins is a bin count, as an int is."
 
 [functions."plotting.plot_pca"]
 # signature: (coords, ax, pc_x, pc_y, explained_variance, labels, palette, s, alpha, kwargs)
