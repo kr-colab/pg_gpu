@@ -400,6 +400,24 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``plot_joint_sfs`` with ``clip_endpoints=True`` (the default) dropped
+  all of row 0 and column 0. Only two cells of a joint SFS are
+  monomorphic, ``[0, 0]`` and ``[n1, n2]``; the rest of row 0 and column
+  0 holds the sites that are polymorphic in one population only, so the
+  default plot hid every private polymorphism. It now leaves only the
+  two monomorphic cells blank and draws the whole grid, with each tick
+  at the centre of its allele count (the old plot was one count off). A
+  new ``folded`` argument is for a folded spectrum: no cell is left
+  blank, because a fold of each axis puts the fixed differences in
+  ``[0, 0]``, and the axes are labelled as minor allele counts.
+* The log colour scale of ``plot_joint_sfs`` started at 1, so the cells
+  below 1 of a projected or scaled spectrum all took the lowest colour.
+  It now runs from the smallest to the largest positive cell.
+* ``plot_windowed`` and ``plot_windowed_panel`` raised a NumPy reduction
+  error for a result with no window; they now draw empty axes.
+  ``plot_windowed_panel`` raises a ``ValueError`` that names the cause
+  when the results have no statistic to plot, which is what
+  ``windowed_analysis`` returns when it has no window.
 * ``distance_stats.dist_moments`` (and ``dist_var``, ``dist_skew``,
   ``dist_kurt``) gave a variance near 1e-33 and a skewness of rounding
   noise for some samples in which every pairwise distance is the same

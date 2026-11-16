@@ -7,6 +7,7 @@ Uses matplotlib Agg backend (no display needed).
 
 import pytest
 import numpy as np
+import pandas as pd
 import cupy as cp
 import matplotlib
 matplotlib.use('Agg')
@@ -54,24 +55,68 @@ class TestSFSPlots:
         assert ax is not None
 
 
-    def test_joint_sfs_with_no_positive_cell_draws(self):
+    def test_joint_sfs_draws_sites_polymorphic_in_one_population(self):
         rng = np.random.default_rng(0)
         hap = np.zeros((8, 5), np.int8)
         hap[4:] = rng.integers(0, 2, (4, 5))   # the first population is monomorphic
         hm = HaplotypeMatrix(hap, np.arange(5) * 100 + 1, 0, 1000)
         joint = sfs.joint_sfs(hm, [0, 1, 2, 3], [4, 5, 6, 7])
-        assert joint.sum() > 0 and not joint[1:, 1:].any()
+        # Every site is in row 0: derived in no haplotype of population 1.
+        assert joint.sum() == joint[0].sum() > 0
         ax = plotting.plot_joint_sfs(joint)
-        # LogNorm fails at draw time, not when the artist is made.
         ax.figure.canvas.draw()
+        drawn = ax.collections[0].get_array()
+        assert drawn.shape == joint.shape
+        np.testing.assert_array_equal(drawn.filled(0), joint)
+
+    def test_joint_sfs_clip_leaves_only_the_monomorphic_corners_blank(self):
+        full = np.arange(1, 26.0).reshape(5, 5)
+        blank = plotting.plot_joint_sfs(full).collections[0].get_array().mask
+        assert np.argwhere(blank).tolist() == [[0, 0], [4, 4]]
+        for kw in (dict(clip_endpoints=False), dict(folded=True)):
+            drawn = plotting.plot_joint_sfs(full, **kw).collections[0].get_array()
+            assert not np.ma.getmaskarray(drawn).any(), kw
+
+    def test_folded_joint_sfs_draws_the_fixed_differences(self):
+        # A fold of each axis puts the sites fixed in one population and
+        # absent from the other in cell [0, 0].
+        hap = np.zeros((8, 5), np.int8)
+        hap[:4, 0:3] = 1
+        hap[4:, 3:5] = 1
+        hm = HaplotypeMatrix(hap, np.arange(5) * 100 + 1, 0, 1000)
+        joint = sfs.joint_sfs(hm, [0, 1, 2, 3], [4, 5, 6, 7])
+        folded = sfs.fold_joint_sfs(joint, 4, 4)
+        assert folded[0, 0] == 5
+        ax = plotting.plot_joint_sfs(folded, folded=True)
+        assert ax.collections[0].get_array()[0, 0] == 5
+        assert ax.get_xlabel().startswith("Minor")
+
+    def test_joint_sfs_ticks_are_at_the_cell_centres(self):
+        mesh = plotting.plot_joint_sfs(np.ones((3, 4)), clip_endpoints=False).collections[0]
+        x, y = mesh.get_coordinates()[..., 0], mesh.get_coordinates()[..., 1]
+        np.testing.assert_array_equal(x[0], [-0.5, 0.5, 1.5, 2.5, 3.5])
+        np.testing.assert_array_equal(y[:, 0], [-0.5, 0.5, 1.5, 2.5])
+
+    def test_joint_sfs_log_scale_starts_at_the_smallest_cell(self):
+        # A projected or scaled spectrum has cells below 1; they must not
+        # all take the lowest colour.
+        cells = np.array([[0.0, 0.2, 0.05], [0.4, 3.0, 0.9], [1.5, 0.3, 0.0]])
+        ax = plotting.plot_joint_sfs(cells)
+        ax.figure.canvas.draw()
+        norm = ax.collections[0].norm
+        assert norm.vmin == pytest.approx(0.05) and norm.vmax == pytest.approx(3.0)
 
     @pytest.mark.parametrize("fill", [0.0, 4.0], ids=["only-nan", "nan-and-counts"])
     def test_joint_sfs_leaves_a_nan_cell_blank(self, fill):
         joint = np.full((4, 4), fill)
         joint[2, 2] = np.nan
         ax = plotting.plot_joint_sfs(joint)
+        # LogNorm fails at draw time, not when the artist is made.
         ax.figure.canvas.draw()
-        assert ax.collections[0].get_array().mask[1, 1]
+        drawn = ax.collections[0].get_array()
+        assert drawn.mask[2, 2]
+        # With no positive cell the plot is empty, on a linear scale.
+        assert drawn.count() == (0 if fill == 0 else 13)
 
 
 class TestLDPlots:
@@ -224,6 +269,21 @@ class TestPlotEdgeInputs:
         starts = np.arange(0, 1000, 100)  # largest start 900 bp
         ax = plotting.plot_windowed(starts, np.random.rand(len(starts)))
         assert ax.get_xlabel() == "Position (bp)"
+
+    def test_windowed_with_no_window_draws_empty_axes(self):
+        ax = plotting.plot_windowed(np.array([]), np.array([]), stat_name="pi")
+        ax.figure.canvas.draw()
+        assert ax.get_xlabel() == "Position (bp)" and ax.get_ylabel() == "pi"
+        fig, axes = plotting.plot_windowed_panel(pd.DataFrame({"start": [], "pi": [], "theta_w": []}))
+        fig.canvas.draw()
+        assert len(axes) == 2
+
+    def test_windowed_panel_with_no_statistic_raises(self):
+        # windowed_analysis returns a frame with no column when there is no
+        # window at all.
+        for kw in ({}, {"statistics": ["pi"]}):
+            with pytest.raises(ValueError, match="no statistic to plot"):
+                plotting.plot_windowed_panel(pd.DataFrame(), **kw)
 
     def test_windowed_panel_single_statistic(self, sim_data):
         matrix, _, _ = sim_data
