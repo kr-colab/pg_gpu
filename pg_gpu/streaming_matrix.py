@@ -553,14 +553,22 @@ class _StreamingMatrixBase:
             yield int(left), int(right), m
 
     def _empty_chunk(self):
-        """An eager matrix with this stream's rows and sample sets and no
-        variants."""
-        return self._build_chunk(
+        """An eager matrix with this stream's rows and sample sets, no
+        variants and no bases.
+
+        It is the zero of a sum over chunks, so it must add nothing to a
+        span either. Its bounds are the stream's, which alone would give it
+        the whole stream's span; ``n_total_sites = 0`` takes precedence and
+        makes the span 0.
+        """
+        m = self._build_chunk(
             cp.empty((0, self._source.num_diploids, 2), cp.int8),
             np.empty(0, np.int64),
             chrom_start=self.chrom_start, chrom_end=self.chrom_end,
             sample_sets=self._sample_sets,
         )
+        m.n_total_sites = 0.0
+        return m
 
     def _attach_span(self, m, left, right):
         """Give an eager matrix over ``[left, right]`` this stream's span.

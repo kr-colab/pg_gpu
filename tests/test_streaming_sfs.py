@@ -9,7 +9,7 @@ a region with no variants.
 import numpy as np
 import pytest
 
-from pg_gpu import HaplotypeMatrix, sfs
+from pg_gpu import HaplotypeMatrix, diversity, sfs
 
 POPS = {"A": [0, 1, 2, 3], "B": [4, 5, 6, 7]}
 # Two regions with no variants. The second has no end, so there is no span to
@@ -73,3 +73,15 @@ def test_stream_with_no_variants_gives_zeros(store, name, region, missing_data):
     assert isinstance(got, np.ndarray)
     assert got.shape == full.shape and got.dtype == full.dtype
     assert not got.any()
+
+
+@pytest.mark.parametrize("region", [None, PAST_THE_LAST_VARIANT], ids=["chunks", "no_chunk"])
+def test_empty_chunk_has_no_span(store, region):
+    # The reducer starts its sum from this matrix, so it must be the zero of
+    # a span too: its bounds are the stream's, but it holds no bases.
+    empty = _load(store, "always", region=region)._empty_chunk()
+    assert empty.num_variants == 0
+    assert empty.get_span() == 0
+    # A per-base rate over no bases is undefined; a count is 0.
+    assert np.isnan(diversity.pi(empty))
+    assert diversity.segregating_sites(empty) == 0
