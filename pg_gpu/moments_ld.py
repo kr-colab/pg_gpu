@@ -320,8 +320,11 @@ def _bed_as_mask(matrix, accessible_bed, chrom):
     if matrix.device != 'GPU':
         matrix.transfer_to_gpu()
     n_total_sites = matrix.n_total_sites
-    matrix.set_accessible_mask(accessible_bed, chrom=chrom)
+    # Setting the mask is inside the try: it assigns the mask before it
+    # counts the accessible bases, so a failure part way (out of memory,
+    # for example) would leave the mask on the matrix.
     try:
+        matrix.set_accessible_mask(accessible_bed, chrom=chrom)
         yield
     finally:
         matrix.remove_accessible_mask()

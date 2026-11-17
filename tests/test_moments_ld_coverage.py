@@ -237,8 +237,10 @@ class TestAccessibleBedOnMatrixInput:
 
     @staticmethod
     def _agree(got, expected):
+        # The pair chunks follow the free GPU memory, so two runs can add
+        # the same terms in another order; the sums agree to rounding only.
         for a, b in zip(got["sums"], expected["sums"]):
-            np.testing.assert_allclose(a, b, rtol=1e-12)
+            np.testing.assert_allclose(a, b, rtol=1e-9)
 
     @pytest.mark.parametrize("kind,use_genotypes", CASES, ids=IDS)
     def test_bed_masks_the_matrix_for_the_call_only(self, kind, use_genotypes, tmp_path):
@@ -263,6 +265,23 @@ class TestAccessibleBedOnMatrixInput:
                                   pops=["pop0", "pop1"], r_bins=[0, 1e-6], report=False,
                                   accessible_bed=self._bed(tmp_path))
         assert not hm.has_accessible_mask and hm.num_variants == 300
+
+    def test_failure_while_the_mask_is_set_leaves_the_matrix_as_it_was(self, tmp_path,
+                                                                        monkeypatch):
+        # set_accessible_mask assigns the mask and then counts the accessible
+        # bases. A failure in the second step must not leave the mask behind.
+        hm = self._matrix("haplotype_matrix")
+        hm.n_total_sites = 90_000
+
+        def out_of_memory(self):
+            raise MemoryError("no room for the count")
+
+        monkeypatch.setattr(HaplotypeMatrix, "_accessible_bases_in_range", out_of_memory)
+        with pytest.raises(MemoryError):
+            compute_ld_statistics(haplotype_matrix=hm, use_genotypes=False,
+                                  accessible_bed=self._bed(tmp_path), **self.KW)
+        assert not hm.has_accessible_mask
+        assert hm.num_variants == 300 and hm.n_total_sites == 90_000
 
     @pytest.mark.parametrize("kind,use_genotypes", CASES[::2], ids=IDS[::2])
     def test_matrix_with_a_mask_raises(self, kind, use_genotypes, tmp_path):
