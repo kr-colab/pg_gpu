@@ -422,8 +422,9 @@ class TestAverageF3UnnormedWholeBlockUndefined:
         assert np.isfinite(f3)
         assert np.isfinite(se)
         assert np.isfinite(z)
-        assert np.isfinite(vj).all()  # no leave-one-out estimate is poisoned
-        assert len(vj) == len(vb) - 1  # the bad block isn't resampled at all
+        assert len(vj) == len(vb)  # vj stays aligned with vb
+        assert np.isnan(vj[1])  # the dropped block has no leave-one-out estimate
+        assert np.isfinite(np.delete(vj, 1)).all()  # no other estimate is poisoned
 
         # Independent check: drop the bad block, then take the plain
         # (unweighted) delete-1 jackknife over what's left -- scikit-allel's
@@ -439,7 +440,7 @@ class TestAverageF3UnnormedWholeBlockUndefined:
         expected_se = np.sqrt(((n - 1) / n)
                               * np.sum((per_iter - per_iter.mean()) ** 2))
         np.testing.assert_allclose(se, expected_se, rtol=1e-10)
-        np.testing.assert_allclose(vj, per_iter, rtol=1e-10)
+        np.testing.assert_allclose(vj[np.isfinite(vb)], per_iter, rtol=1e-10)
 
     def test_every_block_undefined_is_nan_not_a_crash(self):
         """With no block left to jackknife over, se/z are NaN (as when
@@ -457,7 +458,8 @@ class TestAverageF3UnnormedWholeBlockUndefined:
 
         assert np.isnan(f3) and np.isnan(se) and np.isnan(z)
         assert np.isnan(vb).all()
-        assert len(vj) == 0
+        assert len(vj) == len(vb)
+        assert np.isnan(vj).all()
 
 
 class TestPattersonF4ZeroCallSites:

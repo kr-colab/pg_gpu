@@ -442,7 +442,8 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     vb : ndarray
         Per-block values.
     vj : ndarray
-        Jackknife resampled values.
+        Jackknife resampled values. ``vj[i]`` is the estimate with block
+        ``i`` held out, same length and block order as ``vb``.
 
     Notes
     -----
@@ -451,8 +452,10 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     arrays are empty.
 
     With ``normed=False``, a block with no defined site drops out of
-    the jackknife resampling instead of contributing a NaN block mean.
-    Every other block still contributes its own unweighted mean.
+    the jackknife resampling instead of contributing a NaN block mean,
+    so there is no held-out estimate for it; ``vj`` has NaN at that
+    block's position rather than a shorter length. Every other block
+    still contributes its own unweighted mean.
     """
     T, B = _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
                               missing_data=missing_data)
@@ -476,9 +479,11 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
         vb = _moving_nanmean(T, blen).get()
         defined = np.isfinite(vb)
         if defined.any():
-            _, se, vj = block_jackknife(vb[defined], statistic=np.mean)
+            _, se, vj_defined = block_jackknife(vb[defined], statistic=np.mean)
+            vj = np.full(vb.shape, np.nan)
+            vj[defined] = vj_defined
         else:
-            se, vj = np.nan, np.empty(0, dtype=np.float64)
+            se, vj = np.nan, np.full(vb.shape, np.nan)
 
     return f3, se, _z_score(f3, se), vb, vj
 

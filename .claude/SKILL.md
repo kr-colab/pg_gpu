@@ -719,18 +719,18 @@ resampled block indices are applied to both — required for correctness:
 ```python
 T, B = admixture.patterson_f3(h, 'C', 'A', 'B')
 # patterson_f4(h, 'A', 'B', 'C', 'D') returns one per-variant array;
-# its scalar is the plain sum, no denominator.
+# its scalar is the nansum, no denominator.
 # Bin per-variant T and B into block-sized chunks. Trivial bp-window
 # binning works for genome-wide F3; for fine-grained block sizes use
 # np.add.reduceat with block boundaries from h.positions.
 n_per_block = 1000  # variants per block
 n_blocks = T.size // n_per_block
-T_blocks = T[:n_blocks * n_per_block].reshape(n_blocks, n_per_block).sum(1)
-B_blocks = B[:n_blocks * n_per_block].reshape(n_blocks, n_per_block).sum(1)
+T_blocks = np.nansum(T[:n_blocks * n_per_block].reshape(n_blocks, n_per_block), axis=1)
+B_blocks = np.nansum(B[:n_blocks * n_per_block].reshape(n_blocks, n_per_block), axis=1)
 
 f3, f3_se, _ = resampling.block_jackknife(
     (T_blocks, B_blocks),
-    statistic=lambda t, b: float(t.sum() / b.sum()),
+    statistic=lambda t, b: float(np.nansum(t) / np.nansum(b)),
 )
 ```
 
@@ -760,7 +760,7 @@ Notes:
 
 1. **Shape**: `HaplotypeMatrix.shape` is `(n_haplotypes, n_variants)` — rows are haplotypes, columns are variants.
 2. **`windowed_analysis` is a function, not a module** at attribute access. `windowed_analysis.windowed_statistics(...)` raises AttributeError; call `windowed_analysis(h, ...)` directly, or `from pg_gpu.windowed_analysis import windowed_statistics_fused`.
-3. **`patterson_f3` / `patterson_d` return per-variant arrays, not scalars.** `T, B = admixture.patterson_f3(h, pop_c, pop_a, pop_b)` returns two `(n_variants,)` numpy arrays; the scalar F3 is `T.sum() / B.sum()`. Same shape contract for `num, den = admixture.patterson_d(...)`: scalar is `num.sum() / den.sum()`. For block-jackknife SE, prefer `admixture.average_patterson_f3(..., blen=N)` / `average_patterson_d(..., blen=N)` — they return `(estimate, se, z, vb, vj)` and bin internally. With `missing_data='exclude'` the arrays carry `0` placeholders for masked sites and sums still come out right; the explicit `nansum` form is unnecessary.
+3. **`patterson_f3` / `patterson_d` return per-variant arrays, not scalars.** `T, B = admixture.patterson_f3(h, pop_c, pop_a, pop_b)` returns two `(n_variants,)` numpy arrays; the scalar F3 is `np.nansum(T) / np.nansum(B)`. Same shape contract for `num, den = admixture.patterson_d(...)`: scalar is `np.nansum(num) / np.nansum(den)`. For block-jackknife SE, prefer `admixture.average_patterson_f3(..., blen=N)` / `average_patterson_d(..., blen=N)` — they return `(estimate, se, z, vb, vj)` and bin internally. A site where the estimate is undefined (too few calls in a population that needs them) is `NaN`, not `0` — use `nansum`, not `sum`, when combining the raw per-variant arrays yourself.
 4. **Matrices live on the GPU.** Loaders (`from_vcf`, `from_zarr`) return GPU-resident matrices; all stat functions also auto-`transfer_to_gpu()` on the eager classes if a caller hand-constructed one from numpy. You almost never need to call the transfer methods yourself. To hand a result to pandas / seaborn / matplotlib, call `.get()` on the returned cupy array — that's the device-to-host step. `StreamingHaplotypeMatrix` has no `transfer_to_*` methods (it manages chunk-by-chunk residency); pass it straight to the stat functions.
 5. **Selection scan output shape**: `ihs` / `nsl` return `(n_variants,)` on {0,1}-coded data and `(n_variants, K-1)` (one column per alternate allele code) otherwise. `h.restrict_to_biallelic()` gives the classic 1-D scan on {0,1} codes, but it preserves codes -- a surviving `{0,2}` site still forces the 2-D form. `standardize_by_allele_count` takes 1-D input; standardize each column against its own allele count.
 6. **`span_normalize`**: default `True`; requires `chrom_start` / `chrom_end`, an `accessible_bed`, or `h.set_accessible_mask(...)` for meaningful per-base estimates.
