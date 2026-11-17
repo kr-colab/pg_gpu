@@ -278,12 +278,17 @@ class TestPlotEdgeInputs:
         fig.canvas.draw()
         assert len(axes) == 2
 
-    def test_windowed_panel_with_no_statistic_raises(self):
-        # windowed_analysis returns a frame with no column when there is no
-        # window at all.
-        for kw in ({}, {"statistics": ["pi"]}):
-            with pytest.raises(ValueError, match="no statistic to plot"):
-                plotting.plot_windowed_panel(pd.DataFrame(), **kw)
+    @pytest.mark.parametrize("kw", [{}, {"statistics": ["pi"]}], ids=["all", "named"])
+    def test_windowed_panel_without_windows_names_the_cause(self, kw):
+        # windowed_analysis returns a frame with no column when the data
+        # give no window, so there is no 'start' to place a panel on.
+        with pytest.raises(ValueError, match="no 'start' column"):
+            plotting.plot_windowed_panel(pd.DataFrame(), **kw)
+
+    def test_windowed_panel_with_no_statistic_names_the_columns(self):
+        only_windows = pd.DataFrame({"start": [0, 100], "end": [100, 200], "n_variants": [3, 4]})
+        with pytest.raises(ValueError, match="no statistic to plot.*start, end, n_variants"):
+            plotting.plot_windowed_panel(only_windows)
 
     def test_windowed_panel_single_statistic(self, sim_data):
         matrix, _, _ = sim_data

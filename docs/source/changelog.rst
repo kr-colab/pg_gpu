@@ -416,8 +416,9 @@ Bug fixes
 * ``plot_windowed`` and ``plot_windowed_panel`` raised a NumPy reduction
   error for a result with no window; they now draw empty axes.
   ``plot_windowed_panel`` raises a ``ValueError`` that names the cause
-  when the results have no statistic to plot, which is what
-  ``windowed_analysis`` returns when it has no window.
+  when the results have no ``start`` column, which is what
+  ``windowed_analysis`` returns when it has no window, or no statistic
+  to plot.
 * ``distance_stats.dist_moments`` (and ``dist_var``, ``dist_skew``,
   ``dist_kurt``) gave a variance near 1e-33 and a skewness of rounding
   noise for some samples in which every pairwise distance is the same

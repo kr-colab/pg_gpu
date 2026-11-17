@@ -455,10 +455,16 @@ def plot_windowed_panel(results, statistics=None, figsize=None, colors=None):
         statistics = [k for k in results if k not in skip_keys]
 
     n_panels = len(statistics)
-    # windowed_analysis returns a frame with no column at all when it has no
-    # window, so there is no 'start' and nothing to draw.
-    if n_panels == 0 or 'start' not in results:
-        raise ValueError("plot_windowed_panel: no statistic to plot")
+    if 'start' not in results:
+        raise ValueError(
+            "plot_windowed_panel: the results have no 'start' column to "
+            "place the windows. windowed_analysis returns a frame with no "
+            "columns when the data give no window.")
+    if n_panels == 0:
+        raise ValueError(
+            "plot_windowed_panel: no statistic to plot. The results hold "
+            f"only window columns ({', '.join(map(str, results))}); name "
+            "the statistics to plot, or compute some.")
 
     if figsize is None:
         figsize = (10, 2.5 * n_panels)
