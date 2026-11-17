@@ -1441,7 +1441,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "0.0 at a site with fewer than 2 calls in either pop; empty array when exclude leaves no site"
+undefined = "NaN at a site with fewer than 2 calls in either pop; empty array when exclude leaves no site"
 parallel = []
 notes = "Returns a per-variant NumPy array; multiallelic (sums over alleles)."
 
@@ -1452,7 +1452,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "T is 0.0 where pop_c has fewer than 2 calls or a source has none; B is 0.0 where pop_c has fewer than 2 calls; empty arrays when exclude leaves no site"
+undefined = "T is NaN where pop_c has fewer than 2 calls or a source has none; B is 0.0 where pop_c has fewer than 2 calls; empty arrays when exclude leaves no site"
 parallel = []
 notes = "Returns per-variant (T, B); pop_c is the target and the first argument."
 
@@ -1463,7 +1463,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "0.0 at a site where any pop has no call; empty array when exclude leaves no site"
+undefined = "NaN at a site where any pop has no call; empty array when exclude leaves no site"
 parallel = []
 notes = "Multiallelic per-variant f4; unlike patterson_d it keeps >2-allele sites."
 
@@ -1487,7 +1487,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "NaN for a window with sum(B) == 0 when normed; empty array when no window fits"
 parallel = []
-notes = "Windows count variants; normed=False is the mean of per-site T, where non-estimable sites count as 0.0."
+notes = "Windows count variants; normed=False is the nanmean of per-site T, skipping non-estimable sites."
 
 [functions."admixture.moving_patterson_d"]
 # signature: (haplotype_matrix, pop_a, pop_b, pop_c, pop_d, size, start, stop, step, missing_data)

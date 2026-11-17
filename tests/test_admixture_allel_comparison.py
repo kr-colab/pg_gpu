@@ -308,6 +308,110 @@ class TestPattersonDZeroCallSites:
         assert np.isfinite(np.nansum(num) / np.nansum(den))
 
 
+class TestPattersonF2ZeroCallSites:
+    """A site with fewer than 2 calls in a pop is non-estimable: NaN, not 0."""
+
+    @pytest.fixture
+    def zero_call_data(self, two_pop_data):
+        """two_pop_data with all calls missing in A at some sites."""
+        _, base = two_pop_data
+        pops = {name: hap.copy() for name, hap in base.items()}
+        undefined = np.zeros(pops['A'].shape[1], dtype=bool)
+        pops['A'][:, 10:20] = -1
+        undefined[10:20] = True
+        return _make_matrix(pops), pops, undefined
+
+    def test_f2_zero_call_sites_match_allel(self, zero_call_data):
+        matrix, pops, undefined = zero_call_data
+        f2_pg = admixture.patterson_f2(matrix, 'A', 'B')
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        f2_a = allel.patterson_f2(aca, acb)
+
+        np.testing.assert_array_equal(np.isnan(f2_a), undefined)
+        np.testing.assert_array_equal(np.isnan(f2_pg), undefined)
+        np.testing.assert_allclose(f2_pg[~undefined], f2_a[~undefined],
+                                   rtol=1e-10)
+
+
+class TestPattersonF3ZeroCallSites:
+    """A site where C has fewer than 2 calls, or a source has none, leaves
+    T non-estimable: NaN, not 0. These sites previously biased the
+    normed=False mean of average_patterson_f3/moving_patterson_f3 toward 0."""
+
+    @pytest.fixture
+    def zero_call_data(self, three_pop_data):
+        """three_pop_data with all calls missing in C at some sites, and in
+        source A at others."""
+        _, base = three_pop_data
+        pops = {name: hap.copy() for name, hap in base.items()}
+        undefined = np.zeros(pops['C'].shape[1], dtype=bool)
+        pops['C'][:, 10:20] = -1
+        pops['A'][:, 50:55] = -1
+        undefined[10:20] = True
+        undefined[50:55] = True
+        return _make_matrix(pops), pops, undefined
+
+    def test_f3_zero_call_sites_match_allel(self, zero_call_data):
+        matrix, pops, undefined = zero_call_data
+        T_pg, B_pg = admixture.patterson_f3(matrix, 'C', 'A', 'B')
+        acc = _allele_counts(pops['C'])
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        T_a, _ = allel.patterson_f3(acc, aca, acb)
+
+        np.testing.assert_array_equal(np.isnan(T_a), undefined)
+        np.testing.assert_array_equal(np.isnan(T_pg), undefined)
+        np.testing.assert_allclose(T_pg[~undefined], T_a[~undefined],
+                                   rtol=1e-10)
+
+    def test_average_f3_unnormed_matches_allel_with_zero_call_sites(
+            self, zero_call_data):
+        matrix, pops, _ = zero_call_data
+        f3_pg, se_pg, z_pg, _, _ = admixture.average_patterson_f3(
+            matrix, 'C', 'A', 'B', blen=20, normed=False)
+        acc = _allele_counts(pops['C'])
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        f3_a, se_a, z_a, _, _ = allel.average_patterson_f3(
+            acc, aca, acb, blen=20, normed=False)
+        np.testing.assert_allclose(f3_pg, f3_a, rtol=1e-10)
+        np.testing.assert_allclose(se_pg, se_a, rtol=1e-5)
+
+    def test_moving_f3_unnormed_matches_allel_with_zero_call_sites(
+            self, zero_call_data):
+        matrix, pops, _ = zero_call_data
+        f3_pg = admixture.moving_patterson_f3(
+            matrix, 'C', 'A', 'B', size=20, normed=False)
+        acc = _allele_counts(pops['C'])
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        with np.errstate(invalid='ignore'):
+            f3_a = allel.moving_patterson_f3(acc, aca, acb, size=20,
+                                             normed=False)
+        np.testing.assert_array_equal(np.isnan(f3_pg), np.isnan(f3_a))
+        valid = ~np.isnan(f3_a)
+        np.testing.assert_allclose(f3_pg[valid], f3_a[valid], rtol=1e-10)
+
+
+class TestPattersonF4ZeroCallSites:
+    """A site where any pop has no call is non-estimable: NaN, not 0.
+    scikit-allel has no patterson_f4 to compare against, so this checks
+    pg_gpu's own convention directly (mirroring
+    TestPattersonDZeroCallSites.test_zero_call_site_contributes_nothing)."""
+
+    def test_zero_call_site_is_nan(self):
+        pops = {
+            'A': np.array([[-1, 1], [-1, 1]], dtype=np.int8),
+            'B': np.array([[1, 1], [1, 0]], dtype=np.int8),
+            'C': np.array([[1, 1], [1, 0]], dtype=np.int8),
+            'D': np.array([[0, 0], [0, 0]], dtype=np.int8),
+        }
+        f4 = admixture.patterson_f4(_make_matrix(pops), 'A', 'B', 'C', 'D')
+        assert np.isnan(f4[0])
+        assert np.isfinite(f4[1])
+
+
 class TestUnnormedF3Comparison:
     """The normed=False F3 paths (per-window/aggregate mean of the numerator)
     against scikit-allel."""

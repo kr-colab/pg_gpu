@@ -883,6 +883,13 @@ Bug fixes
   window with no variant to begin with. This covers the scalar
   functions, ``diversity_stats``'s theta/eta-family batch, and the
   scatter and fused windowed engines.
+* ``patterson_f2``, ``patterson_f3`` (its ``T``) and ``patterson_f4`` gave
+  0.0, not NaN, at a site where the estimate is undefined. They now give
+  NaN there, matching scikit-allel. This changes ``average_patterson_f3``
+  and ``moving_patterson_f3`` with ``normed=False``: their mean now skips
+  those sites instead of counting them as 0, which had biased the mean
+  toward 0. ``normed=True`` is unaffected, since its ratio of sums already
+  excluded them.
 
 New warnings
 ~~~~~~~~~~~~
