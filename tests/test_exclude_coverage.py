@@ -213,6 +213,12 @@ def test_ihs_exclude_rejects_mismatched_map_pos(hm):
                      missing_data="exclude")
 
 
+def test_ihs_include_rejects_mismatched_map_pos(hm):
+    with pytest.raises(ValueError, match="map_pos"):
+        selection.ihs(hm, map_pos=np.ones(hm.num_variants - 1),
+                     missing_data="include")
+
+
 def test_ehh_decay_exclude(hm, hm_complete):
     _agree(selection.ehh_decay(hm, missing_data="exclude"),
            selection.ehh_decay(hm_complete))
@@ -240,6 +246,12 @@ def test_xpehh_exclude_rejects_mismatched_map_pos(hm4):
     with pytest.raises(ValueError, match="map_pos"):
         selection.xpehh(hm4, "A", "B", map_pos=np.ones(hm4.num_variants - 1),
                         missing_data="exclude")
+
+
+def test_xpehh_include_rejects_mismatched_map_pos(hm4):
+    with pytest.raises(ValueError, match="map_pos"):
+        selection.xpehh(hm4, "A", "B", map_pos=np.ones(hm4.num_variants - 1),
+                        missing_data="include")
 
 
 def test_xpnsl_exclude(hm4):

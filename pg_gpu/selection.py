@@ -326,7 +326,8 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
         ``missing_data='exclude'``, one row per complete site, not
         ``n_variants``; get the matching positions from
         ``haplotype_matrix.exclude_missing_sites(populations=[population]
-        if population else None).positions``.
+        if population else None).positions``. With no complete site,
+        returns ``n_variants`` NaNs instead.
 
     Notes
     -----
@@ -347,8 +348,7 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        missing_per_var = matrix.count_missing(axis=0)
-        valid = cp.where(missing_per_var == 0)[0]
+        valid = cp.where(~matrix._site_has_missing())[0]
         if len(valid) == 0:
             return np.full(matrix.num_variants, np.nan)
         matrix = matrix.get_subset(valid)
@@ -407,6 +407,7 @@ def xpnsl(haplotype_matrix: HaplotypeMatrix,
         ``missing_data='exclude'``, one value per site complete in both
         populations, not ``n_variants``; get the matching positions from
         ``haplotype_matrix.exclude_missing_sites(populations=[pop1, pop2]).positions``.
+        With no complete site, returns ``n_variants`` NaNs instead.
     """
     _warn_unphased(haplotype_matrix, context="xpnsl")
 
@@ -450,12 +451,16 @@ def xpnsl(haplotype_matrix: HaplotypeMatrix,
 # Public API: IHS / XP-EHH
 # ---------------------------------------------------------------------------
 
-def _cut_to_complete_sites(matrix, populations, pos, map_pos, fn_name):
-    """Subset matrix (and pos/map_pos) to sites complete in `populations`."""
+def _check_map_pos_length(matrix, map_pos, fn_name):
+    """Raise if map_pos doesn't have one entry per variant in `matrix`."""
     if map_pos is not None and len(map_pos) != matrix.num_variants:
         raise ValueError(
             f"{fn_name}: map_pos has {len(map_pos)} entries, not one per "
             f"variant ({matrix.num_variants}).")
+
+
+def _cut_to_complete_sites(matrix, populations, pos, map_pos, fn_name):
+    """Subset matrix (and pos/map_pos) to sites complete in `populations`."""
     valid = cp.where(~matrix._site_has_missing(populations))[0]
     matrix = matrix.get_subset(valid)
     if pos is not None:
@@ -528,7 +533,8 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
         all NaN. Under ``missing_data='exclude'``, one row per complete
         site, not ``n_variants``; get the matching positions from
         ``haplotype_matrix.exclude_missing_sites(populations=[population]
-        if population else None).positions``.
+        if population else None).positions``. With no complete site,
+        returns ``n_variants`` NaNs instead.
 
     Notes
     -----
@@ -546,6 +552,8 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
 
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
+
+    _check_map_pos_length(matrix, map_pos, "ihs")
 
     if missing_data == 'exclude':
         n_before = matrix.num_variants
@@ -658,8 +666,11 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
         ``missing_data='exclude'``, one value per site complete in both
         populations, not ``n_variants``; get the matching positions from
         ``haplotype_matrix.exclude_missing_sites(populations=[pop1, pop2]).positions``.
+        With no complete site, returns ``n_variants`` NaNs instead.
     """
     _warn_unphased(haplotype_matrix, context="xpehh")
+
+    _check_map_pos_length(haplotype_matrix, map_pos, "xpehh")
 
     if missing_data == 'exclude':
         if haplotype_matrix.device == 'CPU':
@@ -742,7 +753,8 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
         ``missing_data='exclude'``, one value per complete site, not
         ``n_variants``; get the matching positions from
         ``haplotype_matrix.exclude_missing_sites(populations=[population]
-        if population else None).positions``.
+        if population else None).positions``. With no complete site,
+        returns an empty array instead.
     """
     _warn_unphased(haplotype_matrix, context="ehh_decay")
 
