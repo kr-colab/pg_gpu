@@ -41,26 +41,27 @@ def _f2_terms(xa, na, xb, nb):
     """Per-variant f2(A,B), the tskit unbiased U-statistic summed over alleles.
 
     x* are (n_var, K) per-allele counts on a shared K; n* are (n_var,) valid
-    counts. Matches tskit's ``ts.f2``. Non-estimable sites (n < 2 in either pop)
-    contribute 0.
+    counts. Matches tskit's ``ts.f2``. Non-estimable sites (n < 2 in either
+    pop) are NaN.
     """
     na_, nb_ = na[:, None], nb[:, None]
     num = (xa * (xa - 1) * (nb_ - xb) * (nb_ - xb - 1)
            - xa * (na_ - xa) * (nb_ - xb) * xb)
     den = na_ * (na_ - 1) * nb_ * (nb_ - 1)
-    return cp.where(den > 0, num / den, 0.0).sum(axis=1)
+    return cp.where(den > 0, num / den, cp.nan).sum(axis=1)
 
 
 def _f3_terms(xi, ni, xj, nj, xk, nk):
     """Per-variant f3(I; J, K), the tskit unbiased U-statistic over alleles.
 
     I is the target population (tskit's first sample set). Matches ``ts.f3``.
+    Non-estimable sites (n < 2 in I, or no call in J or K) are NaN.
     """
     ni_, nj_, nk_ = ni[:, None], nj[:, None], nk[:, None]
     num = (xi * (xi - 1) * (nj_ - xj) * (nk_ - xk)
            - xi * (ni_ - xi) * (nj_ - xj) * xk)
     den = ni_ * (ni_ - 1) * nj_ * nk_
-    return cp.where(den > 0, num / den, 0.0).sum(axis=1)
+    return cp.where(den > 0, num / den, cp.nan).sum(axis=1)
 
 
 def _het_unbiased(x, n):
@@ -76,13 +77,14 @@ def _het_unbiased(x, n):
 def _f4_terms(xa, na, xb, nb, xc, nc, xd, nd):
     """Per-variant f4(A,B,C,D), the tskit unbiased U-statistic over alleles.
 
-    Matches tskit's ``ts.f4``.
+    Matches tskit's ``ts.f4``. Non-estimable sites (no call in any pop) are
+    NaN.
     """
     na_, nb_, nc_, nd_ = na[:, None], nb[:, None], nc[:, None], nd[:, None]
     num = (xa * xc * (nb_ - xb) * (nd_ - xd)
            - xa * xd * (nb_ - xb) * (nc_ - xc))
     den = na_ * nb_ * nc_ * nd_
-    return cp.where(den > 0, num / den, 0.0).sum(axis=1)
+    return cp.where(den > 0, num / den, cp.nan).sum(axis=1)
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +110,8 @@ def patterson_f2(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     f2 : ndarray, float64, shape (n_variants,)
-        Per-variant F2 estimates.
+        Per-variant F2 estimates. NaN at a site with fewer than 2 calls
+        in either pop.
     """
     if missing_data == 'exclude':
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
@@ -147,6 +150,7 @@ def patterson_f3(haplotype_matrix: HaplotypeMatrix,
     -------
     T : ndarray, float64, shape (n_variants,)
         Un-normalized F3 estimates per variant (matches tskit f3(C; A, B)).
+        NaN at a site where C has fewer than 2 calls or a source has none.
     B : ndarray, float64, shape (n_variants,)
         Unbiased heterozygosity of the target population C (f3 normalization).
     """
@@ -200,7 +204,8 @@ def patterson_f4(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     f4 : ndarray, float64, shape (n_variants,)
-        Per-variant f4 estimates (sum over variants gives the statistic).
+        Per-variant f4 estimates (nansum over variants gives the
+        statistic). NaN at a site where any pop has no call.
     """
     if missing_data == 'exclude':
         haplotype_matrix = haplotype_matrix.exclude_missing_sites(
@@ -437,13 +442,20 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     vb : ndarray
         Per-block values.
     vj : ndarray
-        Jackknife resampled values.
+        Jackknife resampled values. ``vj[i]`` is the estimate with block
+        ``i`` held out, same length and block order as ``vb``.
 
     Notes
     -----
     When no site is left to estimate from (for example after
     ``missing_data='exclude'``), the three floats are NaN and the two
     arrays are empty.
+
+    With ``normed=False``, a block with no defined site drops out of
+    the jackknife resampling instead of contributing a NaN block mean,
+    so there is no held-out estimate for it; ``vj`` has NaN at that
+    block's position rather than a shorter length. Every other block
+    still contributes its own unweighted mean.
     """
     T, B = _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
                               missing_data=missing_data)
@@ -465,7 +477,13 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
         finite = cp.isfinite(T)
         f3 = float((cp.sum(cp.where(finite, T, 0.0)) / cp.sum(finite)).get())
         vb = _moving_nanmean(T, blen).get()
-        _, se, vj = block_jackknife(vb, statistic=np.mean)
+        defined = np.isfinite(vb)
+        if defined.any():
+            _, se, vj_defined = block_jackknife(vb[defined], statistic=np.mean)
+            vj = np.full(vb.shape, np.nan)
+            vj[defined] = vj_defined
+        else:
+            se, vj = np.nan, np.full(vb.shape, np.nan)
 
     return f3, se, _z_score(f3, se), vb, vj
 

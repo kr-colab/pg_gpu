@@ -931,6 +931,21 @@ Bug fixes
   window with no variant to begin with. This covers the scalar
   functions, ``diversity_stats``'s theta/eta-family batch, and the
   scatter and fused windowed engines.
+* ``patterson_f2``, ``patterson_f3`` (its ``T``) and ``patterson_f4`` gave
+  0.0, not NaN, at a site where the estimate is undefined. They now give
+  NaN there, matching scikit-allel. This changes ``average_patterson_f3``
+  and ``moving_patterson_f3`` with ``normed=False``: their mean now skips
+  those sites instead of counting them as 0, which had biased the mean
+  toward 0. ``normed=True`` is unaffected, since its ratio of sums already
+  excluded them.
+* That same change let a block with no estimable site reach
+  ``average_patterson_f3``'s ``normed=False`` jackknife as a block with a
+  NaN value. Every other leave-one-out estimate still carried that NaN,
+  so ``se``/``z`` came out NaN even though only one block out of many was
+  uninformative. Such a block is now dropped from the jackknife
+  resampling instead. Every other block still contributes its own
+  unweighted mean, matching scikit-allel exactly whenever no block is
+  fully undefined.
 
 New warnings
 ~~~~~~~~~~~~

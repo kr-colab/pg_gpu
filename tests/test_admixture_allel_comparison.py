@@ -308,6 +308,178 @@ class TestPattersonDZeroCallSites:
         assert np.isfinite(np.nansum(num) / np.nansum(den))
 
 
+class TestPattersonF2ZeroCallSites:
+    """A site with fewer than 2 calls in a pop is non-estimable: NaN, not 0."""
+
+    @pytest.fixture
+    def zero_call_data(self, two_pop_data):
+        """two_pop_data with all calls missing in A at some sites."""
+        _, base = two_pop_data
+        pops = {name: hap.copy() for name, hap in base.items()}
+        undefined = np.zeros(pops['A'].shape[1], dtype=bool)
+        pops['A'][:, 10:20] = -1
+        undefined[10:20] = True
+        return _make_matrix(pops), pops, undefined
+
+    def test_f2_zero_call_sites_match_allel(self, zero_call_data):
+        matrix, pops, undefined = zero_call_data
+        f2_pg = admixture.patterson_f2(matrix, 'A', 'B')
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        f2_a = allel.patterson_f2(aca, acb)
+
+        np.testing.assert_array_equal(np.isnan(f2_a), undefined)
+        np.testing.assert_array_equal(np.isnan(f2_pg), undefined)
+        np.testing.assert_allclose(f2_pg[~undefined], f2_a[~undefined],
+                                   rtol=1e-10)
+
+
+class TestPattersonF3ZeroCallSites:
+    """A site where C has fewer than 2 calls, or a source has none, leaves
+    T non-estimable: NaN, not 0. These sites previously biased the
+    normed=False mean of average_patterson_f3/moving_patterson_f3 toward 0."""
+
+    @pytest.fixture
+    def zero_call_data(self, three_pop_data):
+        """three_pop_data with all calls missing in C at some sites, and in
+        source A at others."""
+        _, base = three_pop_data
+        pops = {name: hap.copy() for name, hap in base.items()}
+        undefined = np.zeros(pops['C'].shape[1], dtype=bool)
+        pops['C'][:, 10:20] = -1
+        pops['A'][:, 50:55] = -1
+        undefined[10:20] = True
+        undefined[50:55] = True
+        return _make_matrix(pops), pops, undefined
+
+    def test_f3_zero_call_sites_match_allel(self, zero_call_data):
+        matrix, pops, undefined = zero_call_data
+        T_pg, B_pg = admixture.patterson_f3(matrix, 'C', 'A', 'B')
+        acc = _allele_counts(pops['C'])
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        T_a, _ = allel.patterson_f3(acc, aca, acb)
+
+        np.testing.assert_array_equal(np.isnan(T_a), undefined)
+        np.testing.assert_array_equal(np.isnan(T_pg), undefined)
+        np.testing.assert_allclose(T_pg[~undefined], T_a[~undefined],
+                                   rtol=1e-10)
+
+    def test_average_f3_unnormed_matches_allel_with_zero_call_sites(
+            self, zero_call_data):
+        """Every block here still has at least one defined site (the
+        missing calls only partially cover two blocks), so no block is
+        dropped and this matches allel's own unweighted mean of block
+        means exactly, same as with no missing data at all."""
+        matrix, pops, _ = zero_call_data
+        f3_pg, se_pg, z_pg, _, _ = admixture.average_patterson_f3(
+            matrix, 'C', 'A', 'B', blen=20, normed=False)
+        acc = _allele_counts(pops['C'])
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        f3_a, se_a, z_a, _, _ = allel.average_patterson_f3(
+            acc, aca, acb, blen=20, normed=False)
+        np.testing.assert_allclose(f3_pg, f3_a, rtol=1e-10)
+        np.testing.assert_allclose(se_pg, se_a, rtol=1e-5)
+
+    def test_moving_f3_unnormed_matches_allel_with_zero_call_sites(
+            self, zero_call_data):
+        matrix, pops, _ = zero_call_data
+        f3_pg = admixture.moving_patterson_f3(
+            matrix, 'C', 'A', 'B', size=20, normed=False)
+        acc = _allele_counts(pops['C'])
+        aca = _allele_counts(pops['A'])
+        acb = _allele_counts(pops['B'])
+        with np.errstate(invalid='ignore'):
+            f3_a = allel.moving_patterson_f3(acc, aca, acb, size=20,
+                                             normed=False)
+        np.testing.assert_array_equal(np.isnan(f3_pg), np.isnan(f3_a))
+        valid = ~np.isnan(f3_a)
+        np.testing.assert_allclose(f3_pg[valid], f3_a[valid], rtol=1e-10)
+
+
+class TestAverageF3UnnormedWholeBlockUndefined:
+    """A block with no estimable site used to poison average_patterson_f3's
+    normed=False jackknife entirely: every leave-one-out estimate except
+    the one dropping that block kept its NaN per-block mean, so se/z came
+    out NaN even with only one uninformative block among many. That block
+    now drops out of the resampling instead; every other block still
+    contributes its own unweighted mean, exactly as scikit-allel would
+    compute it with that one block already removed."""
+
+    def test_whole_block_undefined_does_not_poison_se(self):
+        np.random.seed(123)
+        n_var, blen = 200, 20
+        pops = {name: np.random.randint(0, 2, (10, n_var)).astype(np.int8)
+               for name in ['C', 'A', 'B']}
+        pops['C'][:, 20:40] = -1  # block 1 entirely non-estimable
+        matrix = _make_matrix(pops, n_var)
+
+        f3, se, z, vb, vj = admixture.average_patterson_f3(
+            matrix, 'C', 'A', 'B', blen=blen, normed=False)
+
+        assert np.isnan(vb[1])  # the bad block's own value is still NaN
+        assert np.isfinite(f3)
+        assert np.isfinite(se)
+        assert np.isfinite(z)
+        assert len(vj) == len(vb)  # vj stays aligned with vb
+        assert np.isnan(vj[1])  # the dropped block has no leave-one-out estimate
+        assert np.isfinite(np.delete(vj, 1)).all()  # no other estimate is poisoned
+
+        # Independent check: drop the bad block, then take the plain
+        # (unweighted) delete-1 jackknife over what's left -- scikit-allel's
+        # own formula, applied to the n-1 defined blocks.
+        defined = vb[np.isfinite(vb)]
+        n = len(defined)
+        keep = np.ones(n, dtype=bool)
+        per_iter = np.empty(n)
+        for i in range(n):
+            keep[i] = False
+            per_iter[i] = defined[keep].mean()
+            keep[i] = True
+        expected_se = np.sqrt(((n - 1) / n)
+                              * np.sum((per_iter - per_iter.mean()) ** 2))
+        np.testing.assert_allclose(se, expected_se, rtol=1e-10)
+        np.testing.assert_allclose(vj[np.isfinite(vb)], per_iter, rtol=1e-10)
+
+    def test_every_block_undefined_is_nan_not_a_crash(self):
+        """With no block left to jackknife over, se/z are NaN (as when
+        missing_data='exclude' leaves no site at all), not a
+        ZeroDivisionError from an empty block set."""
+        np.random.seed(1)
+        n_var, blen = 50, 10
+        pops = {name: np.random.randint(0, 2, (10, n_var)).astype(np.int8)
+               for name in ['C', 'A', 'B']}
+        pops['C'][:] = -1  # every site non-estimable in C
+        matrix = _make_matrix(pops, n_var)
+
+        f3, se, z, vb, vj = admixture.average_patterson_f3(
+            matrix, 'C', 'A', 'B', blen=blen, normed=False)
+
+        assert np.isnan(f3) and np.isnan(se) and np.isnan(z)
+        assert np.isnan(vb).all()
+        assert len(vj) == len(vb)
+        assert np.isnan(vj).all()
+
+
+class TestPattersonF4ZeroCallSites:
+    """A site where any pop has no call is non-estimable: NaN, not 0.
+    scikit-allel has no patterson_f4 to compare against, so this checks
+    pg_gpu's own convention directly (mirroring
+    TestPattersonDZeroCallSites.test_zero_call_site_contributes_nothing)."""
+
+    def test_zero_call_site_is_nan(self):
+        pops = {
+            'A': np.array([[-1, 1], [-1, 1]], dtype=np.int8),
+            'B': np.array([[1, 1], [1, 0]], dtype=np.int8),
+            'C': np.array([[1, 1], [1, 0]], dtype=np.int8),
+            'D': np.array([[0, 0], [0, 0]], dtype=np.int8),
+        }
+        f4 = admixture.patterson_f4(_make_matrix(pops), 'A', 'B', 'C', 'D')
+        assert np.isnan(f4[0])
+        assert np.isfinite(f4[1])
+
+
 class TestUnnormedF3Comparison:
     """The normed=False F3 paths (per-window/aggregate mean of the numerator)
     against scikit-allel."""
