@@ -19,6 +19,8 @@ Usage:
     mv = moments.LD.Parsing.bootstrap_data({0: ld_stats})
 """
 
+from contextlib import contextmanager
+
 import numpy as np
 import cupy as cp
 
@@ -49,6 +51,7 @@ def compute_ld_statistics(
     report=True, haplotype_matrix=None,
     genotype_matrix=None, accessible_bed=None,
     pop_assignment=None, chunk_size=None, available_memory_bytes=None,
+    chrom=None,
 ):
     """GPU LD statistics in the moments.LD.Parsing.compute_ld_statistics output format.
 
@@ -134,6 +137,10 @@ def compute_ld_statistics(
     accessible_bed : str, optional
         Path to a BED file defining accessible/callable regions. Variants
         at inaccessible positions are removed before computing statistics.
+        With ``haplotype_matrix`` or ``genotype_matrix`` the BED is the
+        mask of that matrix for the call only; the matrix is as it was
+        afterwards. A matrix that already has a mask raises ``ValueError``:
+        compute with that mask, or remove it first.
     chunk_size : int, optional
         Pairs processed per GPU batch. Overrides the automatic estimate; use
         it to bound peak memory when the estimate is too large (e.g. many
@@ -143,10 +150,31 @@ def compute_ld_statistics(
         Memory budget for the automatic chunk-size estimate, in bytes.
         Defaults to half the free GPU memory. Ignored if ``chunk_size`` is set.
 
+    chrom : str, optional
+        Contig of ``accessible_bed`` for a matrix input; required when the
+        BED has more than one. A VCF names its own contig, so ``chrom``
+        with ``vcf_file``, or without ``accessible_bed``, raises
+        ``ValueError``.
+
     Returns
     -------
     dict with keys 'bins', 'sums', 'stats', 'pops' (moments format).
     """
+    matrix = (genotype_matrix if use_genotypes and genotype_matrix is not None
+              else haplotype_matrix)
+    with _bed_as_mask(matrix, accessible_bed, chrom):
+        return _ld_statistics(
+            vcf_file, rec_map_file, pop_file, pops, r_bins, bp_bins,
+            use_genotypes, report, haplotype_matrix, genotype_matrix,
+            accessible_bed, pop_assignment, chunk_size, available_memory_bytes)
+
+
+def _ld_statistics(vcf_file, rec_map_file, pop_file, pops, r_bins, bp_bins,
+                   use_genotypes, report, haplotype_matrix, genotype_matrix,
+                   accessible_bed, pop_assignment, chunk_size,
+                   available_memory_bytes):
+    """The body of ``compute_ld_statistics``. A matrix input has its mask
+    already; ``accessible_bed`` is read here only to load a VCF."""
     if pop_file is not None and pop_assignment is not None:
         raise TypeError(
             "pass only one of pop_file or pop_assignment; they are "
@@ -261,6 +289,43 @@ def compute_ld_statistics(
 # ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _bed_as_mask(matrix, accessible_bed, chrom):
+    """Make ``accessible_bed`` the accessible mask of the caller's matrix
+    for the length of the block, so the statistics see the accessible
+    variants only.
+
+    The matrix is as it was after the block, also when the block raises:
+    a mask left on it would make the next call with the same matrix fail,
+    and would change what the caller's own code sees. ``matrix`` is None
+    when the input is a VCF, which the loader masks.
+    """
+    if accessible_bed is None or matrix is None:
+        if chrom is not None:
+            raise ValueError(
+                "compute_ld_statistics: chrom names the contig of "
+                "accessible_bed for a matrix input; it has no effect with "
+                "vcf_file or without accessible_bed.")
+        yield
+        return
+    if matrix.has_accessible_mask:
+        raise ValueError(
+            "compute_ld_statistics: accessible_bed was given, but the matrix "
+            "already has an accessible mask. Drop accessible_bed to compute "
+            "with that mask, or remove the mask first.")
+    # On the device first: a mask set on a host matrix is gathered there
+    # and once more after the transfer.
+    if matrix.device != 'GPU':
+        matrix.transfer_to_gpu()
+    n_total_sites = matrix.n_total_sites
+    matrix.set_accessible_mask(accessible_bed, chrom=chrom)
+    try:
+        yield
+    finally:
+        matrix.remove_accessible_mask()
+        matrix.n_total_sites = n_total_sites
 
 
 def _interpolate_genetic_distances(positions, rec_map_file):

@@ -234,7 +234,8 @@ def _contig_intervals(path, chrom):
             f"BED file {path} has intervals on {len(contigs)} contigs "
             f"({_show_contigs(contigs)}); "
             "name the contig of the data with chrom= (set_accessible_mask, "
-            "windowed_analysis, from_ts) or region= (from_zarr, from_vcf).")
+            "windowed_analysis, compute_ld_statistics, from_ts) or region= "
+            "(from_zarr, from_vcf).")
     return intervals, contigs
 
 

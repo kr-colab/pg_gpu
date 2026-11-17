@@ -7,6 +7,7 @@ physical-distance cap. These drive the guard, parse, and report branches the
 parity tests skip. The module needs no moments install, so these run in the
 default environment.
 """
+import warnings
 from contextlib import nullcontext
 
 import numpy as np
@@ -177,12 +178,9 @@ class TestVcfLoadingPath:
 
     @pytest.fixture
     def pop_and_bed(self, tmp_path):
-        pop = tmp_path / "pops.tsv"
-        pop.write_text("sample\tpop\n"
-                       + "".join(f"tsk_{i}\tpop0\n" for i in range(10)))
         bed = tmp_path / "acc.bed"
         bed.write_text("1\t0\t1000\n")
-        return str(pop), str(bed)
+        return _pop_file(tmp_path), str(bed)
 
     @pytest.mark.parametrize("use_genotypes", [True, False],
                              ids=["genotype", "haplotype"])
@@ -201,6 +199,122 @@ class TestVcfLoadingPath:
         assert set(res) == {"bins", "sums", "stats", "pops"}
         assert res["pops"] == ["pop0"]
         assert f"Loading {sample_vcf}" in capsys.readouterr().out
+
+
+def _pop_file(tmp_path):
+    """A pop file that puts the ten samples of the ``sample_vcf`` fixture
+    in ``pop0``."""
+    pop = tmp_path / "pops.tsv"
+    pop.write_text("sample\tpop\n" + "".join(f"tsk_{i}\tpop0\n" for i in range(10)))
+    return str(pop)
+
+
+class TestAccessibleBedOnMatrixInput:
+    """accessible_bed with a matrix as input: the BED must mask the variants
+    as it does on the VCF path, and leave the caller's matrix as it was."""
+
+    _rng = np.random.default_rng(5)
+    POS = np.sort(_rng.choice(np.arange(1, 100_001), 300, replace=False))
+    HAP = _rng.integers(0, 2, (40, 300)).astype(np.int8)
+    # BED intervals are 0-based and half-open: positions 15001-48000 and
+    # 70001-90000.
+    INSIDE = ((POS > 15000) & (POS <= 48000)) | ((POS > 70000) & (POS <= 90000))
+    POPS = {"pop0": list(range(20)), "pop1": list(range(20, 40))}
+    KW = dict(pops=["pop0", "pop1"], bp_bins=[0, 2000, 10000], report=False)
+    CASES = [("haplotype_matrix", False), ("haplotype_matrix", True), ("genotype_matrix", True)]
+    IDS = ["haplotypes", "haplotypes-as-genotypes", "genotypes"]
+
+    def _matrix(self, kind, keep=slice(None)):
+        hm = HaplotypeMatrix(self.HAP[:, keep], self.POS[keep], 1, 100_000,
+                             sample_sets=dict(self.POPS), phased=True)
+        return GenotypeMatrix.from_haplotype_matrix(hm) if kind == "genotype_matrix" else hm
+
+    @staticmethod
+    def _bed(tmp_path, contigs=("1",)):
+        bed = tmp_path / "accessible.bed"
+        bed.write_text("".join(f"{c}\t15000\t48000\n{c}\t70000\t90000\n" for c in contigs))
+        return str(bed)
+
+    @staticmethod
+    def _agree(got, expected):
+        for a, b in zip(got["sums"], expected["sums"]):
+            np.testing.assert_allclose(a, b, rtol=1e-12)
+
+    @pytest.mark.parametrize("kind,use_genotypes", CASES, ids=IDS)
+    def test_bed_masks_the_matrix_for_the_call_only(self, kind, use_genotypes, tmp_path):
+        kw = dict(use_genotypes=use_genotypes, **self.KW)
+        by_hand = compute_ld_statistics(**{kind: self._matrix(kind, self.INSIDE)}, **kw)
+        unmasked = compute_ld_statistics(**{kind: self._matrix(kind)}, **kw)
+        matrix = self._matrix(kind)
+        matrix.n_total_sites = 90_000
+        # Two calls on one matrix, as in a loop over bins.
+        for _ in range(2):
+            masked = compute_ld_statistics(**{kind: matrix},
+                                           accessible_bed=self._bed(tmp_path), **kw)
+            self._agree(masked, by_hand)
+            assert not matrix.has_accessible_mask
+            assert matrix.num_variants == 300 and matrix.n_total_sites == 90_000
+        assert not np.allclose(masked["sums"][-1], unmasked["sums"][-1])
+
+    def test_failed_call_leaves_the_matrix_as_it_was(self, tmp_path):
+        hm = self._matrix("haplotype_matrix")
+        with pytest.raises(ValueError, match="rec_map_file required"):
+            compute_ld_statistics(haplotype_matrix=hm, use_genotypes=False,
+                                  pops=["pop0", "pop1"], r_bins=[0, 1e-6], report=False,
+                                  accessible_bed=self._bed(tmp_path))
+        assert not hm.has_accessible_mask and hm.num_variants == 300
+
+    @pytest.mark.parametrize("kind,use_genotypes", CASES[::2], ids=IDS[::2])
+    def test_matrix_with_a_mask_raises(self, kind, use_genotypes, tmp_path):
+        bed = self._bed(tmp_path)
+        matrix = self._matrix(kind)
+        matrix.set_accessible_mask(bed, chrom="1")
+        with pytest.raises(ValueError, match="already has an accessible mask"):
+            compute_ld_statistics(**{kind: matrix}, accessible_bed=bed,
+                                  use_genotypes=use_genotypes, **self.KW)
+        assert matrix.has_accessible_mask
+
+    def test_bed_with_two_contigs_needs_chrom(self, tmp_path):
+        bed = self._bed(tmp_path, contigs=("1", "2"))
+        kw = dict(use_genotypes=False, accessible_bed=bed, **self.KW)
+        with pytest.raises(ValueError, match="chrom="):
+            compute_ld_statistics(haplotype_matrix=self._matrix("haplotype_matrix"), **kw)
+        named = compute_ld_statistics(haplotype_matrix=self._matrix("haplotype_matrix"),
+                                      chrom="1", **kw)
+        one_contig = compute_ld_statistics(
+            haplotype_matrix=self._matrix("haplotype_matrix"), use_genotypes=False,
+            accessible_bed=self._bed(tmp_path), **self.KW)
+        self._agree(named, one_contig)
+
+    def test_chrom_without_a_bed_on_a_matrix_raises(self, sample_vcf, tmp_path):
+        with pytest.raises(ValueError, match="chrom names the contig"):
+            compute_ld_statistics(haplotype_matrix=self._matrix("haplotype_matrix"),
+                                  use_genotypes=False, chrom="1", **self.KW)
+        with pytest.raises(ValueError, match="chrom names the contig"):
+            compute_ld_statistics(vcf_file=sample_vcf, pop_file=_pop_file(tmp_path),
+                                  pops=["pop0"], bp_bins=[0, 100], report=False,
+                                  accessible_bed=self._bed(tmp_path), chrom="1")
+
+    @pytest.mark.parametrize("use_genotypes", [True, False], ids=["genotype", "haplotype"])
+    def test_matrix_input_equals_the_vcf_path(self, sample_vcf, tmp_path, use_genotypes):
+        # The same file and the same BED, through the two inputs.
+        pop = _pop_file(tmp_path)
+        bed = tmp_path / "half.bed"
+        bed.write_text("1\t0\t500\n")
+        kw = dict(pops=["pop0"], bp_bins=[0, 100, 1000], use_genotypes=use_genotypes,
+                  accessible_bed=str(bed), report=False)
+        with warnings.catch_warnings():
+            # The genotype loader drops the fixture's multiallelic sites.
+            warnings.simplefilter("ignore", BiallelicOnlyWarning)
+            from_vcf = compute_ld_statistics(vcf_file=sample_vcf, pop_file=pop, **kw)
+            name, matrix = (("genotype_matrix", GenotypeMatrix.from_vcf(sample_vcf))
+                            if use_genotypes else
+                            ("haplotype_matrix", HaplotypeMatrix.from_vcf(sample_vcf, phased=True)))
+            matrix.load_pop_file(pop, pops=["pop0"])
+            from_matrix = compute_ld_statistics(**{name: matrix}, **kw)
+            unmasked = compute_ld_statistics(**{name: matrix}, **(kw | {"accessible_bed": None}))
+        self._agree(from_matrix, from_vcf)
+        assert not np.allclose(from_matrix["sums"][-1], unmasked["sums"][-1])
 
 
 class TestMissingDataSums:
