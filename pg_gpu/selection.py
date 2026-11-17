@@ -322,7 +322,12 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
         is absent at a site). ``standardize_by_allele_count`` takes 1-D input,
         so standardize each derived-allele column separately, pairing column
         ``j`` with that allele's per-site derived count. A matrix with no
-        alternate allele at all gives ``(n_variants,)``, all NaN.
+        alternate allele at all gives ``(n_variants,)``, all NaN. Under
+        ``missing_data='exclude'``, one row per complete site, not
+        ``n_variants``; get the matching positions from
+        ``haplotype_matrix.exclude_missing_sites(populations=[population]
+        if population else None).positions``. With no complete site,
+        returns ``n_variants`` NaNs instead.
 
     Notes
     -----
@@ -343,8 +348,7 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        missing_per_var = matrix.count_missing(axis=0)
-        valid = cp.where(missing_per_var == 0)[0]
+        valid = cp.where(~matrix._site_has_missing())[0]
         if len(valid) == 0:
             return np.full(matrix.num_variants, np.nan)
         matrix = matrix.get_subset(valid)
@@ -399,18 +403,23 @@ def xpnsl(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     score : ndarray, float, shape (n_variants,)
-        Unstandardized XP-nSL scores: log(nSL_pop1 / nSL_pop2).
+        Unstandardized XP-nSL scores: log(nSL_pop1 / nSL_pop2). Under
+        ``missing_data='exclude'``, one value per site complete in both
+        populations, not ``n_variants``; get the matching positions from
+        ``haplotype_matrix.exclude_missing_sites(populations=[pop1, pop2]).positions``.
+        With no complete site, returns ``n_variants`` NaNs instead.
     """
     _warn_unphased(haplotype_matrix, context="xpnsl")
 
+    if haplotype_matrix.device == 'CPU':
+        haplotype_matrix.transfer_to_gpu()
+
     if missing_data == 'exclude':
-        if haplotype_matrix.device == 'CPU':
-            haplotype_matrix.transfer_to_gpu()
-        missing_per_var = cp.sum(haplotype_matrix.haplotypes < 0, axis=0)
-        valid = cp.where(missing_per_var == 0)[0]
-        if len(valid) == 0:
-            return np.full(haplotype_matrix.num_variants, np.nan)
-        haplotype_matrix = haplotype_matrix.get_subset(valid)
+        n_before = haplotype_matrix.num_variants
+        haplotype_matrix = haplotype_matrix.exclude_missing_sites(
+            populations=[pop1, pop2])
+        if haplotype_matrix.num_variants == 0:
+            return np.full(n_before, np.nan)
 
     m1 = population_rows(haplotype_matrix, pop1)
     m2 = population_rows(haplotype_matrix, pop2)
@@ -441,6 +450,25 @@ def xpnsl(haplotype_matrix: HaplotypeMatrix,
 # ---------------------------------------------------------------------------
 # Public API: IHS / XP-EHH
 # ---------------------------------------------------------------------------
+
+def _check_map_pos_length(matrix, map_pos, fn_name):
+    """Raise if map_pos doesn't have one entry per variant in `matrix`."""
+    if map_pos is not None and len(map_pos) != matrix.num_variants:
+        raise ValueError(
+            f"{fn_name}: map_pos has {len(map_pos)} entries, not one per "
+            f"variant ({matrix.num_variants}).")
+
+
+def _cut_to_complete_sites(matrix, populations, pos, map_pos, fn_name):
+    """Subset matrix (and pos/map_pos) to sites complete in `populations`."""
+    valid = cp.where(~matrix._site_has_missing(populations))[0]
+    matrix = matrix.get_subset(valid)
+    if pos is not None:
+        pos = np.asarray(pos)[valid.get()]
+    if map_pos is not None:
+        map_pos = np.asarray(map_pos)[valid.get()]
+    return matrix, pos, map_pos
+
 
 @_eager_only
 @_phase_dependent
@@ -502,7 +530,11 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
         takes 1-D input, so standardize each derived-allele column separately,
         pairing column ``j`` with that allele's per-site derived count. A
         matrix with no alternate allele at all gives ``(n_variants,)``,
-        all NaN.
+        all NaN. Under ``missing_data='exclude'``, one row per complete
+        site, not ``n_variants``; get the matching positions from
+        ``haplotype_matrix.exclude_missing_sites(populations=[population]
+        if population else None).positions``. With no complete site,
+        returns ``n_variants`` NaNs instead.
 
     Notes
     -----
@@ -521,14 +553,14 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     if matrix.device == 'CPU':
         matrix.transfer_to_gpu()
 
+    _check_map_pos_length(matrix, map_pos, "ihs")
+
     if missing_data == 'exclude':
-        missing_per_var = matrix.count_missing(axis=0)
-        valid = cp.where(missing_per_var == 0)[0]
-        if len(valid) == 0:
-            return np.full(matrix.num_variants, np.nan)
-        matrix = matrix.get_subset(valid)
-        if pos is not None:
-            pos = np.asarray(pos)[valid.get()]
+        n_before = matrix.num_variants
+        matrix, pos, map_pos = _cut_to_complete_sites(
+            matrix, None, pos, map_pos, "ihs")
+        if matrix.num_variants == 0:
+            return np.full(n_before, np.nan)
 
     if pos is None:
         pos = matrix.positions
@@ -630,20 +662,24 @@ def xpehh(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     score : ndarray, float, shape (n_variants,)
-        Unstandardized XP-EHH scores: log(IHH_pop1 / IHH_pop2).
+        Unstandardized XP-EHH scores: log(IHH_pop1 / IHH_pop2). Under
+        ``missing_data='exclude'``, one value per site complete in both
+        populations, not ``n_variants``; get the matching positions from
+        ``haplotype_matrix.exclude_missing_sites(populations=[pop1, pop2]).positions``.
+        With no complete site, returns ``n_variants`` NaNs instead.
     """
     _warn_unphased(haplotype_matrix, context="xpehh")
+
+    _check_map_pos_length(haplotype_matrix, map_pos, "xpehh")
 
     if missing_data == 'exclude':
         if haplotype_matrix.device == 'CPU':
             haplotype_matrix.transfer_to_gpu()
-        missing_per_var = cp.sum(haplotype_matrix.haplotypes < 0, axis=0)
-        valid = cp.where(missing_per_var == 0)[0]
-        if len(valid) == 0:
-            return np.full(haplotype_matrix.num_variants, np.nan)
-        haplotype_matrix = haplotype_matrix.get_subset(valid)
-        if pos is not None:
-            pos = np.asarray(pos)[valid.get()]
+        n_before = haplotype_matrix.num_variants
+        haplotype_matrix, pos, map_pos = _cut_to_complete_sites(
+            haplotype_matrix, [pop1, pop2], pos, map_pos, "xpehh")
+        if haplotype_matrix.num_variants == 0:
+            return np.full(n_before, np.nan)
     m1 = population_rows(haplotype_matrix, pop1)
     m2 = population_rows(haplotype_matrix, pop2)
 
@@ -713,7 +749,12 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
     Returns
     -------
     ehh : ndarray, float, shape (n_variants,)
-        EHH values at each variant position from the first.
+        EHH values at each variant position from the first. Under
+        ``missing_data='exclude'``, one value per complete site, not
+        ``n_variants``; get the matching positions from
+        ``haplotype_matrix.exclude_missing_sites(populations=[population]
+        if population else None).positions``. With no complete site,
+        returns an empty array instead.
     """
     _warn_unphased(haplotype_matrix, context="ehh_decay")
 
@@ -726,8 +767,7 @@ def ehh_decay(haplotype_matrix: HaplotypeMatrix,
         matrix.transfer_to_gpu()
 
     if missing_data == 'exclude':
-        missing_per_var = matrix.count_missing(axis=0)
-        valid = cp.where(missing_per_var == 0)[0]
+        valid = cp.where(~matrix._site_has_missing())[0]
         if len(valid) < matrix.num_variants:
             matrix = matrix.get_subset(valid)
 
