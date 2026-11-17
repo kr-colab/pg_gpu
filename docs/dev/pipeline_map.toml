@@ -136,7 +136,7 @@ notes = "region is samtools style with an inclusive end; chrom_start and chrom_e
 params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased"]
 returns = "HaplotypeMatrix, or StreamingHaplotypeMatrix when streaming='always', or 'auto' and the matrix does not fit"
 span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None. The BED contig is the region's, else the store's (eager and streaming alike); data on several contigs need region= (ValueError)."
-notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=."
+notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=. phased=None (the default) takes the flag that HaplotypeMatrix.to_zarr recorded in the store attribute zarr_io.PHASED_ATTR (zarr_io.stored_phase); a store with no record loads as unphased, since no loader infers phase from the calls."
 
 [inputs."HaplotypeMatrix.from_ts"]
 params = ["ts", "device", "include_invariant", "accessible_bed", "chrom", "phased"]

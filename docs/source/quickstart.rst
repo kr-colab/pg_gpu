@@ -13,8 +13,9 @@ VCF, the two haploid copies of each sample become two adjacent rows.
 
 The ``phased`` flag records whether the rows represent true phased
 haplotypes or a pseudo-phased (arbitrary assignment of alleles within
-each individual). The loaders default to ``phased=False`` for VCF and
-Zarr, but ``from_ts`` defaults to ``phased=True`` for tree sequences. 
+each individual). ``from_vcf`` defaults to ``phased=False``, ``from_ts``
+to ``phased=True`` for tree sequences, and ``from_zarr`` to the flag
+that ``to_zarr`` saved in the store (``False`` for any other store).
 You can override it at load time or change it later with ``set_phased()`` 
 or ``set_unphased()``. Phase-dependent statistics warn on an unphased matrix, 
 and haploid data should always be read with ``phased=True``; see :doc:`phasing`.
@@ -117,8 +118,8 @@ form.
 
 .. code-block:: python
 
-   # Save to VCZ format (default). The flag isn't stored: pass phased=True
-   # again when reading the store back.
+   # Save to VCZ format (default). The store keeps the phased flag, so
+   # from_zarr gives back a phased matrix.
    h = HaplotypeMatrix.from_vcf("data.vcf.gz", phased=True)
    h.to_zarr("data.zarr", contig_name="chr1")
 

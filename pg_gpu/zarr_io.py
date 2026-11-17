@@ -443,8 +443,37 @@ def read_genotypes_allel_grouped(store, region):
             'variant_indices': variant_indices, 'contigs': [chrom]}
 
 
+# Store attribute that holds the ``phased`` flag of the HaplotypeMatrix that
+# wrote the store.
+PHASED_ATTR = 'pg_gpu_phased'
+
+
+def stored_phase(zarr_path):
+    """The ``phased`` flag that ``HaplotypeMatrix.to_zarr`` recorded in a
+    store; False for a store with no record, such as one from another tool."""
+    import zarr
+    return bool(zarr.open_group(str(zarr_path), mode='r').attrs.get(PHASED_ATTR, False))
+
+
+def _record_phase(store, phased, shape, chunks=None):
+    """Record a matrix's ``phased`` flag in a store it is written to.
+
+    The attribute is what ``from_zarr`` reads. A phased matrix also gets
+    ``call_genotype_phased``, the VCZ field for phase; every call has the
+    same value, so it is the fill value of an array with no stored chunk.
+    An unphased matrix gets no such field: its flag says that phase was not
+    declared, not that each call is known to be unphased. A store that has
+    the field already (from the matrix's own ``fields``) keeps it.
+    """
+    store.attrs[PHASED_ATTR] = bool(phased)
+    if phased and 'call_genotype_phased' not in store:
+        store.create_array('call_genotype_phased', shape=shape, dtype='bool',
+                           fill_value=True,
+                           chunks='auto' if chunks is None else chunks[:2])
+
+
 def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
-              chunks=None, fields=None):
+              chunks=None, fields=None, phased=None):
     """Write genotype data in VCZ format.
 
     Parameters
@@ -475,6 +504,11 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
 
         Anything else raises ``ValueError``. The dtype written matches
         the input array so the round-trip is byte-exact.
+    phased : bool, optional
+        The ``phased`` flag of a HaplotypeMatrix. When given, it is
+        written as the ``pg_gpu_phased`` store attribute, which
+        ``HaplotypeMatrix.from_zarr`` reads; ``True`` also writes
+        ``call_genotype_phased``, the VCZ field for phase.
     """
     import zarr
     n_var = len(positions)
@@ -520,6 +554,9 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
                 store.create_array(f'call_{tag}', data=arr)
             else:
                 store.create_array(f'variant_{tag}', data=arr)
+    # After the fields: a matrix can carry call_genotype_phased among them.
+    if phased is not None:
+        _record_phase(store, phased, (n_var, n_samples), chunks)
 
 
 def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,
@@ -658,9 +695,13 @@ def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,
         )
     dst.create_array('contig_id', data=np.array([contig], dtype='U'))
     dst.create_array('variant_contig', data=np.zeros(n_out, dtype=np.int8))
+    # A store that HaplotypeMatrix.to_zarr wrote keeps its phase record.
+    if PHASED_ATTR in src.attrs:
+        _record_phase(dst, src.attrs[PHASED_ATTR], (n_out, n_samp),
+                      (variant_chunk, sample_chunk))
 
 
-def write_allel(zarr_path, gt, positions, samples=None):
+def write_allel(zarr_path, gt, positions, samples=None, phased=None):
     """Write genotype data in scikit-allel format.
 
     Parameters
@@ -673,9 +714,15 @@ def write_allel(zarr_path, gt, positions, samples=None):
         Variant positions.
     samples : list of str, optional
         Sample names.
+    phased : bool, optional
+        The ``phased`` flag of a HaplotypeMatrix. When given, it is
+        written as the ``pg_gpu_phased`` store attribute, which
+        ``HaplotypeMatrix.from_zarr`` reads.
     """
     import zarr
     store = zarr.open(zarr_path, mode='w')
+    if phased is not None:
+        store.attrs[PHASED_ATTR] = bool(phased)   # this layout has no phase field
     store.create_array('calldata/GT', data=np.asarray(gt))
     store.create_array('variants/POS', data=np.asarray(positions))
     if samples is not None:

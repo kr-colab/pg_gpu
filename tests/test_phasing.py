@@ -1,12 +1,18 @@
 """Tests for the ``phased`` flag on HaplotypeMatrix and StreamingHaplotypeMatrix."""
 
+import warnings
+
 import numpy as np
 import pytest
 import cupy as cp
+import zarr
 
 from pg_gpu.haplotype_matrix import HaplotypeMatrix
 from pg_gpu.genotype_matrix import GenotypeMatrix
 from pg_gpu._gpu_genotype_prep import build_haplotype_matrix
+from pg_gpu.zarr_io import PHASED_ATTR
+
+from .conftest import simulate_hm
 
 
 # ---------------------------------------------------------------------------
@@ -247,3 +253,89 @@ class TestZarrPhased:
         assert stream.phased is False
         for _left, _right, chunk in stream.iter_gpu_chunks():
             assert chunk.phased is False
+
+
+# ---------------------------------------------------------------------------
+# to_zarr records the flag and from_zarr gives it back
+# ---------------------------------------------------------------------------
+
+class TestZarrKeepsPhase:
+    """A matrix keeps its ``phased`` value through ``to_zarr`` and
+    ``from_zarr``. The loader reads the record that ``to_zarr`` left in the
+    store; it does not infer phase from the calls, so a store from another
+    tool loads as unphased."""
+
+    @staticmethod
+    def _saved(tmp_path, phased, format="vcz", fields=None):
+        hm = _small_hm(phased=phased)
+        hm.samples = ["s0", "s1"]
+        hm.fields = fields
+        path = str(tmp_path / f"{format}_{phased}.zarr")
+        hm.to_zarr(path, format=format, contig_name="1")
+        return path
+
+    @pytest.mark.parametrize("phased", [True, False])
+    @pytest.mark.parametrize("format,streaming", [
+        ("vcz", "never"), ("vcz", "always"), ("scikit-allel", "never")])
+    def test_round_trip(self, tmp_path, format, streaming, phased):
+        path = self._saved(tmp_path, phased, format=format)
+        assert HaplotypeMatrix.from_zarr(path, streaming=streaming).phased is phased
+
+    def test_saved_simulation_does_not_warn(self, tmp_path):
+        # The case that showed the fault: a phased simulation, saved and
+        # loaded, then given to a phase-dependent statistic.
+        from pg_gpu import UnphasedDataWarning, selection
+        hm = simulate_hm(n_samples=10, mutation_model="binary")
+        assert hm.phased is True
+        path = str(tmp_path / "sim.vcz")
+        hm.to_zarr(path, contig_name="1")
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UnphasedDataWarning)
+            selection.garud_h(HaplotypeMatrix.from_zarr(path))
+
+    def test_phased_store_has_the_vcz_phase_field(self, tmp_path):
+        # call_genotype_phased is the VCZ field for phase: one value for
+        # each variant and sample.
+        field = zarr.open_group(self._saved(tmp_path, True), mode="r")["call_genotype_phased"]
+        assert field.shape == (3, 2) and field.dtype == bool
+        assert np.asarray(field).all()
+
+    def test_unphased_store_has_no_phase_field(self, tmp_path):
+        # phased=False means that phase was not declared; the store must not
+        # state that every call is unphased.
+        store = zarr.open_group(self._saved(tmp_path, False), mode="r")
+        assert "call_genotype_phased" not in store
+        assert store.attrs[PHASED_ATTR] is False
+
+    @pytest.mark.parametrize("phased", [True, False])
+    def test_phase_field_among_the_matrix_fields_is_kept(self, tmp_path, phased):
+        # A matrix loaded with fields=['genotype_phased'] carries the
+        # per-call values; to_zarr writes those, not its own field.
+        per_call = np.array([[True, False], [False, False], [True, True]])
+        path = self._saved(tmp_path, phased, fields={"genotype_phased": per_call})
+        store = zarr.open_group(path, mode="r")
+        np.testing.assert_array_equal(np.asarray(store["call_genotype_phased"]), per_call)
+        assert HaplotypeMatrix.from_zarr(path).phased is phased
+
+    def test_store_without_the_record_loads_unphased(self, tmp_path):
+        # As a store from bio2zarr: every call is marked phased, but the
+        # store has no record from to_zarr.
+        path = self._saved(tmp_path, True)
+        del zarr.open_group(path, mode="r+").attrs[PHASED_ATTR]
+        assert HaplotypeMatrix.from_zarr(path).phased is False
+        assert HaplotypeMatrix.from_zarr(path, streaming="always").phased is False
+
+    def test_genotype_store_has_no_record(self, tmp_path):
+        gm = GenotypeMatrix.from_haplotype_matrix(_small_hm(phased=True))
+        path = str(tmp_path / "genotypes.vcz")
+        gm.to_zarr(path, contig_name="1")
+        assert PHASED_ATTR not in zarr.open_group(path, mode="r").attrs
+        assert HaplotypeMatrix.from_zarr(path).phased is False
+
+    @pytest.mark.parametrize("phased", [True, False])
+    def test_layout_conversion_keeps_the_record(self, tmp_path, phased):
+        from pg_gpu.zarr_io import allel_zarr_to_vcz
+        vcz = str(tmp_path / "converted.vcz")
+        allel_zarr_to_vcz(self._saved(tmp_path, phased, format="scikit-allel"), vcz,
+                          contig="1")
+        assert HaplotypeMatrix.from_zarr(vcz).phased is phased
