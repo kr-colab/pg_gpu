@@ -1507,9 +1507,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN or inf when sum(B) == 0 (normed, no guard); z is NaN or +/-inf when the jackknife SE is exactly 0; (nan, nan, nan, empty, empty) when no site is left; raises ZeroDivisionError when there are sites but no full block"
+undefined = "NaN or inf when sum(B) == 0 (normed, no guard); z is NaN or +/-inf when the jackknife SE is exactly 0; (nan, nan, nan, empty, empty) when no site is left; raises ZeroDivisionError when there are sites but no full block; normed=False gives se=NaN and an empty vj when every block has no defined site"
 parallel = []
-notes = "The point estimate uses every variant but the jackknife blocks drop the trailing n % blen variants, the same as scikit-allel."
+notes = "The point estimate uses every variant but the jackknife blocks drop the trailing n % blen variants, the same as scikit-allel. normed=False drops a block with no defined site from the jackknife resampling instead of giving it a NaN value; every other block still contributes its own unweighted mean, matching scikit-allel's own normed=False SE whenever no block is fully undefined."
 
 [functions."admixture.average_patterson_d"]
 # signature: (haplotype_matrix, pop_a, pop_b, pop_c, pop_d, blen, missing_data)

@@ -890,6 +890,14 @@ Bug fixes
   those sites instead of counting them as 0, which had biased the mean
   toward 0. ``normed=True`` is unaffected, since its ratio of sums already
   excluded them.
+* That same change let a block with no estimable site reach
+  ``average_patterson_f3``'s ``normed=False`` jackknife as a block with a
+  NaN value. Every other leave-one-out estimate still carried that NaN,
+  so ``se``/``z`` came out NaN even though only one block out of many was
+  uninformative. Such a block is now dropped from the jackknife
+  resampling instead. Every other block still contributes its own
+  unweighted mean, matching scikit-allel exactly whenever no block is
+  fully undefined.
 
 New warnings
 ~~~~~~~~~~~~

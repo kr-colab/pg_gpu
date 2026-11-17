@@ -367,6 +367,10 @@ class TestPattersonF3ZeroCallSites:
 
     def test_average_f3_unnormed_matches_allel_with_zero_call_sites(
             self, zero_call_data):
+        """Every block here still has at least one defined site (the
+        missing calls only partially cover two blocks), so no block is
+        dropped and this matches allel's own unweighted mean of block
+        means exactly, same as with no missing data at all."""
         matrix, pops, _ = zero_call_data
         f3_pg, se_pg, z_pg, _, _ = admixture.average_patterson_f3(
             matrix, 'C', 'A', 'B', blen=20, normed=False)
@@ -392,6 +396,68 @@ class TestPattersonF3ZeroCallSites:
         np.testing.assert_array_equal(np.isnan(f3_pg), np.isnan(f3_a))
         valid = ~np.isnan(f3_a)
         np.testing.assert_allclose(f3_pg[valid], f3_a[valid], rtol=1e-10)
+
+
+class TestAverageF3UnnormedWholeBlockUndefined:
+    """A block with no estimable site used to poison average_patterson_f3's
+    normed=False jackknife entirely: every leave-one-out estimate except
+    the one dropping that block kept its NaN per-block mean, so se/z came
+    out NaN even with only one uninformative block among many. That block
+    now drops out of the resampling instead; every other block still
+    contributes its own unweighted mean, exactly as scikit-allel would
+    compute it with that one block already removed."""
+
+    def test_whole_block_undefined_does_not_poison_se(self):
+        np.random.seed(123)
+        n_var, blen = 200, 20
+        pops = {name: np.random.randint(0, 2, (10, n_var)).astype(np.int8)
+               for name in ['C', 'A', 'B']}
+        pops['C'][:, 20:40] = -1  # block 1 entirely non-estimable
+        matrix = _make_matrix(pops, n_var)
+
+        f3, se, z, vb, vj = admixture.average_patterson_f3(
+            matrix, 'C', 'A', 'B', blen=blen, normed=False)
+
+        assert np.isnan(vb[1])  # the bad block's own value is still NaN
+        assert np.isfinite(f3)
+        assert np.isfinite(se)
+        assert np.isfinite(z)
+        assert np.isfinite(vj).all()  # no leave-one-out estimate is poisoned
+        assert len(vj) == len(vb) - 1  # the bad block isn't resampled at all
+
+        # Independent check: drop the bad block, then take the plain
+        # (unweighted) delete-1 jackknife over what's left -- scikit-allel's
+        # own formula, applied to the n-1 defined blocks.
+        defined = vb[np.isfinite(vb)]
+        n = len(defined)
+        keep = np.ones(n, dtype=bool)
+        per_iter = np.empty(n)
+        for i in range(n):
+            keep[i] = False
+            per_iter[i] = defined[keep].mean()
+            keep[i] = True
+        expected_se = np.sqrt(((n - 1) / n)
+                              * np.sum((per_iter - per_iter.mean()) ** 2))
+        np.testing.assert_allclose(se, expected_se, rtol=1e-10)
+        np.testing.assert_allclose(vj, per_iter, rtol=1e-10)
+
+    def test_every_block_undefined_is_nan_not_a_crash(self):
+        """With no block left to jackknife over, se/z are NaN (as when
+        missing_data='exclude' leaves no site at all), not a
+        ZeroDivisionError from an empty block set."""
+        np.random.seed(1)
+        n_var, blen = 50, 10
+        pops = {name: np.random.randint(0, 2, (10, n_var)).astype(np.int8)
+               for name in ['C', 'A', 'B']}
+        pops['C'][:] = -1  # every site non-estimable in C
+        matrix = _make_matrix(pops, n_var)
+
+        f3, se, z, vb, vj = admixture.average_patterson_f3(
+            matrix, 'C', 'A', 'B', blen=blen, normed=False)
+
+        assert np.isnan(f3) and np.isnan(se) and np.isnan(z)
+        assert np.isnan(vb).all()
+        assert len(vj) == 0
 
 
 class TestPattersonF4ZeroCallSites:

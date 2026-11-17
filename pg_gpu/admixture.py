@@ -449,6 +449,10 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
     When no site is left to estimate from (for example after
     ``missing_data='exclude'``), the three floats are NaN and the two
     arrays are empty.
+
+    With ``normed=False``, a block with no defined site drops out of
+    the jackknife resampling instead of contributing a NaN block mean.
+    Every other block still contributes its own unweighted mean.
     """
     T, B = _patterson_f3_gpu(haplotype_matrix, pop_c, pop_a, pop_b,
                               missing_data=missing_data)
@@ -470,7 +474,11 @@ def average_patterson_f3(haplotype_matrix: HaplotypeMatrix,
         finite = cp.isfinite(T)
         f3 = float((cp.sum(cp.where(finite, T, 0.0)) / cp.sum(finite)).get())
         vb = _moving_nanmean(T, blen).get()
-        _, se, vj = block_jackknife(vb, statistic=np.mean)
+        defined = np.isfinite(vb)
+        if defined.any():
+            _, se, vj = block_jackknife(vb[defined], statistic=np.mean)
+        else:
+            se, vj = np.nan, np.empty(0, dtype=np.float64)
 
     return f3, se, _z_score(f3, se), vb, vj
 
