@@ -39,11 +39,13 @@ def plot_sfs(s, ax=None, folded=False, scaled=False, clip_endpoints=True,
     ax : matplotlib.axes.Axes, optional
         Axes to plot on. If None, creates a new figure.
     folded : bool
-        Label x-axis as minor allele count.
+        The spectrum is folded: its last entry is a class of polymorphic
+        sites, and the x-axis counts minor alleles.
     scaled : bool
         Label y-axis as scaled count.
     clip_endpoints : bool
-        If True, exclude the first and last entries (monomorphic classes).
+        If True, exclude the monomorphic classes: the first entry, and the
+        last entry of an unfolded spectrum.
     log_scale : bool
         If True, use log scale for y-axis.
     color : str, optional
@@ -82,7 +84,7 @@ def plot_sfs(s, ax=None, folded=False, scaled=False, clip_endpoints=True,
 
 
 def plot_joint_sfs(s, ax=None, log_scale=True, cmap='YlOrRd',
-                   clip_endpoints=True, **kwargs):
+                   clip_endpoints=True, folded=False, **kwargs):
     """Plot a joint site frequency spectrum as a heatmap.
 
     Parameters
@@ -91,12 +93,22 @@ def plot_joint_sfs(s, ax=None, log_scale=True, cmap='YlOrRd',
         Joint SFS array (from pg_gpu.sfs.joint_sfs, etc.).
     ax : matplotlib.axes.Axes, optional
     log_scale : bool
-        If True, use log color scale. A spectrum with no positive cell has
-        no range for it and is drawn empty on a linear scale.
+        If True, use log color scale, from the smallest to the largest
+        positive cell. A spectrum with no positive cell has no range for it
+        and is drawn empty on a linear scale.
     cmap : str
         Colormap name.
     clip_endpoints : bool
-        If True, exclude monomorphic classes (row/col 0 and last).
+        If True, leave the monomorphic classes of an unfolded spectrum
+        blank: cells ``[0, 0]`` and ``[n1, n2]``. The other cells of row 0
+        and column 0 hold the sites that are polymorphic in one population
+        only, and are drawn.
+    folded : bool
+        The spectrum is folded, so the axes count minor alleles and no
+        cell is left blank: a fold of each axis (``sfs.fold_joint_sfs``)
+        puts the fixed differences between the populations in ``[0, 0]``,
+        and a fold by the overall minor allele (``sfs.joint_sfs_folded``)
+        leaves both corner cells empty.
 
     Returns
     -------
@@ -107,25 +119,28 @@ def plot_joint_sfs(s, ax=None, log_scale=True, cmap='YlOrRd',
 
     s = _to_numpy(s, dtype=float)
 
-    if clip_endpoints:
-        s = s[1:, 1:]
-
     # Only a positive count has a place on a log scale, so every other cell
     # (zero or NaN) is left blank.
     s_plot = np.ma.masked_where(~(s > 0), s)
+    if clip_endpoints and not folded:
+        s_plot[0, 0] = s_plot[-1, -1] = np.ma.masked
 
-    # A spectrum with no positive cell (for example when one population is
-    # monomorphic) has no range for a log scale, so it is drawn empty on a
-    # linear one.
-    norm = (mcolors.LogNorm(vmin=max(1, s_plot.min()), vmax=s_plot.max())
+    # A spectrum with no positive cell has no range for a log scale, so it
+    # is drawn empty on a linear one. The scale starts at the smallest
+    # positive cell, because a projected or scaled spectrum has cells
+    # below 1.
+    norm = (mcolors.LogNorm(vmin=s_plot.min(), vmax=s_plot.max())
             if log_scale and s_plot.count() else None)
 
-    im = ax.pcolormesh(s_plot, norm=norm, cmap=cmap, **kwargs)
+    # Cell edges half a count each side, so tick k is the centre of count k.
+    n1, n2 = s.shape
+    im = ax.pcolormesh(np.arange(n2 + 1) - 0.5, np.arange(n1 + 1) - 0.5, s_plot,
+                       norm=norm, cmap=cmap, **kwargs)
     plt.colorbar(im, ax=ax, label='Count')
 
-    offset = 1 if clip_endpoints else 0
-    ax.set_xlabel('Derived allele count (pop 2)')
-    ax.set_ylabel('Derived allele count (pop 1)')
+    allele = 'Minor' if folded else 'Derived'
+    ax.set_xlabel(f'{allele} allele count (pop 2)')
+    ax.set_ylabel(f'{allele} allele count (pop 1)')
     sns.despine(ax=ax)
 
     return ax
@@ -391,11 +406,13 @@ def plot_windowed(window_start, values, ax=None, stat_name='',
     if color is None:
         color = sns.color_palette()[0]
 
-    # convert to kb or Mb for readability
-    if window_start.max() > 1e6:
+    # convert to kb or Mb for readability; a result with no window (a
+    # region with no variants) draws empty axes in bp
+    largest = window_start.max(initial=0)
+    if largest > 1e6:
         x = window_start / 1e6
         xlabel = 'Position (Mb)'
-    elif window_start.max() > 1e3:
+    elif largest > 1e3:
         x = window_start / 1e3
         xlabel = 'Position (kb)'
     else:
@@ -438,6 +455,16 @@ def plot_windowed_panel(results, statistics=None, figsize=None, colors=None):
         statistics = [k for k in results if k not in skip_keys]
 
     n_panels = len(statistics)
+    if 'start' not in results:
+        raise ValueError(
+            "plot_windowed_panel: the results have no 'start' column to "
+            "place the windows. windowed_analysis returns a frame with no "
+            "columns when the data give no window.")
+    if n_panels == 0:
+        raise ValueError(
+            "plot_windowed_panel: no statistic to plot. The results hold "
+            f"only window columns ({', '.join(map(str, results))}); name "
+            "the statistics to plot, or compute some.")
 
     if figsize is None:
         figsize = (10, 2.5 * n_panels)

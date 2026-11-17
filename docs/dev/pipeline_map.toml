@@ -2281,7 +2281,7 @@ parallel = []
 notes = "Every plotting function reads its array arguments through plotting._to_numpy, which copies a cupy array to the host."
 
 [functions."plotting.plot_joint_sfs"]
-# signature: (s, ax, log_scale, cmap, clip_endpoints, kwargs)
+# signature: (s, ax, log_scale, cmap, clip_endpoints, folded, kwargs)
 axis_kwargs = []
 inputs = ["array"]
 streaming = "n/a"
@@ -2289,7 +2289,7 @@ missing_data = []
 span = "none"
 undefined = "a zero or NaN cell is left blank; a matrix with no positive cell is drawn empty on a linear scale"
 parallel = []
-notes = "clip_endpoints drops only row 0 and column 0, though the docstring says the last ones too."
+notes = "clip_endpoints leaves the monomorphic cells of an unfolded spectrum blank: [0, 0] and [n1, n2]. The rest of row 0 and column 0 (sites polymorphic in one population only) is drawn. With folded=True no cell is blank: sfs.fold_joint_sfs puts fixed differences in [0, 0]. The log scale runs from the smallest to the largest positive cell, and tick k is the centre of count k."
 
 [functions."plotting.plot_pairwise_ld"]
 # signature: (r2_matrix, ax, cmap, vmin, vmax, positions, kwargs)
@@ -2341,7 +2341,7 @@ inputs = ["array"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "the line and the fill break at a NaN window"
+undefined = "the line and the fill break at a NaN window; no window draws empty axes"
 parallel = []
 notes = "The x unit (bp, kb, Mb) comes from the largest window_start."
 
@@ -2352,7 +2352,7 @@ inputs = ["other"]
 streaming = "n/a"
 missing_data = []
 span = "none"
-undefined = "as plot_windowed: gaps at NaN windows"
+undefined = "as plot_windowed: gaps at NaN windows, empty axes for no window; raises ValueError when the results have no statistic to plot or no 'start'"
 parallel = []
 notes = "results is a dict or windowed DataFrame with a 'start' key; with statistics=None it plots every key not in CANONICAL_WINDOW_PREFIX."
 
