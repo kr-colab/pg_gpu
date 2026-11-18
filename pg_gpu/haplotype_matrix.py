@@ -819,9 +819,6 @@ class HaplotypeMatrix:
                 f"got {backend!r}"
             )
 
-        if phased is None:
-            phased = stored_phase(path)
-
         if streaming == "always":
             if fields:
                 raise NotImplementedError(
@@ -865,7 +862,7 @@ class HaplotypeMatrix:
 
     @classmethod
     def _build_eager(cls, path, *, region, accessible_bed, pop_assignment,
-                     fields=None, phased=False):
+                     fields=None, phased=None):
         from .zarr_io import read_genotypes, read_qc_fields
         from ._gpu_genotype_prep import build_haplotype_matrix
 
@@ -890,7 +887,9 @@ class HaplotypeMatrix:
             chrom_start=start,
             chrom_end=stop,
             samples=list(sample_names) if sample_names is not None else None,
-            phased=phased,
+            # None takes the store's record, read below from the handle
+            # that the population step opens.
+            phased=bool(phased),
         )
 
         if fields:
@@ -923,13 +922,15 @@ class HaplotypeMatrix:
         )
         if pop_map is not None:
             hm.load_pop_file(pop_map)
+        if phased is None and store is not None and stored_phase(store):
+            hm.set_phased()
 
         return hm
 
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
                          prefetch, source=None, backend="auto",
-                         accessible_bed=None, phased=False):
+                         accessible_bed=None, phased=None):
         from .streaming_matrix import (
             HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
             _pick_chunk_fetcher,
@@ -946,6 +947,8 @@ class HaplotypeMatrix:
             # zarr store.
             source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
+        if phased is None:
+            phased = stored_phase(source._store)
 
         # Resolve an accessible BED once over the source's variant-position
         # bounds and hand it to the streaming matrix, so span-normalized

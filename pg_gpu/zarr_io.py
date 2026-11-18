@@ -448,11 +448,12 @@ def read_genotypes_allel_grouped(store, region):
 PHASED_ATTR = 'pg_gpu_phased'
 
 
-def stored_phase(zarr_path):
-    """The ``phased`` flag that ``HaplotypeMatrix.to_zarr`` recorded in a
-    store; False for a store with no record, such as one from another tool."""
-    import zarr
-    return bool(zarr.open_group(str(zarr_path), mode='r').attrs.get(PHASED_ATTR, False))
+def stored_phase(store):
+    """The ``phased`` flag that ``HaplotypeMatrix.to_zarr`` recorded in an
+    open store; False for a store with no record, such as one from another
+    tool. It takes the group, not the path, so a loader reads the flag from
+    the handle it has and opens the store no extra time."""
+    return bool(store.attrs.get(PHASED_ATTR, False))
 
 
 def _record_phase(store, phased, shape, chunks=None):
