@@ -1470,13 +1470,21 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     from . import ld_statistics
 
     # zns restricts to the biallelic sites of whatever matrix it is handed;
-    # restricting once up front keeps all three terms on the same sites.
+    # restricting once up front, then excluding once on the combined pop1 +
+    # pop2 rows, keeps all three terms on the same sites regardless of any
+    # other population in sample_sets.
     biallelic = haplotype_matrix.restrict_to_biallelic(warn_context="zx")
-    z1 = ld_statistics._zns_biallelic(population_rows(biallelic, pop1),
-                                      missing_data)
-    z2 = ld_statistics._zns_biallelic(population_rows(biallelic, pop2),
-                                      missing_data)
-    z_total = ld_statistics._zns_biallelic(biallelic, missing_data)
+    if missing_data == 'exclude':
+        biallelic = biallelic.exclude_missing_sites(populations=[pop1, pop2])
+        if biallelic.num_variants == 0:
+            return float('nan')
+
+    combined_idx = (list(_get_population_indices(biallelic, pop1))
+                    + list(_get_population_indices(biallelic, pop2)))
+    z1 = ld_statistics._zns_biallelic(population_rows(biallelic, pop1), 'include')
+    z2 = ld_statistics._zns_biallelic(population_rows(biallelic, pop2), 'include')
+    z_total = ld_statistics._zns_biallelic(
+        population_rows(biallelic, combined_idx), 'include')
 
     if z_total == 0:
         return float('nan')
