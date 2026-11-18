@@ -2117,7 +2117,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN eigvals, eigvecs and sumsq for a window with fewer than max(k, 2) variants (count before the exclude filter); raises ValueError when there is no window"
+undefined = "NaN eigvals, eigvecs and sumsq for a window with fewer than max(k, 2) complete sites (counted after the exclude filter); raises ValueError when there is no window"
 parallel = ["decomposition._local_pca_streaming", "decomposition._local_pca_with_jackknife"]
 notes = "windowed_analysis reaches it through _LOCAL_PCA_STATS with window_type default 'bp' and no engine kwargs, and raises NotImplementedError for a StreamingHaplotypeMatrix; a GenotypeMatrix fails with AttributeError num_haplotypes."
 
@@ -2161,9 +2161,9 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN rows for a window with fewer than max(k, 2) * n_blocks variants; raises ValueError when there is no window"
+undefined = "NaN rows for a window with fewer than max(k, 2) * n_blocks complete sites (counted after the exclude filter); raises ValueError when there is no window"
 parallel = ["decomposition._local_pca_with_jackknife"]
-notes = "windowed_analysis and lostruct use the private _local_pca_with_jackknife, which gates on one-hot columns, not variants; blocks split the one-hot column axis."
+notes = "windowed_analysis and lostruct use the private _local_pca_with_jackknife, which shares this gate (both compare the real site count, not one-hot columns); blocks still split the one-hot column axis, since that is what the Gram is built from."
 
 [functions."distance_stats.pairwise_diffs_haploid"]
 # signature: (haplotype_matrix, population, missing_data)

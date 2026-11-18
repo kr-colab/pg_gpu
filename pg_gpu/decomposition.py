@@ -33,11 +33,14 @@ def _prepare_centered(haplotype_matrix, population=None, missing_data='include',
     per-allele covariance between samples) at haplotype granularity, with each
     haplotype treated as its own sample.
 
-    Returns (X, n_segregating), where X is (n_samples, n_cols) float64 and
+    Returns (X, n_segregating, n_sites), where X is (n_samples, n_cols) float64,
     n_segregating is the per-site sum of (present alleles - 1), the number of
-    segregating sites, used to normalize the Gram. When ``need_segregating`` is
-    False the count is not computed (returned as 0), avoiding its host sync on the
-    per-window path (local PCA normalizes by ncol, not segregating sites).
+    segregating sites, used to normalize the Gram, and n_sites is the number of
+    sites left after the missing_data='exclude' filter (== the input site count
+    under 'include'). When ``need_segregating`` is False, n_segregating is not
+    computed (returned as 0), avoiding its host sync on the per-window path
+    (local PCA normalizes by ncol, not segregating sites); n_sites is always a
+    plain shape, so it costs nothing either way.
     """
     hap, K = _gpu_hap(haplotype_matrix, population, n_alleles)
     return _centered_block(hap, missing_data, K, need_segregating)
@@ -73,13 +76,14 @@ def _centered_block(hap, missing_data, K, need_segregating=True):
         complete = cp.sum(hap >= 0, axis=0) == n_samples
         hap = hap[:, complete]
 
-    if hap.shape[1] == 0:
-        return cp.zeros((n_samples, 0), dtype=cp.float64), 0
+    n_sites = hap.shape[1]
+    if n_sites == 0:
+        return cp.zeros((n_samples, 0), dtype=cp.float64), 0, 0
 
     ac, n_valid = allele_counts(hap, n_alleles=K)     # (n_var, K), (n_var,)
     pairs = cp.argwhere(ac > 0)                        # present (site, allele), all alleles
     if pairs.shape[0] == 0:
-        return cp.zeros((n_samples, 0), dtype=cp.float64), 0
+        return cp.zeros((n_samples, 0), dtype=cp.float64), 0, n_sites
 
     sites = pairs[:, 0]
     alleles = pairs[:, 1]
@@ -94,7 +98,7 @@ def _centered_block(hap, missing_data, K, need_segregating=True):
         n_segregating = int(pairs.shape[0] - cp.unique(sites).size)
     else:
         n_segregating = 0
-    return X, n_segregating
+    return X, n_segregating, n_sites
 
 
 def _centered_gram_chunked(hap, missing_data, K, chunk_vars):
@@ -113,7 +117,7 @@ def _centered_gram_chunked(hap, missing_data, K, chunk_vars):
     n_segregating = 0
     n_cols = 0
     for start in range(0, n_var, chunk_vars):
-        Xc, seg = _centered_block(
+        Xc, seg, _ = _centered_block(
             hap[:, start:start + chunk_vars], missing_data, K)
         if Xc.shape[1]:
             cublas.syrk('N', Xc, out=C, alpha=1.0, beta=1.0, lower=True)
@@ -259,7 +263,7 @@ def randomized_pca(haplotype_matrix: HaplotypeMatrix,
                    alternative="use randomized_pca_dosage on a GenotypeMatrix "
                    "for the unphased diploid dosage PCA")
 
-    X, n_segregating = _prepare_centered(haplotype_matrix, population, missing_data)
+    X, n_segregating, _ = _prepare_centered(haplotype_matrix, population, missing_data)
     n_samples, n_variants = X.shape
     n_components = min(n_components, n_samples, max(n_variants, 1))
 
@@ -854,12 +858,15 @@ def _local_pca_streaming(matrix, iterator, k, missing_data,
     # of issue #91. cp.stack at the end gives a single contiguous
     # (n_windows, ...) tensor; the .get() that follows is the only
     # D->H transfer the dispatcher does.
+    min_pca = max(k, 2)
     n_processed = 0
     for window in iterator:
-        is_valid = window.n_variants >= max(k, 2)
-        window_meta.append((_window_prefix(window), is_valid))
+        prefix = _window_prefix(window)
 
-        if not is_valid:
+        # Already too small before filtering (filtering only removes
+        # sites) so reject it early.
+        if window.n_variants < min_pca:
+            window_meta.append((prefix, False))
             eigvals_gpu_chunks.append(cp.full(k, cp.nan, dtype=cp.float64))
             eigvecs_gpu_chunks.append(
                 cp.full((k, n_samples), cp.nan, dtype=cp.float64))
@@ -867,8 +874,19 @@ def _local_pca_streaming(matrix, iterator, k, missing_data,
             del window
             continue
 
-        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
-                                 need_segregating=False, n_alleles=n_alleles_all)
+        X, _, n_sites = _prepare_centered(window.matrix, missing_data=missing_data,
+                                          need_segregating=False, n_alleles=n_alleles_all)
+
+        if n_sites < min_pca:
+            window_meta.append((prefix, False))
+            eigvals_gpu_chunks.append(cp.full(k, cp.nan, dtype=cp.float64))
+            eigvecs_gpu_chunks.append(
+                cp.full((k, n_samples), cp.nan, dtype=cp.float64))
+            sumsq_gpu_chunks.append(cp.asarray(cp.nan, dtype=cp.float64))
+            del X, window
+            continue
+
+        window_meta.append((prefix, True))
 
         if engine == 'streaming-dense':
             evals, evecs, sumsq = _local_pca_window_dense(
@@ -1177,16 +1195,26 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
     sumsq_list = []
     valid_flags = []
 
+    min_pca = max(k, 2)
     for window in iterator:
         window_meta.append(_window_prefix(window))
-        if window.n_variants < max(k, 2):
+
+        # Already too small before filtering (filtering only removes
+        # sites) so reject it early.
+        if window.n_variants < min_pca:
             gram_list.append(identity_placeholder)
             sumsq_list.append(nan_scalar)
             valid_flags.append(False)
             continue
 
-        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
-                                 need_segregating=False)
+        X, _, n_sites = _prepare_centered(window.matrix, missing_data=missing_data,
+                                          need_segregating=False)
+        if n_sites < min_pca:
+            gram_list.append(identity_placeholder)
+            sumsq_list.append(nan_scalar)
+            valid_flags.append(False)
+            continue
+
         C, sumsq = _window_gram(X, X.shape[1])
         gram_list.append(C)
         sumsq_list.append(sumsq)
@@ -1237,7 +1265,7 @@ def _local_pca_with_jackknife(
     and from the same ``X`` computes both the full Gram matrix (for
     eigvals/eigvecs) and the leave-one-block-out Gram matrices (for jackknife).
 
-    Two-tier validity: windows with enough variants for PCA (``>= max(k, 2)``)
+    Two-tier validity: windows with enough sites for PCA (``>= max(k, 2)``)
     but too few for jackknife (``< max(k, 2) * n_blocks``) get valid
     eigvals/eigvecs but NaN ``jackknife_se``.
     """
@@ -1274,6 +1302,8 @@ def _local_pca_with_jackknife(
     for window in iterator:
         window_meta.append(_window_prefix(window))
 
+        # Already too small before filtering (filtering only removes
+        # sites) so reject it early.
         if window.n_variants < min_pca:
             # Too few variants for PCA or jackknife.
             gram_list.append(identity_placeholder)
@@ -1283,8 +1313,17 @@ def _local_pca_with_jackknife(
             valid_jk.append(False)
             continue
 
-        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
-                                 need_segregating=False)
+        X, _, n_sites = _prepare_centered(window.matrix, missing_data=missing_data,
+                                          need_segregating=False)
+        if n_sites < min_pca:
+            # The exclude filter dropped below the gate after all.
+            gram_list.append(identity_placeholder)
+            sumsq_list.append(nan_scalar)
+            jk_gram_list.append(identity_blocks)
+            valid_pca.append(False)
+            valid_jk.append(False)
+            continue
+
         n_var_win = X.shape[1]
 
         # Full Gram for local_pca.
@@ -1293,9 +1332,12 @@ def _local_pca_with_jackknife(
         sumsq_list.append(sumsq)
         valid_pca.append(True)
 
-        # Leave-one-block-out Grams for jackknife.
+        # Leave-one-block-out Grams for jackknife. The gate compares the
+        # real site count (n_sites), not n_var_win (one-hot columns, which
+        # can exceed the site count); the block split below still slices
+        # X's own columns, so it stays in n_var_win units.
         step = n_var_win // n_blocks
-        if n_var_win < min_jk or step < 1:
+        if n_sites < min_jk or step < 1:
             jk_gram_list.append(identity_blocks)
             valid_jk.append(False)
             continue
@@ -1920,7 +1962,8 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
     Returns
     -------
     numpy.ndarray
-        NaN rows for windows with fewer than `max(k, n_blocks+1)` variants.
+        NaN rows for windows with fewer than `max(k, 2) * n_blocks` complete
+        sites (counted after the `missing_data='exclude'` filter).
     """
     _warn_unphased(haplotype_matrix, context="local_pca_jackknife")
 
@@ -1948,13 +1991,20 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
     valid_flags = []
 
     for window in iterator:
+        # Already too small before filtering (filtering only removes
+        # sites) so reject it early.
         if window.n_variants < min_variants:
             all_grams.append(identity_blocks)
             valid_flags.append(False)
             continue
 
-        X, _ = _prepare_centered(window.matrix, missing_data=missing_data,
-                                 need_segregating=False)
+        X, _, n_sites = _prepare_centered(window.matrix, missing_data=missing_data,
+                                          need_segregating=False)
+        if n_sites < min_variants:
+            all_grams.append(identity_blocks)
+            valid_flags.append(False)
+            continue
+
         n_var_win = X.shape[1]
         # Block width truncates (matches R's `round(nrow/10)` in DPGP_jackknife_var.R).
         step = n_var_win // n_blocks
