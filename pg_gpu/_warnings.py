@@ -566,9 +566,10 @@ def _maybe_memory_warn(path, *, region=None,
 
 # ── Diploid-encoding check ──────────────────────────────────────────────────
 #
-# pg_gpu's loaders assume diploid genotypes: every genotype call is split into
-# two haplotype rows (or summed into a 0/1/2 dosage). Haploid data violates
-# that in two ways that otherwise pass silently:
+# On a ploidy axis of 2, pg_gpu's loaders read diploid genotypes: every
+# genotype call is split into two haplotype rows (or summed into a 0/1/2
+# dosage). Haploid data on such an axis violates that in two ways that
+# otherwise pass silently:
 #
 # * True haploid calls (GT=1) are padded by scikit-allel to a second -1 allele,
 #   so the second haplotype row of every sample is spurious missing data and
@@ -592,21 +593,49 @@ def _format_sample_list(names, idx, limit=6):
     return head
 
 
-def _require_diploid_ploidy(ploidy, source):
-    """Raise unless the ploidy axis is 2.
+def _require_supported_ploidy(ploidy, source):
+    """Raise unless the ploidy axis is 1 or 2, the layouts a
+    HaplotypeMatrix can hold."""
+    if ploidy not in (1, 2):
+        raise ValueError(
+            f"{source} has ploidy {ploidy}; pg_gpu supports ploidy 1 and 2 "
+            f"only (see {ISSUE_URL}).")
 
-    Shared by the streaming reader (ploidy from store metadata) and the
-    value-based detector so the message lives in one place.
-    """
+
+def _require_diploid_ploidy(ploidy, source):
+    """Raise unless the ploidy axis is 2, for a reader whose result holds
+    diploid genotypes."""
+    _require_supported_ploidy(ploidy, source)
     if ploidy != 2:
         raise ValueError(
-            f"{source} has ploidy {ploidy}; pg_gpu's loaders support diploid "
-            f"(ploidy 2) data only. Haploid and polyploid data are not yet "
-            f"supported (see {ISSUE_URL}).")
+            f"{source} has ploidy 1 (haploid), and this loader gives diploid "
+            f"data only. Read a haploid store with HaplotypeMatrix.from_zarr "
+            f"(see {ISSUE_URL}).")
 
 
-def check_diploid_encoding(gt, sample_names=None, source="input"):
+def require_diploid_rows(matrix, context):
+    """Raise when ``context`` pairs haplotype rows into individuals but the
+    matrix has one row per sample.
+
+    Rows ``2i`` and ``2i + 1`` of a haploid matrix are two samples, so a
+    genotype, a heterozygosity or an inbreeding term from them has no
+    meaning.
+    """
+    if matrix.ploidy != 2:
+        raise ValueError(
+            f"{context} groups adjacent haplotype rows into individuals, but "
+            f"this matrix has ploidy {matrix.ploidy} (one row per sample). "
+            f"If rows 2i and 2i + 1 are the two copies of one individual, "
+            f"set matrix.ploidy = 2.")
+
+
+def check_diploid_encoding(gt, sample_names=None, source="input",
+                           allow_haploid=False):
     """Validate that ``gt`` is genuinely diploid before it is loaded.
+
+    With ``allow_haploid``, an array with a ploidy axis of 1 is valid too
+    and passes with no further check: each call is one allele of one
+    sample, so there is no second allele to misread.
 
     Parameters
     ----------
@@ -623,7 +652,8 @@ def check_diploid_encoding(gt, sample_names=None, source="input"):
     Raises
     ------
     ValueError
-        If the array has a ploidy other than 2, or contains a sample whose
+        If the array has a ploidy other than 2 (1 passes with
+        ``allow_haploid``), or contains a sample whose
         calls are all haploid (a called first allele with a padded second
         allele, and never any diploid call). These are encodings the diploid
         loaders handle incorrectly with no valid interpretation.
@@ -644,6 +674,8 @@ def check_diploid_encoding(gt, sample_names=None, source="input"):
     if sample_names is None or len(sample_names) != n_samples:
         sample_names = [f"sample_{i}" for i in range(n_samples)]
 
+    if allow_haploid and ploidy == 1:
+        return
     _require_diploid_ploidy(ploidy, source)
 
     a0 = gt[:, :, 0]
@@ -662,8 +694,9 @@ def check_diploid_encoding(gt, sample_names=None, source="input"):
             f"{source} contains haploid genotype calls for {len(idx)} "
             f"sample(s): {listed}. pg_gpu loads these as diploid, so each "
             f"haploid call becomes a half-missing diploid -- doubling the "
-            f"haplotype count and biasing every statistic. Haploid / "
-            f"hemizygous input is not yet supported (see {ISSUE_URL}).")
+            f"haplotype count and biasing every statistic. Haploid calls "
+            f"load only from a store with a ploidy axis of 1, through "
+            f"HaplotypeMatrix.from_zarr (see {ISSUE_URL}).")
 
     # Polymorphic but not one heterozygote anywhere: looks like hemizygous
     # samples encoded as homozygous diploids (or a fully inbred panel), so warn

@@ -256,7 +256,8 @@ h.load_pop_file("pops.txt")           # loads all pops
 h.load_pop_file("pops.txt", pops=["pop1", "pop2"])  # subset
 
 # Manual -- values are haplotype ROW indices: sample i owns rows 2i and
-# 2i+1, so each pop below holds 2 diploid samples. Assignment validates
+# 2i+1 (h.ploidy == 2; a haploid matrix, h.ploidy == 1, has one row per
+# sample), so each pop below holds 2 diploid samples. Assignment validates
 # rows: out-of-range or duplicate entries raise ValueError. A pop that
 # splits an individual's row pair draws UnpairedRowsWarning when a
 # pairing-aware stat (heterozygosity_observed, fst_weir_cockerham)
@@ -428,7 +429,8 @@ tajd    = diversity.tajimas_d(h)
 he      = diversity.heterozygosity_expected(h)
 # heterozygosity_observed takes a HaplotypeMatrix, not a GenotypeMatrix. It
 # pairs rows into individuals: sample i is rows 2i and 2i+1, which is what
-# every loader produces.
+# every loader produces for diploid data. It raises on a haploid matrix
+# (h.ploidy == 1).
 ho      = diversity.heterozygosity_observed(h)
 
 # Per-population

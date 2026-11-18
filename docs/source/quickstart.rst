@@ -19,6 +19,16 @@ that ``to_zarr`` saved in the store (``False`` for any other store).
 You can override it at load time or change it later with ``set_phased()`` 
 or ``set_unphased()``. Phase-dependent statistics warn on an unphased matrix, 
 and haploid data should always be read with ``phased=True``; see :doc:`phasing`.
+
+The ``ploidy`` attribute is the number of rows per sample: 2 by default,
+or 1 for haploid data, where each row is one sample. ``from_zarr`` takes
+it from the store, ``from_ts`` gives 1 for a tree sequence with no
+individuals or with one sample node per individual, and the raw
+constructor takes ``ploidy=``. ``to_zarr`` writes the store with the
+matrix's ploidy. The statistics that pair rows into diploid individuals
+(``heterozygosity_observed``, ``fst_weir_cockerham``, the genotype
+conversion) raise on a ``ploidy=1`` matrix. A ``ploidy=1`` matrix always
+counts as phased.
  Note some analyses use genotype dosages (0, 1, 2 or -1 for missing), in which case
 you should use ``GenotypeMatrix`` (see "HaplotypeMatrix vs GenotypeMatrix" below).
 

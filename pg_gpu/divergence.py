@@ -501,7 +501,8 @@ def fst_weir_cockerham(haplotype_matrix,
     # list that does not carry each individual's two rows adjacently gives
     # a wrong answer with no error. Gamete statistics accept such lists,
     # which is why the check lives here and warns rather than raises.
-    from ._warnings import check_paired_rows
+    from ._warnings import check_paired_rows, require_diploid_rows
+    require_diploid_rows(haplotype_matrix, "fst_weir_cockerham")
     for pop, idx in ((pop1, pop1_idx), (pop2, pop2_idx)):
         label = pop if isinstance(pop, str) else "row list"
         check_paired_rows(idx, f"fst_weir_cockerham({label})")

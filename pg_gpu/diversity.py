@@ -1882,6 +1882,11 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
     ndarray, float64, shape (n_variants,)
         Observed heterozygosity per variant.
     """
+    if ploidy != 1:
+        # ploidy=1 reads each row as one individual, which a haploid matrix
+        # allows; any other value groups adjacent rows.
+        from ._warnings import require_diploid_rows
+        require_diploid_rows(haplotype_matrix, "heterozygosity_observed")
 
     if population is not None:
         if not isinstance(population, str):

@@ -143,7 +143,7 @@ def _pick_chunk_fetcher(source, *, backend):
         if _store_large_enough_to_warn(source):
             warnings.warn(
                 f"{source.path}: call_genotype.chunks={chunks} spans the "
-                f"full sample axis ({source.num_diploids} diploids); the "
+                f"full sample axis ({source.num_diploids} samples); the "
                 f"kvikio fetcher gives no speedup at this chunking. "
                 f"Falling back to the host fetcher. Re-encode with "
                 f"HaplotypeMatrix.vcf_to_zarr(..., zarr_format=3), whose "
@@ -562,7 +562,7 @@ class _StreamingMatrixBase:
         makes the span 0.
         """
         m = self._build_chunk(
-            cp.empty((0, self._source.num_diploids, 2), cp.int8),
+            cp.empty((0, self._source.num_diploids, self._source.ploidy), cp.int8),
             np.empty(0, np.int64),
             chrom_start=self.chrom_start, chrom_end=self.chrom_end,
             sample_sets=self._sample_sets,
@@ -607,8 +607,9 @@ class _StreamingMatrixBase:
             the same rules as a ``sample_sets`` value: rows within the
             matrix, no duplicates.
 
-            On a haplotype stream rows are gametes: sample ``i`` is rows
-            ``2i`` and ``2i + 1``, and asking for one gamete of a pair
+            On a haplotype stream rows are gametes: sample ``i`` of a
+            diploid store is rows ``2i`` and ``2i + 1`` (a haploid store
+            has one row per sample), and asking for one gamete of a pair
             gives back rows that sit side by side without being one
             sample -- do not feed such a matrix to anything that works
             per individual (``grm``, ``ibs``, ``fst_weir_cockerham``,
@@ -652,17 +653,17 @@ class _StreamingMatrixBase:
                     left, right, hap_cols, to_gpu=True
                 )
             n_var, n_hap = gm_gpu.shape
-            if n_hap % 2 != 0:
+            ploidy = self._source.ploidy
+            if n_hap % ploidy != 0:
                 raise ValueError(
-                    f"materialize(sample_subset=...) requires an even "
-                    f"count to round-trip through (n_dip, 2) layout; "
-                    f"got {n_hap}."
+                    f"materialize(sample_subset=...) needs whole samples "
+                    f"({ploidy} rows each) to round-trip through the "
+                    f"(n_samples, ploidy) layout; got {n_hap} rows."
                 )
-            n_dip_sub = n_hap // 2
-            # Canonical row order puts a sample's two gametes adjacent, so the
-            # haplotype axis is already the flattened (n_dip', 2) layout and
-            # the split is a view rather than a copy.
-            gt = gm_gpu.reshape(n_var, n_dip_sub, 2)
+            # Canonical row order puts the gametes of a sample adjacent, so
+            # the haplotype axis is already the flattened (n_samples',
+            # ploidy) layout and the split is a view rather than a copy.
+            gt = gm_gpu.reshape(n_var, n_hap // ploidy, ploidy)
 
         # sample_subset renumbers the rows, so full-matrix sample_sets no
         # longer apply. Keep each population's surviving members, renumbered
@@ -764,8 +765,9 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
 
     @property
     def phased(self):
-        """Whether the haplotype rows represent true phased haplotypes."""
-        return self._phased
+        """Whether the haplotype rows represent true phased haplotypes;
+        always True for a haploid store, as on ``HaplotypeMatrix``."""
+        return self._phased or self._source.ploidy == 1
 
     def set_phased(self):
         """Mark this stream as phased.  Returns ``self``."""
@@ -780,6 +782,11 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
     @property
     def num_haplotypes(self):
         return self._source.num_haplotypes
+
+    @property
+    def ploidy(self):
+        """Haplotype rows per sample, 1 or 2, from the store's ploidy axis."""
+        return self._source.ploidy
 
     @property
     def haplotypes(self):
@@ -810,7 +817,8 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
         return m
 
     def _repr_sample_axis(self):
-        return f"num_haplotypes={self.num_haplotypes}, phased={self._phased}"
+        return (f"num_haplotypes={self.num_haplotypes}, phased={self.phased}, "
+                f"ploidy={self.ploidy}")
 
     @_phase_dependent
     def compute_ld_statistics_gpu_single_pop(self, bp_bins, raw=False,

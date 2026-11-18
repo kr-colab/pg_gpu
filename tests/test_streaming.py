@@ -480,7 +480,7 @@ class TestMaterialize:
         path, _ = vcz_store
         stream = HaplotypeMatrix.from_zarr(path, streaming="always",
                                             chunk_bp=5_000)
-        with pytest.raises(ValueError, match="even count"):
+        with pytest.raises(ValueError, match="whole samples"):
             stream.materialize(region=(10_000, 20_000),
                                sample_subset=[0, 1, 2])  # odd
 

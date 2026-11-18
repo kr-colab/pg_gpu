@@ -1,17 +1,18 @@
 """GPU-side preparation of raw VCZ-shape genotype blocks for HaplotypeMatrix
 and GenotypeMatrix.
 
-The VCZ ``call_genotype`` array is ``(n_var, n_dip, 2)`` int8. The two matrix
-classes consume it differently:
+The VCZ ``call_genotype`` array is ``(n_var, n_samples, ploidy)`` int8. The
+two matrix classes consume it differently:
 
 * ``HaplotypeMatrix`` wants ``(n_hap, n_var)`` int8 in the canonical row
-  order: hap ``2i`` carries sample i's ploidy 0 and hap ``2i+1`` its ploidy
-  1. ``build_haplotype_matrix`` does that interleave + transpose on the GPU.
+  order: for a diploid store, hap ``2i`` carries sample i's first copy and
+  hap ``2i+1`` its second; for a haploid store, hap ``i`` is sample i.
+  ``build_haplotype_matrix`` does that interleave + transpose on the GPU.
 * ``GenotypeMatrix`` wants ``(n_indiv, n_var)`` int8 dosages (0/1/2 with
   ``-1`` for missing). ``build_genotype_matrix`` counts each site's alt
-  allele on the GPU and propagates missing.
+  allele on the GPU and propagates missing; it takes a diploid block only.
 
-Both helpers take the same raw input shape and exist to keep the
+Both helpers exist to keep the
 host-side numpy reshape (which on a 1 Mb / 200k-haplotype block is
 ~60 s of single-threaded strided int8 copy and a 56 GB allocation)
 off the per-chunk hot path. cupy's tiled transpose / fused add runs in
@@ -39,11 +40,12 @@ def build_haplotype_matrix(gt, pos, *,
 
     Parameters
     ----------
-    gt : ndarray, shape (n_var, n_dip, 2)
+    gt : ndarray, shape (n_var, n_samples, ploidy)
         Raw call_genotype block of allele indices (0 = reference, 1.. =
         alternate), ``-1`` missing. Indices are preserved as-is (the
         per-allele haplotype statistics are multiallelic-capable). Host or
-        device.
+        device. The ploidy axis is 1 or 2, and the matrix takes its
+        ``ploidy`` from it.
     pos : ndarray, shape (n_var,)
         Variant positions. Host or device.
 
@@ -56,24 +58,25 @@ def build_haplotype_matrix(gt, pos, *,
     """
     from .haplotype_matrix import HaplotypeMatrix
 
-    if gt.ndim != 3 or gt.shape[2] != 2:
+    if gt.ndim != 3 or gt.shape[2] not in (1, 2):
         raise ValueError(
-            f"gt must have shape (n_var, n_dip, 2); got {gt.shape}"
+            f"gt must have shape (n_var, n_samples, ploidy) with ploidy 1 "
+            f"or 2; got {gt.shape}"
         )
     if gt.shape[0] != pos.shape[0]:
         raise ValueError(
             f"gt and pos disagree on n_var: gt={gt.shape[0]}, pos={pos.shape[0]}"
         )
 
-    n_var, n_dip, _ = gt.shape
+    n_var, n_samples, ploidy = gt.shape
     gt_gpu = cp.asarray(gt)
 
     # The ploidy axis is last and varies fastest, so reshaping to
-    # (n_var, 2 * n_dip) interleaves the two gametes of each sample; the
-    # transpose then yields the canonical row order, individual i at rows
-    # 2i and 2i+1.
+    # (n_var, ploidy * n_samples) interleaves the gametes of each sample;
+    # the transpose then yields the canonical row order, sample i at rows
+    # ploidy * i onward (2i and 2i+1 for a diploid).
     haps = cp.ascontiguousarray(
-        gt_gpu.reshape(n_var, 2 * n_dip).T
+        gt_gpu.reshape(n_var, ploidy * n_samples).T
     )
     del gt_gpu
 
@@ -84,7 +87,7 @@ def build_haplotype_matrix(gt, pos, *,
         chrom_start=chrom_start, chrom_end=chrom_end,
         sample_sets=sample_sets, n_total_sites=n_total_sites,
         samples=samples, accessible_mask=accessible_mask,
-        allow_empty=allow_empty, phased=phased,
+        allow_empty=allow_empty, phased=phased, ploidy=ploidy,
     )
 
 

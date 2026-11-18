@@ -85,22 +85,30 @@ def get_population_matrix(matrix, population: Union[str, list],
     allow_empty = matrix.num_variants == 0
     is_genotype = isinstance(matrix, GenotypeMatrix)
     extra = {}
+    ploidy = None if is_genotype else matrix.ploidy
     if metadata:
         rows = _rows_as_numpy(pop_indices)
-        if is_genotype:
+        if is_genotype or matrix.ploidy == 1:
+            # One row per sample, so the rows name the samples.
             individuals = rows
         else:
             # Sample i owns rows 2i and 2i + 1; only a list that pairs into
             # whole individuals names a set of samples.
             problem = paired_rows_problem(rows)
             individuals = None if problem else rows[0::2] // 2
+            if problem:
+                # The rows no longer make whole individuals, so each row of
+                # the subset stands for itself.
+                ploidy = 1
             if problem and (matrix.samples is not None
                             or any(a.ndim == 2 for a in matrix.fields.values())):
                 warnings.warn(
                     f"get_population_matrix: the population row list "
                     f"{problem}, so the subset has no sample names or "
-                    f"per-genotype fields.", UnpairedRowsWarning, stacklevel=2)
-        n_individuals = matrix.shape[0] if is_genotype else matrix.shape[0] // 2
+                    f"per-genotype fields, and has ploidy 1 (one row per "
+                    f"sample).", UnpairedRowsWarning, stacklevel=2)
+        n_individuals = (matrix.shape[0] if is_genotype
+                         else matrix.shape[0] // matrix.ploidy)
         extra, mismatched = _population_metadata(matrix, individuals,
                                                  n_individuals)
         if mismatched:
@@ -112,7 +120,8 @@ def get_population_matrix(matrix, population: Union[str, list],
                 UserWarning, stacklevel=2)
     cls = GenotypeMatrix if is_genotype else HaplotypeMatrix
     data = matrix.genotypes if is_genotype else matrix.haplotypes
-    hm_kw = {} if is_genotype else {'phased': matrix.phased}
+    hm_kw = ({} if is_genotype
+             else {'phased': matrix._phased, 'ploidy': ploidy})
     return cls(
         data[pop_indices, :],
         matrix.positions,
