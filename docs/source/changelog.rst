@@ -400,6 +400,13 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``moments_ld.compute_ld_statistics`` ignored ``accessible_bed`` when
+  the input was a ``haplotype_matrix`` or a ``genotype_matrix``, and
+  returned the unmasked statistics with no error; only the VCF path read
+  the BED. The BED is now the mask of the matrix for the call, and the
+  matrix is as it was afterwards. A matrix that already has a mask
+  raises ``ValueError``. A new ``chrom`` argument names the contig of a
+  BED with more than one, because a matrix does not name its own.
 * ``plot_joint_sfs`` with ``clip_endpoints=True`` (the default) dropped
   all of row 0 and column 0. Only two cells of a joint SFS are
   monomorphic, ``[0, 0]`` and ``[n1, n2]``; the rest of row 0 and column
