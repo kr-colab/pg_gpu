@@ -10,8 +10,11 @@ Phase-dependent statistics warn on unphased data
 Added ``phased`` attribute to ``HaplotypeMatrix`` (which defaults to 
 ``False``). This tracks whether the haplotypes in the matrix 
 represent true phased haplotypes or not. Each loader exposes a 
-``phased`` keyword argument: ``from_vcf`` and ``from_zarr`` default 
-to ``False``; ``from_ts`` defaults to ``True``. It is possible to
+``phased`` keyword argument: ``from_vcf`` defaults to ``False``,
+``from_zarr`` to the flag that ``to_zarr`` saved in the store (``False``
+for any other store, since no loader infers phase from the calls), and
+``from_ts`` to ``True``. A phased matrix also writes
+``call_genotype_phased``, the VCZ field for phase. It is possible to
 call ``set_phased()`` or ``set_unphased()`` to change it after
 construction.
 

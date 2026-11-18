@@ -30,7 +30,7 @@ data remain unchanged.
    * - ``HaplotypeMatrix.from_vcf``
      - ``False``
    * - ``HaplotypeMatrix.from_zarr`` (eager and streaming)
-     - ``False``
+     - the flag that ``to_zarr`` saved; ``False`` for any other store
    * - ``HaplotypeMatrix(haplotypes, positions, ...)``
      - ``False``
    * - ``HaplotypeMatrix.from_ts``
@@ -44,8 +44,11 @@ matrix.
 Loaders do not inspect phase information in the input. A VCF with
 ``0|1``-style genotypes still loads as ``phased=False`` by default: a
 ``|`` separator alone does not establish that the genotypes were phased
-reliably. The flag is not saved by ``to_zarr``, so pass ``phased=True``
-again when loading a store.
+reliably. The same holds for a store converted from such a VCF.
+
+``to_zarr`` saves the flag in the store, and ``from_zarr`` gives it back,
+so a matrix keeps its ``phased`` value through a save and a load. This
+is a record of what you declared, not something read from the calls.
 
 .. code-block:: python
 

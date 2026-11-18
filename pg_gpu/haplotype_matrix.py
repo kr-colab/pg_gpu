@@ -9,7 +9,7 @@ from collections import Counter, OrderedDict
 
 from .accessible import (AccessibleMask, _called_sites_mask, _data_contig, resolve_accessible_mask,
                          slice_fields)
-from .zarr_io import _distinct_contigs, parse_region
+from .zarr_io import _distinct_contigs, parse_region, stored_phase
 from ._warnings import _phase_dependent, _warn_unphased
 
 
@@ -260,9 +260,10 @@ class HaplotypeMatrix:
     -------
     The ``phased`` flag records whether the haplotype rows represent true
     phased haplotypes or not.  It defaults to ``False`` on the raw
-    constructor and on ``from_vcf`` / ``from_zarr``, and to ``True`` on
-    ``from_ts`` (tree-sequence haplotypes are phased by definition). No
-    loader inspects the input's phase. Use ``set_phased()`` or
+    constructor and on ``from_vcf``, and to ``True`` on ``from_ts``
+    (tree-sequence haplotypes are phased by definition). ``to_zarr``
+    saves it in the store, and ``from_zarr`` gives it back (``False``
+    for a store with no record). No loader inspects the input's phase. Use ``set_phased()`` or
     ``set_unphased()`` to change it after construction. Phase-dependent statistics emit
     ``UnphasedDataWarning`` on an unphased matrix; see the "Phasing" page
     of the documentation.
@@ -722,7 +723,7 @@ class HaplotypeMatrix:
                   prefetch: int = 1,
                   backend: str = "auto",
                   fields: list = None,
-                  phased: bool = False):
+                  phased: bool = None):
         """Construct a HaplotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
@@ -795,8 +796,13 @@ class HaplotypeMatrix:
             ``(n_var,)`` array, ``call_<tag>`` as ``(n_var, n_samples)``.
             Tags missing from the store are warned and dropped silently.
             Not supported on the streaming path.
-        phased : bool
-            Whether the data are phased haplotypes.  Default ``False``.
+        phased : bool, optional
+            Whether the data are phased haplotypes. The default, ``None``,
+            takes the flag that ``to_zarr`` recorded in the store, so a
+            matrix keeps its ``phased`` value through a save and a load.
+            A store with no such record, for example one from bio2zarr,
+            loads as unphased: the loader does not infer phase from the
+            calls. Pass ``True`` or ``False`` to set it yourself.
 
         Returns
         -------
@@ -856,7 +862,7 @@ class HaplotypeMatrix:
 
     @classmethod
     def _build_eager(cls, path, *, region, accessible_bed, pop_assignment,
-                     fields=None, phased=False):
+                     fields=None, phased=None):
         from .zarr_io import read_genotypes, read_qc_fields
         from ._gpu_genotype_prep import build_haplotype_matrix
 
@@ -881,7 +887,9 @@ class HaplotypeMatrix:
             chrom_start=start,
             chrom_end=stop,
             samples=list(sample_names) if sample_names is not None else None,
-            phased=phased,
+            # None takes the store's record, read below from the handle
+            # that the population step opens.
+            phased=bool(phased),
         )
 
         if fields:
@@ -914,13 +922,15 @@ class HaplotypeMatrix:
         )
         if pop_map is not None:
             hm.load_pop_file(pop_map)
+        if phased is None and store is not None and stored_phase(store):
+            hm.set_phased()
 
         return hm
 
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
                          prefetch, source=None, backend="auto",
-                         accessible_bed=None, phased=False):
+                         accessible_bed=None, phased=None):
         from .streaming_matrix import (
             HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
             _pick_chunk_fetcher,
@@ -937,6 +947,8 @@ class HaplotypeMatrix:
             # zarr store.
             source.pop_cols = source._resolve_pop_assignment(pop_assignment)
         fetcher = _pick_chunk_fetcher(source, backend=backend)
+        if phased is None:
+            phased = stored_phase(source._store)
 
         # Resolve an accessible BED once over the source's variant-position
         # bounds and hand it to the streaming matrix, so span-normalized
@@ -967,6 +979,11 @@ class HaplotypeMatrix:
             ``'scikit-allel'`` for legacy layout.
         contig_name : str, optional
             Chromosome/contig name to store in VCZ format.
+
+        Notes
+        -----
+        The store records the matrix's ``phased`` flag, and ``from_zarr``
+        gives it back to the loaded matrix.
         """
         from .zarr_io import write_vcz, write_allel
 
@@ -978,14 +995,15 @@ class HaplotypeMatrix:
 
         if format == 'vcz':
             write_vcz(zarr_path, gt, pos, self.samples,
-                      contig_name=contig_name, fields=self.fields)
+                      contig_name=contig_name, fields=self.fields,
+                      phased=self.phased)
         elif format == 'scikit-allel':
             if self.fields:
                 raise NotImplementedError(
                     "Writing fields= round-trip is only supported for "
                     "format='vcz'; the scikit-allel writer has not been "
                     "extended yet.")
-            write_allel(zarr_path, gt, pos, self.samples)
+            write_allel(zarr_path, gt, pos, self.samples, phased=self.phased)
         else:
             raise ValueError(
                 f"Unknown format: {format!r}. Use 'vcz' or 'scikit-allel'."
