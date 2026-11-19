@@ -124,6 +124,44 @@ class UnpairedRowsWarning(UserWarning):
     """
 
 
+class UnknownAncestralWarning(UserWarning):
+    """Emitted when a polarized load drops sites with no known ancestral allele.
+
+    A site whose ancestral state is empty or none of the site's alleles
+    (a placeholder such as ``.`` or ``N``) cannot be polarized, so the load
+    leaves it out. The accessible mask and the span do not change, so a
+    per-base statistic still divides by bases that include the dropped
+    sites and comes out lower by about their share. Silence with::
+
+        import warnings
+        from pg_gpu import UnknownAncestralWarning
+        warnings.filterwarnings("ignore", category=UnknownAncestralWarning)
+    """
+
+
+def _check_unknown_ancestral(n_unknown, n_sites, context):
+    """Emit ``UnknownAncestralWarning`` for ``n_unknown`` of ``n_sites``
+    dropped by ``context``; a no-op for 0. All sites unknown raises: that
+    is a wrong tag or wrong alleles, not a property of the data."""
+    n_unknown, n_sites = int(n_unknown), int(n_sites)
+    if n_unknown <= 0:
+        return
+    if n_unknown == n_sites:
+        raise ValueError(
+            f"{context}: none of the {n_sites} sites has an ancestral allele "
+            f"that is one of the site's alleles. Check the tag, the form of "
+            f"its values, and that the alleles are those of this data.")
+    warnings.warn(
+        f"{context}: {n_unknown} of {n_sites} sites have no known ancestral "
+        f"allele and were dropped. Per-base statistics still divide by "
+        f"bases that include them. To silence:\n"
+        "    import warnings\n"
+        "    from pg_gpu import UnknownAncestralWarning\n"
+        "    warnings.filterwarnings('ignore', category=UnknownAncestralWarning)",
+        UnknownAncestralWarning, skip_file_prefixes=_PKG_PREFIXES,
+    )
+
+
 def _rows_as_numpy(rows):
     """Row numbers as a host numpy array.
 

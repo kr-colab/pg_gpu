@@ -643,7 +643,8 @@ class HaplotypeMatrix:
     def from_vcf(cls, path: str, region: str = None,
                  samples: list = None, include_invariant: bool = False,
                  accessible_bed: str = None, fields: list = None,
-                 phased: bool = False):
+                 phased: bool = False, ancestral: str = None,
+                 ancestral_lowercase_known: bool = True):
         """Construct a HaplotypeMatrix from a VCF file.
 
         Parameters
@@ -676,6 +677,22 @@ class HaplotypeMatrix:
         phased : bool
             Whether the data are phased haplotypes.  Default ``False``:
             the loader does not inspect the VCF phase bit.
+        ancestral : str, optional
+            INFO tag that holds the ancestral allele of each site, for
+            example ``'AA'``. The allele codes are then recoded so that code
+            0 is the ancestral allele: at a site where it is an ALT allele,
+            that allele's code and code 0 change places. Sites with no known
+            ancestral allele (an empty value, or one that is none of the
+            site's alleles, such as ``.`` or ``N``) are dropped with an
+            ``UnknownAncestralWarning``. Without it, code 0 is the REF
+            allele, and the statistics that read a derived state (the
+            unfolded SFS, ``theta_h``, Fay and Wu's H, ``ihs``, ...) take
+            REF as ancestral.
+            The reader takes at most three ALT alleles per site, so a
+            later ALT allele as the ancestral state counts as unknown.
+        ancestral_lowercase_known : bool
+            Many files write a low-confidence ancestral call in lower
+            case. True (default) reads it as known, False as unknown.
 
         Returns
         -------
@@ -696,6 +713,17 @@ class HaplotypeMatrix:
         else:
             tag_to_path, unknown_tags = {}, []
             read_fields = None
+        if ancestral is not None:
+            if _classify_vcf_qc_tags(path, [ancestral])[0].get(ancestral) \
+                    != f'variants/{ancestral}':
+                raise ValueError(
+                    f"ancestral={ancestral!r}: the header of {path} has no "
+                    f"such INFO tag.")
+            # The tag is in no default field list of the reader, and an
+            # explicit list must then name each array this loader reads.
+            read_fields = list({*(read_fields or _build_read_vcf_fields(())),
+                                f'variants/{ancestral}', 'variants/REF',
+                                'variants/ALT'})
         vcf = allel.read_vcf(path, region=region, samples=samples,
                              fields=read_fields)
         if vcf is None:
@@ -738,7 +766,16 @@ class HaplotypeMatrix:
 
         hm = cls(haplotypes, positions, chrom_start, chrom_end,
                  samples=sample_names, fields=qc_fields, phased=phased)
+        if ancestral is not None:
+            from .zarr_io import ancestral_codes
+            alleles = np.column_stack([vcf['variants/REF'], vcf['variants/ALT']])
+            hm = hm._polarized(
+                ancestral_codes(vcf[f'variants/{ancestral}'], alleles,
+                                ancestral_lowercase_known),
+                context=f"from_vcf(ancestral={ancestral!r})")
         if include_invariant:
+            # The mask keeps every record position, so a record with no
+            # known ancestral allele stays a called base.
             hm.set_accessible_mask(_called_sites_mask(
                 positions, chrom_start, chrom_end, accessible_bed, chrom))
         elif accessible_bed is not None:
@@ -754,7 +791,8 @@ class HaplotypeMatrix:
                   prefetch: int = 1,
                   backend: str = "auto",
                   fields: list = None,
-                  phased: bool = None):
+                  phased: bool = None, ancestral: str = None,
+                  ancestral_lowercase_known: bool = True):
         """Construct a HaplotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
@@ -834,6 +872,23 @@ class HaplotypeMatrix:
             A store with no such record, for example one from bio2zarr,
             loads as unphased: the loader does not infer phase from the
             calls. Pass ``True`` or ``False`` to set it yourself.
+        ancestral : str, optional
+            INFO tag that holds the ancestral allele of each site, for
+            example ``'AA'``. The allele codes are then recoded so that code
+            0 is the ancestral allele: at a site where it is an ALT allele,
+            that allele's code and code 0 change places. Sites with no known
+            ancestral allele (an empty value, or one that is none of the
+            site's alleles, such as ``.`` or ``N``) are dropped with an
+            ``UnknownAncestralWarning``. Without it, code 0 is the REF
+            allele, and the statistics that read a derived state (the
+            unfolded SFS, ``theta_h``, Fay and Wu's H, ``ihs``, ...) take
+            REF as ancestral.
+            Needs a VCZ store with ``variant_<tag>`` and
+            ``variant_allele``, as ``vcf_to_zarr`` writes; works on the
+            eager and the streaming path.
+        ancestral_lowercase_known : bool
+            Many files write a low-confidence ancestral call in lower
+            case. True (default) reads it as known, False as unknown.
 
         Returns
         -------
@@ -860,7 +915,8 @@ class HaplotypeMatrix:
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 backend=backend, accessible_bed=accessible_bed,
-                phased=phased,
+                phased=phased, ancestral=ancestral,
+                ancestral_lowercase_known=ancestral_lowercase_known,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits; 'auto'
@@ -884,16 +940,20 @@ class HaplotypeMatrix:
                 path, region=region, pop_assignment=pop_assignment,
                 chunk_bp=chunk_bp, prefetch=prefetch,
                 source=source, backend=backend, accessible_bed=accessible_bed,
-                phased=phased,
+                phased=phased, ancestral=ancestral,
+                ancestral_lowercase_known=ancestral_lowercase_known,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
                                 pop_assignment=pop_assignment,
-                                fields=fields, phased=phased)
+                                fields=fields, phased=phased,
+                                ancestral=ancestral,
+                                ancestral_lowercase_known=ancestral_lowercase_known)
 
     @classmethod
     def _build_eager(cls, path, *, region, accessible_bed, pop_assignment,
-                     fields=None, phased=None):
+                     fields=None, phased=None, ancestral=None,
+                     ancestral_lowercase_known=True):
         from .zarr_io import read_genotypes, read_qc_fields
         from ._gpu_genotype_prep import build_haplotype_matrix
 
@@ -935,17 +995,30 @@ class HaplotypeMatrix:
                 region=region,
             )
 
+        # One handle serves the ancestral strings, the population lookup
+        # and the phase record.
+        try:
+            import zarr
+            store = zarr.open_group(path, mode="r")
+        except Exception:
+            store = None
+
+        if ancestral is not None:
+            # After the fields, so they are cut to the kept sites with the
+            # matrix; before the mask, which then sees the final sites.
+            from .zarr_io import read_ancestral_codes
+            hm = hm._polarized(
+                read_ancestral_codes(store, ancestral,
+                                     data.get('variant_indices'),
+                                     ancestral_lowercase_known),
+                context=f"from_zarr(ancestral={ancestral!r})")
+
         if accessible_bed is not None:
             chrom = _data_contig(data['contigs'], f"zarr store {path}",
                                  "load one contig with region=")
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
 
         from .zarr_io import normalize_pop_input
-        try:
-            import zarr
-            store = zarr.open_group(path, mode="r")
-        except Exception:
-            store = None
         pop_map = normalize_pop_input(
             pop_assignment, zarr_path=path,
             sample_names=hm.samples or [],
@@ -962,7 +1035,8 @@ class HaplotypeMatrix:
     @classmethod
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
                          prefetch, source=None, backend="auto",
-                         accessible_bed=None, phased=None):
+                         accessible_bed=None, phased=None, ancestral=None,
+                         ancestral_lowercase_known=True):
         from .streaming_matrix import (
             HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
             _pick_chunk_fetcher,
@@ -981,6 +1055,10 @@ class HaplotypeMatrix:
         fetcher = _pick_chunk_fetcher(source, backend=backend)
         if phased is None:
             phased = stored_phase(source._store)
+        if ancestral is not None:
+            # Here and not in the constructor: the size probe of the eager
+            # path builds a source too, and must not read the strings.
+            source.set_ancestral(ancestral, ancestral_lowercase_known)
 
         # Resolve an accessible BED once over the source's variant-position
         # bounds and hand it to the streaming matrix, so span-normalized
@@ -1762,6 +1840,101 @@ class HaplotypeMatrix:
         for lo in range(0, n_var, step):
             out[lo:lo + step] = column_has_missing(hap[rows, lo:lo + step])
         return out
+
+    def polarize(self, ancestral, alleles=None, lowercase_known=True):
+        """Recode the alleles so that code 0 is the ancestral allele.
+
+        Parameters
+        ----------
+        ancestral : array-like, shape (n_variants,)
+            The ancestral allele of each site: either integer allele codes
+            (-1 for unknown), or allele strings as a VCF ``AA`` tag gives
+            them, which need ``alleles``. It is aligned with the
+            underlying variant axis, as ``fields`` are, not with the view
+            that an accessible mask leaves.
+        alleles : array-like of str, shape (n_variants, n_alleles), optional
+            The allele strings of each site, REF first, to match string
+            values of ``ancestral`` against. Default: ``fields['allele']``.
+        lowercase_known : bool
+            Whether a lower-case (low-confidence) ancestral string counts
+            as known (default) or as unknown.
+
+        Returns
+        -------
+        HaplotypeMatrix
+            A new matrix on the same device. At a site whose ancestral
+            allele has code ``a > 0``, codes 0 and ``a`` change places;
+            missing calls stay. Sites with no known ancestral allele are
+            dropped with an ``UnknownAncestralWarning``. The bounds, the
+            accessible mask and ``n_total_sites`` are those of this matrix.
+            If ``fields`` has ``'allele'``, its columns change places with
+            the codes, so a second call with the same strings changes
+            nothing.
+
+        Notes
+        -----
+        The matrix does not record that it is polarized. A second call
+        with the same integer codes, or with the same strings and the
+        ``alleles`` of before the first call, changes the codes back.
+        Per-allele fields other than ``'allele'`` (``AC``, ``AF``) keep
+        their column order.
+        """
+        codes = np.asarray(ancestral)
+        if not np.issubdtype(codes.dtype, np.integer):
+            from .zarr_io import ancestral_codes
+            if alleles is None:
+                alleles = self.fields.get('allele')
+            if alleles is None:
+                raise ValueError(
+                    "polarize needs the allele strings of each site to "
+                    "match ancestral strings against: pass alleles=, or "
+                    "load the matrix with fields=['allele'].")
+            codes = ancestral_codes(codes, alleles, lowercase_known)
+        return self._polarized(codes, context="polarize")
+
+    def _polarized(self, codes, *, context):
+        """``polarize`` for integer ancestral codes; ``context`` names the
+        caller in the warning for dropped sites."""
+        from ._gpu_genotype_prep import swap_ancestral
+        from ._warnings import _check_unknown_ancestral
+        from .zarr_io import swap_allele_columns
+
+        n_var = self._haplotypes.shape[1]
+        codes = np.asarray(codes)
+        if codes.shape != (n_var,):
+            raise ValueError(
+                f"one ancestral allele per variant is needed: the matrix has "
+                f"{n_var} variants, ancestral has shape {codes.shape}")
+        if codes.size and int(codes.max()) > 127:
+            raise ValueError("ancestral allele codes above 127 do not fit int8")
+        codes = np.where(codes < 0, -1, codes).astype(np.int8)
+        known = np.flatnonzero(codes >= 0)
+        _check_unknown_ancestral(n_var - known.size, n_var, context)
+
+        # Take the kept sites first: the gather is the one copy, and the
+        # swap then runs in place on it. The swap runs on the device; a
+        # host matrix gets a host result.
+        keep = cp.asarray(known)
+        haps = cp.ascontiguousarray(
+            cp.asarray(self._haplotypes)[:, keep].astype(cp.int8, copy=False))
+        swap_ancestral(haps, codes[known])
+        positions = cp.asarray(self._positions)[keep]
+        if self._device == 'CPU':
+            haps, positions = haps.get(), positions.get()
+
+        fields = dict(self.fields)
+        if 'allele' in fields:
+            fields['allele'] = swap_allele_columns(fields['allele'], codes)
+        return HaplotypeMatrix(
+            haps, positions,
+            chrom_start=self.chrom_start, chrom_end=self.chrom_end,
+            sample_sets=self._sample_sets,
+            n_total_sites=self.n_total_sites,
+            accessible_mask=self._accessible_mask,
+            samples=self.samples,
+            fields=slice_fields(fields, known),
+            phased=self._phased, ploidy=self._ploidy,
+        )
 
     def filter_variants_by_missing(self, max_missing_freq=0.1):
         """

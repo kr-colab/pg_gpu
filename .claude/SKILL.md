@@ -66,6 +66,13 @@ h = HaplotypeMatrix.from_vcf("data.vcf.gz", samples=["ind1", "ind2"])
 
 # With accessibility mask (for proper span normalization)
 h = HaplotypeMatrix.from_vcf("data.vcf.gz", accessible_bed="access.bed")
+
+# Polarize: allele code 0 is read as ANCESTRAL everywhere (unfolded SFS,
+# theta_h, Fay & Wu's H, Zeng's E, max_daf, sign of ihs/nsl). A VCF gives
+# code 0 to REF. With an ancestral-allele INFO tag, recode on load; sites
+# with no known ancestral allele are dropped (UnknownAncestralWarning).
+# Also on from_zarr (eager and streaming; needs a vcf_to_zarr store).
+h = HaplotypeMatrix.from_vcf("data.vcf.gz", ancestral="AA")
 ```
 
 **Diploid VCFs**: loaded as 2×n_samples haplotypes (treated as phased).
