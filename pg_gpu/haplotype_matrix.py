@@ -1079,12 +1079,11 @@ class HaplotypeMatrix:
         """Convert an (n_hap, n_var) haplotype matrix to an
         (n_var, n_samples, ploidy) GT array; raises when the rows do not
         make whole samples."""
+        from ._warnings import require_whole_samples
         n_hap, n_var = hap.shape
-        if n_hap % ploidy:
-            raise ValueError(
-                f"to_zarr writes {ploidy} haplotype rows per sample "
-                f"(matrix.ploidy), but the matrix has {n_hap} rows. If each "
-                f"row is one sample, set matrix.ploidy = 1.")
+        require_whole_samples(
+            n_hap, ploidy, "to_zarr",
+            hint=" If each row is one sample, set matrix.ploidy = 1.")
         n_samples = n_hap // ploidy
         # Sample i owns rows ploidy * i onward, so the transpose already has
         # the gametes of a sample side by side.

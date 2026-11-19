@@ -14,7 +14,7 @@ import zarr
 
 from pg_gpu import (GenotypeMatrix, HaplotypeMatrix, UnpairedRowsWarning,
                     UnphasedDataWarning, divergence, diversity, selection)
-from pg_gpu._utils import get_population_matrix
+from pg_gpu._utils import get_population_matrix, population_rows
 from pg_gpu.zarr_io import PHASED_ATTR, allel_zarr_to_vcz
 
 from .conftest import force_chunked_engine
@@ -115,6 +115,18 @@ class TestAttribute:
         hm = HaplotypeMatrix(_calls(8), POS, 0, 500, samples=["s", "t", "u", "v"])
         with pytest.warns(UnpairedRowsWarning, match="has ploidy 1"):
             assert get_population_matrix(hm, rows).ploidy == 1
+
+    def test_unpaired_subset_cannot_become_genotypes(self):
+        # Rows 0 and 2 are one gamete each of two individuals; read as one
+        # individual they would give a genotype that no sample has. The
+        # statistics take their subsets through population_rows.
+        hap = np.array([[0, 0, 0], [0, 0, 0], [1, 1, 1], [1, 1, 1]], dtype=np.int8)
+        hm = HaplotypeMatrix(hap, np.array([1, 2, 3]), 1, 3)
+        sub = population_rows(hm, [0, 2])
+        assert sub.ploidy == 1
+        with pytest.raises(ValueError, match="has ploidy 1"):
+            GenotypeMatrix.from_haplotype_matrix(sub)
+        assert population_rows(hm, [2, 3]).ploidy == 2
 
     def test_paired_subset_of_a_diploid_matrix_stays_diploid(self):
         hm = HaplotypeMatrix(_calls(8), POS, 0, 500, samples=["s", "t", "u", "v"])
@@ -270,6 +282,14 @@ class TestDiploidStore:
 
 # ── to_zarr refuses a store that would not agree with itself ──────────
 class TestWriterChecks:
+
+    @pytest.mark.parametrize("call", [
+        lambda m: GenotypeMatrix.from_haplotype_matrix(m),
+        lambda m: diversity.heterozygosity_observed(m),
+    ], ids=["from_haplotype_matrix", "heterozygosity_observed"])
+    def test_odd_rows_give_the_same_message_everywhere(self, call):
+        with pytest.raises(ValueError, match="whole samples of 2 haplotype rows"):
+            call(HaplotypeMatrix(_calls(5), POS, 0, 500))
 
     def test_odd_rows_at_ploidy_two(self, tmp_path):
         hm = HaplotypeMatrix(_calls(5), POS, 0, 500)

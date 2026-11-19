@@ -613,6 +613,15 @@ def _require_diploid_ploidy(ploidy, source):
             f"(see {ISSUE_URL}).")
 
 
+def require_whole_samples(n_rows, ploidy, context, hint=""):
+    """Raise when ``n_rows`` haplotype rows do not make whole samples of
+    ``ploidy`` rows each, with one message for every consumer."""
+    if n_rows % ploidy:
+        raise ValueError(
+            f"{context} needs whole samples of {ploidy} haplotype rows each, "
+            f"but there are {n_rows} rows.{hint}")
+
+
 def require_diploid_rows(matrix, context):
     """Raise when ``context`` pairs haplotype rows into individuals but the
     matrix has one row per sample.
@@ -625,8 +634,9 @@ def require_diploid_rows(matrix, context):
         raise ValueError(
             f"{context} groups adjacent haplotype rows into individuals, but "
             f"this matrix has ploidy {matrix.ploidy} (one row per sample). "
-            f"If rows 2i and 2i + 1 are the two copies of one individual, "
-            f"set matrix.ploidy = 2.")
+            f"A population subset has ploidy 1 when its row list does not "
+            f"make whole individuals. If rows 2i and 2i + 1 are the two "
+            f"copies of one individual, set matrix.ploidy = 2.")
 
 
 def check_diploid_encoding(gt, sample_names=None, source="input",

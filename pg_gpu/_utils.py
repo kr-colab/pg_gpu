@@ -86,20 +86,23 @@ def get_population_matrix(matrix, population: Union[str, list],
     is_genotype = isinstance(matrix, GenotypeMatrix)
     extra = {}
     ploidy = None if is_genotype else matrix.ploidy
+    rows = _rows_as_numpy(pop_indices)
+    problem = None
+    if ploidy == 2:
+        # Sample i owns rows 2i and 2i + 1. A list that does not pair into
+        # whole individuals gives a subset where each row stands for
+        # itself; at ploidy 2 a consumer would pair unrelated gametes. The
+        # check runs for every caller, the statistics' own subsets included.
+        problem = paired_rows_problem(rows)
+        if problem:
+            ploidy = 1
     if metadata:
-        rows = _rows_as_numpy(pop_indices)
         if is_genotype or matrix.ploidy == 1:
             # One row per sample, so the rows name the samples.
             individuals = rows
         else:
-            # Sample i owns rows 2i and 2i + 1; only a list that pairs into
-            # whole individuals names a set of samples.
-            problem = paired_rows_problem(rows)
+            # Only a list of whole individuals names a set of samples.
             individuals = None if problem else rows[0::2] // 2
-            if problem:
-                # The rows no longer make whole individuals, so each row of
-                # the subset stands for itself.
-                ploidy = 1
             if problem and (matrix.samples is not None
                             or any(a.ndim == 2 for a in matrix.fields.values())):
                 warnings.warn(

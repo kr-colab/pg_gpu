@@ -31,7 +31,10 @@ always counts as phased, since each row is one chromosome.
   declare the layout.
 * ``get_population_matrix`` with a row list that does not make whole
   individuals (one gamete of each, or an odd count) gives a ``ploidy=1``
-  subset, so ``to_zarr`` on it writes one sample per row.
+  subset, so ``to_zarr`` on it writes one sample per row and the genotype
+  conversion raises on it.
+* ``heterozygosity_observed`` and ``inbreeding_coefficient`` take their
+  ``ploidy`` from the matrix by default (``ploidy=None``; it was 2).
 * ``load_pop_file`` raises a ``ValueError`` when the sample names do not
   fit the rows at the matrix's ploidy.
 * **Behavior change.** ``GenotypeMatrix.from_haplotype_matrix`` (and so

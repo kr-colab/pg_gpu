@@ -190,7 +190,7 @@ methods = [
     "tally_gpu_haplotypes_two_pops_with_missing", "to_zarr", "transfer_to_cpu",
     "transfer_to_gpu", "vcf_to_zarr", "watersons_theta", "windowed_r_squared",
 ]
-notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask, else gets its share of n_total_sites (haplotype_matrix._total_sites_share, the rule the windowed engines use). ploidy (1 or 2 rows per sample) follows every subset and copy, as phased does; to_zarr writes the store with it and raises when the rows or the sample names do not fit it. The consumers that pair rows into individuals (GenotypeMatrix.from_haplotype_matrix, heterozygosity_observed, fst_weir_cockerham scalar and windowed) call _warnings.require_diploid_rows and raise at ploidy 1. phased is always True at ploidy 1. get_population_matrix gives a ploidy-1 subset for a row list that does not make whole individuals."
+notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask, else gets its share of n_total_sites (haplotype_matrix._total_sites_share, the rule the windowed engines use). ploidy (1 or 2 rows per sample) follows every subset and copy, as phased does; to_zarr writes the store with it and raises when the rows or the sample names do not fit it. The consumers that pair rows into individuals (GenotypeMatrix.from_haplotype_matrix, heterozygosity_observed, fst_weir_cockerham scalar and windowed) call _warnings.require_diploid_rows and raise at ploidy 1. phased is always True at ploidy 1. get_population_matrix and population_rows give a ploidy-1 subset for a row list that does not make whole individuals, so a consumer that pairs rows raises on it. _warnings.require_whole_samples is the one check that rows divide into samples."
 
 [matrices.GenotypeMatrix]
 module = "genotype_matrix"
@@ -1017,7 +1017,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "per-site NaN where no individual is fully called; raises ValueError when rows are not divisible by ploidy"
 parallel = []
-notes = "Pairs consecutive rows into individuals and warns on an unpaired row list (ploidy 2). Raises on a ploidy-1 matrix unless ploidy=1 is passed."
+notes = "Pairs consecutive rows into individuals and warns on an unpaired row list (ploidy 2). Raises on a ploidy-1 matrix. ploidy=None takes the matrix's ploidy."
 
 [functions."diversity.inbreeding_coefficient"]
 # signature: (haplotype_matrix, population, ploidy, missing_data)

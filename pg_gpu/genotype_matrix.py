@@ -331,12 +331,10 @@ class GenotypeMatrix:
         -------
         GenotypeMatrix
         """
-        from ._warnings import require_diploid_rows
+        from ._warnings import require_diploid_rows, require_whole_samples
         require_diploid_rows(hap_matrix, "GenotypeMatrix.from_haplotype_matrix")
         n_hap = hap_matrix.haplotypes.shape[0]
-        if n_hap % 2 != 0:
-            raise ValueError(
-                f"Need even number of haplotypes for diploid conversion, got {n_hap}")
+        require_whole_samples(n_hap, 2, "GenotypeMatrix.from_haplotype_matrix")
 
         if hap_matrix.device == 'CPU':
             hap_matrix.transfer_to_gpu()

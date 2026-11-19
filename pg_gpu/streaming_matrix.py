@@ -654,12 +654,9 @@ class _StreamingMatrixBase:
                 )
             n_var, n_hap = gm_gpu.shape
             ploidy = self._source.ploidy
-            if n_hap % ploidy != 0:
-                raise ValueError(
-                    f"materialize(sample_subset=...) needs whole samples "
-                    f"({ploidy} rows each) to round-trip through the "
-                    f"(n_samples, ploidy) layout; got {n_hap} rows."
-                )
+            from ._warnings import require_whole_samples
+            require_whole_samples(n_hap, ploidy,
+                                  "materialize(sample_subset=...)")
             # Canonical row order puts the gametes of a sample adjacent, so
             # the haplotype axis is already the flattened (n_samples',
             # ploidy) layout and the split is a view rather than a copy.
