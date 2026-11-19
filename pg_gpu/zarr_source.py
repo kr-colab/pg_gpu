@@ -89,10 +89,12 @@ class ZarrGenotypeSource:
     num_variants : int
         Variants inside ``region`` (or the whole store), after contig
         selection.
+    ploidy : int
+        Length of the store's ploidy axis, 1 or 2.
     num_diploids : int
-        Sample-axis length.
+        Sample-axis length: the samples of the store, at either ploidy.
     num_haplotypes : int
-        ``2 * num_diploids``.
+        ``ploidy * num_diploids``.
     site_pos : ndarray
         Variant positions (host), length ``num_variants``.
     chrom : str
@@ -138,12 +140,12 @@ class ZarrGenotypeSource:
         self.site_pos = all_pos[mask]
 
         cg = self._store["call_genotype"]
-        # The streaming gather and the (n_dip, 2) -> 2 * n_dip haplotype layout
-        # assume diploid. A non-diploid ploidy axis is caught here from the
-        # store metadata alone (no genotype read); pseudo-diploid encodings,
-        # which keep a ploidy-2 axis, are flagged by the eager loader instead.
-        from ._warnings import _require_diploid_ploidy
-        _require_diploid_ploidy(cg.shape[2], f"streaming zarr store '{self.path}'")
+        # The ploidy comes from the store metadata alone (no genotype read).
+        # Haploid calls padded to a ploidy-2 axis are flagged by the eager
+        # loader instead.
+        from ._warnings import _require_supported_ploidy
+        self.ploidy = int(cg.shape[2])
+        _require_supported_ploidy(self.ploidy, f"zarr store '{self.path}'")
         self.chunks = tuple(cg.chunks)
         # Read the codec and zarr format off the handle already in hand,
         # so the fetcher-selection layer can tell a GPU-decodable v3
@@ -152,8 +154,9 @@ class ZarrGenotypeSource:
         meta = cg.metadata.to_dict()
         self.zarr_format = int(meta.get("zarr_format", 3))
         self.codec = _codec_name_from_metadata(meta)
+        # The store's sample axis; each sample has ``ploidy`` haplotypes.
         self.num_diploids = int(cg.shape[1])
-        self.num_haplotypes = 2 * self.num_diploids
+        self.num_haplotypes = self.ploidy * self.num_diploids
         self.num_variants = int(self.site_pos.size)
 
         self.pop_cols = self._resolve_pop_assignment(pop_assignment)
@@ -205,14 +208,14 @@ class ZarrGenotypeSource:
 
         Returns
         -------
-        gt : ndarray, shape (n_var, num_diploids, 2), dtype int8
+        gt : ndarray, shape (n_var, num_diploids, ploidy), dtype int8
             Raw call_genotype block, ``-1`` for multiallelic rows.
         pos : ndarray, shape (n_var,), dtype int64
             Variant positions.
         """
         lo, hi = self._site_index_range(left, right)
         if hi <= lo:
-            return (np.empty((0, self.num_diploids, 2), np.int8),
+            return (np.empty((0, self.num_diploids, self.ploidy), np.int8),
                     np.empty(0, np.int64))
         zlo, zhi = self._zarr_row_range(lo, hi)
         gt = np.asarray(self._store["call_genotype"][zlo:zhi])
@@ -235,7 +238,7 @@ class ZarrGenotypeSource:
         """
         lo, hi = self._site_index_range(left, right)
         if hi <= lo:
-            return (cp.empty((0, self.num_diploids, 2), cp.int8),
+            return (cp.empty((0, self.num_diploids, self.ploidy), cp.int8),
                     np.empty(0, np.int64))
         zlo, zhi = self._zarr_row_range(lo, hi)
         gt = cg[zlo:zhi]
@@ -283,8 +286,8 @@ class ZarrGenotypeSource:
                     np.empty(0, np.int64))
         zlo, zhi = self._zarr_row_range(lo, hi)
 
-        dip_idx = hap_cols // 2
-        ploidy = hap_cols % 2
+        dip_idx = hap_cols // self.ploidy
+        copy_idx = hap_cols % self.ploidy
         unique_dips, inv = np.unique(dip_idx, return_inverse=True)
 
         # Group sorted unique_dips into contiguous diploid-axis runs.
@@ -315,10 +318,10 @@ class ZarrGenotypeSource:
         del slabs
 
         # Final GPU fancy-index: for each requested hap_col, pick the
-        # right (dip, ploidy) cell.
+        # right (sample, copy) cell.
         gm_gpu = block_gpu[:,
                             cp.asarray(slab_offset[inv], dtype=cp.int64),
-                            cp.asarray(ploidy, dtype=cp.int64)]
+                            cp.asarray(copy_idx, dtype=cp.int64)]
         del block_gpu
         pos = self.site_pos[lo:hi].copy()
         return gm_gpu, pos
@@ -330,7 +333,7 @@ class ZarrGenotypeSource:
         region bounds are inclusive).
 
         ``hap_cols`` is an iterable of haplotype-axis indices in
-        ``[0, 2 * num_diploids)``. Uses zarr's ``oindex`` for the
+        ``[0, ploidy * num_diploids)``. Uses zarr's ``oindex`` for the
         sample-axis subset; with bio2zarr-style sample chunking only
         the chunks containing the requested diploids are decompressed.
 
@@ -361,13 +364,14 @@ class ZarrGenotypeSource:
         zlo, zhi = self._zarr_row_range(lo, hi)
 
         # Haplotype rows follow the canonical order, so hap j belongs to
-        # dip j // 2 at ploidy j % 2. VCZ stores (n_var, n_dip, 2) so we have
-        # to translate each requested hap index into (dip, ploidy)
+        # sample j // ploidy at copy j % ploidy (dip j // 2, copy j % 2 for
+        # a diploid). VCZ stores (n_var, n_samples, ploidy) so we have
+        # to translate each requested hap index into (sample, copy)
         # and feed unique dips through oindex (zarr's oindex on a 3-D axis
         # does not de-duplicate, and requesting the same dip twice would
         # double-decompress its sample chunk).
-        dip_idx = hap_cols // 2
-        ploidy = hap_cols % 2
+        dip_idx = hap_cols // self.ploidy
+        copy_idx = hap_cols % self.ploidy
         unique_dips, inv = np.unique(dip_idx, return_inverse=True)
 
         block_host = np.asarray(
@@ -375,14 +379,14 @@ class ZarrGenotypeSource:
         )
         # Ploidy gather on the GPU: at biobank-scale sample subsets
         # (~10 k samples in ``inv`` over hundreds of thousands of
-        # variants) the equivalent ``block[:, inv, ploidy]`` host
+        # variants) the equivalent ``block[:, inv, copy_idx]`` host
         # fancy-index is single-threaded numpy and takes tens of
         # seconds per Mb of variants; the parallel cupy gather is
         # sub-second.
         block_gpu = cp.asarray(block_host)
         del block_host
         gm_gpu = block_gpu[:, cp.asarray(inv, dtype=cp.int64),
-                            cp.asarray(ploidy, dtype=cp.int64)]
+                            cp.asarray(copy_idx, dtype=cp.int64)]
         del block_gpu
         pos = self.site_pos[lo:hi].copy()
         if to_gpu:
@@ -444,12 +448,13 @@ class ZarrGenotypeSource:
                 continue
             pop_to_dips.setdefault(pop, []).append(i)
 
-        # Map diploid indices to haplotype-axis indices: under the canonical
-        # row order dip i lives at haps 2i (ploidy 0) and 2i+1 (ploidy 1),
-        # which is what build_haplotype_matrix produces and load_pop_file
-        # expects.
+        # Map sample indices to haplotype-axis indices: under the canonical
+        # row order sample i lives at the ``ploidy`` haps from ploidy * i
+        # (2i and 2i+1 for a diploid), which is what build_haplotype_matrix
+        # produces and load_pop_file expects.
+        copies = np.arange(self.ploidy, dtype=np.int64)
         pop_cols = {}
         for pop, dips in pop_to_dips.items():
             dips = np.asarray(sorted(dips), dtype=np.int64)
-            pop_cols[pop] = np.stack([2 * dips, 2 * dips + 1], axis=1).ravel()
+            pop_cols[pop] = (self.ploidy * dips[:, None] + copies).ravel()
         return pop_cols

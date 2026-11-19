@@ -2,7 +2,8 @@ Phasing
 =======
 
 A ``HaplotypeMatrix`` stores two rows per diploid individual ``i``: rows ``2i``
-and ``2i + 1`` are the individual's two copies. In phased data, each row
+and ``2i + 1`` are the individual's two copies. (A haploid matrix,
+``ploidy=1``, has one row per sample and is phased by nature.) In phased data, each row
 follows one chromosome across sites. If the data is unphased, a row does not
 represent a real chromosome.
 

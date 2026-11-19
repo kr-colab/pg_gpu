@@ -331,10 +331,10 @@ class GenotypeMatrix:
         -------
         GenotypeMatrix
         """
+        from ._warnings import require_diploid_rows, require_whole_samples
+        require_diploid_rows(hap_matrix, "GenotypeMatrix.from_haplotype_matrix")
         n_hap = hap_matrix.haplotypes.shape[0]
-        if n_hap % 2 != 0:
-            raise ValueError(
-                f"Need even number of haplotypes for diploid conversion, got {n_hap}")
+        require_whole_samples(n_hap, 2, "GenotypeMatrix.from_haplotype_matrix")
 
         if hap_matrix.device == 'CPU':
             hap_matrix.transfer_to_gpu()
@@ -712,6 +712,9 @@ class GenotypeMatrix:
                                         pop_assignment=pop_assignment)
         else:
             source.pop_cols = source._resolve_pop_assignment(pop_assignment)
+        # Each row of the stream is one individual's two gametes summed.
+        from ._warnings import _require_diploid_ploidy
+        _require_diploid_ploidy(source.ploidy, f"zarr store '{path}'")
         fetcher = _pick_chunk_fetcher(source, backend=backend)
 
         # Resolve the accessible BED once over the source's bounds
@@ -845,6 +848,10 @@ class GenotypeMatrix:
 
         # Expand (n_individuals, n_variants) to (n_variants, n_samples, 2)
         n_ind, n_var = geno.shape
+        if geno.size and geno.max() > 2:
+            raise ValueError(
+                f"to_zarr writes diploid calls from genotypes 0, 1 and 2 "
+                f"(negative is missing); the matrix holds {int(geno.max())}.")
         g = geno.T  # (n_var, n_ind)
         gt = np.zeros((n_var, n_ind, 2), dtype=np.int8)
         gt[:, :, 0] = (g >= 1).view(np.int8)

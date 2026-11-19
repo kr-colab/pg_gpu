@@ -148,7 +148,7 @@ class TestHeterozygosityObserved:
     def test_ploidy_not_dividing_n_haplotypes_raises(self):
         hap = np.zeros((6, 2), dtype=np.int8)  # 6 not divisible by 4
         hm = HaplotypeMatrix(hap, np.array([0, 1000]), 0, 2000)
-        with pytest.raises(ValueError, match="not divisible by ploidy"):
+        with pytest.raises(ValueError, match="whole samples of 4 haplotype rows"):
             diversity.heterozygosity_observed(hm, ploidy=4)
 
 

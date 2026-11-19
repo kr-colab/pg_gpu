@@ -122,7 +122,7 @@ check = "The fused engines drop sites above an allele cap (windowed_analysis._Fu
 # ---------------------------------------------------------------------------
 
 [inputs."HaplotypeMatrix.__init__"]
-params = ["genotypes", "positions", "chrom_start", "chrom_end", "sample_sets", "n_total_sites", "samples", "accessible_mask", "fields", "allow_empty", "phased"]
+params = ["genotypes", "positions", "chrom_start", "chrom_end", "sample_sets", "n_total_sites", "samples", "accessible_mask", "fields", "allow_empty", "phased", "ploidy"]
 returns = "HaplotypeMatrix"
 span = "n_total_sites and accessible_mask as given; a mask with no n_total_sites sets n_total_sites to the accessible bases in [chrom_start, chrom_end]."
 
@@ -136,12 +136,13 @@ notes = "region is samtools style with an inclusive end; chrom_start and chrom_e
 params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased"]
 returns = "HaplotypeMatrix, or StreamingHaplotypeMatrix when streaming='always', or 'auto' and the matrix does not fit"
 span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None. The BED contig is the region's, else the store's (eager and streaming alike); data on several contigs need region= (ValueError)."
-notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=. phased=None (the default) takes the flag that HaplotypeMatrix.to_zarr recorded in the store attribute zarr_io.PHASED_ATTR (zarr_io.stored_phase); a store with no record loads as unphased, since no loader infers phase from the calls."
+notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=. phased=None (the default) takes the flag that HaplotypeMatrix.to_zarr recorded in the store attribute zarr_io.PHASED_ATTR (zarr_io.stored_phase); a store with no record loads as unphased, since no loader infers phase from the calls. The matrix takes its ploidy (1 or 2) from the store's ploidy axis, eager and streaming (zarr_source.ZarrGenotypeSource reads it from the store metadata); GenotypeMatrix.from_zarr refuses a ploidy-1 store."
 
 [inputs."HaplotypeMatrix.from_ts"]
-params = ["ts", "device", "include_invariant", "accessible_bed", "chrom", "phased"]
+params = ["ts", "device", "include_invariant", "accessible_bed", "chrom", "phased", "ploidy"]
 returns = "HaplotypeMatrix"
 span = "include_invariant=True sets n_total_sites to the sequence length. accessible_bed sets the mask."
+notes = "ploidy=None gives 2 when individuals own two sample nodes each, else 1 (no individuals, or one node each)."
 
 [inputs."GenotypeMatrix.__init__"]
 params = ["genotypes", "positions", "chrom_start", "chrom_end", "sample_sets", "n_total_sites", "samples", "accessible_mask", "fields", "allow_empty"]
@@ -181,7 +182,7 @@ methods = [
     "has_invariant_info", "is_called", "is_missing", "load_pop_file",
     "locate_unlinked", "n_callable_sites", "n_invariant_sites",
     "n_segregating_sites", "num_haplotypes", "num_variants", "pairwise_LD_v",
-    "pairwise_r2", "phased", "positions", "remove_accessible_mask",
+    "pairwise_r2", "phased", "ploidy", "positions", "remove_accessible_mask",
     "restrict_to_biallelic", "restrict_to_segregating", "sample_sets",
     "set_accessible_mask", "set_phased", "set_unphased", "shape",
     "summarize_missing_data",
@@ -189,7 +190,7 @@ methods = [
     "tally_gpu_haplotypes_two_pops_with_missing", "to_zarr", "transfer_to_cpu",
     "transfer_to_gpu", "vcf_to_zarr", "watersons_theta", "windowed_r_squared",
 ]
-notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask, else gets its share of n_total_sites (haplotype_matrix._total_sites_share, the rule the windowed engines use)."
+notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask, else gets its share of n_total_sites (haplotype_matrix._total_sites_share, the rule the windowed engines use). ploidy (1 or 2 rows per sample) follows every subset and copy, as phased does; to_zarr writes the store with it and raises when the rows or the sample names do not fit it. The consumers that pair rows into individuals (GenotypeMatrix.from_haplotype_matrix, heterozygosity_observed, fst_weir_cockerham scalar and windowed) call _warnings.require_diploid_rows and raise at ploidy 1. phased is always True at ploidy 1. get_population_matrix and population_rows give a ploidy-1 subset for a row list that does not make whole individuals, so a consumer that pairs rows raises on it. _warnings.require_whole_samples is the one check that rows divide into samples."
 
 [matrices.GenotypeMatrix]
 module = "genotype_matrix"
@@ -210,7 +211,7 @@ methods = [
     "chrom", "chrom_end", "chrom_start", "chunk_bp",
     "compute_ld_statistics_gpu_single_pop", "compute_ld_statistics_gpu_two_pops",
     "get_span", "haplotypes", "iter_gpu_chunks", "materialize",
-    "num_haplotypes", "num_variants", "phased", "sample_sets", "set_phased",
+    "num_haplotypes", "num_variants", "phased", "ploidy", "sample_sets", "set_phased",
     "set_unphased",
 ]
 notes = "accessible_mask and n_total_sites are instance attributes: the loader sets accessible_mask from accessible_bed (and, for GenotypeMatrix.from_zarr with include_invariant=True, from the record positions) and leaves n_total_sites None. .haplotypes raises. iter_gpu_chunks yields closed chunks [s, s + chunk_bp - 1] as eager HaplotypeMatrix objects; each chunk and each materialize slice gets the mask, else its share of a hand-set n_total_sites (streaming_matrix._StreamingMatrixBase._attach_span); materialize(region=) gives an eager sub-region."
@@ -1016,7 +1017,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "per-site NaN where no individual is fully called; raises ValueError when rows are not divisible by ploidy"
 parallel = []
-notes = "Pairs consecutive rows into individuals and warns on an unpaired row list (ploidy 2)."
+notes = "Pairs consecutive rows into individuals and warns on an unpaired row list (ploidy 2). Raises on a ploidy-1 matrix. ploidy=None takes the matrix's ploidy."
 
 [functions."diversity.inbreeding_coefficient"]
 # signature: (haplotype_matrix, population, ploidy, missing_data)
@@ -1028,6 +1029,7 @@ span = "none"
 undefined = "per-site NaN where He <= 0 or He is NaN"
 parallel = []
 
+notes = "Raises on a ploidy-1 matrix, through heterozygosity_observed."
 [functions."diversity.mu_var"]
 # signature: (haplotype_matrix, window_length, population)
 axis_kwargs = ["population"]
@@ -1267,7 +1269,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "NaN when sum(a+b+c) <= 0 (so a negative denominator also gives NaN), or when exclude leaves no site"
 parallel = ["windowed_analysis._windowed_twopop_scatter", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked", "windowed_analysis._fused_windowed_twopop_kernel"]
-notes = "Pairs consecutive rows into diploids and only warns on unpaired row lists."
+notes = "Pairs consecutive rows into diploids and only warns on unpaired row lists. Raises on a ploidy-1 matrix."
 
 [functions."divergence.fst_nei"]
 # signature: (haplotype_matrix, pop1, pop2, missing_data)

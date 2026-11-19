@@ -473,6 +473,17 @@ def _record_phase(store, phased, shape, chunks=None):
                            chunks='auto' if chunks is None else chunks[:2])
 
 
+def _check_sample_names(samples, n_samples):
+    """Raise when the sample names do not name each sample of a genotype
+    array: the store's sample axis and its names would disagree."""
+    if samples is not None and len(samples) != n_samples:
+        raise ValueError(
+            f"the store would have {n_samples} samples on its sample axis, "
+            f"but samples has {len(samples)} names. For a HaplotypeMatrix, "
+            f"set matrix.ploidy to the rows per sample, or correct "
+            f"matrix.samples (None writes no names).")
+
+
 def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
               chunks=None, fields=None, phased=None):
     """Write genotype data in VCZ format.
@@ -514,6 +525,7 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
     import zarr
     n_var = len(positions)
     n_samples = gt.shape[1]
+    _check_sample_names(samples, n_samples)
     store = zarr.open(zarr_path, mode='w')
     if chunks is None:
         store.create_array('call_genotype', data=gt.astype(np.int8))
@@ -721,6 +733,7 @@ def write_allel(zarr_path, gt, positions, samples=None, phased=None):
         ``HaplotypeMatrix.from_zarr`` reads.
     """
     import zarr
+    _check_sample_names(samples, np.shape(gt)[1])
     store = zarr.open(zarr_path, mode='w')
     if phased is not None:
         store.attrs[PHASED_ATTR] = bool(phased)   # this layout has no phase field

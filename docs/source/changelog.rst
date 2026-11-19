@@ -4,6 +4,48 @@ Changelog
 Unreleased
 ----------
 
+``HaplotypeMatrix`` has a ``ploidy``, and haploid data round-trip through Zarr
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``HaplotypeMatrix.ploidy`` is the number of rows per sample: 2 (the
+default; sample ``i`` is rows ``2i`` and ``2i + 1``) or 1 (each row is
+one sample). The constructor takes ``ploidy=``, the attribute can be
+assigned, and every subset and copy keeps it. A ``ploidy=1`` matrix
+always counts as phased, since each row is one chromosome.
+
+* ``to_zarr`` writes the store with the matrix's ploidy. It used to pair
+  rows ``2i`` and ``2i + 1`` whatever the matrix held: an odd number of
+  rows failed with a broadcast error, and an even number of haploid rows
+  gave a store whose sample axis and sample names disagreed. It now
+  raises a ``ValueError`` when the rows do not make whole samples or
+  when ``samples`` does not name each of them. ``GenotypeMatrix.to_zarr``
+  makes the same check on its names and raises on a genotype above 2,
+  which it used to write as a homozygote.
+* ``HaplotypeMatrix.from_zarr`` reads a haploid store (a ploidy axis of
+  1, which is what bio2zarr writes for haploid calls) into a
+  ``ploidy=1`` matrix, on the eager and the streaming path. It used to
+  refuse one. ``GenotypeMatrix.from_zarr`` still refuses it, and a VCF
+  with haploid calls is still refused by ``from_vcf``.
+* ``from_ts`` gives ``ploidy=1`` for a tree sequence with no individuals
+  or with one sample node per individual, and takes ``ploidy=`` to
+  declare the layout.
+* ``get_population_matrix`` with a row list that does not make whole
+  individuals (one gamete of each, or an odd count) gives a ``ploidy=1``
+  subset, so ``to_zarr`` on it writes one sample per row and the genotype
+  conversion raises on it.
+* ``heterozygosity_observed`` and ``inbreeding_coefficient`` take their
+  ``ploidy`` from the matrix by default (``ploidy=None``; it was 2).
+* ``load_pop_file`` raises a ``ValueError`` when the sample names do not
+  fit the rows at the matrix's ploidy.
+* **Behavior change.** ``GenotypeMatrix.from_haplotype_matrix`` (and so
+  genotype-mode LD on a ``HaplotypeMatrix``), ``heterozygosity_observed``,
+  ``inbreeding_coefficient`` and ``fst_weir_cockerham`` (scalar and
+  windowed) raise a ``ValueError`` on a ``ploidy=1`` matrix. They used to
+  pair unrelated haploid rows into individuals with no error. This
+  reaches a matrix from ``from_ts`` on a tree sequence with no
+  individuals; if its adjacent rows are the two copies of one sample,
+  pass ``ploidy=2`` to ``from_ts`` or set ``matrix.ploidy = 2``.
+
 Phase-dependent statistics warn on unphased data
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

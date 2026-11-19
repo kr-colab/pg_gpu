@@ -217,15 +217,3 @@ def test_normal_diploid_zarr_loads_without_warning(tmp_path):
         warnings.simplefilter("error", HaploidDataWarning)
         hm = HaplotypeMatrix.from_zarr(path)
     assert hm.num_haplotypes == 4
-
-
-def test_from_zarr_rejects_non_diploid_ploidy(tmp_path):
-    # A genuinely haploid store has a ploidy-1 call_genotype axis; from_zarr
-    # rejects it from the store metadata.
-    from pg_gpu.zarr_io import write_vcz
-    gt = _i8([[[1], [0], [1]], [[0], [1], [1]]])  # (2 var, 3 samples, ploidy 1)
-    path = str(tmp_path / "haploid.vcz")
-    write_vcz(path, gt, np.array([100, 200]),
-              samples=["s0", "s1", "s2"], contig_name="chr1")
-    with pytest.raises(ValueError, match="ploidy 1"):
-        HaplotypeMatrix.from_zarr(path)

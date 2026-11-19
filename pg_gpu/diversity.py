@@ -1856,7 +1856,7 @@ def _heterozygosity_expected_sites(haplotype_matrix: HaplotypeMatrix,
 @_eager_only
 def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
                             population: Optional[Union[str, list]] = None,
-                            ploidy: int = 2,
+                            ploidy: Optional[int] = None,
                             missing_data: str = 'include'):
     """
     Compute observed heterozygosity per variant.
@@ -1871,8 +1871,11 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
         Haplotype data.
     population : str or list, optional
         Population name or sample indices.
-    ploidy : int
-        Ploidy level. Default 2 (diploid).
+    ploidy : int, optional
+        Adjacent rows per individual. Default ``None``: the matrix's
+        ``ploidy``. Pass a larger number for rows laid out in groups that
+        the attribute cannot record (it is 1 or 2). A ``ploidy=1`` matrix
+        raises: one row per sample has no heterozygosity.
     missing_data : str
         'include' - skip missing individuals per site (default)
         'exclude' - NaN at sites with any missing data
@@ -1882,6 +1885,11 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
     ndarray, float64, shape (n_variants,)
         Observed heterozygosity per variant.
     """
+    # One row per sample has no second copy to differ from.
+    from ._warnings import require_diploid_rows, require_whole_samples
+    require_diploid_rows(haplotype_matrix, "heterozygosity_observed")
+    if ploidy is None:
+        ploidy = haplotype_matrix.ploidy
 
     if population is not None:
         if not isinstance(population, str):
@@ -1910,9 +1918,7 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
     hap = matrix.haplotypes  # (n_haplotypes, n_variants)
     n_hap = hap.shape[0]
 
-    if n_hap % ploidy != 0:
-        raise ValueError(
-            f"Number of haplotypes ({n_hap}) not divisible by ploidy ({ploidy})")
+    require_whole_samples(n_hap, ploidy, "heterozygosity_observed")
 
     n_individuals = n_hap // ploidy
 
@@ -1952,7 +1958,7 @@ def heterozygosity_observed(haplotype_matrix: HaplotypeMatrix,
 @_eager_only
 def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
                            population: Optional[Union[str, list]] = None,
-                           ploidy: int = 2,
+                           ploidy: Optional[int] = None,
                            missing_data: str = 'include'):
     """
     Compute Wright's inbreeding coefficient F per variant.
@@ -1966,8 +1972,9 @@ def inbreeding_coefficient(haplotype_matrix: HaplotypeMatrix,
         Haplotype data.
     population : str or list, optional
         Population name or sample indices.
-    ploidy : int
-        Ploidy level for observed heterozygosity computation.
+    ploidy : int, optional
+        Adjacent rows per individual for the observed heterozygosity;
+        default ``None``, the matrix's ``ploidy``.
     missing_data : str
         Passed to heterozygosity_expected and heterozygosity_observed.
 

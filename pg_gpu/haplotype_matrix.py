@@ -141,10 +141,11 @@ def _ts_row_order(ts):
     if bad.size:
         from ._warnings import ISSUE_URL
         raise ValueError(
-            "from_ts needs two sample nodes per individual to lay out rows 2i "
-            f"and 2i + 1; individual {bad[0]} has {per_individual[bad[0]]}. "
-            f"{_TS_LAYOUT_HINT} pg_gpu's loaders support diploid data only; "
-            f"haploid and polyploid input is not yet supported (see {ISSUE_URL}).")
+            "from_ts needs the same number of sample nodes, one or two, for "
+            f"every individual; individual {bad[0]} has {per_individual[bad[0]]}. "
+            f"{_TS_LAYOUT_HINT} A tree sequence must be all haploid or all "
+            f"diploid; mixed and polyploid input is not yet supported (see "
+            f"{ISSUE_URL}).")
     # Node id order within an individual is the order individual.nodes reports
     # and the order write_vcf emits alleles in, so from_ts and from_vcf of the
     # VCF written from the same tree sequence produce identical rows.
@@ -273,16 +274,26 @@ class HaplotypeMatrix:
     Rows are gametes, and for diploid data the two gametes of one sample are
     adjacent: sample ``i`` owns rows ``2i`` and ``2i + 1``. Every loader
     produces this order and every consumer that reconstructs individuals --
-    ``GenotypeMatrix.from_haplotype_matrix``, ``relatedness.ibs``,
-    ``divergence.fst_weir_cockerham``, ``diversity.heterozygosity_observed``,
-    ``diversity.inbreeding_coefficient``, genotype-mode LD, and the
-    ``to_zarr`` writer -- assumes it. ``sample_sets`` therefore lists both
-    gametes of each member, e.g. sample 3 contributes ``[6, 7]``.
+    ``GenotypeMatrix.from_haplotype_matrix``,
+    ``divergence.fst_weir_cockerham`` (scalar and windowed),
+    ``diversity.heterozygosity_observed``,
+    ``diversity.inbreeding_coefficient`` and genotype-mode LD -- assumes
+    it. ``sample_sets`` therefore lists both gametes of each member, e.g.
+    sample 3 contributes ``[6, 7]``.
 
-    The one exception is ``from_ts`` on a tree sequence with no individuals,
-    or with one sample node per individual: those rows keep ``ts.samples()``
-    order and do not pair, so the consumers above have no defined meaning on
-    them.
+    Ploidy
+    ------
+    ``ploidy`` is the number of rows per sample: 2 for the layout above, or
+    1 when each row is one sample (haploid data). It defaults to 2. A
+    haploid store loads with ``ploidy=1`` through ``from_zarr``, and
+    ``from_ts`` gives ``ploidy=1`` for a tree sequence with no individuals
+    or with one sample node per individual, whose rows keep
+    ``ts.samples()`` order. ``samples`` and the sample axis of per-genotype
+    ``fields`` have one entry per sample, so ``num_haplotypes / ploidy``
+    entries. The consumers above raise on a ``ploidy=1`` matrix, which
+    always counts as phased; ``to_zarr`` writes the store with the
+    matrix's ploidy. Assign ``matrix.ploidy`` to declare a different
+    layout.
 
     Statistics that treat rows as independent gametes are unaffected by the
     order; only the ones above pair rows.
@@ -300,9 +311,11 @@ class HaplotypeMatrix:
     n_total_sites : int, optional
         Total callable sites for span normalization.
     samples : list, optional
-        Diploid sample names (from VCF).
+        Sample names, one for each ``ploidy`` rows.
     accessible_mask : AccessibleMask, optional
         Genome accessibility mask.
+    ploidy : int
+        Haplotype rows per sample, 1 or 2 (default 2). See "Ploidy" above.
     """
     def __init__(self,
                  genotypes,
@@ -316,6 +329,7 @@ class HaplotypeMatrix:
                  fields: dict = None,
                  allow_empty: bool = False,
                  phased: bool = False,
+                 ploidy: int = 2,
                 ):
         # ``allow_empty`` is set only by the streaming chunk builder, which
         # yields zero-variant chunks over empty regions (e.g. an acrocentric
@@ -350,8 +364,8 @@ class HaplotypeMatrix:
         self.chrom_end = chrom_end
         self.sample_sets = sample_sets   # property setter validates
         self.n_total_sites = n_total_sites
-        # Diploid sample names from VCF; copied so a derived matrix never
-        # shares the caller's list.
+        # One name for each ``ploidy`` rows; copied so a derived matrix
+        # never shares the caller's list.
         self.samples = copy.copy(samples)
         # Optional per-variant (n_var,) and per-genotype (n_var, n_samples)
         # VCF FORMAT/INFO arrays. Empty dict when no quality fields were
@@ -359,6 +373,7 @@ class HaplotypeMatrix:
         # per-genotype.
         self.fields = dict(fields) if fields else {}
         self._phased = bool(phased)
+        self.ploidy = ploidy   # property setter validates
 
         if accessible_mask is not None and not isinstance(accessible_mask, AccessibleMask):
             accessible_mask = resolve_accessible_mask(
@@ -475,9 +490,25 @@ class HaplotypeMatrix:
         return self.accessible_mask is not None
 
     @property
+    def ploidy(self):
+        """Haplotype rows per sample: 2 (rows ``2i`` and ``2i + 1`` are the
+        two copies of sample ``i``) or 1 (each row is one sample)."""
+        return self._ploidy
+
+    @ploidy.setter
+    def ploidy(self, ploidy):
+        if isinstance(ploidy, bool) or ploidy not in (1, 2):
+            raise ValueError(f"ploidy must be 1 or 2; got {ploidy!r}")
+        self._ploidy = int(ploidy)
+
+    @property
     def phased(self):
-        """Whether the haplotype rows represent true phased haplotypes."""
-        return self._phased
+        """Whether the haplotype rows represent true phased haplotypes.
+
+        Always True at ``ploidy=1``: a row with one copy per sample is one
+        chromosome, so there is no phase to be wrong about.
+        """
+        return self._phased or self._ploidy == 1
 
     def set_phased(self):
         """Mark this matrix as phased.  Returns ``self``."""
@@ -871,13 +902,14 @@ class HaplotypeMatrix:
         positions = data['positions']
         sample_names = data['samples']
 
-        # The eager and streaming readers, the kvikio sample-subset gather, and
-        # the (n_dip, 2) -> 2 * n_dip haplotype layout all assume diploid.
-        # Reject non-diploid ploidy and genuine haploid calls, and warn when the
-        # data are polymorphic yet hold no heterozygote (a hemizygous tell).
+        # A store with a ploidy axis of 1 is haploid and loads as it is. On
+        # a ploidy axis of 2, reject haploid calls padded to diploid, and
+        # warn when the data are polymorphic yet hold no heterozygote (a
+        # hemizygous tell).
         from ._warnings import check_diploid_encoding
         check_diploid_encoding(gt, sample_names=sample_names,
-                               source=f"zarr store '{path}'")
+                               source=f"zarr store '{path}'",
+                               allow_haploid=True)
 
         _, start, stop = parse_region(region)
         start = start if start is not None else int(positions[0])
@@ -991,7 +1023,7 @@ class HaplotypeMatrix:
             else self.haplotypes.get()
         pos = self.positions if isinstance(self.positions, np.ndarray) \
             else self.positions.get()
-        gt = self._haplotypes_to_gt(hap)
+        gt = self._haplotypes_to_gt(hap, self.ploidy)
 
         if format == 'vcz':
             write_vcz(zarr_path, gt, pos, self.samples,
@@ -1043,14 +1075,19 @@ class HaplotypeMatrix:
                      show_progress=show_progress, zarr_format=zarr_format)
 
     @staticmethod
-    def _haplotypes_to_gt(hap):
-        """Convert (n_hap, n_var) haplotype matrix back to (n_var, n_samples, 2) GT array."""
+    def _haplotypes_to_gt(hap, ploidy=2):
+        """Convert an (n_hap, n_var) haplotype matrix to an
+        (n_var, n_samples, ploidy) GT array; raises when the rows do not
+        make whole samples."""
+        from ._warnings import require_whole_samples
         n_hap, n_var = hap.shape
-        n_samples = n_hap // 2
-        gt = np.empty((n_var, n_samples, 2), dtype=hap.dtype)
-        gt[:, :, 0] = hap[0::2, :].T
-        gt[:, :, 1] = hap[1::2, :].T
-        return gt
+        require_whole_samples(
+            n_hap, ploidy, "to_zarr",
+            hint=" If each row is one sample, set matrix.ploidy = 1.")
+        n_samples = n_hap // ploidy
+        # Sample i owns rows ploidy * i onward, so the transpose already has
+        # the gametes of a sample side by side.
+        return np.ascontiguousarray(hap.T).reshape(n_var, n_samples, ploidy)
 
     def load_pop_file(self, pop_assignment, pops: list = None):
         """Load population assignments from a tab-delimited file or
@@ -1073,11 +1110,18 @@ class HaplotypeMatrix:
         Notes
         -----
         Each population's entry lists haplotype rows, not samples, so a member
-        contributes both of its gametes (sample ``i`` gives ``2i`` and
-        ``2i + 1``).
+        contributes each of its gametes (sample ``i`` of a diploid matrix
+        gives ``2i`` and ``2i + 1``; at ``ploidy=1``, row ``i``).
         """
         if self.samples is None:
             raise ValueError("No sample names stored. Use from_vcf() to load data.")
+        if len(self.samples) * self.ploidy != self.num_haplotypes:
+            # Names that do not fit the rows would map each sample to rows
+            # of another one.
+            raise ValueError(
+                f"load_pop_file maps each sample name to {self.ploidy} "
+                f"haplotype row(s) (matrix.ploidy), but the matrix has "
+                f"{len(self.samples)} names for {self.num_haplotypes} rows.")
 
         if isinstance(pop_assignment, dict):
             pop_map = {str(k): str(v) for k, v in pop_assignment.items() if v}
@@ -1094,15 +1138,17 @@ class HaplotypeMatrix:
         if pops is None:
             pops = sorted(found_pops)
 
-        # Canonical row order: sample i owns haplotype rows 2i and 2i+1, so a
-        # population's index list holds both gametes of each of its samples.
+        # Canonical row order: sample i owns the ``ploidy`` rows from
+        # ploidy * i (2i and 2i+1 for a diploid), so a population's index
+        # list holds every gamete of each of its samples.
         pop_dips = {p: [] for p in pops}
         for i, name in enumerate(self.samples):
             pop = pop_map.get(name)
             if pop in pop_dips:
                 pop_dips[pop].append(i)
+        k = self.ploidy
         pop_sets = {
-            p: [h for d in dips for h in (2 * d, 2 * d + 1)]
+            p: [k * d + c for d in dips for c in range(k)]
             for p, dips in pop_dips.items()
         }
 
@@ -1124,7 +1170,8 @@ class HaplotypeMatrix:
                 include_invariant: bool = False,
                 accessible_bed: str = None,
                 chrom: str = None,
-                phased: bool = True) -> 'HaplotypeMatrix':
+                phased: bool = True,
+                ploidy: int = None) -> 'HaplotypeMatrix':
         """
         Create a HaplotypeMatrix from a tskit.TreeSequence.
 
@@ -1138,6 +1185,10 @@ class HaplotypeMatrix:
             chrom: Chromosome name for BED file filtering.
             phased: Whether the data are phased.  Default ``True``
                 (tree-sequence haplotypes are phased by definition).
+            ploidy: Rows per sample, 1 or 2. Default ``None``: 2 when
+                individuals own two sample nodes each, else 1 (see Notes).
+                Pass 2 to declare that adjacent rows of a tree sequence
+                with no individuals are the two copies of one sample.
 
         Returns:
             HaplotypeMatrix: A new HaplotypeMatrix instance
@@ -1148,9 +1199,9 @@ class HaplotypeMatrix:
             rows ``2i`` and ``2i + 1`` regardless of the order of
             ``ts.samples()``, which ``simplify`` is free to change. A tree
             sequence with no individuals, or with one sample node per
-            individual (``ploidy=1``), keeps ``ts.samples()`` order; the
-            statistics that pair adjacent rows into individuals have no
-            defined meaning on such input. Any other layout raises.
+            individual, keeps ``ts.samples()`` order and gives a matrix
+            with ``ploidy=1``; the statistics that pair adjacent rows into
+            individuals raise on it. Any other layout raises.
 
             Populations declared in the tree sequence (with a name in
             metadata) are automatically registered in ``sample_sets``:
@@ -1182,8 +1233,10 @@ class HaplotypeMatrix:
             positions = cp.array(positions)
 
         n_total_sites = int(ts.sequence_length) if include_invariant else None
+        if ploidy is None:
+            ploidy = 2 if paired else 1
         hm = cls(haplotypes, positions, chrom_start, chrom_end,
-                 n_total_sites=n_total_sites, phased=phased)
+                 n_total_sites=n_total_sites, phased=phased, ploidy=ploidy)
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
 
@@ -1268,7 +1321,7 @@ class HaplotypeMatrix:
         last_pos = self.positions[-1] if self.positions.size > 0 else None
         return (f"HaplotypeMatrix(shape={self.shape}, "
                 f"first_position={first_pos}, last_position={last_pos}, "
-                f"phased={self._phased})")
+                f"phased={self.phased}, ploidy={self._ploidy})")
 
     def _empty_subset(self) -> "HaplotypeMatrix":
         """Build a copy of this matrix that holds no variants.
@@ -1288,6 +1341,7 @@ class HaplotypeMatrix:
         result._pos_filtered = None
         result._device = self._device
         result._phased = self._phased
+        result._ploidy = self._ploidy
         result._sample_sets = self._sample_sets
         result.chrom_start = self.chrom_start
         result.chrom_end = self.chrom_end
@@ -1342,6 +1396,7 @@ class HaplotypeMatrix:
             samples=self.samples,
             fields=slice_fields(self.fields, positions, self._accessible_idx),
             phased=self._phased,
+            ploidy=self._ploidy,
         )
 
     def get_subset_from_range(self, low: int, high: int) -> "HaplotypeMatrix":
@@ -1398,6 +1453,7 @@ class HaplotypeMatrix:
             accessible_mask=sliced_mask,
             fields=slice_fields(self.fields, indices, self._accessible_idx),
             phased=self._phased,
+            ploidy=self._ploidy,
         )
 
     def _keep_sites(self, keep) -> "HaplotypeMatrix":
@@ -1423,6 +1479,7 @@ class HaplotypeMatrix:
             samples=self.samples,
             fields=slice_fields(self.fields, keep, self._accessible_idx),
             phased=self._phased,
+            ploidy=self._ploidy,
         )
 
     def restrict_to_biallelic(self, *, warn_context=None) -> "HaplotypeMatrix":
@@ -1771,7 +1828,7 @@ class HaplotypeMatrix:
         haps_src = self._haplotypes
         pos_src = self._positions
         n_haps, n_var = haps_src.shape
-        n_samples = n_haps // 2
+        n_samples = n_haps // self.ploidy
 
         if variants is not None:
             variants_arr = xp.asarray(variants).astype(bool, copy=False)
@@ -1795,11 +1852,11 @@ class HaplotypeMatrix:
         # Stamp genotype-level rejections into a working copy of the
         # haplotype matrix so the original is untouched.
         if genotypes_arr is not None:
-            # (n_var, n_samples) -> (2 * n_samples, n_var): both
-            # haplotype rows for a sample share its genotype mask, and under
+            # (n_var, n_samples) -> (ploidy * n_samples, n_var): every
+            # haplotype row of a sample shares its genotype mask, and under
             # the canonical row order those rows are adjacent.
             per_sample_keep = genotypes_arr.T  # (n_samples, n_var)
-            hap_keep = xp.repeat(per_sample_keep, 2, axis=0)
+            hap_keep = xp.repeat(per_sample_keep, self.ploidy, axis=0)
             haps = xp.where(hap_keep, haps_src, np.int8(-1))
         else:
             haps = haps_src
@@ -1830,6 +1887,7 @@ class HaplotypeMatrix:
             samples=self.samples,
             fields=new_fields,
             phased=self._phased,
+            ploidy=self._ploidy,
         )
 
     def summarize_missing_data(self):

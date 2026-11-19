@@ -38,13 +38,15 @@ entirely in GPU memory, ``HaplotypeMatrix.from_zarr`` /
 projected footprint). The streaming object iterates the chromosome
 chunk by chunk through every kernel that accepts a fully loaded
 matrix; see :doc:`tutorials/biobank_streaming` for the end-to-end
-pattern and the VCF-to-VCZ conversion step. The reader requires
-diploid genotypes; haploid and polyploid stores are rejected.
+pattern and the VCF-to-VCZ conversion step. ``HaplotypeMatrix.from_zarr``
+reads diploid and haploid stores (a ploidy axis of 2 or 1);
+``GenotypeMatrix.from_zarr`` needs diploid genotypes. Polyploid stores
+are rejected.
 
 .. autoclass:: pg_gpu.streaming_matrix.StreamingHaplotypeMatrix
    :members: iter_gpu_chunks, materialize, num_haplotypes, num_variants,
              chrom, chrom_start, chrom_end, sample_sets, align_bp,
-             phased, set_phased, set_unphased,
+             phased, set_phased, set_unphased, ploidy,
              compute_ld_statistics_gpu_single_pop,
              compute_ld_statistics_gpu_two_pops
    :show-inheritance:

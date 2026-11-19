@@ -299,5 +299,5 @@ class TestHaplotypeMatrixEstimator:
         hap = rng.integers(0, 2, (9, 10), dtype=np.int8)
         pos = np.arange(10, dtype=np.int64) * 1000
         hm = HaplotypeMatrix(hap, pos, 0, 10 * 1000)
-        with pytest.raises(ValueError, match="even number"):
+        with pytest.raises(ValueError, match="whole samples of 2 haplotype rows"):
             hm.pairwise_r2(estimator='rogers_huff')

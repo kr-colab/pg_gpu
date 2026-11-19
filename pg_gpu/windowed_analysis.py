@@ -1216,7 +1216,8 @@ def _windowed_twopop_scatter(haplotype_matrix, window_size, step_size,
         # fst_wc pairs consecutive rows of each population into individuals;
         # the other statistics here take any row list, so this check is
         # specific to fst_wc, mirroring the fused engine's equivalent.
-        from ._warnings import check_paired_rows_for_populations
+        from ._warnings import check_paired_rows_for_populations, require_diploid_rows
+        require_diploid_rows(haplotype_matrix, "windowed fst_wc")
         check_paired_rows_for_populations(
             haplotype_matrix.sample_sets, pop1_name, pop2_name,
             "windowed fst_wc")
@@ -2893,7 +2894,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         if 'fst_wc' in statistics:
             # The kernel pairs consecutive subset rows into individuals for
             # Weir-Cockerham; the gamete statistics take any row list.
-            from ._warnings import check_paired_rows_for_populations
+            from ._warnings import check_paired_rows_for_populations, require_diploid_rows
+            require_diploid_rows(haplotype_matrix, "windowed fst_wc")
             check_paired_rows_for_populations(
                 haplotype_matrix.sample_sets, pop1, pop2, "windowed fst_wc")
 
@@ -3162,7 +3164,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
             if need_winmat:
                 win_mat = HaplotypeMatrix(matrix.haplotypes[:, s:e],
                                            matrix.positions[s:e],
-                                           phased=matrix.phased)
+                                           phased=matrix.phased,
+                                           ploidy=matrix.ploidy)
                 if 'omega' in stat_arrays:
                     # Feed already-biallelic input so omega's own restriction
                     # drops nothing and stays silent; warned once for the scan
@@ -3359,7 +3362,8 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
             if need_wc:
                 # The kernel pairs consecutive rows into individuals for
                 # Weir-Cockerham; the gamete statistics take any row list.
-                from ._warnings import check_paired_rows
+                from ._warnings import check_paired_rows, require_diploid_rows
+                require_diploid_rows(haplotype_matrix, "windowed fst_wc")
                 label = pop if isinstance(pop, str) else "row list"
                 check_paired_rows(rows, f"windowed fst_wc({label})")
             return cp.asarray(rows, dtype=cp.int64)
