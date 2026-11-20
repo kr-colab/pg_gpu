@@ -1073,7 +1073,10 @@ Bug fixes
   jackknife on the one-hot column count rather than the variant count,
   which could disagree with ``local_pca_jackknife`` on the same window
   once a site's one-hot encoding spans more than one column. Both are
-  now gated on the real number of complete sites.
+  now gated on the real number of complete sites. A window whose calls
+  are all missing standardizes to zero one-hot columns while its site
+  count still clears the gate, so all four window-processing paths now
+  also treat that as invalid.
 
 New warnings
 ~~~~~~~~~~~~

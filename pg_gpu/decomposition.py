@@ -877,7 +877,8 @@ def _local_pca_streaming(matrix, iterator, k, missing_data,
         X, _, n_sites = _prepare_centered(window.matrix, missing_data=missing_data,
                                           need_segregating=False, n_alleles=n_alleles_all)
 
-        if n_sites < min_pca:
+        if n_sites < min_pca or X.shape[1] == 0:
+            # No usable sites after all: the exclude filter emptied it, or every call was missing.
             window_meta.append((prefix, False))
             eigvals_gpu_chunks.append(cp.full(k, cp.nan, dtype=cp.float64))
             eigvecs_gpu_chunks.append(
@@ -1209,7 +1210,8 @@ def local_pca(haplotype_matrix: "HaplotypeMatrix",
 
         X, _, n_sites = _prepare_centered(window.matrix, missing_data=missing_data,
                                           need_segregating=False)
-        if n_sites < min_pca:
+        if n_sites < min_pca or X.shape[1] == 0:
+            # No usable sites after all: the exclude filter emptied it, or every call was missing.
             gram_list.append(identity_placeholder)
             sumsq_list.append(nan_scalar)
             valid_flags.append(False)
@@ -1315,8 +1317,8 @@ def _local_pca_with_jackknife(
 
         X, _, n_sites = _prepare_centered(window.matrix, missing_data=missing_data,
                                           need_segregating=False)
-        if n_sites < min_pca:
-            # The exclude filter dropped below the gate after all.
+        if n_sites < min_pca or X.shape[1] == 0:
+            # No usable sites after all: the exclude filter emptied it, or every call was missing.
             gram_list.append(identity_placeholder)
             sumsq_list.append(nan_scalar)
             jk_gram_list.append(identity_blocks)
