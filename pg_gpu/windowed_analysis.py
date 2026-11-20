@@ -24,7 +24,8 @@ from . import selection
 from ._utils import _eager_only, population_rows
 from ._haplotype_groups import column_has_missing
 from ._haplotype_hash import garud_h_windows
-from ._warnings import _outside_phase_guard, _phase_dependent, _warn_unphased
+from ._warnings import (_outside_guards, _phase_dependent, _scan_entry,
+                        _warn_unphased, _warn_unpolarized)
 
 # Column order of the Garud H family, as garud_h_windows returns it.
 _FUSED_GARUD_STATS = ('garud_h1', 'garud_h12', 'garud_h123', 'garud_h2h1',
@@ -40,11 +41,29 @@ _PHASE_DEPENDENT_STATS = frozenset(
 })
 
 
-def _phase_scan_context(name, statistics):
-    """Warning context naming the phase-dependent stats a scan requests, or
-    None when it requests none."""
-    requested = sorted(str(s) for s in set(statistics) & _PHASE_DEPENDENT_STATS)
-    return f"{name} ({', '.join(requested)})" if requested else None
+# Statistics whose value changes when the ancestral and a derived allele
+# change places.
+_DERIVED_STATE_STATS = frozenset({
+    'theta_h', 'theta_l', 'fay_wu_h', 'normalized_fay_wu_h', 'zeng_e',
+    'zeng_dh', 'max_daf', 'daf_hist', 'singletons', 'n_singletons',
+    'mean_nsl'})
+
+
+def _warn_scan(haplotype_matrix, name, statistics):
+    """Emit the warnings of a scan entry point ``name`` for the statistics
+    it was asked for: phase-dependent ones on unphased data, and ones of a
+    derived state on unpolarized data.
+
+    Keyed on the names asked for and done once at the entry: the engines
+    sum more than is asked for, the per-window fallback calls a scalar
+    function for each window, and a stream runs an engine for each chunk.
+    """
+    for names, warn in ((_PHASE_DEPENDENT_STATS, _warn_unphased),
+                        (_DERIVED_STATE_STATS, _warn_unpolarized)):
+        requested = sorted(str(s) for s in statistics
+                           if isinstance(s, str) and s in names)
+        if requested:
+            warn(haplotype_matrix, context=f"{name} ({', '.join(requested)})")
 
 # Statistics that read the rows of two populations.
 _TWO_POP_STATS = frozenset({'fst', 'fst_hudson', 'fst_wc', 'dxy', 'da'})
@@ -440,7 +459,7 @@ class StatisticsComputer:
                 results[stat.__name__] = np.nan
                 continue
             kwargs = self.custom_stat_kwargs.get(stat.__name__, {})
-            results[stat.__name__] = _outside_phase_guard(stat, window, **kwargs)
+            results[stat.__name__] = _outside_guards(stat, window, **kwargs)
 
         return results
 
@@ -744,7 +763,7 @@ class WindowedAnalyzer:
             missing_data=missing_data, span_normalize=span_normalize
         )
 
-    @_phase_dependent
+    @_scan_entry
     def compute(self, haplotype_matrix: HaplotypeMatrix) -> pd.DataFrame:
         """
         Compute windowed statistics for entire haplotype matrix.
@@ -762,9 +781,7 @@ class WindowedAnalyzer:
         pd.DataFrame
             Results with statistics for each window
         """
-        phase_ctx = _phase_scan_context("WindowedAnalyzer.compute", self.statistics)
-        if phase_ctx:
-            _warn_unphased(haplotype_matrix, context=phase_ctx)
+        _warn_scan(haplotype_matrix, "WindowedAnalyzer.compute", self.statistics)
         # Set population info if needed
         if self.populations and not haplotype_matrix.sample_sets:
             warnings.warn("Populations specified but haplotype_matrix has no sample_sets")
@@ -785,7 +802,7 @@ class WindowedAnalyzer:
 
         return pd.DataFrame(results)
 
-    @_phase_dependent
+    @_scan_entry
     def compute_region(self, haplotype_matrix: HaplotypeMatrix,
                       chrom: Union[str, int],
                       start: int,
@@ -812,16 +829,14 @@ class WindowedAnalyzer:
         pd.DataFrame
             Results for windows in the specified region
         """
-        phase_ctx = _phase_scan_context("WindowedAnalyzer.compute_region", self.statistics)
-        if phase_ctx:
-            _warn_unphased(haplotype_matrix, context=phase_ctx)
+        _warn_scan(haplotype_matrix, "WindowedAnalyzer.compute_region", self.statistics)
         # Extract region from matrix
         region_matrix = haplotype_matrix.get_subset_from_range(start, end)
 
         # Compute statistics
         return self.compute(region_matrix)
 
-    @_phase_dependent
+    @_scan_entry
     def compute_streaming(self, haplotype_matrix: HaplotypeMatrix,
                          batch_size: int = 100) -> Iterator[pd.DataFrame]:
         """
@@ -842,16 +857,14 @@ class WindowedAnalyzer:
         pd.DataFrame
             Batch of results
         """
-        phase_ctx = _phase_scan_context("WindowedAnalyzer.compute_streaming", self.statistics)
-        if phase_ctx:
-            _warn_unphased(haplotype_matrix, context=phase_ctx)
+        _warn_scan(haplotype_matrix, "WindowedAnalyzer.compute_streaming", self.statistics)
         return self._iter_batches(haplotype_matrix, batch_size)
 
     def _iter_batches(self, haplotype_matrix, batch_size):
         # Iteration runs after compute_streaming has returned and reset the
-        # phase depth, so each window runs inside its own phase-dependent
-        # frame; the statistics it reaches then stay silent.
-        compute_window = _phase_dependent(self.stats_computer.compute)
+        # guard depths, so each window runs inside its own guarded frame;
+        # the statistics it reaches then stay silent.
+        compute_window = _scan_entry(self.stats_computer.compute)
         window_iter = WindowIterator(haplotype_matrix, self.window_params,
                                      skip_empty=False)
         total_windows = window_iter.count_windows()
@@ -1486,7 +1499,7 @@ def _check_windowed_kwargs(kwargs, statistics):
     raise TypeError(" ".join(lines))
 
 
-@_phase_dependent
+@_scan_entry
 def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                      window_size: int = 50000,
                      step_size: Optional[int] = None,
@@ -1598,9 +1611,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
         raise ValueError("`regions` kwarg must be provided for `window_type='regions'`.")
     if missing_data not in ('include', 'exclude'):
         raise ValueError("Unknown value for `missing_data`. Please use 'include' or 'exclude'.")
-    phase_ctx = _phase_scan_context("windowed_analysis", statistics)
-    if phase_ctx:
-        _warn_unphased(haplotype_matrix, context=phase_ctx)
+    _warn_scan(haplotype_matrix, "windowed_analysis", statistics)
     result = _windowed_analysis(
         haplotype_matrix, window_size=window_size, step_size=step_size,
         statistics=_engine_statistics(statistics), populations=populations,
@@ -2733,7 +2744,7 @@ class _FusedSites:
 
 
 @_eager_only
-@_phase_dependent
+@_scan_entry
 def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                               bp_bins=None,
                               statistics=('pi', 'theta_w', 'tajimas_d',
@@ -2800,9 +2811,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
         with few complete haplotypes nor applies a cutoff; check that
         column yourself.
     """
-    phase_ctx = _phase_scan_context("windowed_statistics_fused", statistics)
-    if phase_ctx:
-        _warn_unphased(haplotype_matrix, context=phase_ctx)
+    _warn_scan(haplotype_matrix, "windowed_statistics_fused", statistics)
 
     # Pre-filter positions: a window exclusion emptied (NaN for max_daf)
     # looks identical to one with no variant to begin with (0.0) once
@@ -3165,7 +3174,8 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 win_mat = HaplotypeMatrix(matrix.haplotypes[:, s:e],
                                            matrix.positions[s:e],
                                            phased=matrix.phased,
-                                           ploidy=matrix.ploidy)
+                                           ploidy=matrix.ploidy,
+                                           polarized=matrix.polarized)
                 if 'omega' in stat_arrays:
                     # Feed already-biallelic input so omega's own restriction
                     # drops nothing and stays silent; warned once for the scan
@@ -3190,7 +3200,7 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
 
 
 @_eager_only
-@_phase_dependent
+@_scan_entry
 def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
                                       bp_bins=None,
                                       statistics=('pi', 'theta_w', 'tajimas_d'),
@@ -3216,9 +3226,7 @@ def windowed_statistics_fused_chunked(haplotype_matrix: HaplotypeMatrix,
     """
     from ._memutil import estimate_fused_chunk_size, free_gpu_pool
 
-    phase_ctx = _phase_scan_context("windowed_statistics_fused_chunked", statistics)
-    if phase_ctx:
-        _warn_unphased(haplotype_matrix, context=phase_ctx)
+    _warn_scan(haplotype_matrix, "windowed_statistics_fused_chunked", statistics)
 
     # Pre-filter positions: a window exclusion emptied (NaN for max_daf)
     # looks identical to one with no variant to begin with (0.0) once

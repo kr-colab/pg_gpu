@@ -21,7 +21,8 @@ state (``theta_h``, ``theta_l``, Fay and Wu's H, Zeng's E, ``max_daf``,
 ``ihs`` and ``nsl``) depend on it. A VCF gives code 0 to REF; pass
 the ``ancestral='INFO tag'`` (for example ``'AA'``) argument to
 ``HaplotypeMatrix.from_vcf`` and ``from_zarr`` to recode by an
-ancestral-allele tag.
+ancestral-allele tag. These statistics warn on a matrix that is not
+marked polarized; see :doc:`polarization`.
 
 Diversity Statistics
 --------------------

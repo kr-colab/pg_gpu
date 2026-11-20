@@ -124,7 +124,8 @@ def get_population_matrix(matrix, population: Union[str, list],
     cls = GenotypeMatrix if is_genotype else HaplotypeMatrix
     data = matrix.genotypes if is_genotype else matrix.haplotypes
     hm_kw = ({} if is_genotype
-             else {'phased': matrix._phased, 'ploidy': ploidy})
+             else {'phased': matrix._phased, 'ploidy': ploidy,
+                   'polarized': matrix.polarized})
     return cls(
         data[pop_indices, :],
         matrix.positions,

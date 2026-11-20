@@ -130,6 +130,7 @@ filterwarnings = [
     # Fixtures load VCFs as unphased; tests that check the warning catch it
     # with simplefilter("always"). Matched by message for the same reason.
     "ignore:.* depends on haplotype phase:UserWarning",
+    "ignore:.* reads allele code 0 as the ancestral allele:UserWarning",
 ]
 
 [tool.coverage.run]

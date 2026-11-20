@@ -32,9 +32,35 @@ and ``nsl``) are then correct on data whose REF is not ancestral.
   and the streaming path. A store from ``to_zarr`` has neither array and
   raises.
 * The ancestral state must be set explicitly for polarized statistics to
-  be correct. No matrix records that it is polarized, and no statistic
-  warns on data that are not. The genotype loaders do not take
-  ``ancestral=``.
+  be correct. The genotype loaders do not take ``ancestral=``.
+
+``HaplotypeMatrix`` has a ``polarized`` flag, and derived-state statistics warn without it
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``HaplotypeMatrix.polarized`` records whether allele code 0 is the
+ancestral allele at every site. It is ``False`` by default and from
+``from_vcf``, and ``True`` from ``from_ts``, from a load with
+``ancestral=`` and from ``polarize``. ``set_polarized()`` and the
+``polarized=`` argument of the loaders declare it for data whose REF
+already is ancestral. Every subset and copy keeps it, ``to_zarr`` saves
+it, and ``from_zarr`` gives it back (eager and streaming). See
+:doc:`polarization`.
+
+* **Behavior change.** The statistics whose value changes when the
+  ancestral and a derived allele change places emit an
+  ``UnpolarizedDataWarning`` on a matrix that is not marked: ``theta_h``,
+  ``theta_l``, ``fay_wus_h``, ``normalized_fay_wus_h``, ``zeng_e``,
+  ``zeng_dh``, ``max_daf``, ``daf_histogram``, ``singleton_count``,
+  ``neutrality_tests``, the unfolded ``sfs`` and ``joint_sfs`` with
+  their scaled and projected forms, ``ihs``, ``nsl``,
+  ``genetic_relatedness`` with ``polarised=True``,
+  ``FrequencySpectrum``, and ``diversity_stats``, ``windowed_analysis``,
+  ``WindowedAnalyzer`` and the fused engines when such a statistic is
+  asked for. One call warns once. The values do not change.
+* ``utils/genome_scan.py`` takes ``--ancestral TAG``.
+* ``polarize``, and a load with ``ancestral=``, raise on data that are
+  marked polarized when the recode would move code 0. A second call
+  with the same codes used to change the codes back with no error.
 
 ``HaplotypeMatrix`` has a ``ploidy``, and haploid data round-trip through Zarr
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

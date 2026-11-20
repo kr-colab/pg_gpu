@@ -59,6 +59,11 @@ def parse_args():
     p.add_argument("--pop-file",
                    help="tab-delimited file (sample, pop) -- VCF/zarr only")
     p.add_argument("--accessible-bed", help="BED file of accessible regions")
+    p.add_argument("--ancestral", metavar="TAG",
+                   help="INFO tag with the ancestral allele (e.g. AA), for VCF "
+                        "and Zarr input: recode so that allele 0 is ancestral. "
+                        "Without it REF is taken as ancestral by Fay and Wu's H "
+                        "and the unfolded spectra, with a warning.")
     p.add_argument("--window-size", type=int, default=100_000)
     p.add_argument("--step-size", type=int, default=10_000)
     p.add_argument("-o", "--output", default="genome_scan.pdf",
@@ -124,7 +129,7 @@ def load_data(args):
     if path.endswith(VCF_EXTS):
         hm = HaplotypeMatrix.from_vcf(
             args.input, region=args.region,
-            accessible_bed=args.accessible_bed,
+            accessible_bed=args.accessible_bed, ancestral=args.ancestral,
         )
         if args.pop_file:
             hm.load_pop_file(args.pop_file)
@@ -137,7 +142,7 @@ def load_data(args):
         # treat as a zarr store (no canonical extension)
         hm = HaplotypeMatrix.from_zarr(
             args.input, region=args.region,
-            accessible_bed=args.accessible_bed,
+            accessible_bed=args.accessible_bed, ancestral=args.ancestral,
         )
         if args.pop_file:
             hm.load_pop_file(args.pop_file)

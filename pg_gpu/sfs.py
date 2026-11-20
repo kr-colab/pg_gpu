@@ -13,6 +13,7 @@ from typing import Union, Optional
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import population_rows
 from .streaming_matrix import StreamingHaplotypeMatrix, _stream_sum
+from ._warnings import _polarization_dependent, _warn_unpolarized
 
 
 def _population_size(matrix, population):
@@ -42,6 +43,7 @@ def _per_allele_counts(matrix, n_alleles=None):
 # Public API: Single-population SFS
 # ---------------------------------------------------------------------------
 
+@_polarization_dependent
 def sfs(haplotype_matrix: HaplotypeMatrix,
         population: Optional[Union[str, list]] = None,
         missing_data: str = 'include'):
@@ -62,6 +64,7 @@ def sfs(haplotype_matrix: HaplotypeMatrix,
     ndarray, int64, shape (n_chromosomes + 1,)
         Element k = number of variants with k derived alleles.
     """
+    _warn_unpolarized(haplotype_matrix, context="sfs")
     if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
         return _stream_sum(
             haplotype_matrix,
@@ -157,6 +160,7 @@ def sfs_folded(haplotype_matrix: HaplotypeMatrix,
     return s.astype(cp.float64).get()
 
 
+@_polarization_dependent
 def sfs_scaled(haplotype_matrix: HaplotypeMatrix,
                population: Optional[Union[str, list]] = None,
                missing_data: str = 'include'):
@@ -175,6 +179,7 @@ def sfs_scaled(haplotype_matrix: HaplotypeMatrix,
     -------
     ndarray, float64, shape (n_chromosomes + 1,)
     """
+    _warn_unpolarized(haplotype_matrix, context="sfs_scaled")
     s = sfs(haplotype_matrix, population, missing_data=missing_data)
     return scale_sfs(s)
 
@@ -299,6 +304,7 @@ def _joint_folded_cells(haplotype_matrix, pop1, pop2, missing_data):
     return fA[keep].astype(cp.int64), fB[keep].astype(cp.int64), n1, n2
 
 
+@_polarization_dependent
 def joint_sfs(haplotype_matrix: HaplotypeMatrix,
               pop1: Union[str, list],
               pop2: Union[str, list],
@@ -325,6 +331,7 @@ def joint_sfs(haplotype_matrix: HaplotypeMatrix,
         Element [i, j] = number of derived alleles with i copies in pop1
         and j copies in pop2.
     """
+    _warn_unpolarized(haplotype_matrix, context="joint_sfs")
     if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
         return _stream_sum(
             haplotype_matrix,
@@ -386,6 +393,7 @@ def _projection_matrix_vec(n_from, n_to):
     return np.exp(log_P)
 
 
+@_polarization_dependent
 def project_joint_sfs(haplotype_matrix: HaplotypeMatrix,
                        pop1: Union[str, list],
                        pop2: Union[str, list],
@@ -417,6 +425,7 @@ def project_joint_sfs(haplotype_matrix: HaplotypeMatrix,
     -------
     ndarray, float64, shape ``(target_n1 + 1, target_n2 + 1)``
     """
+    _warn_unpolarized(haplotype_matrix, context="project_joint_sfs")
     if isinstance(haplotype_matrix, StreamingHaplotypeMatrix):
         n1 = _population_size(haplotype_matrix, pop1)
         n2 = _population_size(haplotype_matrix, pop2)
@@ -511,6 +520,7 @@ def joint_sfs_folded(haplotype_matrix: HaplotypeMatrix,
     return s.reshape(x, y).astype(cp.float64).get()
 
 
+@_polarization_dependent
 def joint_sfs_scaled(haplotype_matrix: HaplotypeMatrix,
                      pop1: Union[str, list],
                      pop2: Union[str, list],
@@ -529,6 +539,7 @@ def joint_sfs_scaled(haplotype_matrix: HaplotypeMatrix,
     -------
     ndarray, float64, shape (n1 + 1, n2 + 1)
     """
+    _warn_unpolarized(haplotype_matrix, context="joint_sfs_scaled")
     s = joint_sfs(haplotype_matrix, pop1, pop2, missing_data=missing_data)
     return scale_joint_sfs(s)
 

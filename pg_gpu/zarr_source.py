@@ -169,7 +169,7 @@ class ZarrGenotypeSource:
         self._mappable = ((int(self.site_pos[0]), int(self.site_pos[-1]))
                           if self.num_variants else (0, 0))
 
-    def set_ancestral(self, tag, lowercase_known=True):
+    def set_ancestral(self, tag, lowercase_known=True, already_polarized=False):
         """Polarize the source by the INFO tag ``tag``.
 
         Reads the ancestral allele and the allele strings of the source's
@@ -178,14 +178,17 @@ class ZarrGenotypeSource:
         ancestral allele from the source, so ``site_pos``,
         ``num_variants`` and every slice hold the kept variants only. The
         bounds (``mappable_lo``, ``mappable_hi`` and the chunk grid) stay
-        those of all the variants, as on the eager path.
+        those of all the variants, as on the eager path. Raises when the
+        store is ``already_polarized`` and the tag would move code 0.
         """
         from ._warnings import _check_unknown_ancestral
-        from .zarr_io import read_ancestral_codes
+        from .zarr_io import check_not_polarized_twice, read_ancestral_codes
         whole = self._zarr_var_indices.size == self._store["variant_position"].shape[0]
         codes = read_ancestral_codes(
             self._store, tag, None if whole else self._zarr_var_indices,
             lowercase_known)
+        check_not_polarized_twice(already_polarized, codes,
+                                  f"from_zarr(ancestral={tag!r})")
         known = codes >= 0
         _check_unknown_ancestral(codes.size - int(known.sum()), codes.size,
                                  f"from_zarr(ancestral={tag!r})")

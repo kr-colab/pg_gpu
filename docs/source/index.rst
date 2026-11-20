@@ -15,6 +15,7 @@ GPU-accelerated population genetics statistics for Python.
    missing_data
    multiallelic
    phasing
+   polarization
    examples
    tutorials
    workflows

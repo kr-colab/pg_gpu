@@ -766,11 +766,13 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
     """
 
     def __init__(self, source, fetcher, chunk_bp, prefetch, *,
-                 phased=False, accessible_mask=None, n_total_sites=None):
+                 phased=False, accessible_mask=None, n_total_sites=None,
+                 polarized=False):
         super().__init__(source, fetcher, chunk_bp, prefetch,
                          accessible_mask=accessible_mask,
                          n_total_sites=n_total_sites)
         self._phased = bool(phased)
+        self._polarized = bool(polarized)
 
     @property
     def phased(self):
@@ -786,6 +788,22 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
     def set_unphased(self):
         """Mark this stream as unphased.  Returns ``self``."""
         self._phased = False
+        return self
+
+    @property
+    def polarized(self):
+        """Whether allele code 0 is the ancestral allele at every site."""
+        return self._polarized
+
+    def set_polarized(self):
+        """Mark this stream as polarized: code 0 already is the ancestral
+        allele. Changes no allele code. Returns ``self``."""
+        self._polarized = True
+        return self
+
+    def set_unpolarized(self):
+        """Mark this stream as not polarized.  Returns ``self``."""
+        self._polarized = False
         return self
 
     @property
@@ -820,14 +838,15 @@ class StreamingHaplotypeMatrix(_StreamingMatrixBase):
         # minutes over a biobank-scale walk.
         sets = kwargs.pop('sample_sets', None)
         m = build_haplotype_matrix(gt, pos, allow_empty=True,
-                                   phased=self._phased, **kwargs)
+                                   phased=self._phased,
+                                   polarized=self._polarized, **kwargs)
         if sets is not None:
             m._sample_sets = sets
         return m
 
     def _repr_sample_axis(self):
         return (f"num_haplotypes={self.num_haplotypes}, phased={self.phased}, "
-                f"ploidy={self.ploidy}")
+                f"ploidy={self.ploidy}, polarized={self._polarized}")
 
     @_phase_dependent
     def compute_ld_statistics_gpu_single_pop(self, bp_bins, raw=False,

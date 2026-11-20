@@ -512,6 +512,19 @@ def read_ancestral_codes(store, tag, variant_indices=None,
     return ancestral_codes(strings[tag], strings['allele'], lowercase_known)
 
 
+def check_not_polarized_twice(polarized, codes, context):
+    """Raise when a recode would move code 0 of data that are marked
+    polarized: the swap would put a derived allele at code 0 again."""
+    n_moved = int((np.asarray(codes) > 0).sum()) if polarized else 0
+    if n_moved:
+        raise ValueError(
+            f"{context}: the data are marked polarized (code 0 is the "
+            f"ancestral allele), but the ancestral allele given here has "
+            f"another code at {n_moved} sites, so a recode would move the "
+            f"allele that the mark calls ancestral. If the mark is wrong, "
+            f"call .set_unpolarized() first, or load with polarized=False.")
+
+
 def swap_allele_columns(alleles, codes):
     """Allele strings with column 0 exchanged for the ancestral column at
     each site, so the strings keep naming the codes after a recode."""
@@ -525,6 +538,17 @@ def swap_allele_columns(alleles, codes):
 # Store attribute that holds the ``phased`` flag of the HaplotypeMatrix that
 # wrote the store.
 PHASED_ATTR = 'pg_gpu_phased'
+
+
+# Store attribute that holds the ``polarized`` flag of the HaplotypeMatrix
+# that wrote the store: whether allele code 0 is the ancestral allele.
+POLARIZED_ATTR = 'pg_gpu_polarized'
+
+
+def stored_polarized(store):
+    """The ``polarized`` flag that ``HaplotypeMatrix.to_zarr`` recorded in an
+    open store; False for a store with no record."""
+    return bool(store.attrs.get(POLARIZED_ATTR, False))
 
 
 def stored_phase(store):
@@ -564,7 +588,7 @@ def _check_sample_names(samples, n_samples):
 
 
 def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
-              chunks=None, fields=None, phased=None):
+              chunks=None, fields=None, phased=None, polarized=None):
     """Write genotype data in VCZ format.
 
     Parameters
@@ -600,6 +624,10 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
         written as the ``pg_gpu_phased`` store attribute, which
         ``HaplotypeMatrix.from_zarr`` reads; ``True`` also writes
         ``call_genotype_phased``, the VCZ field for phase.
+    polarized : bool, optional
+        The ``polarized`` flag of a HaplotypeMatrix. When given, it is
+        written as the ``pg_gpu_polarized`` store attribute, which
+        ``HaplotypeMatrix.from_zarr`` reads.
     """
     import zarr
     n_var = len(positions)
@@ -649,6 +677,8 @@ def write_vcz(zarr_path, gt, positions, samples=None, contig_name=None,
     # After the fields: a matrix can carry call_genotype_phased among them.
     if phased is not None:
         _record_phase(store, phased, (n_var, n_samples), chunks)
+    if polarized is not None:
+        store.attrs[POLARIZED_ATTR] = bool(polarized)
 
 
 def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,
@@ -791,9 +821,12 @@ def allel_zarr_to_vcz(allel_path, vcz_path, *, contig=None, region=None,
     if PHASED_ATTR in src.attrs:
         _record_phase(dst, src.attrs[PHASED_ATTR], (n_out, n_samp),
                       (variant_chunk, sample_chunk))
+    if POLARIZED_ATTR in src.attrs:
+        dst.attrs[POLARIZED_ATTR] = bool(src.attrs[POLARIZED_ATTR])
 
 
-def write_allel(zarr_path, gt, positions, samples=None, phased=None):
+def write_allel(zarr_path, gt, positions, samples=None, phased=None,
+                polarized=None):
     """Write genotype data in scikit-allel format.
 
     Parameters
@@ -810,12 +843,17 @@ def write_allel(zarr_path, gt, positions, samples=None, phased=None):
         The ``phased`` flag of a HaplotypeMatrix. When given, it is
         written as the ``pg_gpu_phased`` store attribute, which
         ``HaplotypeMatrix.from_zarr`` reads.
+    polarized : bool, optional
+        The ``polarized`` flag of a HaplotypeMatrix, written as the
+        ``pg_gpu_polarized`` store attribute.
     """
     import zarr
     _check_sample_names(samples, np.shape(gt)[1])
     store = zarr.open(zarr_path, mode='w')
     if phased is not None:
         store.attrs[PHASED_ATTR] = bool(phased)   # this layout has no phase field
+    if polarized is not None:
+        store.attrs[POLARIZED_ATTR] = bool(polarized)
     store.create_array('calldata/GT', data=np.asarray(gt))
     store.create_array('variants/POS', data=np.asarray(positions))
     if samples is not None:

@@ -15,7 +15,8 @@ from typing import Union, Optional, Dict, Callable
 from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import _eager_only, population_rows
-from ._warnings import _phase_dependent, _warn_unphased
+from ._warnings import (_phase_dependent, _polar_depth, _polarization_dependent,
+                        _warn_unphased, _warn_unpolarized)
 
 
 def _emptied_by_exclude(orig_num_variants, matrix, missing_data):
@@ -614,6 +615,9 @@ class FrequencySpectrum:
         if matrix.device == 'CPU':
             matrix.transfer_to_gpu()
         self._source_matrix = matrix
+        # The spectrum is of derived alleles, so it is only as polarized as
+        # the matrix it was counted from.
+        self._warned_unpolarized = False
         n_hap = matrix.num_haplotypes
         if n_total_sites is None:
             n_total_sites = matrix.n_total_sites
@@ -685,6 +689,10 @@ class FrequencySpectrum:
             weights_fn = WEIGHT_REGISTRY[weights]
         else:
             weights_fn = weights
+        # A weight vector that is not symmetric under i <-> n - i reads the
+        # derived state; a caller's own function is taken to be one.
+        if not (isinstance(weights, str) and weights in _FOLDED_WEIGHTS):
+            self._note_polarization(f"theta({getattr(weights, '__name__', weights)!s})")
 
         total = 0.0
         for n, xi in self.sfs_by_n.items():
@@ -775,10 +783,22 @@ class FrequencySpectrum:
         result.n_segregating = int(np.sum(projected[1:target_n]))
         result.n_total_sites = self.n_total_sites
         result._source_matrix = self._source_matrix
+        result._warned_unpolarized = self._warned_unpolarized
         return result
+
+    def _note_polarization(self, what):
+        """Warn, once for this spectrum, when ``what`` reads the derived
+        state and the source matrix is not marked polarized."""
+        if not self._warned_unpolarized:
+            _warn_unpolarized(self._source_matrix,
+                              context=f"FrequencySpectrum.{what}")
+            # A call from inside another guarded statistic was silent, and
+            # must not use up the one warning.
+            self._warned_unpolarized = _polar_depth.get() <= 1
 
     def sfs(self, n=None):
         """Return the SFS, optionally projected."""
+        self._note_polarization("sfs")
         if n is not None:
             return self.project(n).sfs_by_n[n]
         if len(self.sfs_by_n) == 1:
@@ -1037,6 +1057,7 @@ def segregating_sites(haplotype_matrix: HaplotypeMatrix,
     return int(cp.sum(cp.where(sites_with_data, alleles_present - 1, 0)).get())
 
 
+@_polarization_dependent
 @_eager_only
 def singleton_count(haplotype_matrix: HaplotypeMatrix,
                    population: Optional[Union[str, list]] = None,
@@ -1061,6 +1082,7 @@ def singleton_count(haplotype_matrix: HaplotypeMatrix,
     int
         Number of singleton variants
     """
+    _warn_unpolarized(haplotype_matrix, context="singleton_count")
 
     # Get population subset if specified
     if population is not None:
@@ -1111,6 +1133,17 @@ _COUNT_STATS = {
     'n_variants': lambda hm, pop, md: _prepare_matrix(hm, pop, md).num_variants,
     'haplotype_diversity': lambda hm, pop, md: _haplotype_diversity_stat(hm, pop, md),
 }
+# Names of diversity_stats whose value changes when the ancestral and a
+# derived allele change places at a biallelic site.
+_DERIVED_STATE_STATS = frozenset({
+    'theta_h', 'theta_l', 'fay_wus_h', 'normalized_fay_wus_h', 'zeng_e',
+    'zeng_dh', 'singletons', 'eta1', 'minus_eta1'})
+# Built-in weights of FrequencySpectrum.theta that are symmetric under
+# i <-> n - i, so their theta does not read the derived state at a
+# biallelic site. The starred eta weights count the singletons of both
+# ends.
+_FOLDED_WEIGHTS = frozenset({'pi', 'theta_pi', 'watterson', 'theta_s',
+                             'eta1_star', 'minus_eta1_star'})
 _DIVERSITY_STATS_NAMES = (frozenset(_THETA_STATS) | frozenset(_TEST_SPECS)
                           | frozenset(_DIFFERENCE_STATS)
                           | frozenset(_COUNT_STATS) | {'zeng_dh'})
@@ -1126,6 +1159,7 @@ def _haplotype_diversity_stat(haplotype_matrix, population, missing_data):
 
 @_eager_only
 @_phase_dependent
+@_polarization_dependent
 def diversity_stats(haplotype_matrix: HaplotypeMatrix,
                    population: Optional[Union[str, list]] = None,
                    statistics: list = ['pi', 'theta_w', 'tajimas_d'],
@@ -1169,6 +1203,10 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
     unknown = [s for s in statistics if s not in _DIVERSITY_STATS_NAMES]
     if unknown:
         raise ValueError(f"Unknown statistic: {', '.join(map(str, unknown))}")
+    derived = [s for s in statistics if s in _DERIVED_STATE_STATS]
+    if derived:
+        _warn_unpolarized(haplotype_matrix,
+                          context=f"diversity_stats ({', '.join(derived)})")
     needs_thetas = {s for s in statistics if s not in _COUNT_STATS}
     want_dh = 'zeng_dh' in needs_thetas
     if want_dh:
@@ -1226,6 +1264,7 @@ def diversity_stats(haplotype_matrix: HaplotypeMatrix,
 
 
 
+@_polarization_dependent
 @_eager_only
 def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
               population: Optional[Union[str, list]] = None,
@@ -1251,6 +1290,7 @@ def fay_wus_h(haplotype_matrix: HaplotypeMatrix,
     float
         Fay and Wu's H value
     """
+    _warn_unpolarized(haplotype_matrix, context="fay_wus_h")
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
     result = _compute_thetas(matrix, ('pi', 'theta_h'))
     return result['thetas']['pi'] - result['thetas']['theta_h']
@@ -1322,6 +1362,7 @@ def _haplotypes_for_grouping(haplotype_matrix, population, missing_data):
 
 
 
+@_polarization_dependent
 @_eager_only
 def theta_h(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
@@ -1350,6 +1391,7 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
     -------
     float
     """
+    _warn_unpolarized(haplotype_matrix, context="theta_h")
     orig_num_variants = haplotype_matrix.num_variants
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
     if _emptied_by_exclude(orig_num_variants, matrix, missing_data):
@@ -1359,6 +1401,7 @@ def theta_h(haplotype_matrix: HaplotypeMatrix,
                                  result['n_sites_with_data'])
 
 
+@_polarization_dependent
 @_eager_only
 def theta_l(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
@@ -1390,6 +1433,7 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
     -------
     float
     """
+    _warn_unpolarized(haplotype_matrix, context="theta_l")
     orig_num_variants = haplotype_matrix.num_variants
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
     if _emptied_by_exclude(orig_num_variants, matrix, missing_data):
@@ -1401,6 +1445,7 @@ def theta_l(haplotype_matrix: HaplotypeMatrix,
 
 
 
+@_polarization_dependent
 @_eager_only
 def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
                          population: Optional[Union[str, list]] = None,
@@ -1430,12 +1475,14 @@ def normalized_fay_wus_h(haplotype_matrix: HaplotypeMatrix,
         Normalized H*. Negative values indicate excess high-frequency
         derived alleles (directional selection signal).
     """
+    _warn_unpolarized(haplotype_matrix, context="normalized_fay_wus_h")
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
     if matrix.num_variants == 0:
         return float("nan")
     return _compute_neutrality_test(matrix, 'pi', 'theta_h')
 
 
+@_polarization_dependent
 @_eager_only
 def zeng_e(haplotype_matrix: HaplotypeMatrix,
            population: Optional[Union[str, list]] = None,
@@ -1457,12 +1504,14 @@ def zeng_e(haplotype_matrix: HaplotypeMatrix,
     -------
     float
     """
+    _warn_unpolarized(haplotype_matrix, context="zeng_e")
     matrix = _prepare_matrix(haplotype_matrix, population, missing_data)
     if matrix.num_variants == 0:
         return float('nan')
     return _compute_neutrality_test(matrix, 'theta_l', 'watterson')
 
 
+@_polarization_dependent
 @_eager_only
 def zeng_dh(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
@@ -1493,6 +1542,7 @@ def zeng_dh(haplotype_matrix: HaplotypeMatrix,
         (consistent with a selective sweep). NaN when either test is
         undefined (too few segregating sites).
     """
+    _warn_unpolarized(haplotype_matrix, context="zeng_dh")
     D = tajimas_d(haplotype_matrix, population, missing_data=missing_data)
     H = normalized_fay_wus_h(haplotype_matrix, population, missing_data=missing_data)
 
@@ -1512,6 +1562,7 @@ def _zeng_dh_combine(D, H):
     return np.where(np.isfinite(D) & np.isfinite(H), dh, np.nan)
 
 
+@_polarization_dependent
 @_eager_only
 def max_daf(haplotype_matrix: HaplotypeMatrix,
             population: Optional[Union[str, list]] = None,
@@ -1534,6 +1585,7 @@ def max_daf(haplotype_matrix: HaplotypeMatrix,
         Maximum DAF in [0, 1], or NaN when ``'exclude'`` leaves no complete
         site.
     """
+    _warn_unpolarized(haplotype_matrix, context="max_daf")
 
     if population is not None:
         matrix = population_rows(haplotype_matrix, population)
@@ -1599,6 +1651,7 @@ def haplotype_count(haplotype_matrix: HaplotypeMatrix,
     return res[1]
 
 
+@_polarization_dependent
 @_eager_only
 def daf_histogram(matrix, n_bins: int = 20,
                   population: Optional[Union[str, list]] = None,
@@ -1625,6 +1678,7 @@ def daf_histogram(matrix, n_bins: int = 20,
         Normalized counts (sum to 1).
     bin_edges : ndarray, float64, shape (n_bins + 1,)
     """
+    _warn_unpolarized(matrix, context="daf_histogram")
 
     from .genotype_matrix import GenotypeMatrix
 
@@ -1752,6 +1806,7 @@ daf_histogram_diploid = _eager_only(_daf_histogram_diploid, name='daf_histogram_
 
 # Summary statistics combinations commonly used
 
+@_polarization_dependent
 @_eager_only
 def neutrality_tests(haplotype_matrix: HaplotypeMatrix,
                     population: Optional[Union[str, list]] = None,
@@ -1776,6 +1831,7 @@ def neutrality_tests(haplotype_matrix: HaplotypeMatrix,
     dict
         Dictionary with neutrality test results
     """
+    _warn_unpolarized(haplotype_matrix, context="neutrality_tests")
     return {
         'tajimas_d': tajimas_d(haplotype_matrix, population, missing_data),
         'fay_wus_h': fay_wus_h(haplotype_matrix, population, missing_data),

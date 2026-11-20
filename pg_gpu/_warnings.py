@@ -325,34 +325,49 @@ class UnphasedDataWarning(UserWarning):
     """
 
 
-# Nesting depth of ``_phase_dependent`` calls in the current context. A
-# phase-dependent function called by another one runs at depth > 1, and
-# ``_warn_unphased`` stays silent there, so one user call warns once.
-_phase_depth = contextvars.ContextVar('_phase_depth', default=0)
+def _depth_guard(name):
+    """A nesting counter and the decorator that keeps it.
 
-
-def _phase_dependent(func):
-    """Track nested calls so only the outermost phase-dependent call warns.
+    A statistic that warns about its input is decorated, and its warning
+    stays silent at a depth above 1: a decorated function that another one
+    calls is not the user's call, so one user call warns once. Each kind
+    of warning has its own counter.
 
     Decorated functions must not be generators; wrap lazy work separately.
     """
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        token = _phase_depth.set(_phase_depth.get() + 1)
-        try:
-            return func(*args, **kwargs)
-        finally:
-            _phase_depth.reset(token)
-    return wrapper
+    depth = contextvars.ContextVar(name, default=0)
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            token = depth.set(depth.get() + 1)
+            try:
+                return func(*args, **kwargs)
+            finally:
+                depth.reset(token)
+        return wrapper
+    return depth, decorator
 
 
-def _outside_phase_guard(func, *args, **kwargs):
-    """Run a user callable at phase-guard depth zero."""
-    token = _phase_depth.set(0)
+_phase_depth, _phase_dependent = _depth_guard('_phase_depth')
+_polar_depth, _polarization_dependent = _depth_guard('_polar_depth')
+
+
+def _scan_entry(func):
+    """Decorator for an entry point that may reach both kinds of
+    statistic: phase-dependent ones and ones of a derived state."""
+    return _phase_dependent(_polarization_dependent(func))
+
+
+def _outside_guards(func, *args, **kwargs):
+    """Run a user callable at depth zero of every guard, so a statistic
+    that it calls warns as it does for a direct call."""
+    tokens = [(depth, depth.set(0)) for depth in (_phase_depth, _polar_depth)]
     try:
         return func(*args, **kwargs)
     finally:
-        _phase_depth.reset(token)
+        for depth, token in reversed(tokens):
+            depth.reset(token)
 
 
 def _warn_unphased(matrix, *, context, alternative=None):
@@ -372,6 +387,41 @@ def _warn_unphased(matrix, *, context, alternative=None):
         "    from pg_gpu import UnphasedDataWarning\n"
         "    warnings.filterwarnings('ignore', category=UnphasedDataWarning)",
         UnphasedDataWarning, skip_file_prefixes=_PKG_PREFIXES,
+    )
+
+
+class UnpolarizedDataWarning(UserWarning):
+    """Warn when a statistic of a derived state uses data not marked polarized.
+
+    pg_gpu reads allele code 0 as the ancestral allele. On a matrix that is
+    not marked polarized, code 0 is whatever the input gave it, which for a
+    VCF is REF. Load with ``ancestral=`` or call ``polarize`` to recode by
+    an ancestral-allele tag, or call ``set_polarized()`` when code 0
+    already is the ancestral allele.
+    """
+
+
+def _warn_unpolarized(matrix, *, context):
+    """Warn when an unpolarized matrix reaches a statistic of a derived
+    state. Silent for an object with no ``polarized`` flag."""
+    if _polar_depth.get() > 1 or getattr(matrix, 'polarized', True) is not False:
+        return
+    # A stream has no polarize method; its recode is a matter of the load.
+    recode = "Load with ancestral='AA' (an INFO tag)" + (
+        " or call .polarize()" if hasattr(matrix, 'polarize') else "")
+    warnings.warn(
+        # "reads allele code 0 as the ancestral allele" is the phrase the
+        # test suite's warning filter keys on (pyproject.toml); a test pins it.
+        f"{context} reads allele code 0 as the ancestral allele, but this "
+        f"{type(matrix).__name__} is not marked polarized, so the result "
+        f"takes the allele that the input gave code 0 (REF, for a VCF) as "
+        f"ancestral. {recode} to recode by an ancestral-allele tag; if code "
+        "0 already is the ancestral allele, call .set_polarized(). To "
+        "silence:\n"
+        "    import warnings\n"
+        "    from pg_gpu import UnpolarizedDataWarning\n"
+        "    warnings.filterwarnings('ignore', category=UnpolarizedDataWarning)",
+        UnpolarizedDataWarning, skip_file_prefixes=_PKG_PREFIXES,
     )
 
 

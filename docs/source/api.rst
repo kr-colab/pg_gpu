@@ -47,6 +47,7 @@ are rejected.
    :members: iter_gpu_chunks, materialize, num_haplotypes, num_variants,
              chrom, chrom_start, chrom_end, sample_sets, align_bp,
              phased, set_phased, set_unphased, ploidy,
+             polarized, set_polarized, set_unpolarized,
              compute_ld_statistics_gpu_single_pop,
              compute_ld_statistics_gpu_two_pops
    :show-inheritance:
@@ -96,6 +97,11 @@ you have already understood and leave the rest on::
 
 .. autoclass:: pg_gpu.UnknownAncestralWarning
    :show-inheritance:
+
+.. autoclass:: pg_gpu.UnpolarizedDataWarning
+   :show-inheritance:
+
+   See :doc:`polarization` for which functions emit it.
 
 .. autoclass:: pg_gpu.MultiallelicCapWarning
    :show-inheritance:
