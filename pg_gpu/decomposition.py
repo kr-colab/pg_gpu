@@ -1271,6 +1271,11 @@ def _local_pca_with_jackknife(
     but too few for jackknife (``< max(k, 2) * n_blocks``) get valid
     eigvals/eigvecs but NaN ``jackknife_se``.
     """
+    if n_blocks < 2:
+        raise ValueError(
+            f"n_blocks must be at least 2 to leave one block out at a time, "
+            f"got {n_blocks}")
+
     from .windowed_analysis import WindowIterator, _window_prefix
 
     window_params = _resolve_window_params(
@@ -1792,7 +1797,8 @@ def lostruct(haplotype_matrix: "HaplotypeMatrix",
         is shared with the base eigendecomposition, so enabling this is
         much cheaper than calling ``local_pca_jackknife`` separately.
     n_blocks : int
-        Number of jackknife blocks per window when ``jackknife=True``.
+        Number of jackknife blocks per window when ``jackknife=True``
+        (at least 2).
         Ignored otherwise.
     jackknife_aggregate : {'mean', None}
         ``'mean'`` returns shape ``(n_windows, k)`` -- per-PC standard
@@ -1955,7 +1961,7 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
     Parameters
     ----------
     n_blocks : int
-        Number of jackknife blocks per window.
+        Number of jackknife blocks per window (at least 2).
     aggregate : {'mean', None}
         'mean' returns shape (n_windows, k) — per-PC SE averaged across
         samples (matches R's `mean(b)`). None returns the full
@@ -1967,6 +1973,11 @@ def local_pca_jackknife(haplotype_matrix: "HaplotypeMatrix",
         NaN rows for windows with fewer than `max(k, 2) * n_blocks` complete
         sites (counted after the `missing_data='exclude'` filter).
     """
+    if n_blocks < 2:
+        raise ValueError(
+            f"n_blocks must be at least 2 to leave one block out at a time, "
+            f"got {n_blocks}")
+
     _warn_unphased(haplotype_matrix, context="local_pca_jackknife")
 
     from .windowed_analysis import WindowIterator

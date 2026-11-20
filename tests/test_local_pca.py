@@ -619,6 +619,14 @@ class TestJackknife:
         assert se.shape == (expected_n_windows, 2, small_hm.num_haplotypes)
         assert np.all(np.isfinite(se) & (se >= 0))
 
+    @pytest.mark.parametrize('n_blocks', [0, 1])
+    def test_rejects_too_few_blocks(self, small_hm, n_blocks):
+        # n_blocks=1 leaves no data when the one block is left out, which
+        # silently gave an SE of 0 instead of raising or giving NaN.
+        with pytest.raises(ValueError, match="n_blocks"):
+            local_pca_jackknife(small_hm, window_size=200, window_type='snp',
+                                k=2, n_blocks=n_blocks)
+
     def test_sign_alignment_via_flip(self):
         """Sign-aligned variance is invariant to arbitrary pre-flips."""
         rng = np.random.default_rng(11)
@@ -637,6 +645,24 @@ class TestJackknife:
         with pytest.raises(ValueError, match="3 or 4 dims"):
             _sign_align_replicates(cp.zeros((2, 3)))
 
+    def test_include_window_with_every_call_missing_is_nan(self):
+        # The site count passes the gate under missing_data='include', but
+        # every call in this window is missing, so it standardizes to zero
+        # columns -- caught here by the block width (0 // n_blocks < 1),
+        # not by the site-count gate.
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (10, 30)).astype(np.int8)
+        hap[:, 10:20] = -1  # window 1 (sites 10-19): every call missing
+        hm = HaplotypeMatrix(hap, np.arange(30) * 100 + 1, 1, 3000)
+
+        se = local_pca_jackknife(hm, window_size=10, step_size=10,
+                                 window_type='snp', k=2, n_blocks=2,
+                                 missing_data='include', aggregate='mean')
+
+        assert np.isnan(se[1]).all()
+        assert np.isfinite(se[0]).all()
+        assert np.isfinite(se[2]).all()
+
 
 # ---------------------------------------------------------------------------
 # Fused local_pca + jackknife
@@ -644,6 +670,15 @@ class TestJackknife:
 
 
 class TestFusedJackknife:
+
+    @pytest.mark.parametrize('n_blocks', [0, 1])
+    def test_rejects_too_few_blocks(self, small_hm, n_blocks):
+        with pytest.raises(ValueError, match="n_blocks"):
+            _local_pca_with_jackknife(small_hm, window_size=200, window_type='snp',
+                                      k=2, n_blocks=n_blocks)
+        with pytest.raises(ValueError, match="n_blocks"):
+            lostruct(small_hm, window_size=200, window_type='snp', k=2,
+                     jackknife=True, n_corners=0, n_blocks=n_blocks)
 
     def test_fused_matches_separate(self, small_hm):
         k, n_blocks = 2, 5

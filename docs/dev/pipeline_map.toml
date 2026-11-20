@@ -2150,7 +2150,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN mds row for a window that pc_dist cannot compare; raises ValueError with fewer than 2 comparable windows"
+undefined = "NaN mds row for a window that pc_dist cannot compare; raises ValueError with fewer than 2 comparable windows, or with jackknife=True and n_blocks < 2"
 parallel = []
 notes = "With jackknife=True it calls _local_pca_with_jackknife and drops engine, tile_size, oversample, n_subspace_iter and random_state for the local PCA step."
 
@@ -2161,7 +2161,7 @@ inputs = ["HaplotypeMatrix"]
 streaming = "rejects"
 missing_data = ["include", "exclude"]
 span = "none"
-undefined = "NaN rows for a window with fewer than max(k, 2) * n_blocks complete sites (counted after the exclude filter), or whose calls are all missing; raises ValueError when there is no window"
+undefined = "NaN rows for a window with fewer than max(k, 2) * n_blocks complete sites (counted after the exclude filter), or whose calls are all missing; raises ValueError when there is no window, or when n_blocks < 2"
 parallel = ["decomposition._local_pca_with_jackknife"]
 notes = "windowed_analysis and lostruct use the private _local_pca_with_jackknife, which shares this gate (both compare the real site count, not one-hot columns); blocks still split the one-hot column axis, since that is what the Gram is built from."
 

@@ -1077,6 +1077,11 @@ Bug fixes
   are all missing standardizes to zero one-hot columns while its site
   count still clears the gate, so all four window-processing paths now
   also treat that as invalid.
+* ``local_pca_jackknife``, ``_local_pca_with_jackknife`` (``lostruct(jackknife=True)``
+  and ``windowed_analysis``) silently gave a jackknife SE of 0.0 for
+  ``n_blocks=1``: leaving out the only block empties every window, which
+  standardizes to a valid-looking all-zero Gram instead of NaN.
+  ``n_blocks < 2`` now raises ``ValueError``.
 
 New warnings
 ~~~~~~~~~~~~
