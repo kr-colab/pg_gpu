@@ -803,7 +803,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when variants exist but no site has two valid haplotypes, when span <= 0, or when 'exclude' empties a matrix that had variants; 0.0 with no variants at all; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.pi_components", "diversity.FrequencySpectrum.theta", "divergence._site_components_from_counts", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span, correcting for sites the population's own missing calls dropped from the sum; _fused_windowed_kernel_v2 has its own C copy of the per-site formula and gets the same rescale, from the var_count/count_valid_w it already returns."
+notes = "span_normalize=True rescales the raw sum by num_variants / n_sites_with_data before dividing by the span, correcting for sites the population's own missing calls dropped from the sum; _fused_windowed_kernel_v2 has its own C copy of the per-site formula and gets the same rescale, from the var_count/count_valid_w it already returns. FrequencySpectrum.theta('pi') is biallelic-restricted (BiallelicOnlyWarning on a dropped multiallelic site) and otherwise exact, including at a reference-absent two-allele site."
 
 [functions."diversity.theta_w"]
 # signature: (haplotype_matrix, population, span_normalize, missing_data)
@@ -814,7 +814,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when variants exist but no site has two valid haplotypes, when span <= 0, or when 'exclude' empties a matrix that had variants; 0.0 with no variants at all; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "Per site (alleles present - 1) * 1/a1(n_valid); FrequencySpectrum.theta sums xi instead and differs at reference-absent multiallelic sites. span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 computes the same per-site a1(n_valid) contribution and gets the same rescale."
+notes = "Per site (alleles present - 1) * 1/a1(n_valid); FrequencySpectrum.theta('watterson') is biallelic-restricted (BiallelicOnlyWarning on a dropped multiallelic site) and otherwise exact. span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 computes the same per-site a1(n_valid) contribution and gets the same rescale."
 
 [functions."diversity.tajimas_d"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -836,7 +836,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "0 when no site has two valid haplotypes"
 parallel = ["diversity._compute_thetas", "diversity.FrequencySpectrum.__init__", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "haplotype_matrix.HaplotypeMatrix.n_segregating_sites", "genotype_matrix.GenotypeMatrix.n_segregating_sites"]
-notes = "Counts mutations (alleles present - 1, so a triallelic site counts 2), not sites; haplotype_matrix.HaplotypeMatrix.n_segregating_sites counts sites (>= 2 distinct alleles present) via the same allele_counts primitive. genotype_matrix.GenotypeMatrix.n_segregating_sites uses a separate, genuinely biallelic dosage rule."
+notes = "Counts mutations (alleles present - 1, so a triallelic site counts 2), not sites; haplotype_matrix.HaplotypeMatrix.n_segregating_sites counts sites (>= 2 distinct alleles present) via the same allele_counts primitive. genotype_matrix.GenotypeMatrix.n_segregating_sites uses a separate, genuinely biallelic dosage rule. FrequencySpectrum.__init__ restricts to biallelic sites first (BiallelicOnlyWarning on a dropped multiallelic site), so its n_segregating counts only the retained sites, each contributing at most 1."
 
 [functions."diversity.singleton_count"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -891,7 +891,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when variants exist but no site has two valid haplotypes, when span <= 0, or when 'exclude' empties a matrix that had variants; 0.0 with no variants at all; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2", "windowed_analysis.windowed_statistics_fused", "windowed_analysis.windowed_statistics_fused_chunked"]
-notes = "span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 has its own C copy of the per-site formula and gets the same rescale."
+notes = "span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 has its own C copy of the per-site formula and gets the same rescale. FrequencySpectrum.theta('theta_h') is biallelic-restricted (BiallelicOnlyWarning on a dropped multiallelic site) and otherwise exact."
 
 [functions."diversity.theta_l"]
 # signature: (haplotype_matrix, population, span_normalize, missing_data)
@@ -902,7 +902,7 @@ missing_data = ["include", "exclude"]
 span = "get_span"
 undefined = "NaN when variants exist but no site has two valid haplotypes, when span <= 0, or when 'exclude' empties a matrix that had variants; 0.0 with no variants at all; span_normalize=False returns the raw sum unrescaled (0.0 when no site contributes)"
 parallel = ["diversity.FrequencySpectrum.theta", "windowed_analysis._windowed_thetas_scatter", "windowed_analysis._fused_windowed_kernel_v2"]
-notes = "span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 has its own C copy of the per-site formula and gets the same rescale. It equals (pi + theta_h) / 2 only at biallelic sites, so the fused kernel sums it on its own."
+notes = "span_normalize=True rescales by num_variants / n_sites_with_data before dividing by the span; _fused_windowed_kernel_v2 has its own C copy of the per-site formula and gets the same rescale. It equals (pi + theta_h) / 2 only at biallelic sites, so the fused kernel sums it on its own. FrequencySpectrum.theta('theta_l') is biallelic-restricted (BiallelicOnlyWarning on a dropped multiallelic site) and otherwise exact."
 
 [functions."diversity.normalized_fay_wus_h"]
 # signature: (haplotype_matrix, population, missing_data)
@@ -1064,7 +1064,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "all-zero array with no segregating derived allele; all-zero array of the full shape on streaming input with no variant"
 parallel = ["diversity.FrequencySpectrum.__init__"]
-notes = "FrequencySpectrum builds its own per-n SFS with the same 0 < count < n rule; streaming sums per-chunk results with _stream_sum."
+notes = "FrequencySpectrum.sfs_by_n (and its sfs() method) build the same per-n SFS with the same 0 < count < n rule, but only after restricting to biallelic sites (BiallelicOnlyWarning on a dropped multiallelic site), which sfs.sfs() itself does not do; streaming sums per-chunk results with _stream_sum."
 
 [functions."sfs.sfs_folded"]
 # signature: (haplotype_matrix, population, missing_data)

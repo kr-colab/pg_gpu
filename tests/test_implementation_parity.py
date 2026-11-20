@@ -398,9 +398,10 @@ def _supported_paths(stat):
 # ---------------------------------------------------------------------------
 
 _FS_MULTIALLELIC = (
-    "on multiallelic sites the FrequencySpectrum builds a per-allele SFS whose "
-    "segregating-class count and pi differ from the scalar's per-allele counts, "
-    "so the SFS-derived estimators that depend on them diverge. #100"
+    "FrequencySpectrum restricts to biallelic sites and drops a 3+-allele "
+    "site rather than counting it, so any estimator it feeds diverges from "
+    "the scalar functions (which cover every site) whenever the data has "
+    "genuinely multiallelic sites."
 )
 
 # (stat, path) -> list of (reason, conditions) rules; the first rule whose
@@ -410,7 +411,8 @@ _FS_MULTIALLELIC = (
 # skip is handled separately, so a fused rule with conditions=None never reaches
 # the (skipped) missing_exclude cell.
 _XFAILS = {
-    # FS per-allele SFS diverges from the scalar per-allele counts (multiallelic).
+    # FS drops multiallelic sites outright, so every FS-derived estimator
+    # diverges from the scalar functions on data with 3+-allele sites.
     ("tajimas_d", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("normalized_fay_wu_h", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("zeng_e", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
@@ -418,6 +420,12 @@ _XFAILS = {
     ("theta_w", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("segregating_sites", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("fay_wu_h", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("theta_h", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("theta_l", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("eta1", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("eta1_star", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("minus_eta1", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("minus_eta1_star", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
 }
 
 

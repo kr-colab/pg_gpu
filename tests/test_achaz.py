@@ -219,9 +219,13 @@ class TestCustomWeights:
 class TestNeutralModelValidation:
     """Validate estimators against known theta from msprime simulation."""
 
+    @pytest.mark.filterwarnings("ignore::pg_gpu._warnings.BiallelicOnlyWarning")
     def test_estimators_unbiased(self):
         """Under standard neutral model, all theta estimators should be
         unbiased: E[theta_hat] ≈ theta = 4 * N * mu * L."""
+        # msprime's default mutation model allows recurrent mutation, so a rare
+        # rep can land a 3+-allele site that FrequencySpectrum drops; harmless
+        # to this aggregate, many-replicate check.
         N = 10_000
         mu = 1e-8
         L = 100_000
@@ -253,8 +257,12 @@ class TestNeutralModelValidation:
             assert abs(mean_est - expected) / expected < 0.5, \
                 f"{name}: mean={mean_est:.2f}, expected={expected:.2f}"
 
+    @pytest.mark.filterwarnings("ignore::pg_gpu._warnings.BiallelicOnlyWarning")
     def test_tajimas_d_mean_near_zero(self):
         """Under neutrality, E[Tajima's D] ≈ 0."""
+        # msprime's default mutation model allows recurrent mutation, so a rare
+        # rep can land a 3+-allele site that FrequencySpectrum drops; harmless
+        # to this aggregate, many-replicate check.
         d_values = []
         for seed in range(50):
             ts = msprime.sim_ancestry(
@@ -386,6 +394,29 @@ class TestFrequencySpectrumEdges:
         assert fs.n_segregating == 0 and len(fs.sfs_by_n) > 1
         assert fs.suggest_projection_n() == fs.n_max
 
+    def test_suggest_projection_n_counts_reference_absent_site_once(self):
+        # A reference-absent two-allele site is one segregating site, but its
+        # two nonzero allele columns each land in sfs_by_n (the uncollapsed,
+        # per-allele histogram); suggest_projection_n must count it as one,
+        # as n_segregating (its denominator) already does, or it reaches
+        # retain_fraction too early and suggests a target_n that drops more
+        # real data than asked for.
+        hap = np.array([
+            [1, 1, 1],
+            [0, 1, 0],
+            [0, 1, 0],
+            [0, 2, 0],
+            [0, 2, 0],
+            [0, 2, 0],
+            [0, 2, -1],
+            [0, 2, -1],
+            [0, -1, -1],
+            [0, -1, -1],
+        ], dtype=np.int8)
+        fs = FrequencySpectrum(HaplotypeMatrix(hap, np.array([0, 100, 200]), 0, 3))
+        assert fs.n_segregating == 3
+        assert fs.suggest_projection_n(retain_fraction=0.9) == 6
+
     def test_sfs_method_paths(self, hm):
         single = FrequencySpectrum(hm)
         np.testing.assert_array_equal(single.sfs(),
@@ -402,6 +433,26 @@ class TestFrequencySpectrumEdges:
         proj = multi.project(target)
         assert proj.n_max == target
         assert list(proj.sfs_by_n) == [target]
+
+    def test_project_dropped_count_counts_reference_absent_site_once(self):
+        # A dropped group containing a reference-absent two-allele site is
+        # one true segregating site; the warning's count (like
+        # n_segregating) must not double it the way sfs_by_n does.
+        hap = np.array([
+            [1, 1],
+            [0, 1],
+            [0, 1],
+            [0, 2],
+            [0, 2],
+            [0, 2],
+            [0, 2],
+            [0, 2],
+            [0, -1],
+            [0, -1],
+        ], dtype=np.int8)
+        fs = FrequencySpectrum(HaplotypeMatrix(hap, np.array([0, 100]), 0, 2))
+        with pytest.warns(UserWarning, match=r"project\(10\): 1 segregating"):
+            fs.project(10)
 
     def test_empty_spectrum(self):
         # Under 'exclude', a missing call at every site leaves no complete

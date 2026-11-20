@@ -390,6 +390,11 @@ Built-in estimators: ``pi``, ``watterson``, ``theta_h``, ``theta_l``,
 ``eta1``, ``eta1_star``, ``minus_eta1``, ``minus_eta1_star``. Custom weight
 functions are also supported.
 
+``FrequencySpectrum`` restricts to biallelic sites (dropping a multiallelic
+one with a ``BiallelicOnlyWarning``, not approximating it) and its own
+``sfs()`` is not always the same array as the ``sfs`` module's functions;
+see :ref:`fs-vs-scalar` in the multiallelic sites guide.
+
 Dimensionality Reduction and Distance
 --------------------------------------
 
