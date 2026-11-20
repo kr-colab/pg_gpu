@@ -129,8 +129,8 @@ span = "n_total_sites and accessible_mask as given; a mask with no n_total_sites
 [inputs."HaplotypeMatrix.from_vcf"]
 params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields", "phased", "ancestral", "ancestral_lowercase_known", "polarized"]
 returns = "HaplotypeMatrix"
-span = "include_invariant=True sets the mask to the record positions (accessible._called_sites_mask; with accessible_bed, only those in the BED), so n_total_sites is the count of distinct called positions. accessible_bed sets the mask and n_total_sites, on the region's contig, else the VCF's; a VCF with several contigs needs region= (ValueError)."
-notes = "region is samtools style with an inclusive end; chrom_start and chrom_end come from the region, else from the first and last variant."
+span = "include_invariant=True sets the mask to the record positions (accessible._called_sites_mask; with accessible_bed, only those in the BED), so n_total_sites is the count of distinct called positions. accessible_bed sets the mask and n_total_sites, on the region's contig, else the VCF's."
+notes = "region is samtools style with an inclusive end; chrom_start and chrom_end come from the region, else from the first and last variant. Without region, a VCF with several contigs raises ValueError (accessible._data_contig): chrom_start/chrom_end are single scalars, so the matrix assumes one contig."
 
 [inputs."HaplotypeMatrix.from_zarr"]
 params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased", "ancestral", "ancestral_lowercase_known", "polarized"]
