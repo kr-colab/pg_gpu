@@ -87,7 +87,8 @@ def build_haplotype_matrix(gt, pos, *,
                            chrom_start=None, chrom_end=None,
                            sample_sets=None, n_total_sites=None,
                            samples=None, accessible_mask=None,
-                           allow_empty = False, ancestral_codes=None):
+                           allow_empty = False, ancestral_codes=None,
+                           polarized=False):
     """Build a HaplotypeMatrix from a raw VCZ-style genotype block.
 
     Parameters
@@ -103,6 +104,10 @@ def build_haplotype_matrix(gt, pos, *,
     ancestral_codes : array-like, int8, shape (n_var,), optional
         The code of the ancestral allele at each site; the block is
         recoded with ``swap_ancestral`` so that code 0 is ancestral.
+    polarized : bool
+        The ``polarized`` flag of the matrix. The caller sets it; a recode
+        by ``ancestral_codes`` does not, so a stream stays the one owner
+        of the flag of its chunks.
 
     The remaining kwargs are forwarded to ``HaplotypeMatrix.__init__``.
 
@@ -145,6 +150,7 @@ def build_haplotype_matrix(gt, pos, *,
         sample_sets=sample_sets, n_total_sites=n_total_sites,
         samples=samples, accessible_mask=accessible_mask,
         allow_empty=allow_empty, phased=phased, ploidy=ploidy,
+        polarized=polarized,
     )
 
 

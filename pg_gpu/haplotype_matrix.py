@@ -9,7 +9,7 @@ from collections import Counter, OrderedDict
 
 from .accessible import (AccessibleMask, _called_sites_mask, _data_contig, resolve_accessible_mask,
                          slice_fields)
-from .zarr_io import _distinct_contigs, parse_region, stored_phase
+from .zarr_io import _distinct_contigs, parse_region, stored_phase, stored_polarized
 from ._warnings import _phase_dependent, _warn_unphased
 
 
@@ -281,6 +281,18 @@ class HaplotypeMatrix:
     it. ``sample_sets`` therefore lists both gametes of each member, e.g.
     sample 3 contributes ``[6, 7]``.
 
+    Polarization
+    ------------
+    The statistics of a derived state (the unfolded SFS, ``theta_h``,
+    Fay and Wu's H, ``ihs``, ...) read allele code 0 as the ancestral
+    allele. The ``polarized`` flag records whether that is true of the
+    matrix. It defaults to ``False`` on the raw constructor and on
+    ``from_vcf``, where code 0 is REF, and is ``True`` from ``from_ts`` and
+    after a recode by ``ancestral=`` or ``polarize``. ``to_zarr`` saves it,
+    and ``from_zarr`` gives it back. Use ``set_polarized()`` to declare
+    that code 0 already is ancestral. Those statistics emit
+    ``UnpolarizedDataWarning`` on a matrix that is not marked.
+
     Ploidy
     ------
     ``ploidy`` is the number of rows per sample: 2 for the layout above, or
@@ -316,6 +328,9 @@ class HaplotypeMatrix:
         Genome accessibility mask.
     ploidy : int
         Haplotype rows per sample, 1 or 2 (default 2). See "Ploidy" above.
+    polarized : bool
+        Whether allele code 0 is the ancestral allele (default False). See
+        "Polarization" above.
     """
     def __init__(self,
                  genotypes,
@@ -330,6 +345,7 @@ class HaplotypeMatrix:
                  allow_empty: bool = False,
                  phased: bool = False,
                  ploidy: int = 2,
+                 polarized: bool = False,
                 ):
         # ``allow_empty`` is set only by the streaming chunk builder, which
         # yields zero-variant chunks over empty regions (e.g. an acrocentric
@@ -374,6 +390,7 @@ class HaplotypeMatrix:
         self.fields = dict(fields) if fields else {}
         self._phased = bool(phased)
         self.ploidy = ploidy   # property setter validates
+        self._polarized = bool(polarized)
 
         if accessible_mask is not None and not isinstance(accessible_mask, AccessibleMask):
             accessible_mask = resolve_accessible_mask(
@@ -520,6 +537,23 @@ class HaplotypeMatrix:
         self._phased = False
         return self
 
+    @property
+    def polarized(self):
+        """Whether allele code 0 is the ancestral allele at every site."""
+        return self._polarized
+
+    def set_polarized(self):
+        """Mark this matrix as polarized: code 0 already is the ancestral
+        allele. Changes no allele code; ``polarize`` recodes. Returns
+        ``self``."""
+        self._polarized = True
+        return self
+
+    def set_unpolarized(self):
+        """Mark this matrix as not polarized.  Returns ``self``."""
+        self._polarized = False
+        return self
+
     def set_accessible_mask(self, mask_or_path, chrom=None):
         """Attach an accessible site mask (non-destructive).
 
@@ -644,7 +678,8 @@ class HaplotypeMatrix:
                  samples: list = None, include_invariant: bool = False,
                  accessible_bed: str = None, fields: list = None,
                  phased: bool = False, ancestral: str = None,
-                 ancestral_lowercase_known: bool = True):
+                 ancestral_lowercase_known: bool = True,
+                 polarized: bool = False):
         """Construct a HaplotypeMatrix from a VCF file.
 
         Parameters
@@ -693,6 +728,10 @@ class HaplotypeMatrix:
         ancestral_lowercase_known : bool
             Many files write a low-confidence ancestral call in lower
             case. True (default) reads it as known, False as unknown.
+        polarized : bool
+            Whether allele code 0 (REF) already is the ancestral allele at
+            every site. Default ``False``. ``ancestral=`` makes it true by
+            a recode; this argument only declares it.
 
         Returns
         -------
@@ -765,11 +804,12 @@ class HaplotypeMatrix:
                      if fields else {})
 
         hm = cls(haplotypes, positions, chrom_start, chrom_end,
-                 samples=sample_names, fields=qc_fields, phased=phased)
+                 samples=sample_names, fields=qc_fields, phased=phased,
+                 polarized=polarized)
         if ancestral is not None:
             from .zarr_io import ancestral_codes
             alleles = np.column_stack([vcf['variants/REF'], vcf['variants/ALT']])
-            hm = hm._polarized(
+            hm = hm._polarize_by_codes(
                 ancestral_codes(vcf[f'variants/{ancestral}'], alleles,
                                 ancestral_lowercase_known),
                 context=f"from_vcf(ancestral={ancestral!r})")
@@ -792,7 +832,8 @@ class HaplotypeMatrix:
                   backend: str = "auto",
                   fields: list = None,
                   phased: bool = None, ancestral: str = None,
-                  ancestral_lowercase_known: bool = True):
+                  ancestral_lowercase_known: bool = True,
+                  polarized: bool = None):
         """Construct a HaplotypeMatrix from a Zarr store.
 
         Supports both VCZ (bio2zarr) and scikit-allel zarr layouts.
@@ -889,6 +930,12 @@ class HaplotypeMatrix:
         ancestral_lowercase_known : bool
             Many files write a low-confidence ancestral call in lower
             case. True (default) reads it as known, False as unknown.
+        polarized : bool, optional
+            Whether allele code 0 already is the ancestral allele at every
+            site. The default, ``None``, takes the flag that ``to_zarr``
+            recorded in the store (``False`` for a store with no record).
+            ``ancestral=`` makes it true by a recode; this argument only
+            declares it.
 
         Returns
         -------
@@ -917,6 +964,7 @@ class HaplotypeMatrix:
                 backend=backend, accessible_bed=accessible_bed,
                 phased=phased, ancestral=ancestral,
                 ancestral_lowercase_known=ancestral_lowercase_known,
+                polarized=polarized,
             )
 
         # 'auto' and 'never' both want eager when the matrix fits; 'auto'
@@ -942,18 +990,20 @@ class HaplotypeMatrix:
                 source=source, backend=backend, accessible_bed=accessible_bed,
                 phased=phased, ancestral=ancestral,
                 ancestral_lowercase_known=ancestral_lowercase_known,
+                polarized=polarized,
             )
         return cls._build_eager(path, region=region,
                                 accessible_bed=accessible_bed,
                                 pop_assignment=pop_assignment,
                                 fields=fields, phased=phased,
                                 ancestral=ancestral,
-                                ancestral_lowercase_known=ancestral_lowercase_known)
+                                ancestral_lowercase_known=ancestral_lowercase_known,
+                                polarized=polarized)
 
     @classmethod
     def _build_eager(cls, path, *, region, accessible_bed, pop_assignment,
                      fields=None, phased=None, ancestral=None,
-                     ancestral_lowercase_known=True):
+                     ancestral_lowercase_known=True, polarized=None):
         from .zarr_io import read_genotypes, read_qc_fields
         from ._gpu_genotype_prep import build_haplotype_matrix
 
@@ -995,13 +1045,17 @@ class HaplotypeMatrix:
                 region=region,
             )
 
-        # One handle serves the ancestral strings, the population lookup
-        # and the phase record.
+        # One handle serves the polarization record, the ancestral strings,
+        # the population lookup and the phase record.
         try:
             import zarr
             store = zarr.open_group(path, mode="r")
         except Exception:
             store = None
+        if polarized is None:
+            polarized = store is not None and stored_polarized(store)
+        if polarized:
+            hm.set_polarized()
 
         if ancestral is not None:
             if store is None:
@@ -1013,7 +1067,7 @@ class HaplotypeMatrix:
             # After the fields, so they are cut to the kept sites with the
             # matrix; before the mask, which then sees the final sites.
             from .zarr_io import read_ancestral_codes
-            hm = hm._polarized(
+            hm = hm._polarize_by_codes(
                 read_ancestral_codes(store, ancestral,
                                      data.get('variant_indices'),
                                      ancestral_lowercase_known),
@@ -1042,7 +1096,7 @@ class HaplotypeMatrix:
     def _build_streaming(cls, path, *, region, pop_assignment, chunk_bp,
                          prefetch, source=None, backend="auto",
                          accessible_bed=None, phased=None, ancestral=None,
-                         ancestral_lowercase_known=True):
+                         ancestral_lowercase_known=True, polarized=None):
         from .streaming_matrix import (
             HostChunkFetcher, KvikioChunkFetcher, StreamingHaplotypeMatrix,
             _pick_chunk_fetcher,
@@ -1061,10 +1115,14 @@ class HaplotypeMatrix:
         fetcher = _pick_chunk_fetcher(source, backend=backend)
         if phased is None:
             phased = stored_phase(source._store)
+        if polarized is None:
+            polarized = stored_polarized(source._store)
         if ancestral is not None:
             # Here and not in the constructor: the size probe of the eager
             # path builds a source too, and must not read the strings.
-            source.set_ancestral(ancestral, ancestral_lowercase_known)
+            source.set_ancestral(ancestral, ancestral_lowercase_known,
+                                 already_polarized=polarized)
+            polarized = True
 
         # Resolve an accessible BED once over the source's variant-position
         # bounds and hand it to the streaming matrix, so span-normalized
@@ -1079,7 +1137,7 @@ class HaplotypeMatrix:
             source, fetcher,
             chunk_bp=chunk_bp, prefetch=prefetch,
             accessible_mask=accessible_mask,
-            phased=phased,
+            phased=phased, polarized=polarized,
         )
 
     def to_zarr(self, zarr_path: str, format: str = 'vcz',
@@ -1112,14 +1170,15 @@ class HaplotypeMatrix:
         if format == 'vcz':
             write_vcz(zarr_path, gt, pos, self.samples,
                       contig_name=contig_name, fields=self.fields,
-                      phased=self.phased)
+                      phased=self.phased, polarized=self.polarized)
         elif format == 'scikit-allel':
             if self.fields:
                 raise NotImplementedError(
                     "Writing fields= round-trip is only supported for "
                     "format='vcz'; the scikit-allel writer has not been "
                     "extended yet.")
-            write_allel(zarr_path, gt, pos, self.samples, phased=self.phased)
+            write_allel(zarr_path, gt, pos, self.samples, phased=self.phased,
+                        polarized=self.polarized)
         else:
             raise ValueError(
                 f"Unknown format: {format!r}. Use 'vcz' or 'scikit-allel'."
@@ -1320,7 +1379,8 @@ class HaplotypeMatrix:
         if ploidy is None:
             ploidy = 2 if paired else 1
         hm = cls(haplotypes, positions, chrom_start, chrom_end,
-                 n_total_sites=n_total_sites, phased=phased, ploidy=ploidy)
+                 n_total_sites=n_total_sites, phased=phased, ploidy=ploidy,
+                 polarized=True)
         if accessible_bed is not None:
             hm.set_accessible_mask(accessible_bed, chrom=chrom)
 
@@ -1405,7 +1465,8 @@ class HaplotypeMatrix:
         last_pos = self.positions[-1] if self.positions.size > 0 else None
         return (f"HaplotypeMatrix(shape={self.shape}, "
                 f"first_position={first_pos}, last_position={last_pos}, "
-                f"phased={self.phased}, ploidy={self._ploidy})")
+                f"phased={self.phased}, ploidy={self._ploidy}, "
+                f"polarized={self._polarized})")
 
     def _empty_subset(self) -> "HaplotypeMatrix":
         """Build a copy of this matrix that holds no variants.
@@ -1426,6 +1487,7 @@ class HaplotypeMatrix:
         result._device = self._device
         result._phased = self._phased
         result._ploidy = self._ploidy
+        result._polarized = self._polarized
         result._sample_sets = self._sample_sets
         result.chrom_start = self.chrom_start
         result.chrom_end = self.chrom_end
@@ -1481,6 +1543,7 @@ class HaplotypeMatrix:
             fields=slice_fields(self.fields, positions, self._accessible_idx),
             phased=self._phased,
             ploidy=self._ploidy,
+            polarized=self._polarized,
         )
 
     def get_subset_from_range(self, low: int, high: int) -> "HaplotypeMatrix":
@@ -1538,6 +1601,7 @@ class HaplotypeMatrix:
             fields=slice_fields(self.fields, indices, self._accessible_idx),
             phased=self._phased,
             ploidy=self._ploidy,
+            polarized=self._polarized,
         )
 
     def _keep_sites(self, keep) -> "HaplotypeMatrix":
@@ -1564,6 +1628,7 @@ class HaplotypeMatrix:
             fields=slice_fields(self.fields, keep, self._accessible_idx),
             phased=self._phased,
             ploidy=self._ploidy,
+            polarized=self._polarized,
         )
 
     def restrict_to_biallelic(self, *, warn_context=None) -> "HaplotypeMatrix":
@@ -1877,13 +1942,17 @@ class HaplotypeMatrix:
             the codes, so a second call with the same strings changes
             nothing.
 
+        Raises
+        ------
+        ValueError
+            If the matrix is marked polarized and the ancestral allele has
+            a code other than 0 at some site: the recode would undo an
+            earlier one.
+
         Notes
         -----
-        The matrix does not record that it is polarized. A second call
-        with the same integer codes, or with the same strings and the
-        ``alleles`` of before the first call, changes the codes back.
-        Per-allele fields other than ``'allele'`` (``AC``, ``AF``) keep
-        their column order.
+        The result is marked polarized. Per-allele fields other than
+        ``'allele'`` (``AC``, ``AF``) keep their column order.
         """
         codes = np.asarray(ancestral)
         if not np.issubdtype(codes.dtype, np.integer):
@@ -1896,14 +1965,14 @@ class HaplotypeMatrix:
                     "match ancestral strings against: pass alleles=, or "
                     "load the matrix with fields=['allele'].")
             codes = ancestral_codes(codes, alleles, lowercase_known)
-        return self._polarized(codes, context="polarize")
+        return self._polarize_by_codes(codes, context="polarize")
 
-    def _polarized(self, codes, *, context):
+    def _polarize_by_codes(self, codes, *, context):
         """``polarize`` for integer ancestral codes; ``context`` names the
         caller in the warning for dropped sites."""
         from ._gpu_genotype_prep import swap_ancestral
         from ._warnings import _check_unknown_ancestral
-        from .zarr_io import swap_allele_columns
+        from .zarr_io import check_not_polarized_twice, swap_allele_columns
 
         n_var = self._haplotypes.shape[1]
         codes = np.asarray(codes)
@@ -1914,6 +1983,7 @@ class HaplotypeMatrix:
         if codes.size and int(codes.max()) > 127:
             raise ValueError("ancestral allele codes above 127 do not fit int8")
         codes = np.where(codes < 0, -1, codes).astype(np.int8)
+        check_not_polarized_twice(self._polarized, codes, context)
         known = np.flatnonzero(codes >= 0)
         _check_unknown_ancestral(n_var - known.size, n_var, context)
 
@@ -1939,7 +2009,7 @@ class HaplotypeMatrix:
             accessible_mask=self._accessible_mask,
             samples=self.samples,
             fields=slice_fields(fields, known),
-            phased=self._phased, ploidy=self._ploidy,
+            phased=self._phased, ploidy=self._ploidy, polarized=True,
         )
 
     def filter_variants_by_missing(self, max_missing_freq=0.1):
@@ -2067,6 +2137,7 @@ class HaplotypeMatrix:
             fields=new_fields,
             phased=self._phased,
             ploidy=self._ploidy,
+            polarized=self._polarized,
         )
 
     def summarize_missing_data(self):

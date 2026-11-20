@@ -9,7 +9,8 @@ import numpy as np
 import cupy as cp
 from typing import Optional, Union
 
-from ._warnings import _phase_dependent, _warn_unphased, _splits_individual
+from ._warnings import (_phase_dependent, _warn_unphased, _splits_individual,
+                        _warn_unpolarized)
 
 
 @_phase_dependent
@@ -75,6 +76,13 @@ def genetic_relatedness(haplotype_matrix, sample_sets=None, indexes=None, *,
     from ._memutil import estimate_variant_chunk_size
     from .streaming_matrix import StreamingHaplotypeMatrix
     from .haplotype_matrix import HaplotypeMatrix
+
+    if polarised:
+        # The polarised form leaves the ancestral allele out of the count.
+        # With centring, a biallelic site gives the same value either way,
+        # but a multiallelic one does not.
+        _warn_unpolarized(haplotype_matrix,
+                          context="genetic_relatedness (polarised=True)")
 
     # This list-of-row-lists parameter never passes the sample_sets setter,
     # so apply the same range and duplicate rules here. Without them an

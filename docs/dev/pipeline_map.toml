@@ -122,18 +122,18 @@ check = "The fused engines drop sites above an allele cap (windowed_analysis._Fu
 # ---------------------------------------------------------------------------
 
 [inputs."HaplotypeMatrix.__init__"]
-params = ["genotypes", "positions", "chrom_start", "chrom_end", "sample_sets", "n_total_sites", "samples", "accessible_mask", "fields", "allow_empty", "phased", "ploidy"]
+params = ["genotypes", "positions", "chrom_start", "chrom_end", "sample_sets", "n_total_sites", "samples", "accessible_mask", "fields", "allow_empty", "phased", "ploidy", "polarized"]
 returns = "HaplotypeMatrix"
 span = "n_total_sites and accessible_mask as given; a mask with no n_total_sites sets n_total_sites to the accessible bases in [chrom_start, chrom_end]."
 
 [inputs."HaplotypeMatrix.from_vcf"]
-params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields", "phased", "ancestral", "ancestral_lowercase_known"]
+params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields", "phased", "ancestral", "ancestral_lowercase_known", "polarized"]
 returns = "HaplotypeMatrix"
 span = "include_invariant=True sets the mask to the record positions (accessible._called_sites_mask; with accessible_bed, only those in the BED), so n_total_sites is the count of distinct called positions. accessible_bed sets the mask and n_total_sites, on the region's contig, else the VCF's; a VCF with several contigs needs region= (ValueError)."
 notes = "region is samtools style with an inclusive end; chrom_start and chrom_end come from the region, else from the first and last variant."
 
 [inputs."HaplotypeMatrix.from_zarr"]
-params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased", "ancestral", "ancestral_lowercase_known"]
+params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased", "ancestral", "ancestral_lowercase_known", "polarized"]
 returns = "HaplotypeMatrix, or StreamingHaplotypeMatrix when streaming='always', or 'auto' and the matrix does not fit"
 span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None. The BED contig is the region's, else the store's (eager and streaming alike); data on several contigs need region= (ValueError)."
 notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=. phased=None (the default) takes the flag that HaplotypeMatrix.to_zarr recorded in the store attribute zarr_io.PHASED_ATTR (zarr_io.stored_phase); a store with no record loads as unphased, since no loader infers phase from the calls. The matrix takes its ploidy (1 or 2) from the store's ploidy axis, eager and streaming (zarr_source.ZarrGenotypeSource reads it from the store metadata); GenotypeMatrix.from_zarr refuses a ploidy-1 store. ancestral= (an INFO tag, VCZ stores only) makes code 0 the ancestral allele and drops the sites with none: the eager path through HaplotypeMatrix.polarize, the streaming path in the source (zarr_source.ZarrGenotypeSource.set_ancestral drops the sites; the chunk builder recodes each block with _gpu_genotype_prep.swap_ancestral). The codes come from zarr_io.ancestral_codes on every path, from_vcf included. The genotype loaders have no ancestral=."
@@ -182,16 +182,17 @@ methods = [
     "has_invariant_info", "is_called", "is_missing", "load_pop_file",
     "locate_unlinked", "n_callable_sites", "n_invariant_sites",
     "n_segregating_sites", "num_haplotypes", "num_variants", "pairwise_LD_v",
-    "pairwise_r2", "phased", "ploidy", "polarize", "positions",
+    "pairwise_r2", "phased", "ploidy", "polarize", "polarized", "positions",
     "remove_accessible_mask",
     "restrict_to_biallelic", "restrict_to_segregating", "sample_sets",
-    "set_accessible_mask", "set_phased", "set_unphased", "shape",
+    "set_accessible_mask", "set_phased", "set_polarized", "set_unphased",
+    "set_unpolarized", "shape",
     "summarize_missing_data",
     "tally_gpu_haplotypes", "tally_gpu_haplotypes_two_pops",
     "tally_gpu_haplotypes_two_pops_with_missing", "to_zarr", "transfer_to_cpu",
     "transfer_to_gpu", "vcf_to_zarr", "watersons_theta", "windowed_r_squared",
 ]
-notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask, else gets its share of n_total_sites (haplotype_matrix._total_sites_share, the rule the windowed engines use). ploidy (1 or 2 rows per sample) follows every subset and copy, as phased does; to_zarr writes the store with it and raises when the rows or the sample names do not fit it. The consumers that pair rows into individuals (GenotypeMatrix.from_haplotype_matrix, heterozygosity_observed, fst_weir_cockerham scalar and windowed) call _warnings.require_diploid_rows and raise at ploidy 1. phased is always True at ploidy 1. get_population_matrix and population_rows give a ploidy-1 subset for a row list that does not make whole individuals, so a consumer that pairs rows raises on it. _warnings.require_whole_samples is the one check that rows divide into samples. polarize recodes code 0 to the ancestral allele (one swap rule for biallelic and multiallelic sites) and drops sites with none; it keeps the bounds, mask and n_total_sites, and swaps fields['allele'] with the codes. No matrix records that it is polarized."
+notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask, else gets its share of n_total_sites (haplotype_matrix._total_sites_share, the rule the windowed engines use). ploidy (1 or 2 rows per sample) follows every subset and copy, as phased does; to_zarr writes the store with it and raises when the rows or the sample names do not fit it. The consumers that pair rows into individuals (GenotypeMatrix.from_haplotype_matrix, heterozygosity_observed, fst_weir_cockerham scalar and windowed) call _warnings.require_diploid_rows and raise at ploidy 1. phased is always True at ploidy 1. get_population_matrix and population_rows give a ploidy-1 subset for a row list that does not make whole individuals, so a consumer that pairs rows raises on it. _warnings.require_whole_samples is the one check that rows divide into samples. polarize recodes code 0 to the ancestral allele (one swap rule for biallelic and multiallelic sites) and drops sites with none; it keeps the bounds, mask and n_total_sites, and swaps fields['allele'] with the codes. polarized (is code 0 the ancestral allele) follows every subset and copy, as phased does; to_zarr records it in the store attribute zarr_io.POLARIZED_ATTR and from_zarr reads it (polarized=None). The statistics whose value changes under a swap of ancestral and derived call _warnings._warn_unpolarized under the _warnings._polarization_dependent depth guard, so one user call warns once; the dispatchers and every windowed entry point (diversity_stats; windowed_analysis, the WindowedAnalyzer methods and the fused engines through windowed_analysis._warn_scan) key the warning on the names asked for (diversity._DERIVED_STATE_STATS, windowed_analysis._DERIVED_STATE_STATS), not on what an engine sums; a caller's own statistic runs through _warnings._outside_guards and warns as a direct call does. Statistics that depend on code 0 at multiallelic sites only (mu_sfs, the starred eta weights, FrequencySpectrum pi) do not warn and are pinned in that test. tests/test_unpolarized_warning.py decides the set by experiment: a new statistic must warn exactly when its value changes under the swap. A recode of marked data that would move code 0 raises (zarr_io.check_not_polarized_twice). GenotypeMatrix has no flag."
 
 [matrices.GenotypeMatrix]
 module = "genotype_matrix"
@@ -212,8 +213,9 @@ methods = [
     "chrom", "chrom_end", "chrom_start", "chunk_bp",
     "compute_ld_statistics_gpu_single_pop", "compute_ld_statistics_gpu_two_pops",
     "get_span", "haplotypes", "iter_gpu_chunks", "materialize",
-    "num_haplotypes", "num_variants", "phased", "ploidy", "sample_sets", "set_phased",
-    "set_unphased",
+    "num_haplotypes", "num_variants", "phased", "ploidy", "polarized",
+    "sample_sets", "set_phased", "set_polarized", "set_unphased",
+    "set_unpolarized",
 ]
 notes = "accessible_mask and n_total_sites are instance attributes: the loader sets accessible_mask from accessible_bed (and, for GenotypeMatrix.from_zarr with include_invariant=True, from the record positions) and leaves n_total_sites None. .haplotypes raises. iter_gpu_chunks yields closed chunks [s, s + chunk_bp - 1] as eager HaplotypeMatrix objects; each chunk and each materialize slice gets the mask, else its share of a hand-set n_total_sites (streaming_matrix._StreamingMatrixBase._attach_span); materialize(region=) gives an eager sub-region."
 
@@ -687,6 +689,7 @@ new_windowed_statistic = [
     "Add the name to the set of each engine that computes it (windowed_analysis module constants, windowed_analysis.StatisticsComputer for the fallback).",
     "Add a [windowed] row here, with a `not_in` entry for each engine family (scatter, fused, fallback) that does not compute it, and run tests/test_pipeline_map.py.",
     "Add the name to the batch dispatcher of its module if it has one, and to its `names` in [dispatch]; otherwise add the function to that dispatcher's `not_named`.",
+    "If its value changes when the ancestral and a derived allele change places, add the name to windowed_analysis._DERIVED_STATE_STATS (and to diversity._DERIVED_STATE_STATS for a diversity_stats name), and decorate the scalar function; tests/test_unpolarized_warning.py fails until the warning and the experiment agree.",
     "Test it alone, together with a name from each other engine family, with two populations, under 'include' and 'exclude', with and without a mask, and on a StreamingHaplotypeMatrix.",
     "Compare each engine with the scalar function on one window.",
 ]

@@ -73,6 +73,11 @@ h = HaplotypeMatrix.from_vcf("data.vcf.gz", accessible_bed="access.bed")
 # with no known ancestral allele are dropped (UnknownAncestralWarning).
 # Also on from_zarr (eager and streaming; needs a vcf_to_zarr store).
 h = HaplotypeMatrix.from_vcf("data.vcf.gz", ancestral="AA")
+
+# h.polarized records it (True after ancestral=, polarize() or from_ts).
+# The derived-state statistics emit UnpolarizedDataWarning on a matrix
+# that is not marked. If REF already is ancestral, declare it:
+h = HaplotypeMatrix.from_vcf("polarized.vcf.gz", polarized=True)   # or h.set_polarized()
 ```
 
 **Diploid VCFs**: loaded as 2×n_samples haplotypes (treated as phased).

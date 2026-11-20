@@ -16,7 +16,8 @@ from ._utils import _eager_only, population_rows
 from ._memutil import allele_counts
 from ._haplotype_groups import complete_sites, frequencies
 from ._haplotype_hash import garud_from_moments, garud_h_windows
-from ._warnings import _phase_dependent, _warn_unphased
+from ._warnings import (_phase_dependent, _polarization_dependent, _warn_unphased,
+                        _warn_unpolarized)
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +289,7 @@ garud_h_diploid = _eager_only(_garud_h_diploid, name='garud_h_diploid')
 # Public API: nSL / XP-nSL
 # ---------------------------------------------------------------------------
 
+@_polarization_dependent
 @_eager_only
 @_phase_dependent
 def nsl(haplotype_matrix: HaplotypeMatrix,
@@ -337,6 +339,7 @@ def nsl(haplotype_matrix: HaplotypeMatrix,
     truncates the scan and changes the scores; materialize the region eagerly
     for a chromosome-wide result.
     """
+    _warn_unpolarized(haplotype_matrix, context="nsl")
     _warn_unphased(haplotype_matrix, context="nsl")
 
     if population is not None:
@@ -470,6 +473,7 @@ def _cut_to_complete_sites(matrix, populations, pos, map_pos, fn_name):
     return matrix, pos, map_pos
 
 
+@_polarization_dependent
 @_eager_only
 @_phase_dependent
 def ihs(haplotype_matrix: HaplotypeMatrix,
@@ -543,6 +547,7 @@ def ihs(haplotype_matrix: HaplotypeMatrix,
     windowing, or a StreamingHaplotypeMatrix) truncates the scan and changes the
     scores; materialize the region eagerly for a chromosome-wide result.
     """
+    _warn_unpolarized(haplotype_matrix, context="ihs")
     _warn_unphased(haplotype_matrix, context="ihs")
 
     if population is not None:
