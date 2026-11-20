@@ -422,6 +422,48 @@ class TestFromVcf:
         assert gm.accessible_mask is not None
         assert gm.n_total_sites == 500 - gm.chrom_start + 1
 
+    @pytest.fixture
+    def indexed_vcf(self, tmp_path):
+        """A bgzipped, tabix-indexed VCF with the loaded positions as truth."""
+        import msprime
+        from .conftest import bgzip_index
+        ts = msprime.sim_ancestry(samples=10, sequence_length=20_000,
+                                  recombination_rate=1e-4, random_seed=7, ploidy=2)
+        ts = msprime.sim_mutations(ts, rate=1e-3, random_seed=7)
+        vcf = str(tmp_path / "r.vcf")
+        with open(vcf, "w") as f:
+            ts.write_vcf(f, contig_id="1")
+        path = bgzip_index(vcf)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            pos = cp.asnumpy(GenotypeMatrix.from_vcf(path).positions)
+        return path, pos
+
+    @pytest.mark.filterwarnings("ignore::pg_gpu.BiallelicOnlyWarning")
+    def test_region_sets_bounds_and_selects_variants(self, indexed_vcf):
+        path, pos = indexed_vcf
+        first, mid = int(pos[0]), int(pos[len(pos) // 2])
+        gm = GenotypeMatrix.from_vcf(path, region=f"1:{first}-{mid}")
+        got = cp.asnumpy(gm.positions)
+        assert int(got[-1]) == mid
+        assert len(got) == int(np.sum(pos <= mid))
+        assert (gm.chrom_start, gm.chrom_end) == (first, mid)
+
+    @pytest.mark.filterwarnings("ignore::pg_gpu.BiallelicOnlyWarning")
+    def test_samples_subsets_loaded_samples(self, indexed_vcf):
+        path, _ = indexed_vcf
+        full = GenotypeMatrix.from_vcf(path)
+        subset = GenotypeMatrix.from_vcf(path, samples=full.samples[:3])
+        assert subset.samples == full.samples[:3]
+        assert subset.num_individuals == 3
+
+    def test_empty_region_raises(self, indexed_vcf):
+        path, pos = indexed_vcf
+        past_the_end = int(pos[-1]) + 10_000
+        with pytest.raises(ValueError, match="No variants found"):
+            GenotypeMatrix.from_vcf(path, region=f"1:{past_the_end}-{past_the_end + 10}")
+
 
 class TestToZarr:
 

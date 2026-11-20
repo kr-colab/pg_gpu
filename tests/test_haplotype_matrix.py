@@ -883,6 +883,20 @@ def test_from_vcf_region_forms(indexed_vcf):
     np.testing.assert_array_equal(positions(f"1:{first:,}-{mid:,}"), got)
 
 
+def test_from_vcf_samples_subsets_loaded_samples(indexed_vcf):
+    path, _ = indexed_vcf
+    full = HaplotypeMatrix.from_vcf(path)
+    subset = HaplotypeMatrix.from_vcf(path, samples=full.samples[:3])
+    assert subset.samples == full.samples[:3]
+    assert subset.num_haplotypes == 6
+
+
+def test_from_vcf_empty_region_raises(indexed_vcf):
+    path, pos = indexed_vcf
+    past_the_end = int(pos[-1]) + 10_000
+    with pytest.raises(ValueError, match="No variants found"):
+        HaplotypeMatrix.from_vcf(path, region=f"1:{past_the_end}-{past_the_end + 10}")
+
 
 class TestFromTsRowOrder:
     """from_ts lays out rows by individual, not by ts.samples() order."""
