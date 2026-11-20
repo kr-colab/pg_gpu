@@ -9,7 +9,8 @@ Polarize by an ancestral-allele tag
 
 pg_gpu reads allele code 0 as the ancestral allele, and a VCF gives code
 0 to REF. ``HaplotypeMatrix.from_zarr`` and ``HaplotypeMatrix.from_vcf``
-now take ``ancestral='AA'`` (any INFO tag) and recode each site so that
+now take an ``ancestral`` argument (typically ``'AA'``, but any INFO tag
+in the VCF may be used) and recode each site so that
 code 0 is the allele that the tag names; ``HaplotypeMatrix.polarize``
 does the same for an array of ancestral alleles or allele codes. The
 statistics that read a derived state (the unfolded SFS, ``theta_h``,
@@ -30,8 +31,10 @@ and ``nsl``) are then correct on data whose REF is not ancestral.
   ``variant_allele``, as ``vcf_to_zarr`` writes, and works on the eager
   and the streaming path. A store from ``to_zarr`` has neither array and
   raises.
-* No matrix records that it is polarized, and no statistic warns on data
-  that are not. The genotype loaders do not take ``ancestral=``.
+* The ancestral state must be set explicitly for polarized statistics to
+  be correct. No matrix records that it is polarized, and no statistic
+  warns on data that are not. The genotype loaders do not take
+  ``ancestral=``.
 
 ``HaplotypeMatrix`` has a ``ploidy``, and haploid data round-trip through Zarr
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

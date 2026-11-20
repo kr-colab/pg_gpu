@@ -63,11 +63,18 @@ def swap_ancestral(haps, codes):
     if haps.dtype != cp.int8 or not haps.flags.c_contiguous:
         raise ValueError("haps must be a C-contiguous int8 array")
     n_var = haps.shape[1]
-    codes = cp.ascontiguousarray(cp.asarray(codes, dtype=cp.int8))
+    codes = cp.asarray(codes)
     if codes.shape != (n_var,):
         raise ValueError(
             f"one ancestral code per variant is needed: {n_var} variants, "
             f"codes of shape {codes.shape}")
+    # A code outside int8 would wrap in the cast below and name some other
+    # allele, with no error.
+    if codes.dtype.kind not in 'iu' or (
+            codes.size and not (-128 <= int(codes.min()) and int(codes.max()) <= 127)):
+        raise ValueError(
+            "ancestral codes must be integers that fit int8 (-128 to 127)")
+    codes = cp.ascontiguousarray(codes.astype(cp.int8, copy=False))
     size = haps.size
     if size:
         _SWAP_ANCESTRAL(((size + 255) // 256,), (256,),

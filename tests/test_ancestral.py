@@ -340,6 +340,14 @@ class TestSwapKernel:
         assert not (once == haps).all()
         assert (swap_ancestral(once, codes) == haps).all()
 
+    @pytest.mark.parametrize("codes", [np.array([0, 200, 1]), np.array([0, -300, 1]),
+                                       np.array([0.0, 1.0, 1.0])],
+                             ids=["above-int8", "below-int8", "not-integer"])
+    def test_codes_that_do_not_fit_int8_raise(self, codes):
+        # 200 as int8 is -56: the cast would name another allele in silence.
+        with pytest.raises(ValueError, match="fit int8"):
+            swap_ancestral(cp.zeros((2, 3), dtype=cp.int8), codes)
+
     def test_wrong_number_of_codes_raises(self):
         with pytest.raises(ValueError, match="one ancestral code per variant"):
             swap_ancestral(cp.zeros((2, 3), dtype=cp.int8), np.zeros(4, dtype=np.int8))
@@ -399,6 +407,18 @@ class TestErrors:
     def test_tag_not_in_the_vcf_header(self, binary):
         with pytest.raises(ValueError, match="no such INFO tag"):
             HaplotypeMatrix.from_vcf(binary.vcf, ancestral="ANC")
+
+    def test_store_that_does_not_open_as_a_group(self, binary, monkeypatch):
+        # The genotype reader opens the store in its own way, so a failure
+        # of the group handle must give its own error, not a TypeError
+        # from the reader of the ancestral strings.
+        import zarr
+
+        def fail(*args, **kwargs):
+            raise ValueError("no handle")
+        monkeypatch.setattr(zarr, "open_group", fail)
+        with pytest.raises(ValueError, match="could not open"):
+            HaplotypeMatrix.from_zarr(binary.vcz, ancestral="AA")
 
     def test_scikit_allel_store(self, binary, tmp_path):
         path = str(tmp_path / "allel.zarr")

@@ -1004,6 +1004,12 @@ class HaplotypeMatrix:
             store = None
 
         if ancestral is not None:
+            if store is None:
+                # The other two readers of the handle have a fallback; the
+                # ancestral strings have none.
+                raise ValueError(
+                    f"ancestral={ancestral!r}: could not open '{path}' as a "
+                    f"zarr group to read the ancestral alleles.")
             # After the fields, so they are cut to the kept sites with the
             # matrix; before the mask, which then sees the final sites.
             from .zarr_io import read_ancestral_codes
@@ -1849,9 +1855,9 @@ class HaplotypeMatrix:
         ancestral : array-like, shape (n_variants,)
             The ancestral allele of each site: either integer allele codes
             (-1 for unknown), or allele strings as a VCF ``AA`` tag gives
-            them, which need ``alleles``. It is aligned with the
-            underlying variant axis, as ``fields`` are, not with the view
-            that an accessible mask leaves.
+            them, which need ``alleles``. Its length must be the number of
+            variants that the matrix holds, not the number in the view
+            (subset) of variants that an accessible mask leaves.
         alleles : array-like of str, shape (n_variants, n_alleles), optional
             The allele strings of each site, REF first, to match string
             values of ``ancestral`` against. Default: ``fields['allele']``.
