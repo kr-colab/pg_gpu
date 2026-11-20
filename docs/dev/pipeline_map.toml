@@ -1427,7 +1427,7 @@ missing_data = ["include", "exclude"]
 span = "none"
 undefined = "NaN when one of the three ZnS values is NaN (for example fewer than two segregating sites) or the total ZnS is 0"
 parallel = []
-notes = "The total term uses every row of the matrix, not only pop1 and pop2."
+notes = "The total term reads only pop1 and pop2's rows, like the other two-population functions. Under missing_data='exclude', all three terms share one site set: sites are filtered once on the combined pop1 + pop2 rows, before any of the three ZnS values is computed."
 
 [functions."divergence.distance_based_stats"]
 # signature: (haplotype_matrix, pop1, pop2, missing_data)

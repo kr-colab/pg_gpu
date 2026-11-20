@@ -1056,6 +1056,14 @@ Bug fixes
   resampling instead. Every other block still contributes its own
   unweighted mean, matching scikit-allel exactly whenever no block is
   fully undefined.
+* ``divergence.zx``'s total ZnS term read every row of the matrix, not
+  only ``pop1`` and ``pop2``, so a third population in ``sample_sets``
+  changed the result. With ``missing_data='exclude'``, each of the three
+  ZnS terms also excluded sites based only on its own rows, so a call
+  missing in one population could be dropped from that population's term
+  and the total but kept in the other population's term. The total term
+  now reads only ``pop1`` and ``pop2``, and all three terms now share one
+  site set, filtered once on the combined ``pop1`` + ``pop2`` rows.
 
 New warnings
 ~~~~~~~~~~~~
