@@ -443,6 +443,85 @@ def read_genotypes_allel_grouped(store, region):
             'variant_indices': variant_indices, 'contigs': [chrom]}
 
 
+def ancestral_codes(ancestral, alleles, lowercase_known=True):
+    """The allele code of the ancestral allele at each site.
+
+    Parameters
+    ----------
+    ancestral : array-like of str, shape (n_variants,)
+        The ancestral allele of each site, as a VCF ``AA`` tag gives it.
+        Of a value with ``|`` (the Ensembl form, ``A|||``) the part before
+        the first ``|`` counts; spaces around it do not.
+    alleles : array-like of str, shape (n_variants, n_alleles)
+        The allele strings of each site: column 0 is REF, the next columns
+        are the ALT alleles, padded with ``''``.
+    lowercase_known : bool
+        Many files write a low-confidence ancestral call in lower case.
+        True (default) reads it as known; False reads it as unknown.
+
+    Returns
+    -------
+    ndarray, int8, shape (n_variants,)
+        The column of ``alleles`` that equals the ancestral allele, without
+        regard to case, or -1 where the state is unknown: an empty value,
+        or one that is none of the site's alleles, which is what the usual
+        placeholders (``.``, ``N``, ``-``) are.
+    """
+    # StringDType keeps one long indel allele from widening every element,
+    # which a fixed-width unicode array would do.
+    text = np.dtypes.StringDType()
+    anc = np.asarray(ancestral).astype(text)
+    alleles = np.asarray(alleles).astype(text)
+    if alleles.ndim != 2 or anc.shape != alleles.shape[:1]:
+        raise ValueError(
+            f"ancestral must have one value per variant and alleles one row "
+            f"per variant; got shapes {anc.shape} and {alleles.shape}")
+    if alleles.shape[1] > 127:
+        raise ValueError(
+            f"{alleles.shape[1]} allele columns; allele codes are int8")
+    anc = np.strings.strip(np.strings.partition(anc, np.array("|", dtype=text))[0])
+    upper = np.strings.upper(anc)
+    match = np.strings.upper(alleles) == upper[:, None]
+    # '' pads the allele columns and stands for a missing AA, so an empty
+    # value would match the padding of a site with fewer alleles.
+    known = match.any(axis=1) & (anc != "")
+    if not lowercase_known:
+        known &= anc == upper
+    return np.where(known, match.argmax(axis=1), -1).astype(np.int8)
+
+
+def read_ancestral_codes(store, tag, variant_indices=None,
+                         lowercase_known=True):
+    """``ancestral_codes`` for the variants of an open VCZ store, from its
+    ``variant_<tag>`` and ``variant_allele`` arrays.
+
+    Raises when the store has no such arrays: the ancestral state then
+    cannot be matched to allele codes, and a load that went on would give
+    statistics polarized by REF with no sign of it.
+    """
+    absent = [k for k in (f'variant_{tag}', 'variant_allele') if k not in store]
+    if absent:
+        raise ValueError(
+            f"ancestral={tag!r} needs the arrays {absent} that the store "
+            f"does not have. A VCZ store from HaplotypeMatrix.vcf_to_zarr "
+            f"(bio2zarr) has variant_allele, and variant_{tag} when the VCF "
+            f"has that INFO tag; a store from to_zarr or a scikit-allel "
+            f"store does not.")
+
+    strings = _read_qc_fields_vcz(store, [tag, 'allele'], variant_indices)
+    return ancestral_codes(strings[tag], strings['allele'], lowercase_known)
+
+
+def swap_allele_columns(alleles, codes):
+    """Allele strings with column 0 exchanged for the ancestral column at
+    each site, so the strings keep naming the codes after a recode."""
+    out = np.array(alleles, copy=True)
+    rows = np.flatnonzero(np.asarray(codes) > 0)
+    cols = np.asarray(codes)[rows].astype(np.int64)
+    out[rows, 0], out[rows, cols] = alleles[rows, cols], alleles[rows, 0]
+    return out
+
+
 # Store attribute that holds the ``phased`` flag of the HaplotypeMatrix that
 # wrote the store.
 PHASED_ATTR = 'pg_gpu_phased'

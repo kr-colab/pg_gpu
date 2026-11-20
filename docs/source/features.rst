@@ -15,6 +15,14 @@ Two marks flag statistics that depend on haplotype phase (see
 * :sup:`‡` depends on phase only on a ``HaplotypeMatrix``, and on a 
   ``GenotypeMatrix`` it uses a diploid version.
 
+Allele code 0 is read as the ancestral allele. The statistics of a derived
+state (``theta_h``, ``theta_l``, Fay and Wu's H, Zeng's E, ``max_daf``,
+``daf_histogram``, the unfolded ``sfs`` and ``joint_sfs``, and the sign of
+``ihs`` and ``nsl``) depend on it. A VCF gives code 0 to REF; pass
+the ``ancestral='INFO tag'`` (for example ``'AA'``) argument to
+``HaplotypeMatrix.from_vcf`` and ``from_zarr`` to recode by an
+ancestral-allele tag.
+
 Diversity Statistics
 --------------------
 

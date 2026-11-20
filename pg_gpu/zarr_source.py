@@ -111,6 +111,9 @@ class ZarrGenotypeSource:
     pop_cols : dict or None
         ``{pop_name: ndarray[hap_axis_indices]}`` when a pop file was
         resolved, else None.
+    ancestral_codes : ndarray or None
+        After ``set_ancestral``: the allele code of the ancestral allele of
+        each variant of the source, int8, length ``num_variants``.
     """
 
     def __init__(self, path, *, region=None, pop_assignment=None,
@@ -160,6 +163,36 @@ class ZarrGenotypeSource:
         self.num_variants = int(self.site_pos.size)
 
         self.pop_cols = self._resolve_pop_assignment(pop_assignment)
+        self.ancestral_codes = None
+        # The positions of the first and last variant. set_ancestral drops
+        # variants, and a drop must not move the bounds of the source.
+        self._mappable = ((int(self.site_pos[0]), int(self.site_pos[-1]))
+                          if self.num_variants else (0, 0))
+
+    def set_ancestral(self, tag, lowercase_known=True):
+        """Polarize the source by the INFO tag ``tag``.
+
+        Reads the ancestral allele and the allele strings of the source's
+        variants once, keeps their codes in ``ancestral_codes`` for the
+        chunk builder to recode with, and drops the variants with no known
+        ancestral allele from the source, so ``site_pos``,
+        ``num_variants`` and every slice hold the kept variants only. The
+        bounds (``mappable_lo``, ``mappable_hi`` and the chunk grid) stay
+        those of all the variants, as on the eager path.
+        """
+        from ._warnings import _check_unknown_ancestral
+        from .zarr_io import read_ancestral_codes
+        whole = self._zarr_var_indices.size == self._store["variant_position"].shape[0]
+        codes = read_ancestral_codes(
+            self._store, tag, None if whole else self._zarr_var_indices,
+            lowercase_known)
+        known = codes >= 0
+        _check_unknown_ancestral(codes.size - int(known.sum()), codes.size,
+                                 f"from_zarr(ancestral={tag!r})")
+        self._zarr_var_indices = self._zarr_var_indices[known]
+        self.site_pos = self.site_pos[known]
+        self.num_variants = int(self.site_pos.size)
+        self.ancestral_codes = codes[known]
 
     @property
     def region_start(self):
@@ -174,12 +207,12 @@ class ZarrGenotypeSource:
     @property
     def mappable_lo(self):
         """Position of the first variant in the source (or 0 if empty)."""
-        return int(self.site_pos[0]) if self.num_variants else 0
+        return self._mappable[0]
 
     @property
     def mappable_hi(self):
         """Position of the last variant in the source."""
-        return int(self.site_pos[-1]) if self.num_variants else 0
+        return self._mappable[1]
 
     @property
     def grid_start(self):
@@ -217,8 +250,10 @@ class ZarrGenotypeSource:
         if hi <= lo:
             return (np.empty((0, self.num_diploids, self.ploidy), np.int8),
                     np.empty(0, np.int64))
-        zlo, zhi = self._zarr_row_range(lo, hi)
+        zlo, zhi, rows = self._zarr_row_range(lo, hi)
         gt = np.asarray(self._store["call_genotype"][zlo:zhi])
+        if rows is not None:
+            gt = gt[rows]
         pos = self.site_pos[lo:hi].copy()
         return gt, pos
 
@@ -240,18 +275,28 @@ class ZarrGenotypeSource:
         if hi <= lo:
             return (cp.empty((0, self.num_diploids, self.ploidy), cp.int8),
                     np.empty(0, np.int64))
-        zlo, zhi = self._zarr_row_range(lo, hi)
+        zlo, zhi, rows = self._zarr_row_range(lo, hi)
         gt = cg[zlo:zhi]
+        if rows is not None:
+            gt = gt[cp.asarray(rows)]
         pos = self.site_pos[lo:hi].copy()
         return gt, pos
 
     def _zarr_row_range(self, lo, hi):
-        """Map an in-source row range ``[lo, hi)`` to the underlying
-        zarr ``call_genotype`` row range, accounting for the region
-        filter applied at construction."""
+        """Map an in-source row range ``[lo, hi)`` to the row range
+        ``[zlo, zhi)`` of the store's ``call_genotype``, and the rows of
+        that block that are the source's own.
+
+        The region filter leaves one run of rows, so the block is the
+        variants and ``rows`` is None. After ``set_ancestral`` drops
+        variants the run has other rows between them, and ``rows`` indexes
+        the kept ones within the block.
+        """
         zlo = int(self._zarr_var_indices[lo])
         zhi = int(self._zarr_var_indices[hi - 1]) + 1
-        return zlo, zhi
+        rows = (None if zhi - zlo == hi - lo
+                else self._zarr_var_indices[lo:hi] - zlo)
+        return zlo, zhi, rows
 
     def slice_subsample_gpu(self, left, right, hap_cols, *, cg):
         """Like ``slice_subsample(to_gpu=True)`` but reads chunks
@@ -284,7 +329,7 @@ class ZarrGenotypeSource:
         if hi <= lo:
             return (cp.empty((0, len(hap_cols)), cp.int8),
                     np.empty(0, np.int64))
-        zlo, zhi = self._zarr_row_range(lo, hi)
+        zlo, zhi, rows = self._zarr_row_range(lo, hi)
 
         dip_idx = hap_cols // self.ploidy
         copy_idx = hap_cols % self.ploidy
@@ -316,6 +361,8 @@ class ZarrGenotypeSource:
         block_gpu = (slabs[0] if len(slabs) == 1
                      else cp.concatenate(slabs, axis=1))
         del slabs
+        if rows is not None:
+            block_gpu = block_gpu[cp.asarray(rows)]
 
         # Final GPU fancy-index: for each requested hap_col, pick the
         # right (sample, copy) cell.
@@ -361,7 +408,7 @@ class ZarrGenotypeSource:
             empty = (cp.empty((0, len(hap_cols)), cp.int8) if to_gpu
                      else np.empty((0, len(hap_cols)), np.int8))
             return empty, np.empty(0, np.int64)
-        zlo, zhi = self._zarr_row_range(lo, hi)
+        zlo, zhi, rows = self._zarr_row_range(lo, hi)
 
         # Haplotype rows follow the canonical order, so hap j belongs to
         # sample j // ploidy at copy j % ploidy (dip j // 2, copy j % 2 for
@@ -385,6 +432,8 @@ class ZarrGenotypeSource:
         # sub-second.
         block_gpu = cp.asarray(block_host)
         del block_host
+        if rows is not None:
+            block_gpu = block_gpu[cp.asarray(rows)]
         gm_gpu = block_gpu[:, cp.asarray(inv, dtype=cp.int64),
                             cp.asarray(copy_idx, dtype=cp.int64)]
         del block_gpu

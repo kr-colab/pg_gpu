@@ -127,16 +127,16 @@ returns = "HaplotypeMatrix"
 span = "n_total_sites and accessible_mask as given; a mask with no n_total_sites sets n_total_sites to the accessible bases in [chrom_start, chrom_end]."
 
 [inputs."HaplotypeMatrix.from_vcf"]
-params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields", "phased"]
+params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields", "phased", "ancestral", "ancestral_lowercase_known"]
 returns = "HaplotypeMatrix"
 span = "include_invariant=True sets the mask to the record positions (accessible._called_sites_mask; with accessible_bed, only those in the BED), so n_total_sites is the count of distinct called positions. accessible_bed sets the mask and n_total_sites, on the region's contig, else the VCF's; a VCF with several contigs needs region= (ValueError)."
 notes = "region is samtools style with an inclusive end; chrom_start and chrom_end come from the region, else from the first and last variant."
 
 [inputs."HaplotypeMatrix.from_zarr"]
-params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased"]
+params = ["path", "region", "accessible_bed", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields", "phased", "ancestral", "ancestral_lowercase_known"]
 returns = "HaplotypeMatrix, or StreamingHaplotypeMatrix when streaming='always', or 'auto' and the matrix does not fit"
 span = "accessible_bed only; there is no include_invariant, so n_total_sites stays None. The BED contig is the region's, else the store's (eager and streaming alike); data on several contigs need region= (ValueError)."
-notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=. phased=None (the default) takes the flag that HaplotypeMatrix.to_zarr recorded in the store attribute zarr_io.PHASED_ATTR (zarr_io.stored_phase); a store with no record loads as unphased, since no loader infers phase from the calls. The matrix takes its ploidy (1 or 2) from the store's ploidy axis, eager and streaming (zarr_source.ZarrGenotypeSource reads it from the store metadata); GenotypeMatrix.from_zarr refuses a ploidy-1 store."
+notes = "Reads VCZ and scikit-allel layouts (zarr_io). The streaming path rejects fields=. phased=None (the default) takes the flag that HaplotypeMatrix.to_zarr recorded in the store attribute zarr_io.PHASED_ATTR (zarr_io.stored_phase); a store with no record loads as unphased, since no loader infers phase from the calls. The matrix takes its ploidy (1 or 2) from the store's ploidy axis, eager and streaming (zarr_source.ZarrGenotypeSource reads it from the store metadata); GenotypeMatrix.from_zarr refuses a ploidy-1 store. ancestral= (an INFO tag, VCZ stores only) makes code 0 the ancestral allele and drops the sites with none: the eager path through HaplotypeMatrix.polarize, the streaming path in the source (zarr_source.ZarrGenotypeSource.set_ancestral drops the sites; the chunk builder recodes each block with _gpu_genotype_prep.swap_ancestral). The codes come from zarr_io.ancestral_codes on every path, from_vcf included. The genotype loaders have no ancestral=."
 
 [inputs."HaplotypeMatrix.from_ts"]
 params = ["ts", "device", "include_invariant", "accessible_bed", "chrom", "phased", "ploidy"]
@@ -182,7 +182,8 @@ methods = [
     "has_invariant_info", "is_called", "is_missing", "load_pop_file",
     "locate_unlinked", "n_callable_sites", "n_invariant_sites",
     "n_segregating_sites", "num_haplotypes", "num_variants", "pairwise_LD_v",
-    "pairwise_r2", "phased", "ploidy", "positions", "remove_accessible_mask",
+    "pairwise_r2", "phased", "ploidy", "polarize", "positions",
+    "remove_accessible_mask",
     "restrict_to_biallelic", "restrict_to_segregating", "sample_sets",
     "set_accessible_mask", "set_phased", "set_unphased", "shape",
     "summarize_missing_data",
@@ -190,7 +191,7 @@ methods = [
     "tally_gpu_haplotypes_two_pops_with_missing", "to_zarr", "transfer_to_cpu",
     "transfer_to_gpu", "vcf_to_zarr", "watersons_theta", "windowed_r_squared",
 ]
-notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask, else gets its share of n_total_sites (haplotype_matrix._total_sites_share, the rule the windowed engines use). ploidy (1 or 2 rows per sample) follows every subset and copy, as phased does; to_zarr writes the store with it and raises when the rows or the sample names do not fit it. The consumers that pair rows into individuals (GenotypeMatrix.from_haplotype_matrix, heterozygosity_observed, fst_weir_cockerham scalar and windowed) call _warnings.require_diploid_rows and raise at ploidy 1. phased is always True at ploidy 1. get_population_matrix and population_rows give a ploidy-1 subset for a row list that does not make whole individuals, so a consumer that pairs rows raises on it. _warnings.require_whole_samples is the one check that rows divide into samples."
+notes = "get_span is the scalar span rule. Subsets (get_subset, get_subset_from_range, population_rows) keep n_total_sites; a range subset recounts it from the mask, else gets its share of n_total_sites (haplotype_matrix._total_sites_share, the rule the windowed engines use). ploidy (1 or 2 rows per sample) follows every subset and copy, as phased does; to_zarr writes the store with it and raises when the rows or the sample names do not fit it. The consumers that pair rows into individuals (GenotypeMatrix.from_haplotype_matrix, heterozygosity_observed, fst_weir_cockerham scalar and windowed) call _warnings.require_diploid_rows and raise at ploidy 1. phased is always True at ploidy 1. get_population_matrix and population_rows give a ploidy-1 subset for a row list that does not make whole individuals, so a consumer that pairs rows raises on it. _warnings.require_whole_samples is the one check that rows divide into samples. polarize recodes code 0 to the ancestral allele (one swap rule for biallelic and multiallelic sites) and drops sites with none; it keeps the bounds, mask and n_total_sites, and swaps fields['allele'] with the codes. No matrix records that it is polarized."
 
 [matrices.GenotypeMatrix]
 module = "genotype_matrix"

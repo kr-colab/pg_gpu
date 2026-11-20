@@ -4,6 +4,38 @@ Changelog
 Unreleased
 ----------
 
+Polarize by an ancestral-allele tag
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+pg_gpu reads allele code 0 as the ancestral allele, and a VCF gives code
+0 to REF. ``HaplotypeMatrix.from_zarr`` and ``HaplotypeMatrix.from_vcf``
+now take an ``ancestral`` argument (typically ``'AA'``, but any INFO tag
+in the VCF may be used) and recode each site so that
+code 0 is the allele that the tag names; ``HaplotypeMatrix.polarize``
+does the same for an array of ancestral alleles or allele codes. The
+statistics that read a derived state (the unfolded SFS, ``theta_h``,
+``theta_l``, Fay and Wu's H, Zeng's E, ``max_daf``, the sign of ``ihs``
+and ``nsl``) are then correct on data whose REF is not ancestral.
+
+* At a site whose ancestral allele is an ALT allele, that allele's code
+  and code 0 change places, so a multiallelic site keeps its other codes.
+* A site with no known ancestral allele (an empty value, or one that is
+  none of the site's alleles, such as ``.`` or ``N``) is dropped, with an
+  ``UnknownAncestralWarning`` that gives the count. The accessible mask
+  and the span do not change, so per-base statistics still divide by
+  bases that include the dropped sites.
+* A lower-case (low-confidence) value counts as known;
+  ``ancestral_lowercase_known=False`` makes it unknown. Of a value in the
+  Ensembl form (``A|||``), the part before the first ``|`` counts.
+* ``from_zarr`` needs a VCZ store with ``variant_<tag>`` and
+  ``variant_allele``, as ``vcf_to_zarr`` writes, and works on the eager
+  and the streaming path. A store from ``to_zarr`` has neither array and
+  raises.
+* The ancestral state must be set explicitly for polarized statistics to
+  be correct. No matrix records that it is polarized, and no statistic
+  warns on data that are not. The genotype loaders do not take
+  ``ancestral=``.
+
 ``HaplotypeMatrix`` has a ``ploidy``, and haploid data round-trip through Zarr
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

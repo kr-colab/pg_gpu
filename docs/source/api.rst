@@ -94,6 +94,9 @@ you have already understood and leave the rest on::
    See :doc:`phasing` for which functions emit it and their unphased
    alternatives.
 
+.. autoclass:: pg_gpu.UnknownAncestralWarning
+   :show-inheritance:
+
 .. autoclass:: pg_gpu.MultiallelicCapWarning
    :show-inheritance:
 

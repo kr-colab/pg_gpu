@@ -548,6 +548,7 @@ class _StreamingMatrixBase:
                 gt, pos,
                 chrom_start=int(left), chrom_end=int(right),
                 sample_sets=self._sample_sets,
+                **self._ancestral_kwargs(left, right),
             )
             self._attach_span(m, int(left), int(right))
             yield int(left), int(right), m
@@ -677,9 +678,20 @@ class _StreamingMatrixBase:
             gt, pos,
             chrom_start=left, chrom_end=right,
             sample_sets=sets,
+            **self._ancestral_kwargs(left, right),
         )
         self._attach_span(m, left, right)
         return m
+
+    def _ancestral_kwargs(self, left, right):
+        """The ancestral codes of the variants in ``[left, right]`` as a
+        keyword for the chunk builder, which recodes the block with them;
+        empty for a source that is not polarized."""
+        codes = getattr(self._source, 'ancestral_codes', None)
+        if codes is None:
+            return {}
+        lo, hi = self._source._site_index_range(left, right)
+        return {'ancestral_codes': codes[lo:hi]}
 
     def _renumber_sets(self, sets, sample_subset):
         """Sets renumbered into the subset's row space; rows the subset

@@ -30,12 +30,64 @@ fully-missing row (no valid dosage exists), matching the eager from_vcf loader.
 import cupy as cp
 
 
+# Exchange allele code 0 with the ancestral allele's code at each site. A
+# negative value is a missing call or ploidy padding and stays as it is.
+_SWAP_ANCESTRAL = cp.RawKernel(r'''
+extern "C" __global__
+void swap_ancestral(signed char* haps, const signed char* code,
+                    const long long n_var, const long long size) {
+    long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    signed char a = code[idx % n_var];
+    if (a <= 0) return;
+    signed char h = haps[idx];
+    if (h == 0) haps[idx] = a;
+    else if (h == a) haps[idx] = 0;
+}
+''', 'swap_ancestral')
+
+
+def swap_ancestral(haps, codes):
+    """Make allele code 0 the ancestral allele, in place.
+
+    Parameters
+    ----------
+    haps : cupy.ndarray, int8, shape (n_hap, n_var), C-contiguous
+        Allele codes; negative is missing.
+    codes : array-like, int8, shape (n_var,)
+        The code of the ancestral allele at each site. At a site with code
+        ``a > 0``, codes 0 and ``a`` change places, so a multiallelic site
+        keeps its other codes. A site with code 0 or -1 (unknown) does not
+        change.
+    """
+    if haps.dtype != cp.int8 or not haps.flags.c_contiguous:
+        raise ValueError("haps must be a C-contiguous int8 array")
+    n_var = haps.shape[1]
+    codes = cp.asarray(codes)
+    if codes.shape != (n_var,):
+        raise ValueError(
+            f"one ancestral code per variant is needed: {n_var} variants, "
+            f"codes of shape {codes.shape}")
+    # A code outside int8 would wrap in the cast below and name some other
+    # allele, with no error.
+    if codes.dtype.kind not in 'iu' or (
+            codes.size and not (-128 <= int(codes.min()) and int(codes.max()) <= 127)):
+        raise ValueError(
+            "ancestral codes must be integers that fit int8 (-128 to 127)")
+    codes = cp.ascontiguousarray(codes.astype(cp.int8, copy=False))
+    size = haps.size
+    if size:
+        _SWAP_ANCESTRAL(((size + 255) // 256,), (256,),
+                        (haps, codes, cp.int64(n_var), cp.int64(size)))
+    return haps
+
+
 def build_haplotype_matrix(gt, pos, *,
                            phased,
                            chrom_start=None, chrom_end=None,
                            sample_sets=None, n_total_sites=None,
                            samples=None, accessible_mask=None,
-                           allow_empty = False):
+                           allow_empty = False, ancestral_codes=None):
     """Build a HaplotypeMatrix from a raw VCZ-style genotype block.
 
     Parameters
@@ -48,6 +100,9 @@ def build_haplotype_matrix(gt, pos, *,
         ``ploidy`` from it.
     pos : ndarray, shape (n_var,)
         Variant positions. Host or device.
+    ancestral_codes : array-like, int8, shape (n_var,), optional
+        The code of the ancestral allele at each site; the block is
+        recoded with ``swap_ancestral`` so that code 0 is ancestral.
 
     The remaining kwargs are forwarded to ``HaplotypeMatrix.__init__``.
 
@@ -79,6 +134,8 @@ def build_haplotype_matrix(gt, pos, *,
         gt_gpu.reshape(n_var, ploidy * n_samples).T
     )
     del gt_gpu
+    if ancestral_codes is not None:
+        swap_ancestral(haps, ancestral_codes)
 
     positions = cp.asarray(pos)
 

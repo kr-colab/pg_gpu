@@ -53,6 +53,10 @@ you should use ``GenotypeMatrix`` (see "HaplotypeMatrix vs GenotypeMatrix" below
    # Load a subset of samples
    h = HaplotypeMatrix.from_vcf("data.vcf.gz", samples=["ind1", "ind2", "ind3"])
 
+   # Polarize by the AA tag: allele 0 becomes the ancestral allele, which
+   # the unfolded SFS, theta_h and Fay and Wu's H read as such
+   h = HaplotypeMatrix.from_vcf("data.vcf.gz", ancestral="AA")
+
    # From NumPy array (n_haplotypes, n_variants)
    import numpy as np
    hap = np.array([[0, 1, 0], [1, 0, 1]], dtype=np.int8)
