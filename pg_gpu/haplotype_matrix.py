@@ -796,7 +796,7 @@ class HaplotypeMatrix:
                 chrom_start = start
             if stop is not None:
                 chrom_end = stop - 1
-        elif accessible_bed is not None and 'variants/CHROM' in vcf:
+        elif 'variants/CHROM' in vcf:
             chrom = _data_contig(_distinct_contigs(vcf['variants/CHROM']),
                                  f"VCF {path}", "load one contig with region=")
 
