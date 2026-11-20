@@ -297,6 +297,10 @@ def _window_mean_het_expected(matrix, missing_data):
     return float(np.nanmean(he))
 
 
+_LD_MAX_DISTANCE_DEFAULT = 10000
+"""Default ``ld_max_distance`` for ``mean_r2`` and ``ld_decay``."""
+
+
 class StatisticsComputer:
     """Computes population genetics statistics for windows."""
 
@@ -316,7 +320,7 @@ class StatisticsComputer:
                  populations: Optional[List[str]] = None,
                  custom_stat_kwargs: Optional[Dict] = None,
                  ld_bins: Optional[List[int]] = None,
-                 ld_max_distance: int = 10000,
+                 ld_max_distance: int = _LD_MAX_DISTANCE_DEFAULT,
                  missing_data: str = 'include',
                  span_normalize=True):
         self.statistics = statistics
@@ -453,8 +457,12 @@ class StatisticsComputer:
             # mean_r2 took `max_dist`, ld_decay took `max_distance`; accept
             # either as an alias for the other, and fall back to
             # ld_max_distance when neither is given.
+            if 'max_dist' in kwargs and 'max_distance' in kwargs:
+                raise TypeError(
+                    "pass only one of max_dist or max_distance; they are "
+                    "aliases for the same argument.")
             if 'max_dist' in kwargs:
-                kwargs.setdefault('max_distance', kwargs.pop('max_dist'))
+                kwargs['max_distance'] = kwargs.pop('max_dist')
             kwargs.setdefault('max_distance', self.ld_max_distance)
             results[stat] = self.LD_STATS[stat](window, **kwargs)
 
@@ -700,7 +708,7 @@ class WindowedAnalyzer:
                  statistics: List[Union[str, Callable]] = ['pi'],
                  populations: Optional[List[str]] = None,
                  regions: Optional[pd.DataFrame] = None,
-                 ld_max_distance: int = 10000,
+                 ld_max_distance: int = _LD_MAX_DISTANCE_DEFAULT,
                  ld_bins: Optional[List[int]] = None,
                  gpu_memory_limit: Union[str, int] = 'auto',
                  chunk_size: Union[str, int] = 'auto',
