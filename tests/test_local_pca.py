@@ -731,6 +731,27 @@ class TestFusedJackknife:
         assert np.isfinite(se_direct[0]).all()
         assert np.isfinite(se_fused[0]).all()
 
+    def test_fused_include_window_with_every_call_missing_is_nan(self):
+        """Mirrors TestNanHandling.test_include_window_with_every_call_missing_is_nan
+        for the fused jackknife path: the site count passes the gate under
+        missing_data='include', but every call in this window is missing, so
+        it standardizes to zero columns. _local_pca_with_jackknife must give
+        NaN eigvals/sumsq/jackknife_se for it, not eigvals [0, 0]."""
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (10, 30)).astype(np.int8)
+        hap[:, 10:20] = -1  # window 1 (sites 10-19): every call missing
+        hm = HaplotypeMatrix(hap, np.arange(30) * 100 + 1, 1, 3000)
+
+        result = _local_pca_with_jackknife(hm, window_size=10, step_size=10,
+                                           window_type='snp', k=2, n_blocks=2,
+                                           missing_data='include', aggregate='mean')
+
+        assert np.isnan(result.eigvals[1]).all()
+        assert np.isnan(result.sumsq[1])
+        assert np.isnan(result.jackknife_se[1]).all()
+        assert np.isfinite(result.eigvals[0]).all()
+        assert np.isfinite(result.eigvals[2]).all()
+
     def test_fused_tiny_window_yields_nan(self, small_hm, sparse_regions):
         # A one-variant region can form neither PCs nor jackknife blocks, so
         # its eigenvalue row and SE block are NaN while the others stay finite.
