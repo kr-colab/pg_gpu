@@ -99,6 +99,25 @@ def test_windowed_ld_decay_matches_mean_r2(hm):
                                rtol=1e-9, atol=1e-12)
 
 
+@pytest.mark.parametrize("stat", ["mean_r2", "ld_decay"])
+def test_windowed_ld_stats_default_distance(hm, stat):
+    # With no custom_stat_kwargs at all, both LD statistics must use
+    # WindowedAnalyzer's own ld_max_distance default (10000), not raise.
+    r = _single(hm, [stat])
+    np.testing.assert_allclose(r[stat], float(_compute_mean_r2(hm, 10000)),
+                               rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("stat", ["mean_r2", "ld_decay"])
+def test_windowed_ld_max_distance_takes_effect(hm, stat):
+    # ld_max_distance must change the result, and match the equivalent
+    # custom_stat_kwargs spelling.
+    r = _single(hm, [stat], ld_max_distance=20000)
+    np.testing.assert_allclose(r[stat], float(_compute_mean_r2(hm, 20000)),
+                               rtol=1e-9, atol=1e-12)
+    assert not np.isclose(r[stat], float(_compute_mean_r2(hm, 10000)))
+
+
 def test_windowed_distribution_moments_match_scalar(hm):
     r = _single(hm, ["dist_var", "dist_skew", "dist_kurt"])
     np.testing.assert_allclose(
