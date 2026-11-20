@@ -209,6 +209,22 @@ def test_from_vcf_with_several_contigs_raises(two_contig_vcf, cls):
         cls.from_vcf(vcf, accessible_bed=bed)
 
 
+def test_from_vcf_without_region_raises_for_several_contigs(two_contig_vcf):
+    # No accessible_bed at all: this used to load silently, concatenating
+    # both contigs' positions into one coordinate axis.
+    vcf, _ = two_contig_vcf
+    with pytest.raises(ValueError, match="variants on 2 contigs"):
+        HaplotypeMatrix.from_vcf(vcf)
+
+
+def test_genotype_from_vcf_without_bed_raises_for_several_contigs(two_contig_vcf):
+    # GenotypeMatrix.from_vcf has no region=, so this is its only guard
+    # against a multi-contig VCF.
+    vcf, _ = two_contig_vcf
+    with pytest.raises(ValueError, match="variants on 2 contigs"):
+        GenotypeMatrix.from_vcf(vcf)
+
+
 def test_from_vcf_region_selects_one_contig(two_contig_vcf):
     vcf, bed = two_contig_vcf
     hm = HaplotypeMatrix.from_vcf(vcf, region="2", accessible_bed=bed)

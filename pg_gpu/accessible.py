@@ -213,14 +213,13 @@ def _show_contigs(contigs):
 
 def _data_contig(contigs, source, remedy):
     """The contig of data whose variants lie on ``contigs``, or None when the
-    data name none. An accessible mask covers one contig, so data on several
-    raise ValueError with ``remedy``: one contig's intervals applied to all
-    of them would be wrong."""
+    data name none. ``HaplotypeMatrix``/``GenotypeMatrix`` has one contig per
+    matrix (a single ``chrom_start``/``chrom_end``, no per-site contig field),
+    so data on several raise ValueError with ``remedy``."""
     if len(contigs) > 1:
         raise ValueError(
             f"{source} has variants on {len(contigs)} contigs "
-            f"({_show_contigs(contigs)}), but an accessible mask covers one "
-            f"contig; {remedy}.")
+            f"({_show_contigs(contigs)}); {remedy}.")
     return contigs[0] if contigs else None
 
 
