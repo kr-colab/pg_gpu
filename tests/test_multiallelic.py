@@ -255,15 +255,18 @@ class TestPerAlleleSFS:
         assert np.asarray(sfs.sfs(derived)).sum() == 0
         assert np.asarray(sfs.sfs(ancestral)).sum() == 0
 
-    def test_freqspec_theta_h_l_match_scalar(self, multiallelic_hm):
-        # theta_h / theta_l are additive per allele, so the SFS path equals the
-        # scalar path even on multiallelic data.
+    def test_freqspec_drops_multiallelic_sites(self, multiallelic_hm):
+        # A multiallelic (3+-allele) site is dropped, not approximated: every
+        # estimator loses that site's contribution entirely, so a
+        # FrequencySpectrum built from data with real multiallelic sites no
+        # longer matches the scalar functions, which still cover every site.
         _, hm = multiallelic_hm
-        fs = FrequencySpectrum(hm)
-        np.testing.assert_allclose(fs.theta('theta_h'),
-                                   diversity.theta_h(hm, span_normalize=False), rtol=1e-9)
-        np.testing.assert_allclose(fs.theta('theta_l'),
-                                   diversity.theta_l(hm, span_normalize=False), rtol=1e-9)
+        with pytest.warns(BiallelicOnlyWarning, match="multiallelic"):
+            fs = FrequencySpectrum(hm)
+        for name, fn in [('pi', diversity.pi), ('watterson', diversity.theta_w),
+                         ('theta_h', diversity.theta_h), ('theta_l', diversity.theta_l)]:
+            assert not np.isclose(fs.theta(name), fn(hm, span_normalize=False), rtol=1e-6)
+        assert fs.n_segregating != diversity.segregating_sites(hm)
 
     def test_freqspec_matches_scalar_biallelic(self, multiallelic_hm):
         # On biallelic data every estimator agrees between the two paths.
@@ -276,14 +279,38 @@ class TestPerAlleleSFS:
             np.testing.assert_allclose(fs.theta(name),
                                        fn(hm_bi, span_normalize=False), rtol=1e-9)
 
-    def test_freqspec_pi_diverges_from_scalar_on_multiallelic(self, multiallelic_hm):
-        # Documented divergence (issue #100): the marginal SFS overcounts pi on
-        # multiallelic data; the scalar diversity.pi is authoritative.
-        _, hm = multiallelic_hm
-        pi_sfs = FrequencySpectrum(hm).theta('pi')
-        pi_scalar = diversity.pi(hm, span_normalize=False)
-        assert pi_sfs > pi_scalar
-        assert not np.isclose(pi_sfs, pi_scalar, rtol=1e-6)
+    @pytest.mark.parametrize("hap", [
+        [1, 1, 1, 2, 2, 2],      # symmetric 3/3 split
+        [1, 1, 2, 2, 2, 2],      # asymmetric 2/4 split
+    ])
+    def test_freqspec_matches_scalar_two_allele_reference_absent(self, hap):
+        # A site with two alleles, neither of them allele 0 (the reference
+        # base is absent from the sample), is still two-allele data --
+        # restrict_to_biallelic keeps it, and pi/watterson/segregating_sites
+        # must not double-count it the way a genuinely multiallelic (3+
+        # allele) site is now dropped for.
+        hm = HaplotypeMatrix(np.array(hap, dtype=np.int8).reshape(-1, 1),
+                              np.array([100]), 0, 200)
+        fs = FrequencySpectrum(hm)
+        np.testing.assert_allclose(fs.theta('pi'),
+                                   diversity.pi(hm, span_normalize=False), rtol=1e-9)
+        np.testing.assert_allclose(fs.theta('watterson'),
+                                   diversity.theta_w(hm, span_normalize=False), rtol=1e-9)
+        assert fs.n_segregating == diversity.segregating_sites(hm)
+        np.testing.assert_allclose(fs.theta('theta_h'),
+                                   diversity.theta_h(hm, span_normalize=False), rtol=1e-9)
+        np.testing.assert_allclose(fs.theta('theta_l'),
+                                   diversity.theta_l(hm, span_normalize=False), rtol=1e-9)
+
+    def test_freqspec_sfs_still_matches_sfs_module_reference_absent(self):
+        # fs.sfs() stays the unmodified per-allele SFS (same as sfs.sfs()):
+        # only theta()'s internal pi/watterson counting collapses this site.
+        from pg_gpu import sfs as sfs_mod
+        hap = np.array([1, 1, 1, 2, 2, 2], dtype=np.int8).reshape(-1, 1)
+        hm = HaplotypeMatrix(hap, np.array([100]), 0, 200)
+        fs = FrequencySpectrum(hm)
+        np.testing.assert_array_equal(np.asarray(fs.sfs()),
+                                      np.asarray(sfs_mod.sfs(hm)))
 
 
 class TestJointSFS:

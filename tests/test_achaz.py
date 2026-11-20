@@ -219,9 +219,13 @@ class TestCustomWeights:
 class TestNeutralModelValidation:
     """Validate estimators against known theta from msprime simulation."""
 
+    @pytest.mark.filterwarnings("ignore::pg_gpu._warnings.BiallelicOnlyWarning")
     def test_estimators_unbiased(self):
         """Under standard neutral model, all theta estimators should be
         unbiased: E[theta_hat] ≈ theta = 4 * N * mu * L."""
+        # msprime's default mutation model allows recurrent mutation, so a rare
+        # rep can land a 3+-allele site that FrequencySpectrum drops; harmless
+        # to this aggregate, many-replicate check.
         N = 10_000
         mu = 1e-8
         L = 100_000
@@ -253,8 +257,12 @@ class TestNeutralModelValidation:
             assert abs(mean_est - expected) / expected < 0.5, \
                 f"{name}: mean={mean_est:.2f}, expected={expected:.2f}"
 
+    @pytest.mark.filterwarnings("ignore::pg_gpu._warnings.BiallelicOnlyWarning")
     def test_tajimas_d_mean_near_zero(self):
         """Under neutrality, E[Tajima's D] ≈ 0."""
+        # msprime's default mutation model allows recurrent mutation, so a rare
+        # rep can land a 3+-allele site that FrequencySpectrum drops; harmless
+        # to this aggregate, many-replicate check.
         d_values = []
         for seed in range(50):
             ts = msprime.sim_ancestry(

@@ -84,18 +84,34 @@ against older results or against another tool.
   ``(n1 + 1, n2 + 1)`` grid rather than the smaller
   ``(n1 // 2 + 1, n2 // 2 + 1)``.
 
+.. _fs-vs-scalar:
+
 Which value to trust on multiallelic data
 -----------------------------------------
 
 The plain functions -- ``diversity.pi``, ``diversity.tajimas_d``, and
-friends -- are the ones to trust. They match ``tskit`` exactly.
+friends -- are the ones to trust on data with many multiallelic sites.
+They match ``tskit`` exactly, at any number of alleles.
 
-``FrequencySpectrum`` also offers :math:`\pi`, Tajima's D, and Fay-Wu's
-H, but on multiallelic data these are close approximations rather than
-exact. The reason is that a frequency spectrum records *how many* sites
-sit at each frequency, but not *which alleles came from the same site*,
-and you need that grouping to get :math:`\pi` exactly right. On
-two-allele data the two routes agree exactly.
+``FrequencySpectrum`` restricts to biallelic sites the same way
+``admixture.patterson_d`` and the ``GenotypeMatrix`` loaders do (see
+below). That is, a site with three or more extant alleles is dropped with a
+``BiallelicOnlyWarning`` giving the count. On the sites it
+keeps, every one of ``FrequencySpectrum``'s estimators (:math:`\pi`,
+Watterson's theta, Tajima's D, Fay-Wu's H, Zeng's E, and the rest)
+exactly matches what the scalar functions give on that same subset.
+Comparing ``FrequencySpectrum`` directly against a scalar function run on
+the full, undropped data will disagree whenever real multiallelic sites
+are present, since the scalar function still counts them and
+``FrequencySpectrum`` does not. This restriction is because `FrequencySpectrum`
+is the vehicle for Achaz's (2009) variance framework, which assumes
+infinite-sites and thus biallelic data.
+
+``FrequencySpectrum``'s own ``sfs()`` method follows the same
+restriction, so it is not always the same array as the standalone
+``sfs.sfs()`` / ``sfs.sfs_folded()`` functions (:ref:`sfs-conventions`),
+which keep every allele of every site. On data with no sites of three or
+more alleles, the two agree.
 
 PCA and local PCA keep one column per allele
 --------------------------------------------
@@ -124,11 +140,13 @@ of them throws multiallelic sites away, it tells you how many with a
 ``BiallelicOnlyWarning``, so you do not mistake a partial answer for a
 complete one.
 
-That means ``admixture.patterson_d`` and the
+That means ``admixture.patterson_d``, ``FrequencySpectrum``, and the
 ``GenotypeMatrix`` loaders described below. If you want a statistic like
 Patterson's D that does handle multiallelic sites, use
 ``admixture.patterson_f4``, which measures the same thing without the
 restriction, at the expense of normalization (it is not bounded in [-1, 1]).
+For ``FrequencySpectrum``, use the plain functions in ``diversity``
+instead; see :ref:`fs-vs-scalar`.
 
 To turn the warning off:
 

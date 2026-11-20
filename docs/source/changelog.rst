@@ -868,7 +868,7 @@ Bug fixes
   ``eta1_star``, ``minus_eta1``, ``minus_eta1_star``) as available but
   raised ``Unknown statistic`` when asked for them. It now computes them
   through the per-allele scalar path, giving the same values as
-  ``FrequencySpectrum.theta`` on both biallelic and multiallelic data.
+  ``FrequencySpectrum.theta`` on the biallelic sites both cover.
 * ``zns`` and ``omega`` accepted ``estimator='rogers_huff'`` on a
   ``HaplotypeMatrix`` and silently computed naive ``r2`` instead. They
   now pair adjacent haplotypes into 0/1/2 dosages and compute the
@@ -1082,15 +1082,25 @@ Bug fixes
   ``n_blocks=1``: leaving out the only block empties every window, which
   standardizes to a valid-looking all-zero Gram instead of NaN.
   ``n_blocks < 2`` now raises ``ValueError``.
+* ``FrequencySpectrum`` now restricts to biallelic sites, the same way
+  ``patterson_d`` and the ``GenotypeMatrix`` loaders do: a site with
+  three or more alleles is dropped, with a ``BiallelicOnlyWarning``
+  giving the count, instead of being folded into the spectrum and
+  approximated. On the sites it keeps -- including a reference-absent
+  two-allele site, where allele ``0`` itself does not appear in the
+  sample -- every estimator now matches the scalar functions exactly;
+  ``pi`` and ``watterson`` used to double-count such a site's two
+  present alleles as if both were derived relative to a reference that
+  was not there.
 
 New warnings
 ~~~~~~~~~~~~
 
 * ``BiallelicOnlyWarning`` -- something that only works on two-allele
   sites threw multiallelic sites away, and tells you how many. Comes
-  from ``patterson_d``, the ``GenotypeMatrix`` loaders and
-  ``from_haplotype_matrix``, and the LD statistics that restrict to
-  two-allele sites (``zns``, ``omega``, ``pairwise_r2``,
+  from ``patterson_d``, ``FrequencySpectrum``, the ``GenotypeMatrix``
+  loaders and ``from_haplotype_matrix``, and the LD statistics that
+  restrict to two-allele sites (``zns``, ``omega``, ``pairwise_r2``,
   ``pairwise_LD_v``, ``locate_unlinked``, ``windowed_r_squared``).
   The ``tally_gpu_haplotypes*`` methods keep multiallelic sites, count
   the highest allele against all others, and warn with the number of

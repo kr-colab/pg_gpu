@@ -606,6 +606,11 @@ weighted sum over the SFS is one ``fs.theta(weight_fn)`` call away.
    fs.theta(my_custom_weight_fn)
    fs.project(target_n=50).theta("pi")
 
+``FrequencySpectrum`` restricts to biallelic sites, dropping a
+multiallelic one with a ``BiallelicOnlyWarning`` rather than
+approximating it; see :ref:`fs-vs-scalar` for what that means for its
+estimators and for its own ``sfs()``.
+
 Missing Data and Accessibility Masks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

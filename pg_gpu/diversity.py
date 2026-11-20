@@ -595,6 +595,12 @@ class FrequencySpectrum:
     which are faster. This class is for custom weight functions,
     SFS inspection, projection, and the general Achaz variance framework.
 
+    Restricted to biallelic sites (see ``HaplotypeMatrix.restrict_to_biallelic``);
+    a multiallelic site is dropped with a ``BiallelicOnlyWarning``, not
+    approximated. Its own ``sfs()`` is not always the same array as
+    ``pg_gpu.sfs.sfs()``, which keeps multiallelic sites -- see the SFS
+    conventions in the multiallelic sites guide.
+
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
@@ -614,6 +620,7 @@ class FrequencySpectrum:
 
         if matrix.device == 'CPU':
             matrix.transfer_to_gpu()
+        matrix = matrix.restrict_to_biallelic(warn_context="FrequencySpectrum")
         self._source_matrix = matrix
         # The spectrum is of derived alleles, so it is only as polarized as
         # the matrix it was counted from.
@@ -630,16 +637,43 @@ class FrequencySpectrum:
             ac = ac[complete]
             n_valid = n_valid[complete]
 
-        # NOTE (issue #100): per-allele polarised SFS -- each derived allele
-        # contributes at its own frequency for 0 < count < n (both fixed classes,
-        # bin 0 and bin n, excluded, matching tskit). The SFS is marginal (it
-        # forgets which derived alleles co-occur at a site), so on MULTIALLELIC
-        # data the estimators that depend on co-occurrence diverge from the
-        # authoritative scalar functions (diversity.pi etc.): pi -- and hence
-        # Tajima's D and Fay-Wu H -- overcount, and Watterson (sum of xi) differs
-        # from the scalar distinct-alleles-1 at reference-absent sites.
-        # theta_h/theta_l and the eta-family are exact.
+        # Per-allele polarised SFS -- each derived allele contributes at its
+        # own frequency for 0 < count < n (both fixed classes, bin 0 and bin
+        # n, excluded, matching tskit). A reference-absent site still has two
+        # present alleles here, both landing in ``derived``; pi/watterson need
+        # them collapsed into one entry to match the scalar functions (which
+        # are reference-label-agnostic), so a second, collapsed histogram
+        # feeds those two estimators. theta_h/theta_l and the eta-family use
+        # the uncollapsed histogram unchanged -- they already match the scalar
+        # functions without it.
+        derived = ac[:, 1:]
+        collapsed = derived
+        if derived.shape[1] >= 2:
+            two_allele_ref_absent = (ac[:, 0] == 0) & (cp.count_nonzero(derived, axis=1) == 2)
+            if bool(cp.any(two_allele_ref_absent)):
+                rows = cp.nonzero(two_allele_ref_absent)[0]
+                lowest = cp.argmax(derived[rows] > 0, axis=1)
+                collapsed = derived.copy()
+                collapsed[rows, lowest] = 0
+
+        def _bin_by_n(cols, unique_n):
+            by_n = {}
+            for ni_gpu in unique_n:
+                ni = int(ni_gpu.get())
+                if ni < 2:
+                    continue
+                mask = n_valid == ni
+                vals = cols[mask]
+                vals = vals[(vals > 0) & (vals < ni)]
+                if vals.size:
+                    xi = cp.bincount(vals, minlength=ni + 1)[:ni + 1]
+                else:  # no segregating derived alleles (cupy bincount rejects empty)
+                    xi = cp.zeros(ni + 1, dtype=cp.int64)
+                by_n[ni] = xi.astype(cp.float64).get()
+            return by_n
+
         self.sfs_by_n = {}
+        self._sfs_by_n_collapsed = {}
         # Sample size for the neutrality-test variance: the harmonic mean of
         # the per-site sample sizes over sites with n >= 2, as in
         # _compute_thetas.
@@ -652,26 +686,17 @@ class FrequencySpectrum:
         else:
             unique_n = cp.unique(n_valid)
             self.n_max = int(unique_n[-1].get())
-            for ni_gpu in unique_n:
-                ni = int(ni_gpu.get())
-                if ni < 2:
-                    continue
-                mask = n_valid == ni
-                vals = ac[mask][:, 1:]
-                vals = vals[(vals > 0) & (vals < ni)]
-                if vals.size:
-                    xi = cp.bincount(vals, minlength=ni + 1)[:ni + 1]
-                else:  # no segregating derived alleles (cupy bincount rejects empty)
-                    xi = cp.zeros(ni + 1, dtype=cp.int64)
-                self.sfs_by_n[ni] = xi.astype(cp.float64).get()
+            self.sfs_by_n = _bin_by_n(derived, unique_n)
+            self._sfs_by_n_collapsed = _bin_by_n(collapsed, unique_n)
             self.n_segregating = sum(
-                int(np.sum(xi[1:n])) for n, xi in self.sfs_by_n.items())
+                int(np.sum(xi[1:n])) for n, xi in self._sfs_by_n_collapsed.items())
 
         self.n_total_sites = n_total_sites
         if n_total_sites is not None and self.n_max > 0:
             n_invariant = n_total_sites - self.n_segregating
             if n_invariant > 0 and self.n_max in self.sfs_by_n:
                 self.sfs_by_n[self.n_max][0] += n_invariant
+                self._sfs_by_n_collapsed[self.n_max][0] += n_invariant
 
     def theta(self, weights='pi', span_normalize=False, span=None):
         """Compute a theta estimator from the SFS.
@@ -687,15 +712,19 @@ class FrequencySpectrum:
             if weights not in WEIGHT_REGISTRY:
                 raise ValueError(f"Unknown weight: {weights}")
             weights_fn = WEIGHT_REGISTRY[weights]
+            sfs_by_n = (self._sfs_by_n_collapsed
+                        if weights in ('pi', 'theta_pi', 'watterson', 'theta_s')
+                        else self.sfs_by_n)
         else:
             weights_fn = weights
+            sfs_by_n = self.sfs_by_n
         # A weight vector that is not symmetric under i <-> n - i reads the
         # derived state; a caller's own function is taken to be one.
         if not (isinstance(weights, str) and weights in _FOLDED_WEIGHTS):
             self._note_polarization(f"theta({getattr(weights, '__name__', weights)!s})")
 
         total = 0.0
-        for n, xi in self.sfs_by_n.items():
+        for n, xi in sfs_by_n.items():
             w = np.asarray(weights_fn(n))
             if w.shape != (n + 1,):
                 raise ValueError(
@@ -761,14 +790,19 @@ class FrequencySpectrum:
 
     def project(self, target_n):
         """Project all SFS groups to a common sample size."""
-        projected = np.zeros(target_n + 1)
-        dropped = 0
-        for n, xi in self.sfs_by_n.items():
-            if n < target_n:
-                # Projection only lowers a sample size; it cannot raise one.
-                dropped += int(np.sum(xi[1:n]))
-                continue
-            projected += project_sfs(xi, n, target_n)
+        def _project(sfs_by_n):
+            out = np.zeros(target_n + 1)
+            dropped = 0
+            for n, xi in sfs_by_n.items():
+                if n < target_n:
+                    # Projection only lowers a sample size; it cannot raise one.
+                    dropped += int(np.sum(xi[1:n]))
+                    continue
+                out += project_sfs(xi, n, target_n)
+            return out, dropped
+
+        projected, dropped = _project(self.sfs_by_n)
+        projected_collapsed, _ = _project(self._sfs_by_n_collapsed)
         if dropped:
             warnings.warn(
                 f"FrequencySpectrum.project({target_n}): {dropped} segregating "
@@ -777,10 +811,11 @@ class FrequencySpectrum:
                 UserWarning, stacklevel=2)
         result = object.__new__(FrequencySpectrum)
         result.sfs_by_n = {target_n: projected}
+        result._sfs_by_n_collapsed = {target_n: projected_collapsed}
         # Every site of the projection has target_n haplotypes.
         result._n_eff = target_n
         result.n_max = target_n
-        result.n_segregating = int(np.sum(projected[1:target_n]))
+        result.n_segregating = int(np.sum(projected_collapsed[1:target_n]))
         result.n_total_sites = self.n_total_sites
         result._source_matrix = self._source_matrix
         result._warned_unpolarized = self._warned_unpolarized
