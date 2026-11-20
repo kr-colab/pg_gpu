@@ -783,7 +783,7 @@ class FrequencySpectrum:
             return self.n_max
         cumulative = 0
         for ni in sorted_ns:
-            cumulative += int(np.sum(self.sfs_by_n[ni][1:ni]))
+            cumulative += int(np.sum(self._sfs_by_n_collapsed[ni][1:ni]))
             if cumulative / total_seg >= retain_fraction:
                 return ni
         return sorted_ns[-1]
@@ -801,8 +801,8 @@ class FrequencySpectrum:
                 out += project_sfs(xi, n, target_n)
             return out, dropped
 
-        projected, dropped = _project(self.sfs_by_n)
-        projected_collapsed, _ = _project(self._sfs_by_n_collapsed)
+        projected, _ = _project(self.sfs_by_n)
+        projected_collapsed, dropped = _project(self._sfs_by_n_collapsed)
         if dropped:
             warnings.warn(
                 f"FrequencySpectrum.project({target_n}): {dropped} segregating "
