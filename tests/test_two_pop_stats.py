@@ -306,3 +306,40 @@ class TestZx:
 
         expected = (zns(c[:12], pc) + zns(c[12:], pc)) / (2 * zns(c, pc))
         assert val == pytest.approx(expected)
+
+    def test_third_population_does_not_change_biallelic_filter(self):
+        """A site biallelic in pop1 + pop2 but triallelic only through
+        pop3's rows must not be dropped, or counted, differently depending
+        on whether pop3 is present."""
+        hap, pos = self._third_pop_hap()
+        hap[26:, 5] = 2  # pop3-only third allele at one site
+        two = {'pop1': list(range(12)), 'pop2': list(range(12, 26))}
+        three = {**two, 'pop3': list(range(26, 42))}
+
+        with_pop3 = divergence.zx(
+            HaplotypeMatrix(hap, pos, 1, 7000, sample_sets=three), 'pop1', 'pop2')
+        without_pop3 = divergence.zx(
+            HaplotypeMatrix(hap[:26], pos, 1, 7000, sample_sets=two), 'pop1', 'pop2')
+        assert with_pop3 == pytest.approx(without_pop3)
+
+    def test_overlapping_populations_do_not_raise(self):
+        """pop1 and pop2 sharing rows must not hit the duplicate-row check
+        that a plain population row list gets elsewhere."""
+        hap, pos = self._third_pop_hap()
+        hap = hap[:12]
+        hm = HaplotypeMatrix(hap, pos, 1, 7000,
+                             sample_sets={'pop1': list(range(12))})
+        # Identical populations: within == total, so the ratio is 1.
+        assert divergence.zx(hm, 'pop1', 'pop1') == pytest.approx(1.0)
+
+        # Partial overlap: must give a finite value, same total ZnS as
+        # restricting by hand to the deduped union of both row lists.
+        hm2 = HaplotypeMatrix(hap, pos, 1, 7000,
+                              sample_sets={'a': list(range(8)), 'b': list(range(4, 12))})
+        val = divergence.zx(hm2, 'a', 'b')
+        assert np.isfinite(val)
+        union_rows = list(range(12))  # range(8) union range(4, 12)
+        expected_total = ld_statistics.zns(HaplotypeMatrix(hap[union_rows], pos, 1, 7000))
+        z_a = ld_statistics.zns(HaplotypeMatrix(hap[:8], pos, 1, 7000))
+        z_b = ld_statistics.zns(HaplotypeMatrix(hap[4:12], pos, 1, 7000))
+        assert val == pytest.approx((z_a + z_b) / (2 * expected_total))

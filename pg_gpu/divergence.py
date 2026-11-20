@@ -1440,9 +1440,11 @@ def zx(haplotype_matrix: HaplotypeMatrix,
     stronger LD within populations than across the combined sample,
     consistent with population structure or recent admixture.
 
-    All three ZnS values are computed on one site set: sites with more
-    than two alleles across the whole sample are dropped first, and a
-    ``BiallelicOnlyWarning`` reports how many.
+    All three ZnS values are computed on one site set, restricted to
+    pop1's and pop2's own rows: sites with more than two alleles among
+    those rows are dropped first, with a ``BiallelicOnlyWarning`` that
+    reports how many, and ``missing_data='exclude'`` then drops any site
+    with a missing call in pop1 or pop2.
 
     Depends on haplotype phase; see :doc:`phasing`.
 
@@ -1469,22 +1471,29 @@ def zx(haplotype_matrix: HaplotypeMatrix,
 
     from . import ld_statistics
 
-    # zns restricts to the biallelic sites of whatever matrix it is handed;
-    # restricting once up front, then excluding once on the combined pop1 +
-    # pop2 rows, keeps all three terms on the same sites regardless of any
-    # other population in sample_sets.
-    biallelic = haplotype_matrix.restrict_to_biallelic(warn_context="zx")
+    pop1_idx = list(_get_population_indices(haplotype_matrix, pop1))
+    pop2_idx = list(_get_population_indices(haplotype_matrix, pop2))
+    # The combined sample for the total ZnS term is pop1's rows plus
+    # pop2's, deduped so a row shared by both is not counted twice.
+    seen = set(pop1_idx)
+    combined_idx = pop1_idx + [i for i in pop2_idx if i not in seen]
+
+    # Taking these rows first, then restricting to biallelic sites and
+    # excluding missing ones, keeps all three ZnS terms on the same sites
+    # regardless of any other population in sample_sets.
+    combined = population_rows(haplotype_matrix, combined_idx)
+    biallelic = combined.restrict_to_biallelic(warn_context="zx")
     if missing_data == 'exclude':
-        biallelic = biallelic.exclude_missing_sites(populations=[pop1, pop2])
+        biallelic = biallelic.exclude_missing_sites()
         if biallelic.num_variants == 0:
             return float('nan')
 
-    combined_idx = (list(_get_population_indices(biallelic, pop1))
-                    + list(_get_population_indices(biallelic, pop2)))
-    z1 = ld_statistics._zns_biallelic(population_rows(biallelic, pop1), 'include')
-    z2 = ld_statistics._zns_biallelic(population_rows(biallelic, pop2), 'include')
-    z_total = ld_statistics._zns_biallelic(
-        population_rows(biallelic, combined_idx), 'include')
+    row_of = {orig: i for i, orig in enumerate(combined_idx)}
+    z1 = ld_statistics._zns_biallelic(
+        population_rows(biallelic, [row_of[i] for i in pop1_idx]), 'include')
+    z2 = ld_statistics._zns_biallelic(
+        population_rows(biallelic, [row_of[i] for i in pop2_idx]), 'include')
+    z_total = ld_statistics._zns_biallelic(biallelic, 'include')
 
     if z_total == 0:
         return float('nan')
