@@ -150,10 +150,10 @@ returns = "GenotypeMatrix"
 span = "Same rule as HaplotypeMatrix.__init__, in its own code."
 
 [inputs."GenotypeMatrix.from_vcf"]
-params = ["path", "include_invariant", "accessible_bed", "fields"]
+params = ["path", "region", "samples", "include_invariant", "accessible_bed", "fields"]
 returns = "GenotypeMatrix"
-span = "include_invariant=True sets the mask to the record positions, multiallelic records it drops included (accessible._called_sites_mask; with accessible_bed, only those in the BED). The bounds span every loaded record, multiallelic ones it drops included. accessible_bed sets the mask on the VCF's contig."
-notes = "No region and no samples parameter, unlike HaplotypeMatrix.from_vcf. A VCF with several contigs raises ValueError (accessible._data_contig), checked before the biallelic filtering and dosage conversion; since there is no region= here, the remedy is to subset the VCF first (e.g. bcftools view -r)."
+span = "include_invariant=True sets the mask to the record positions, multiallelic records it drops included (accessible._called_sites_mask; with accessible_bed, only those in the BED). The bounds span every loaded record, multiallelic ones it drops included, else from the region when one is given. accessible_bed sets the mask on the region's contig, else the VCF's."
+notes = "region and samples match HaplotypeMatrix.from_vcf. Without region, a VCF with several contigs raises ValueError (accessible._data_contig), checked before the biallelic filtering and dosage conversion."
 
 [inputs."GenotypeMatrix.from_zarr"]
 params = ["path", "region", "accessible_bed", "include_invariant", "pop_assignment", "streaming", "chunk_bp", "prefetch", "backend", "fields"]

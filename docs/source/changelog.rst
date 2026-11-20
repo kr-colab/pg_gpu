@@ -500,6 +500,19 @@ Read this section if you are comparing against older pg_gpu results.
   back to a haploid estimate. One row is half an individual and gives
   the diploid analysis no within-population variance to estimate.
 
+``GenotypeMatrix.from_vcf`` takes ``region=`` and ``samples=``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``GenotypeMatrix.from_vcf`` had neither, unlike ``HaplotypeMatrix.from_vcf``:
+selecting one contig or a sample subset meant pre-filtering the VCF with an
+external tool first. It now accepts both, with the same semantics as
+``HaplotypeMatrix.from_vcf`` (``region`` is samtools-style and needs a
+bgzipped, tabix-indexed VCF; the chromosome bounds come from the region
+when one is given, else from the first and last loaded record). Loading a
+region now also rejects a multi-contig VCF only when no ``region`` was
+given, as ``HaplotypeMatrix.from_vcf`` does; the message now points at
+``region=`` instead of an external subsetting step.
+
 Bug fixes
 ~~~~~~~~~
 
@@ -1091,11 +1104,10 @@ Bug fixes
   accessible mask, windowed analysis) could pair or window sites from two
   different chromosomes as if they were adjacent. It now raises
   ``ValueError`` without ``region=``, the same as ``from_zarr``.
-* ``GenotypeMatrix.from_vcf`` had the same multi-contig gap, and has no
-  ``region=`` to select one contig with; it now raises the same
-  ``ValueError`` (the remedy is to subset the VCF first, e.g. with
-  ``bcftools view -r``), checked before the biallelic filtering and
-  dosage conversion so a rejected VCF does not pay for either.
+* ``GenotypeMatrix.from_vcf`` had the same multi-contig gap; it now
+  raises the same ``ValueError`` without ``region=``, checked before
+  the biallelic filtering and dosage conversion so a rejected VCF does
+  not pay for either.
 
 New warnings
 ~~~~~~~~~~~~

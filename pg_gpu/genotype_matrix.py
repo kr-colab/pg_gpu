@@ -454,14 +454,19 @@ class GenotypeMatrix:
                                phased=False)
 
     @classmethod
-    def from_vcf(cls, path, include_invariant=False, accessible_bed=None,
-                 fields=None):
+    def from_vcf(cls, path, region=None, samples=None, include_invariant=False,
+                 accessible_bed=None, fields=None):
         """Construct from a VCF file.
 
         Parameters
         ----------
         path : str
             Path to VCF file.
+        region : str, optional
+            Genomic region to load: 'chrom', 'chrom:start', or
+            'chrom:start-end'; see ``HaplotypeMatrix.from_vcf``.
+        samples : list of str, optional
+            Subset of samples to load. If None, loads all samples.
         include_invariant : bool
             If True, the VCF has a record for each called base. The record
             positions become the accessible mask; see
@@ -482,31 +487,39 @@ class GenotypeMatrix:
         import allel
         from .haplotype_matrix import (
             _build_read_vcf_fields, _classify_vcf_qc_tags,
-            _resolve_qc_fields_vcf,
+            _resolve_qc_fields_vcf, _tabix_region,
         )
         from ._warnings import _maybe_memory_warn
-        _maybe_memory_warn(path)
+        _maybe_memory_warn(path, region=region)
+        # scikit-allel accepts 'chrom' and 'chrom:start-end' but not an
+        # open end or thousands separators, so the samtools forms are
+        # parsed once here and re-rendered.
+        chrom, start, stop = parse_region(region)
+        if region is not None:
+            region = _tabix_region(chrom, start, stop)
         if fields:
             tag_to_path, unknown_tags = _classify_vcf_qc_tags(path, fields)
             read_fields = _build_read_vcf_fields(tag_to_path.values())
         else:
             tag_to_path, unknown_tags = {}, []
             read_fields = None
-        callset = allel.read_vcf(path, fields=read_fields)
+        callset = allel.read_vcf(path, region=region, samples=samples,
+                                 fields=read_fields)
+        if callset is None:
+            raise ValueError(f"No variants found in {path}"
+                             + (f" for region {region}" if region else ""))
         gt = callset['calldata/GT']  # (n_variants, n_samples, 2)
         pos = callset['variants/POS']
-        samples = list(callset['samples'])
+        sample_names = list(callset['samples'])
 
-        # Reject a multi-contig VCF; there is no region= here to narrow it.
-        chrom = None
-        if 'variants/CHROM' in callset:
+        # Reject a multi-contig VCF; a given region already narrows to one.
+        if region is None and 'variants/CHROM' in callset:
             chrom = _data_contig(
                 _distinct_contigs(callset['variants/CHROM']), f"VCF {path}",
-                "load one contig per GenotypeMatrix, e.g. from a VCF "
-                "subset with bcftools view -r")
+                "pass region='chrom' to select one")
 
         from ._warnings import check_diploid_encoding, _warn_biallelic_only
-        check_diploid_encoding(gt, sample_names=samples, source=f"VCF '{path}'")
+        check_diploid_encoding(gt, sample_names=sample_names, source=f"VCF '{path}'")
 
         # Biallelic = at most two distinct present alleles; the dosage counts the
         # alt (highest present allele > 0), so {0,2} and reference-absent {1,2}
@@ -540,11 +553,21 @@ class GenotypeMatrix:
         # transpose to (n_individuals, n_variants)
         geno = geno.T
 
-        # The region spans every loaded record, as in HaplotypeMatrix.from_vcf:
-        # a record dropped above as multiallelic is still a base of it.
+        # The bounds span every loaded record, multiallelic ones included
+        # (dropped above, but still a base of the matrix). When a region is
+        # given, use its own bounds instead, so the analysis range matches
+        # what was asked for, not just the observed variant span -- this
+        # matters for span normalization with an accessible mask.
         all_pos = callset['variants/POS']
-        gm = cls(geno, pos, chrom_start=int(all_pos[0]), chrom_end=int(all_pos[-1]),
-                 samples=samples, fields=qc_fields)
+        chrom_start = int(all_pos[0])
+        chrom_end = int(all_pos[-1])
+        if region is not None:
+            if start is not None:
+                chrom_start = start
+            if stop is not None:
+                chrom_end = stop - 1
+        gm = cls(geno, pos, chrom_start=chrom_start, chrom_end=chrom_end,
+                 samples=sample_names, fields=qc_fields)
         if include_invariant:
             gm.set_accessible_mask(_called_sites_mask(
                 all_pos, gm.chrom_start, gm.chrom_end, accessible_bed, chrom))
