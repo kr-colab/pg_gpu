@@ -497,6 +497,14 @@ class GenotypeMatrix:
         pos = callset['variants/POS']
         samples = list(callset['samples'])
 
+        # Reject a multi-contig VCF; there is no region= here to narrow it.
+        chrom = None
+        if 'variants/CHROM' in callset:
+            chrom = _data_contig(
+                _distinct_contigs(callset['variants/CHROM']), f"VCF {path}",
+                "load one contig per GenotypeMatrix, e.g. from a VCF "
+                "subset with bcftools view -r")
+
         from ._warnings import check_diploid_encoding, _warn_biallelic_only
         check_diploid_encoding(gt, sample_names=samples, source=f"VCF '{path}'")
 
@@ -537,12 +545,6 @@ class GenotypeMatrix:
         all_pos = callset['variants/POS']
         gm = cls(geno, pos, chrom_start=int(all_pos[0]), chrom_end=int(all_pos[-1]),
                  samples=samples, fields=qc_fields)
-        chrom = None
-        if accessible_bed is not None and 'variants/CHROM' in callset:
-            chrom = _data_contig(
-                _distinct_contigs(callset['variants/CHROM']), f"VCF {path}",
-                "load one contig per GenotypeMatrix, e.g. from a VCF "
-                "subset with bcftools view -r")
         if include_invariant:
             gm.set_accessible_mask(_called_sites_mask(
                 all_pos, gm.chrom_start, gm.chrom_end, accessible_bed, chrom))

@@ -1099,6 +1099,11 @@ Bug fixes
   accessible mask, windowed analysis) could pair or window sites from two
   different chromosomes as if they were adjacent. It now raises
   ``ValueError`` without ``region=``, the same as ``from_zarr``.
+* ``GenotypeMatrix.from_vcf`` had the same multi-contig gap, and has no
+  ``region=`` to select one contig with; it now raises the same
+  ``ValueError`` (the remedy is to subset the VCF first, e.g. with
+  ``bcftools view -r``), checked before the biallelic filtering and
+  dosage conversion so a rejected VCF does not pay for either.
 
 New warnings
 ~~~~~~~~~~~~
