@@ -1064,6 +1064,24 @@ Bug fixes
   and the total but kept in the other population's term. The total term
   now reads only ``pop1`` and ``pop2``, and all three terms now share one
   site set, filtered once on the combined ``pop1`` + ``pop2`` rows.
+* ``local_pca`` (every engine) and ``local_pca_jackknife`` decided a
+  window's validity from its variant count before ``missing_data='exclude'``
+  removed incomplete sites, so a window with no complete site got
+  eigenvalues of 0, a ``sumsq`` of 0, and a degenerate unit-vector PC1
+  instead of NaN. ``_local_pca_with_jackknife`` (used by
+  ``lostruct(jackknife=True)`` and ``windowed_analysis``) also gated its
+  jackknife on the one-hot column count rather than the variant count,
+  which could disagree with ``local_pca_jackknife`` on the same window
+  once a site's one-hot encoding spans more than one column. Both are
+  now gated on the real number of complete sites. A window whose calls
+  are all missing standardizes to zero one-hot columns while its site
+  count still clears the gate, so all four window-processing paths now
+  also treat that as invalid.
+* ``local_pca_jackknife``, ``_local_pca_with_jackknife`` (``lostruct(jackknife=True)``
+  and ``windowed_analysis``) silently gave a jackknife SE of 0.0 for
+  ``n_blocks=1``: leaving out the only block empties every window, which
+  standardizes to a valid-looking all-zero Gram instead of NaN.
+  ``n_blocks < 2`` now raises ``ValueError``.
 
 New warnings
 ~~~~~~~~~~~~

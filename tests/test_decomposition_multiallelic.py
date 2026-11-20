@@ -27,7 +27,7 @@ class TestDecompositionMultiallelic:
         # genetic relatedness matrix; pin it against the tree sequence's
         # genetic_relatedness output as an external oracle.
         ts, hm = multiallelic_hm
-        X, n_seg = _prepare_centered(hm)
+        X, n_seg, _ = _prepare_centered(hm)
         C = cp.asnumpy((X @ X.T) / n_seg)
         n = ts.num_samples
         sets = [[s] for s in ts.samples()]
@@ -98,7 +98,7 @@ class TestLocalPCAMultiallelic:
 
     def _direct_eigvals(self, hap_sub, pos_sub, s, e, k):
         sub = HaplotypeMatrix(hap_sub, pos_sub, int(s), int(e))
-        X, _ = _prepare_centered(sub, missing_data='include', need_segregating=False)
+        X, _, _ = _prepare_centered(sub, missing_data='include', need_segregating=False)
         C, _ = _window_gram(X, X.shape[1])
         return np.sort(cp.asnumpy(cp.linalg.eigh(C)[0]))[::-1][:k]
 
@@ -165,7 +165,7 @@ class TestChunkedGram:
         from pg_gpu.decomposition import _centered_block, _centered_gram_chunked
         hap = self._hap()
         K = int(hap.max()) + 1
-        X, seg_dense = _centered_block(hap, missing_data, K)
+        X, seg_dense, _ = _centered_block(hap, missing_data, K)
         C_dense = (X @ X.T).get()
         C, seg, n_cols = _centered_gram_chunked(hap, missing_data, K, chunk_vars)
         assert seg == seg_dense

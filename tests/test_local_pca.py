@@ -255,6 +255,46 @@ class TestNanHandling:
         with pytest.raises(ValueError, match="pc_dist"):
             pcoa(dist)
 
+    @pytest.mark.parametrize('engine', ['dense-eigh', 'streaming-dense', 'streaming-rsvd'])
+    def test_exclude_window_with_no_complete_site_is_nan(self, engine):
+        # window.n_variants (10) passes the gate before the exclude filter,
+        # but every site in this window has a missing call, so the filter
+        # leaves 0 complete sites -- the window must still come out NaN,
+        # not eigvals [0, 0] / sumsq 0 / a degenerate unit eigenvector.
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (10, 30)).astype(np.int8)
+        hap[0, 10:20] = -1  # window 1 (sites 10-19): no complete site
+        hm = HaplotypeMatrix(hap, np.arange(30) * 100 + 1, 1, 3000)
+
+        res = local_pca(hm, window_size=10, step_size=10, window_type='snp',
+                        k=2, missing_data='exclude', engine=engine)
+        assert np.isnan(res.eigvals[1]).all()
+        assert np.isnan(res.eigvecs[1]).all()
+        assert np.isnan(res.sumsq[1])
+        assert np.isfinite(res.eigvals[0]).all()
+        assert np.isfinite(res.eigvals[2]).all()
+
+        dist = pc_dist(res, normalize=None, npc=2)
+        assert np.isnan(dist[1]).all()
+
+    @pytest.mark.parametrize('engine', ['dense-eigh', 'streaming-dense', 'streaming-rsvd'])
+    def test_include_window_with_every_call_missing_is_nan(self, engine):
+        # Under 'include' the exclude filter never runs, so the site count
+        # passes the gate unchanged; but every call in this window is
+        # missing, so it standardizes to zero one-hot columns and must
+        # still come out NaN, not eigvals [0, 0] / sumsq 0.
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (10, 30)).astype(np.int8)
+        hap[:, 10:20] = -1  # window 1 (sites 10-19): every call missing
+        hm = HaplotypeMatrix(hap, np.arange(30) * 100 + 1, 1, 3000)
+
+        res = local_pca(hm, window_size=10, step_size=10, window_type='snp',
+                        k=2, missing_data='include', engine=engine)
+        assert np.isnan(res.eigvals[1]).all()
+        assert np.isnan(res.sumsq[1])
+        assert np.isfinite(res.eigvals[0]).all()
+        assert np.isfinite(res.eigvals[2]).all()
+
 
 # ---------------------------------------------------------------------------
 # pc_dist correctness
@@ -579,6 +619,14 @@ class TestJackknife:
         assert se.shape == (expected_n_windows, 2, small_hm.num_haplotypes)
         assert np.all(np.isfinite(se) & (se >= 0))
 
+    @pytest.mark.parametrize('n_blocks', [0, 1])
+    def test_rejects_too_few_blocks(self, small_hm, n_blocks):
+        # n_blocks=1 leaves no data when the one block is left out, which
+        # silently gave an SE of 0 instead of raising or giving NaN.
+        with pytest.raises(ValueError, match="n_blocks"):
+            local_pca_jackknife(small_hm, window_size=200, window_type='snp',
+                                k=2, n_blocks=n_blocks)
+
     def test_sign_alignment_via_flip(self):
         """Sign-aligned variance is invariant to arbitrary pre-flips."""
         rng = np.random.default_rng(11)
@@ -597,6 +645,24 @@ class TestJackknife:
         with pytest.raises(ValueError, match="3 or 4 dims"):
             _sign_align_replicates(cp.zeros((2, 3)))
 
+    def test_include_window_with_every_call_missing_is_nan(self):
+        # The site count passes the gate under missing_data='include', but
+        # every call in this window is missing, so it standardizes to zero
+        # columns -- caught here by the block width (0 // n_blocks < 1),
+        # not by the site-count gate.
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (10, 30)).astype(np.int8)
+        hap[:, 10:20] = -1  # window 1 (sites 10-19): every call missing
+        hm = HaplotypeMatrix(hap, np.arange(30) * 100 + 1, 1, 3000)
+
+        se = local_pca_jackknife(hm, window_size=10, step_size=10,
+                                 window_type='snp', k=2, n_blocks=2,
+                                 missing_data='include', aggregate='mean')
+
+        assert np.isnan(se[1]).all()
+        assert np.isfinite(se[0]).all()
+        assert np.isfinite(se[2]).all()
+
 
 # ---------------------------------------------------------------------------
 # Fused local_pca + jackknife
@@ -604,6 +670,15 @@ class TestJackknife:
 
 
 class TestFusedJackknife:
+
+    @pytest.mark.parametrize('n_blocks', [0, 1])
+    def test_rejects_too_few_blocks(self, small_hm, n_blocks):
+        with pytest.raises(ValueError, match="n_blocks"):
+            _local_pca_with_jackknife(small_hm, window_size=200, window_type='snp',
+                                      k=2, n_blocks=n_blocks)
+        with pytest.raises(ValueError, match="n_blocks"):
+            lostruct(small_hm, window_size=200, window_type='snp', k=2,
+                     jackknife=True, n_corners=0, n_blocks=n_blocks)
 
     def test_fused_matches_separate(self, small_hm):
         k, n_blocks = 2, 5
@@ -643,6 +718,74 @@ class TestFusedJackknife:
         # Jackknife should be NaN (4 < 10)
         assert result.jackknife_se is not None
         assert np.all(np.isnan(result.jackknife_se))
+
+    def test_jackknife_gate_uses_sites_not_one_hot_columns(self):
+        """A fully heterozygous window gets 2 one-hot columns per site, so
+        the gate must compare against the real site count, not X.shape[1] --
+        otherwise this window (10 sites, below the gate of 12) would pass as
+        if it had 20. local_pca_jackknife and _local_pca_with_jackknife
+        (via lostruct) must agree."""
+        rng = np.random.default_rng(0)
+        n_hap, n_var = 16, 30
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[0, :], hap[1, :] = 0, 1  # every site segregating: 2 columns/site
+        hm = HaplotypeMatrix(hap, np.arange(n_var) * 100 + 1, 1, 3000)
+
+        kw = dict(window_size=10, step_size=10, window_type='snp',
+                  k=2, n_blocks=6)  # gate: max(2, 2) * 6 = 12 > 10 sites
+
+        se_direct = local_pca_jackknife(hm, aggregate='mean', **kw)
+        se_fused = lostruct(hm, jackknife=True, n_corners=0,
+                            jackknife_aggregate='mean', **kw).jackknife_se
+
+        assert np.isnan(se_direct[0]).all()
+        assert np.isnan(se_fused[0]).all()
+        np.testing.assert_allclose(se_direct, se_fused, equal_nan=True)
+
+    def test_jackknife_exclude_window_with_no_complete_site_is_nan(self):
+        """Mirrors TestNanHandling.test_exclude_window_with_no_complete_site_is_nan
+        for the jackknife paths: window.n_variants (10) passes the gate before
+        the exclude filter, but every site in this window has a missing call,
+        so the filter leaves 0 complete sites. local_pca_jackknife and
+        lostruct(jackknife=True) must both come out NaN, not a degenerate SE
+        from 0 real sites."""
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (10, 30)).astype(np.int8)
+        hap[0, 10:20] = -1  # window 1 (sites 10-19): no complete site
+        hm = HaplotypeMatrix(hap, np.arange(30) * 100 + 1, 1, 3000)
+
+        kw = dict(window_size=10, step_size=10, window_type='snp',
+                  k=2, n_blocks=2, missing_data='exclude')
+
+        se_direct = local_pca_jackknife(hm, aggregate='mean', **kw)
+        se_fused = lostruct(hm, jackknife=True, n_corners=0,
+                            jackknife_aggregate='mean', **kw).jackknife_se
+
+        assert np.isnan(se_direct[1]).all()
+        assert np.isnan(se_fused[1]).all()
+        assert np.isfinite(se_direct[0]).all()
+        assert np.isfinite(se_fused[0]).all()
+
+    def test_fused_include_window_with_every_call_missing_is_nan(self):
+        """Mirrors TestNanHandling.test_include_window_with_every_call_missing_is_nan
+        for the fused jackknife path: the site count passes the gate under
+        missing_data='include', but every call in this window is missing, so
+        it standardizes to zero columns. _local_pca_with_jackknife must give
+        NaN eigvals/sumsq/jackknife_se for it, not eigvals [0, 0]."""
+        rng = np.random.default_rng(0)
+        hap = rng.integers(0, 2, (10, 30)).astype(np.int8)
+        hap[:, 10:20] = -1  # window 1 (sites 10-19): every call missing
+        hm = HaplotypeMatrix(hap, np.arange(30) * 100 + 1, 1, 3000)
+
+        result = _local_pca_with_jackknife(hm, window_size=10, step_size=10,
+                                           window_type='snp', k=2, n_blocks=2,
+                                           missing_data='include', aggregate='mean')
+
+        assert np.isnan(result.eigvals[1]).all()
+        assert np.isnan(result.sumsq[1])
+        assert np.isnan(result.jackknife_se[1]).all()
+        assert np.isfinite(result.eigvals[0]).all()
+        assert np.isfinite(result.eigvals[2]).all()
 
     def test_fused_tiny_window_yields_nan(self, small_hm, sparse_regions):
         # A one-variant region can form neither PCs nor jackknife blocks, so
