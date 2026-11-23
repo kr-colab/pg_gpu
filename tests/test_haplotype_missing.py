@@ -235,7 +235,7 @@ def test_moving_garud_h_exclude_matches_windowed_analysis():
     np.testing.assert_allclose(moving, df[GARUD].to_numpy(dtype=np.float64)[:3])
 
 
-def test_fallback_groups_once_per_window(windowed_case, monkeypatch):
+def test_fused_groups_every_window_in_one_call(windowed_case, monkeypatch):
     # The package exports a function with the module's name, so take the
     # module from sys.modules.
     wa = sys.modules["pg_gpu.windowed_analysis"]
@@ -245,11 +245,11 @@ def test_fallback_groups_once_per_window(windowed_case, monkeypatch):
     monkeypatch.setattr(wa, "garud_h_windows",
                         lambda *a, **k: calls.append(1) or real(*a, **k))
     size = 100 * SPACING
-    # 'pi' with 'exclude' sends the request to the per-window fallback.
     df = windowed_analysis(_hm(hap), window_size=size, step_size=size,
                            statistics=GARUD + ["haplotype_count", "pi"],
                            missing_data="exclude")
-    assert len(calls) == len(df) >= len(win)
+    assert len(df) >= len(win)
+    assert len(calls) == 1
 
 
 def test_windowed_exclude_matches_scalar(windowed_case):
@@ -262,8 +262,7 @@ def test_windowed_exclude_matches_scalar(windowed_case):
                               statistics=stats, missing_data="exclude")
     np.testing.assert_allclose(
         fused[stats].to_numpy(dtype=np.float64)[:len(win)], ref)
-    # A mixed request takes the per-window fallback; its Garud columns
-    # equal the scalar ones too.
+    # A mixed request's Garud columns equal the scalar ones too.
     mixed = windowed_analysis(h, window_size=size, step_size=size,
                               statistics=stats + ["pi"], missing_data="exclude")
     np.testing.assert_allclose(

@@ -172,8 +172,8 @@ def test_moving_garud_h_warns_on_thin_windows():
     assert few[0].filename == __file__
 
 
-def test_fallback_accepts_populations_given_as_rows():
-    # The per-window fallback ('pi' with a Garud statistic under 'exclude')
+def test_windowed_accepts_populations_given_as_rows():
+    # 'pi' with a Garud statistic under 'exclude', with two populations,
     # gives row-list populations the values it gives the same rows by name.
     hap = _hap(60, 0.01)
     r1, r2 = list(range(30)), list(range(30, 60))
