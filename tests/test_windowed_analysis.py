@@ -2483,3 +2483,56 @@ def test_custom_statistic_sees_the_unfiltered_window():
                            missing_data='exclude')
     assert df['n_variants'].tolist() == [2, 0, 0]
     np.testing.assert_array_equal(df['matrix_variants_seen'], [3, 2, np.nan])
+
+
+class TestExcludeAlwaysPrefersFused:
+    """Under 'exclude', every request the fused engine knows now reaches it,
+    not just the ones outside the since-removed _EXCLUDE_FALLBACK_FIRST list."""
+
+    @staticmethod
+    def _hm(seed=0, rate=0.02):
+        rng = np.random.default_rng(seed)
+        n_hap, n_var = 30, 400
+        hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+        hap[rng.random(hap.shape) < rate] = -1
+        return HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10)
+
+    @pytest.mark.parametrize("stats", [
+        ['pi'], ['garud_h1'], ['pi', 'garud_h1'], ['segregating_sites', 'het_expected'],
+    ])
+    def test_routes_to_fused_not_fallback(self, stats):
+        from unittest import mock
+        from pg_gpu.windowed_analysis import StatisticsComputer
+        with mock.patch.object(StatisticsComputer, "compute") as spy:
+            windowed_analysis(self._hm(), window_size=1000, step_size=1000,
+                              statistics=stats, missing_data='exclude')
+        spy.assert_not_called()
+
+    @pytest.mark.parametrize("stats", [
+        ['pi'], ['garud_h1'], ['pi', 'garud_h1'],
+    ])
+    def test_matches_the_fallback(self, stats):
+        kw = dict(window_size=1000, step_size=1000, statistics=stats,
+                  missing_data='exclude')
+        fast = windowed_analysis(self._hm(), **kw)
+        fallback = WindowedAnalyzer(progress_bar=False, **kw).compute(self._hm())
+        for s in stats:
+            np.testing.assert_allclose(fast[s], fallback[s], equal_nan=True)
+
+    def test_allele_cap_now_differs_from_the_fallback(self):
+        # Accepted cost of removing the routing list: this request used to
+        # reach the fallback (no allele cap; segregating_sites + het_expected
+        # is not servable by the scatter engine, which also has no cap). It
+        # now reaches the fused engine, which drops a site over the cap.
+        from pg_gpu._warnings import MultiallelicCapWarning
+        n_hap, n_var = 4, 5
+        hap = np.zeros((n_hap, n_var), dtype=np.int8)
+        hap[0, 3] = 9
+        hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10)
+        kw = dict(window_size=n_var * 10, step_size=n_var * 10,
+                  statistics=['segregating_sites', 'het_expected'], missing_data='exclude')
+        with pytest.warns(MultiallelicCapWarning):
+            fast = windowed_analysis(hm, **kw)
+        fallback = WindowedAnalyzer(progress_bar=False, **kw).compute(hm)
+        assert fast['n_variants'][0] == n_var - 1
+        assert fallback['n_variants'][0] == n_var

@@ -108,16 +108,6 @@ _FUSED_STATS = (_FUSED_SINGLE_STATS | _TWO_POP_STATS
                 | _PER_SITE_RANGE_STATS
                 | _SNP_DIST_STATS | _PAIRWISE_LD_STATS | _DIST_MOMENT_STATS)
 
-# Fused statistics that the per-window fallback serves under 'exclude' when a
-# request holds nothing else. The fused engine gives the same values, but
-# for Garud's H next to other statistics it holds a filtered copy of the
-# matrix, which the choice of the chunked engine does not count, and it
-# drops sites over its allele cap. Do not add a name here when the fallback
-# learns to compute it.
-_EXCLUDE_FALLBACK_FIRST = (frozenset({'pi', 'theta_w', 'tajimas_d',
-                                      'segregating_sites', 'het_expected'})
-                           | frozenset(_FUSED_GARUD_STATS) | _TWO_POP_STATS)
-
 # Statistics that windowed_statistics_fused_chunked computes itself, in
 # chunks. It hands every other fused statistic to windowed_statistics_fused,
 # because those do not need the transposed matrix that the chunking bounds.
@@ -1516,7 +1506,9 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     Convenience function for windowed analysis.
 
     Depends on haplotype phase when a phase-dependent statistic is requested;
-    see :doc:`phasing`.
+    see :doc:`phasing`. A site with 8 or more distinct alleles is dropped by
+    the fused and chunked engines (``MultiallelicCapWarning``); see
+    :doc:`multiallelic`.
 
     Parameters
     ----------
@@ -1924,13 +1916,7 @@ def _windowed_analysis(haplotype_matrix: HaplotypeMatrix,
                 return result
 
     # Fused CUDA kernel path for more complex stat combinations.
-
-    # Under 'exclude' the per-window fallback serves a request made only of
-    # _EXCLUDE_FALLBACK_FIRST names (Garud-only requests excepted); the
-    # fused engine serves every other request it can.
-    can_fuse = ((missing_data == 'include' or requested.issubset(_FUSED_GARUD_STATS)
-                 or not requested <= _EXCLUDE_FALLBACK_FIRST)
-                and requested <= _FUSED_STATS
+    can_fuse = (requested <= _FUSED_STATS
                 # The fused engine tiles bp grids and custom regions; snp
                 # windows are variant-index ranges that only the per-window
                 # fallback builds, so they must skip the fused path.
@@ -2652,8 +2638,11 @@ class _FusedSites:
         self.missing_data = missing_data
         self._matrix = None
 
+        # garud_h_windows handles 'exclude' and any allele count itself.
+        garud_only = stats <= set(_FUSED_GARUD_STATS)
+
         keep_mask = None
-        if missing_data == 'exclude' and not stats <= set(_FUSED_GARUD_STATS):
+        if missing_data == 'exclude' and not garud_only:
             if two_pop:
                 keep_mask = ~haplotype_matrix._site_has_missing([pop1, pop2])
             else:
@@ -2661,18 +2650,20 @@ class _FusedSites:
                 keep_mask = ~column_has_missing(self.rows.haplotypes)
             self.missing_data = 'include'
 
-        # The two-population kernels read pop1 and pop2 rows of the caller's
-        # matrix, which the single-population rows need not cover, so the
-        # cap is then judged over every row.
-        cap_source = haplotype_matrix if two_pop else self.rows
-        overcap = cap_source.haplotypes.max(axis=0) >= _FUSED_MAX_ALLELES
-        if keep_mask is not None:
-            overcap &= keep_mask
-        n_over = int(overcap.sum())
-        self.capped = n_over > 0
-        if self.capped:
-            _warn_fused_allele_cap(n_over)
-            keep_mask = ~overcap if keep_mask is None else keep_mask & ~overcap
+        self.capped = False
+        if not garud_only:
+            # The two-population kernels read pop1 and pop2 rows of the
+            # caller's matrix, which the single-population rows need not
+            # cover, so the cap is then judged over every row.
+            cap_source = haplotype_matrix if two_pop else self.rows
+            overcap = cap_source.haplotypes.max(axis=0) >= _FUSED_MAX_ALLELES
+            if keep_mask is not None:
+                overcap &= keep_mask
+            n_over = int(overcap.sum())
+            self.capped = n_over > 0
+            if self.capped:
+                _warn_fused_allele_cap(n_over)
+                keep_mask = ~overcap if keep_mask is None else keep_mask & ~overcap
 
         positions = self.rows.positions
         if not isinstance(positions, cp.ndarray):
@@ -2992,10 +2983,20 @@ def windowed_statistics_fused(haplotype_matrix: HaplotypeMatrix,
                 if name in results:
                     results[name] = np.where(excluded_to_empty, np.nan, results[name])
 
-    # Garud's H: exact per-window haplotype hashing, batched to GPU memory
+    # Garud's H: exact per-window haplotype hashing, batched to GPU memory.
     if any(s in statistics for s in _FUSED_GARUD_STATS):
-        _compute_fused_garud_h(sites.matrix, win_start, win_stop, statistics,
-                               results, missing_data=missing_data)
+        if sites.keep is None:
+            garud_win_start, garud_win_stop = win_start, win_stop
+        else:
+            # win_start/win_stop index sites.positions, a subset of
+            # sites.rows.positions with non-contiguous kept indices.
+            garud_windows = _WindowAccumulator(sites.rows.positions, ws_gpu, we_gpu)
+            garud_win_start, garud_win_stop = garud_windows.start, garud_windows.stop
+        # sites.rows/orig_missing_data, not sites.matrix/missing_data: Garud
+        # judges completeness over its own population, not the rest of the
+        # request's.
+        _compute_fused_garud_h(sites.rows, garud_win_start, garud_win_stop,
+                               statistics, results, missing_data=orig_missing_data)
 
     # Per-site stats binned into windows. A variant belongs to window w iff
     # ws[w] <= pos < we[w] -- the same right-open variant range win_start /

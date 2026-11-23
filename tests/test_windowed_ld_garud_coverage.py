@@ -13,16 +13,21 @@ Two oracle strategies, both non-tautological:
   `selection.garud_h` on the bp-sliced submatrix, and a window with no
   variants must report a single haplotype.
 """
+import warnings
+
 import cupy as cp
 import numpy as np
 import pytest
 
 import pg_gpu._memutil as _memutil
 from pg_gpu import (
-    HaplotypeMatrix, distance_stats, divergence, ld_statistics, selection,
+    HaplotypeMatrix, MultiallelicCapWarning, distance_stats, divergence,
+    ld_statistics, selection,
 )
+from pg_gpu._utils import population_rows
 from pg_gpu.windowed_analysis import (
     WindowedAnalyzer, _compute_mean_r2, windowed_analysis,
+    windowed_statistics_fused, windowed_statistics_fused_chunked,
 )
 
 from .conftest import founder_haplotypes, garud_reference, simulate_hm
@@ -222,6 +227,77 @@ def test_garud_only_request_matches_combined_request(hm):
     for s in _GARUD_COUNT:
         np.testing.assert_array_equal(alone[s].to_numpy(),
                                       combined[s].to_numpy())
+
+
+# windowed_analysis's per-population split never mixes a population with
+# a pair in one call; these call the fused engine directly to reach that.
+def test_garud_direct_call_mixed_with_two_pop_matches_scalar_under_exclude():
+    # p1 has no missing calls, so its true H1 cannot depend on p2.
+    rng = np.random.default_rng(7)
+    n_hap, n_var = 40, 2000
+    hap = rng.integers(0, 2, (n_hap, n_var)).astype(np.int8)
+    p1, p2 = list(range(20)), list(range(20, 40))
+    missing = rng.random((20, n_var)) < 0.4
+    hap[20:40][missing] = -1
+    hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10)
+    bins = np.array([0, n_var * 10])
+
+    r = windowed_statistics_fused(hm, bp_bins=bins, statistics=("garud_h1", "fst"),
+                                  population=p1, pop1=p1, pop2=p2,
+                                  missing_data="exclude")
+    ref = selection.garud_h(population_rows(hm, p1), missing_data="exclude")
+    np.testing.assert_allclose(r["garud_h1"], [float(ref[0])], rtol=1e-9, atol=1e-12)
+
+
+def test_garud_direct_call_allele_cap_does_not_apply():
+    # The capped site is the only one distinguishing haplotype 0 from the
+    # rest; dropping it would wrongly merge them into one group.
+    n_hap, n_var = 4, 5
+    hap = np.zeros((n_hap, n_var), dtype=np.int8)
+    hap[0, 3] = 9  # over the fused kernels' allele cap of 8
+    hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10)
+    bins = np.array([0, n_var * 10])
+
+    with pytest.warns(MultiallelicCapWarning):
+        r = windowed_statistics_fused(hm, bp_bins=bins, statistics=("garud_h1", "pi"),
+                                      missing_data="include")
+    ref = selection.garud_h(hm, missing_data="include")
+    assert float(ref[0]) == pytest.approx(0.625)  # 2 groups: 1/4 and 3/4
+    np.testing.assert_allclose(r["garud_h1"], [float(ref[0])], rtol=1e-9, atol=1e-12)
+
+
+def test_garud_only_request_does_not_warn_or_undercount_over_cap_site():
+    # Nothing in a Garud-only request drops this site, so it must not warn
+    # or undercount n_variants for it.
+    n_hap, n_var = 4, 5
+    hap = np.zeros((n_hap, n_var), dtype=np.int8)
+    hap[0, 3] = 9
+    hm = HaplotypeMatrix(hap, np.arange(n_var, dtype=np.int64) * 10)
+    bins = np.array([0, n_var * 10])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", MultiallelicCapWarning)
+        r = windowed_statistics_fused(hm, bp_bins=bins, statistics=("garud_h1",),
+                                      missing_data="include")
+    assert r["n_variants"] == [n_var]
+
+
+def test_garud_chunked_delegation_matches_unchunked(hm_twopop, monkeypatch):
+    # Chunked delegates Garud to windowed_statistics_fused via _sites=sites;
+    # confirm the fix reaches that path too.
+    from pg_gpu import _memutil
+    monkeypatch.setattr(_memutil, "estimate_fused_chunk_size", lambda n_hap: 1000)
+    bins = np.array([0, 50_000])
+    unchunked = windowed_statistics_fused(
+        hm_twopop, bp_bins=bins, statistics=("garud_h1", "fst"),
+        population=hm_twopop.sample_sets["p1"], pop1=hm_twopop.sample_sets["p1"],
+        pop2=hm_twopop.sample_sets["p2"], missing_data="exclude")
+    chunked = windowed_statistics_fused_chunked(
+        hm_twopop, bp_bins=bins, statistics=("garud_h1", "fst"),
+        population=hm_twopop.sample_sets["p1"], pop1=hm_twopop.sample_sets["p1"],
+        pop2=hm_twopop.sample_sets["p2"], missing_data="exclude")
+    np.testing.assert_allclose(unchunked["garud_h1"], chunked["garud_h1"],
+                               rtol=1e-9, atol=1e-12)
 
 
 @pytest.mark.slow
