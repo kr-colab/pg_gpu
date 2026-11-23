@@ -1506,7 +1506,9 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     Convenience function for windowed analysis.
 
     Depends on haplotype phase when a phase-dependent statistic is requested;
-    see :doc:`phasing`.
+    see :doc:`phasing`. A site with 8 or more distinct alleles is dropped by
+    the fused and chunked engines (``MultiallelicCapWarning``); see
+    :doc:`multiallelic`.
 
     Parameters
     ----------
