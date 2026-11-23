@@ -1095,6 +1095,15 @@ Bug fixes
   request also no longer runs the allele-cap check at all, so it no
   longer wrongly warns that a site was excluded or undercounts
   ``n_variants`` for a site nothing in the request actually dropped.
+* ``windowed_analysis`` under ``missing_data='exclude'`` sent some
+  requests (``pi``, ``theta_w``, ``tajimas_d``, ``segregating_sites``,
+  ``het_expected``, the Garud names, the two-population names, or a mix
+  of only those) to the slower per-window loop rather than the fused
+  engine. These now run on the fused (or chunked) engine like any other
+  ``'exclude'`` request, which is faster but gives a window containing a
+  site with 8 or more distinct alleles a different value: that site is
+  now dropped, with a ``MultiallelicCapWarning``, where it used to be
+  included.
 
 New warnings
 ~~~~~~~~~~~~
