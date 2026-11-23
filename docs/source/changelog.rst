@@ -1082,6 +1082,19 @@ Bug fixes
   ``n_blocks=1``: leaving out the only block empties every window, which
   standardizes to a valid-looking all-zero Gram instead of NaN.
   ``n_blocks < 2`` now raises ``ValueError``.
+* The fused engine's Garud's H columns (and ``haplotype_count``) took on
+  the rest of a mixed request's site filter instead of judging
+  completeness over their own population, so a request sharing a call
+  with a two-population statistic (``fst``, ``dxy``, ``da``) could give
+  a wrong Garud value whenever the other population had missing calls
+  Garud's own population did not. Garud's H also silently dropped a
+  site with an allele index of 8 or more under the fused kernels' shared
+  cap, which its hash never needed. Both are gone: Garud's H now always
+  judges completeness over its own population and reads every site
+  regardless of allele count, on every request shape. A Garud-only
+  request also no longer runs the allele-cap check at all, so it no
+  longer wrongly warns that a site was excluded or undercounts
+  ``n_variants`` for a site nothing in the request actually dropped.
 
 New warnings
 ~~~~~~~~~~~~
