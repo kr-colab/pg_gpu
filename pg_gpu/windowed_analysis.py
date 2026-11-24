@@ -327,12 +327,18 @@ class StatisticsComputer:
         self.populations = populations or []
         self.custom_stat_kwargs = custom_stat_kwargs or {}
         self.ld_bins = ld_bins or [0, 1000, 5000, 10000, 50000]
+        if not isinstance(ld_max_distance, (int, float)) or ld_max_distance <= 0:
+            raise ValueError(
+                f"ld_max_distance must be a positive number, got {ld_max_distance!r}")
         self.ld_max_distance = ld_max_distance
         self.missing_data = missing_data
         self.span_normalize = span_normalize
 
         # Categorize statistics
         self._categorize_statistics()
+        # Resolve aliased kwargs
+        self._ld_kwargs = {stat: self._resolve_ld_kwargs(stat)
+                            for stat in self.ld_stats}
 
     def _categorize_statistics(self):
         """Categorize statistics by type for efficient computation."""
@@ -399,6 +405,21 @@ class StatisticsComputer:
                 # Custom callable
                 self.custom_stats.append(stat)
 
+    def _resolve_ld_kwargs(self, stat):
+        """Final kwargs for one LD statistic: `max_dist` and `max_distance`
+        are aliases; with neither, use ld_max_distance."""
+        kwargs = dict(self.custom_stat_kwargs.get(stat, {}))
+        if stat == 'ld_decay' and 'bins' not in kwargs:
+            kwargs['bins'] = self.ld_bins
+        if 'max_dist' in kwargs and 'max_distance' in kwargs:
+            raise TypeError(
+                "pass only one of max_dist or max_distance; they are "
+                "aliases for the same argument.")
+        if 'max_dist' in kwargs:
+            kwargs['max_distance'] = kwargs.pop('max_dist')
+        kwargs.setdefault('max_distance', self.ld_max_distance)
+        return kwargs
+
     def compute(self, window: WindowData) -> Dict[str, float]:
         """Compute all requested statistics for a window."""
         results = _window_prefix(window)
@@ -450,21 +471,7 @@ class StatisticsComputer:
 
         # LD statistics
         for stat in self.ld_stats:
-            kwargs = dict(self.custom_stat_kwargs.get(stat, {}))
-            # Add default bins for ld_decay if not provided
-            if stat == 'ld_decay' and 'bins' not in kwargs:
-                kwargs['bins'] = self.ld_bins
-            # mean_r2 took `max_dist`, ld_decay took `max_distance`; accept
-            # either as an alias for the other, and fall back to
-            # ld_max_distance when neither is given.
-            if 'max_dist' in kwargs and 'max_distance' in kwargs:
-                raise TypeError(
-                    "pass only one of max_dist or max_distance; they are "
-                    "aliases for the same argument.")
-            if 'max_dist' in kwargs:
-                kwargs['max_distance'] = kwargs.pop('max_dist')
-            kwargs.setdefault('max_distance', self.ld_max_distance)
-            results[stat] = self.LD_STATS[stat](window, **kwargs)
+            results[stat] = self.LD_STATS[stat](window, **self._ld_kwargs[stat])
 
         # Custom statistics. The callable gets the window's matrix as it is,
         # before any 'exclude' filter, and decides what to do with it; only a
@@ -1600,7 +1607,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     **kwargs
         ``regions`` (with ``window_type='regions'``) is read by whichever
         engine serves the request. The other WindowedAnalyzer parameters (``ld_bins``,
-        ``custom_stat_kwargs``, ``progress_bar`` and the rest) take effect
+        ``ld_max_distance``, ``custom_stat_kwargs``, ``progress_bar`` and the rest) take effect
         only when the per-window fallback serves the request; the scatter
         and fused engines accept them and do not use them. For the
         local-PCA statistics, ``k``, ``population``, ``batch_size``,
