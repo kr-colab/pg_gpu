@@ -22,7 +22,8 @@ from pg_gpu import (
     HaplotypeMatrix, distance_stats, divergence, ld_statistics, selection,
 )
 from pg_gpu.windowed_analysis import (
-    WindowedAnalyzer, _compute_mean_r2, windowed_analysis,
+    WindowedAnalyzer, _LD_MAX_DISTANCE_DEFAULT, _compute_mean_r2,
+    windowed_analysis,
 )
 
 from .conftest import founder_haplotypes, garud_reference, simulate_hm
@@ -78,7 +79,7 @@ def test_windowed_mean_r2_matches_scalar(hm):
     analyzer = WindowedAnalyzer(
         window_type="bp", window_size=_WHOLE, step_size=_WHOLE,
         statistics=["mean_r2"],
-        custom_stat_kwargs={"mean_r2": {"max_dist": 20000}})
+        custom_stat_kwargs={"mean_r2": {"max_distance": 20000}})
     df = analyzer.compute(hm)
     assert len(df) == 1
     np.testing.assert_allclose(df.iloc[0]["mean_r2"],
@@ -97,6 +98,28 @@ def test_windowed_ld_decay_matches_mean_r2(hm):
     np.testing.assert_allclose(df.iloc[0]["ld_decay"],
                                float(_compute_mean_r2(hm, 20000)),
                                rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("stat", ["mean_r2", "ld_decay"])
+def test_windowed_ld_stats_default_distance(hm, stat):
+    # With no custom_stat_kwargs at all, both LD statistics must use
+    # WindowedAnalyzer's own ld_max_distance default, not raise.
+    r = _single(hm, [stat])
+    np.testing.assert_allclose(
+        r[stat], float(_compute_mean_r2(hm, _LD_MAX_DISTANCE_DEFAULT)),
+        rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("stat", ["mean_r2", "ld_decay"])
+def test_windowed_ld_max_distance_takes_effect(hm, stat):
+    # ld_max_distance must change the result, and match the equivalent
+    # custom_stat_kwargs spelling.
+    distance = 2 * _LD_MAX_DISTANCE_DEFAULT
+    r = _single(hm, [stat], ld_max_distance=distance)
+    np.testing.assert_allclose(r[stat], float(_compute_mean_r2(hm, distance)),
+                               rtol=1e-9, atol=1e-12)
+    assert not np.isclose(
+        r[stat], float(_compute_mean_r2(hm, _LD_MAX_DISTANCE_DEFAULT)))
 
 
 def test_windowed_distribution_moments_match_scalar(hm):

@@ -297,6 +297,10 @@ def _window_mean_het_expected(matrix, missing_data):
     return float(np.nanmean(he))
 
 
+_LD_MAX_DISTANCE_DEFAULT = 10000
+"""Default ``ld_max_distance`` for ``mean_r2`` and ``ld_decay``."""
+
+
 class StatisticsComputer:
     """Computes population genetics statistics for windows."""
 
@@ -309,19 +313,24 @@ class StatisticsComputer:
     # LD-based statistics
     LD_STATS = {
         'ld_decay': lambda w, **kwargs: _compute_mean_r2(w.matrix, **kwargs),
-        'mean_r2': lambda w, max_dist: _compute_mean_r2(w.matrix, max_dist),
+        'mean_r2': lambda w, max_distance: _compute_mean_r2(w.matrix, max_distance),
     }
 
     def __init__(self, statistics: List[Union[str, Callable]],
                  populations: Optional[List[str]] = None,
                  custom_stat_kwargs: Optional[Dict] = None,
                  ld_bins: Optional[List[int]] = None,
+                 ld_max_distance: int = _LD_MAX_DISTANCE_DEFAULT,
                  missing_data: str = 'include',
                  span_normalize=True):
         self.statistics = statistics
         self.populations = populations or []
         self.custom_stat_kwargs = custom_stat_kwargs or {}
         self.ld_bins = ld_bins or [0, 1000, 5000, 10000, 50000]
+        if not isinstance(ld_max_distance, (int, float)) or ld_max_distance <= 0:
+            raise ValueError(
+                f"ld_max_distance must be a positive number, got {ld_max_distance!r}")
+        self.ld_max_distance = ld_max_distance
         self.missing_data = missing_data
         self.span_normalize = span_normalize
 
@@ -444,10 +453,11 @@ class StatisticsComputer:
 
         # LD statistics
         for stat in self.ld_stats:
-            kwargs = self.custom_stat_kwargs.get(stat, {})
+            kwargs = dict(self.custom_stat_kwargs.get(stat, {}))
             # Add default bins for ld_decay if not provided
             if stat == 'ld_decay' and 'bins' not in kwargs:
                 kwargs['bins'] = self.ld_bins
+            kwargs.setdefault('max_distance', self.ld_max_distance)
             results[stat] = self.LD_STATS[stat](window, **kwargs)
 
         # Custom statistics. The callable gets the window's matrix as it is,
@@ -692,7 +702,7 @@ class WindowedAnalyzer:
                  statistics: List[Union[str, Callable]] = ['pi'],
                  populations: Optional[List[str]] = None,
                  regions: Optional[pd.DataFrame] = None,
-                 ld_max_distance: int = 10000,
+                 ld_max_distance: int = _LD_MAX_DISTANCE_DEFAULT,
                  ld_bins: Optional[List[int]] = None,
                  gpu_memory_limit: Union[str, int] = 'auto',
                  chunk_size: Union[str, int] = 'auto',
@@ -719,9 +729,12 @@ class WindowedAnalyzer:
         regions : DataFrame, optional
             Custom regions for window_type='regions'
         ld_max_distance : int
-            Maximum distance for LD calculations
+            Maximum distance for LD calculations (``mean_r2`` and
+            ``ld_decay``), unless overridden per-statistic in
+            ``custom_stat_kwargs``
         ld_bins : list, optional
-            Distance bins for LD decay
+            Currently unused; ``ld_decay`` gives the same scalar as
+            ``mean_r2`` rather than a binned decay curve
         gpu_memory_limit : str or int
             GPU memory limit ('auto', '8GB', or bytes)
         chunk_size : str or int
@@ -760,6 +773,7 @@ class WindowedAnalyzer:
         # Initialize components
         self.stats_computer = StatisticsComputer(
             statistics, populations, custom_stat_kwargs, ld_bins=self.ld_bins,
+            ld_max_distance=self.ld_max_distance,
             missing_data=missing_data, span_normalize=span_normalize
         )
 
@@ -1580,7 +1594,7 @@ def windowed_analysis(haplotype_matrix: HaplotypeMatrix,
     **kwargs
         ``regions`` (with ``window_type='regions'``) is read by whichever
         engine serves the request. The other WindowedAnalyzer parameters (``ld_bins``,
-        ``custom_stat_kwargs``, ``progress_bar`` and the rest) take effect
+        ``ld_max_distance``, ``custom_stat_kwargs``, ``progress_bar`` and the rest) take effect
         only when the per-window fallback serves the request; the scatter
         and fused engines accept them and do not use them. For the
         local-PCA statistics, ``k``, ``population``, ``batch_size``,
