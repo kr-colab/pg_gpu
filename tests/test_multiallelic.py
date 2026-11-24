@@ -26,6 +26,16 @@ def _strict_biallelic_mask(G):
     return (G.max(axis=1) == 1) & (G == 0).any(axis=1) & (G == 1).any(axis=1)
 
 
+def _fs_kept_mask(G):
+    """Sites FrequencySpectrum keeps: at most one distinct non-reference
+    allele present, computed independently of FrequencySpectrum itself."""
+    n_alleles = int(G.max()) + 1
+    n_non_ref_present = np.zeros(G.shape[0], dtype=int)
+    for a in range(1, n_alleles):
+        n_non_ref_present += (G == a).any(axis=1)
+    return n_non_ref_present <= 1
+
+
 def _expected_segregating(hap, exclude=False):
     """Independent numpy reference: mutation-count segregating sites.
 
@@ -266,6 +276,24 @@ class TestPerAlleleSFS:
                          ('theta_h', diversity.theta_h), ('theta_l', diversity.theta_l)]:
             assert not np.isclose(fs.theta(name), fn(hm, span_normalize=False), rtol=1e-6)
         assert fs.n_segregating != diversity.segregating_sites(hm)
+
+    def test_freqspec_diverges_only_on_the_sites_it_drops(self, multiallelic_hm):
+        # The divergence from the scalar functions on mixed data is exactly
+        # the sites FrequencySpectrum drops: computed on an independently
+        # derived mask of just the sites it keeps, every estimator matches
+        # the scalar functions there, while still diverging on the full data.
+        ts, hm = multiallelic_hm
+        G = ts.genotype_matrix()
+        kept = _fs_kept_mask(G)
+        assert 0 < kept.sum() < len(kept)
+        hm_kept = hm.get_subset(np.where(kept)[0])
+        with pytest.warns(BiallelicOnlyWarning, match="biallelic"):
+            fs = FrequencySpectrum(hm)
+        for name, fn in [('pi', diversity.pi), ('watterson', diversity.theta_w),
+                         ('theta_h', diversity.theta_h), ('theta_l', diversity.theta_l)]:
+            np.testing.assert_allclose(fs.theta(name),
+                                       fn(hm_kept, span_normalize=False), rtol=1e-9)
+            assert not np.isclose(fs.theta(name), fn(hm, span_normalize=False), rtol=1e-6)
 
     def test_freqspec_matches_scalar_biallelic(self, multiallelic_hm):
         # On biallelic data every estimator agrees between the two paths.
