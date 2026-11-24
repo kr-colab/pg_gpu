@@ -108,9 +108,8 @@ Multiallelic sites
 A few statistics count each derived allele of a site apart. At a biallelic
 site they give the same value whichever allele has code 0, so they do not
 warn; at a site with three or more alleles their value does depend on it:
-``mu_sfs`` (scalar and windowed), the ``eta1_star`` and
-``minus_eta1_star`` estimators, and ``FrequencySpectrum`` with the ``pi``
-weight (and so its Tajima's D). ``genetic_relatedness`` with
+``mu_sfs`` (scalar and windowed) and the ``eta1_star`` and
+``minus_eta1_star`` estimators. ``genetic_relatedness`` with
 ``polarised=True`` is the same with centring, and it does warn, since
 that argument asks for the derived state.
 

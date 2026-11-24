@@ -322,8 +322,7 @@ _STATS = {
         None, "fst_wc", "fst_wc", "fst_wc"),
     # The Achaz eta-family: the per-allele scalar path (via diversity_stats) is
     # the reference; the SFS dot-product (FrequencySpectrum.theta) is the one
-    # path checked against it. Both are per-allele-correct, so they agree on
-    # every condition (no xfail), and eta is not a windowed stat.
+    # path checked against it. Not a windowed stat.
     **{name: _Stat(
         False, "value",
         lambda hm, md, name=name: diversity.diversity_stats(
@@ -403,6 +402,13 @@ _FS_MULTIALLELIC = (
     "so the SFS-derived estimators that depend on them diverge. #100"
 )
 
+_FS_DROPS_MULTIALLELIC = (
+    "FrequencySpectrum drops any site with the reference absent or two or more "
+    "alternates present, consistent with the infinite-sites assumption behind "
+    "the Achaz framework, so it no longer covers every site the scalar "
+    "functions do."
+)
+
 # (stat, path) -> list of (reason, conditions) rules; the first rule whose
 # ``conditions`` set contains the condition (or is None, meaning every
 # condition where the path runs) applies. A key carries more than one rule when
@@ -418,6 +424,14 @@ _XFAILS = {
     ("theta_w", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("segregating_sites", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
     ("fay_wu_h", "fs"): [(_FS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    # FS drops the multiallelic sites outright, so it no longer sees every
+    # site the scalar's per-allele count does.
+    ("theta_h", "fs"): [(_FS_DROPS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("theta_l", "fs"): [(_FS_DROPS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("eta1", "fs"): [(_FS_DROPS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("eta1_star", "fs"): [(_FS_DROPS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("minus_eta1", "fs"): [(_FS_DROPS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
+    ("minus_eta1_star", "fs"): [(_FS_DROPS_MULTIALLELIC, _WHEN_MULTIALLELIC)],
 }
 
 

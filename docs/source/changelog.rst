@@ -503,6 +503,16 @@ Read this section if you are comparing against older pg_gpu results.
 Bug fixes
 ~~~~~~~~~
 
+* ``FrequencySpectrum`` double-counted a site whose reference allele is
+  absent from the sample: with two alternates present and neither of
+  them allele 0, ``pi`` and ``watterson`` (and so Tajima's D) treated
+  both as derived relative to a reference that was not there, inflating
+  the result. Such a site is now dropped instead, the same way a true
+  three-or-more-allele site already was, with the combined count in one
+  ``BiallelicOnlyWarning``; see :ref:`fs-biallelic-only`. ``theta_h``,
+  ``theta_l`` and the eta estimators no longer cover a dropped site,
+  where they previously did, so they can differ from the scalar
+  functions on data that has one.
 * ``moments_ld.compute_ld_statistics`` ignored ``accessible_bed`` when
   the input was a ``haplotype_matrix`` or a ``genotype_matrix``, and
   returned the unmasked statistics with no error; only the VCF path read
