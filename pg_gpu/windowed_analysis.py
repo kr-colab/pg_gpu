@@ -336,9 +336,6 @@ class StatisticsComputer:
 
         # Categorize statistics
         self._categorize_statistics()
-        # Resolve aliased kwargs
-        self._ld_kwargs = {stat: self._resolve_ld_kwargs(stat)
-                            for stat in self.ld_stats}
 
     def _categorize_statistics(self):
         """Categorize statistics by type for efficient computation."""
@@ -405,21 +402,6 @@ class StatisticsComputer:
                 # Custom callable
                 self.custom_stats.append(stat)
 
-    def _resolve_ld_kwargs(self, stat):
-        """Final kwargs for one LD statistic: `max_dist` and `max_distance`
-        are aliases; with neither, use ld_max_distance."""
-        kwargs = dict(self.custom_stat_kwargs.get(stat, {}))
-        if stat == 'ld_decay' and 'bins' not in kwargs:
-            kwargs['bins'] = self.ld_bins
-        if 'max_dist' in kwargs and 'max_distance' in kwargs:
-            raise TypeError(
-                "pass only one of max_dist or max_distance; they are "
-                "aliases for the same argument.")
-        if 'max_dist' in kwargs:
-            kwargs['max_distance'] = kwargs.pop('max_dist')
-        kwargs.setdefault('max_distance', self.ld_max_distance)
-        return kwargs
-
     def compute(self, window: WindowData) -> Dict[str, float]:
         """Compute all requested statistics for a window."""
         results = _window_prefix(window)
@@ -471,7 +453,12 @@ class StatisticsComputer:
 
         # LD statistics
         for stat in self.ld_stats:
-            results[stat] = self.LD_STATS[stat](window, **self._ld_kwargs[stat])
+            kwargs = dict(self.custom_stat_kwargs.get(stat, {}))
+            # Add default bins for ld_decay if not provided
+            if stat == 'ld_decay' and 'bins' not in kwargs:
+                kwargs['bins'] = self.ld_bins
+            kwargs.setdefault('max_distance', self.ld_max_distance)
+            results[stat] = self.LD_STATS[stat](window, **kwargs)
 
         # Custom statistics. The callable gets the window's matrix as it is,
         # before any 'exclude' filter, and decides what to do with it; only a

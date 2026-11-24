@@ -79,7 +79,7 @@ def test_windowed_mean_r2_matches_scalar(hm):
     analyzer = WindowedAnalyzer(
         window_type="bp", window_size=_WHOLE, step_size=_WHOLE,
         statistics=["mean_r2"],
-        custom_stat_kwargs={"mean_r2": {"max_dist": 20000}})
+        custom_stat_kwargs={"mean_r2": {"max_distance": 20000}})
     df = analyzer.compute(hm)
     assert len(df) == 1
     np.testing.assert_allclose(df.iloc[0]["mean_r2"],
@@ -120,13 +120,6 @@ def test_windowed_ld_max_distance_takes_effect(hm, stat):
                                rtol=1e-9, atol=1e-12)
     assert not np.isclose(
         r[stat], float(_compute_mean_r2(hm, _LD_MAX_DISTANCE_DEFAULT)))
-
-
-@pytest.mark.parametrize("stat", ["mean_r2", "ld_decay"])
-def test_windowed_ld_max_dist_and_max_distance_conflict_raises(hm, stat):
-    with pytest.raises(TypeError, match="only one of max_dist or max_distance"):
-        _single(hm, [stat], custom_stat_kwargs={
-            stat: {"max_dist": 1000, "max_distance": 2000}})
 
 
 def test_windowed_distribution_moments_match_scalar(hm):

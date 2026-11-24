@@ -386,7 +386,7 @@ SCANS = {
     "fused diploshic": dict(statistics=['omega', 'mu_ld', 'dist_var']),
     "mean_nsl": dict(statistics=['mean_nsl']),
     "fallback mean_r2": dict(statistics=['mean_r2'],
-                             custom_stat_kwargs={'mean_r2': {'max_dist': 2_000}}),
+                             custom_stat_kwargs={'mean_r2': {'max_distance': 2_000}}),
     "local_pca": dict(statistics=['local_pca']),
 }
 
@@ -419,7 +419,7 @@ def test_fused_entry_points_warn_once(hm):
 
 def test_windowed_analyzer_methods_warn_once(hm):
     an = wa.WindowedAnalyzer(window_size=WIN, statistics=['garud_h12', 'mean_r2'],
-                             custom_stat_kwargs={'mean_r2': {'max_dist': 2_000}},
+                             custom_stat_kwargs={'mean_r2': {'max_distance': 2_000}},
                              progress_bar=False)
     _warns_once(lambda: an.compute(hm), "WindowedAnalyzer.compute")
     _warns_once(lambda: an.compute_region(hm, "1", 0, 10_000),
@@ -521,7 +521,7 @@ def test_rephasing_matches_classification():
                                    equal_nan=True) for c in cols), \
             f"phase-dependent stat {s} unchanged by re-phasing"
 
-    kw = dict(custom_stat_kwargs={'mean_r2': {'max_dist': 1_000}})
+    kw = dict(custom_stat_kwargs={'mean_r2': {'max_distance': 1_000}})
     a, b = _scan(base, ['mean_r2'], **kw), _scan(flipped, ['mean_r2'], **kw)
     assert any(not np.allclose(a[c].to_numpy(float), b[c].to_numpy(float),
                                equal_nan=True) for c in _numeric_stat_cols(a))

@@ -1086,9 +1086,10 @@ Bug fixes
   ``mean_r2`` or ``ld_decay`` unless the maximum distance was passed
   through ``custom_stat_kwargs``; the documented ``ld_max_distance``
   argument had no effect. ``ld_max_distance`` (default 10000) is now the
-  distance both statistics use, and either statistic also accepts the
-  other's ``custom_stat_kwargs`` keyword (``max_dist`` or
-  ``max_distance``) as an alias.
+  distance both statistics use, overridable per-statistic with
+  ``custom_stat_kwargs={'mean_r2' or 'ld_decay': {'max_distance': ...}}``.
+  ``mean_r2``'s older ``max_dist`` spelling of this keyword is no longer
+  accepted.
 
 New warnings
 ~~~~~~~~~~~~

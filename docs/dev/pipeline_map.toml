@@ -537,14 +537,14 @@ scalar = "HaplotypeMatrix.pairwise_r2"
 engines = ["fallback"]
 not_in = { scatter = "#347", fused = "#347" }
 span_normalized = false
-notes = "Gives the same scalar as mean_r2 rather than a binned decay curve; ld_bins has no effect. Distance defaults to ld_max_distance, overridable with custom_stat_kwargs={'ld_decay': {'max_distance': ...}} (or the 'max_dist' alias)."
+notes = "Gives the same scalar as mean_r2 rather than a binned decay curve; ld_bins has no effect. Distance defaults to ld_max_distance, overridable with custom_stat_kwargs={'ld_decay': {'max_distance': ...}}."
 
 [windowed.mean_r2]
 scalar = "HaplotypeMatrix.pairwise_r2"
 engines = ["fallback"]
 not_in = { scatter = "#347", fused = "#347" }
 span_normalized = false
-notes = "Distance defaults to ld_max_distance, overridable with custom_stat_kwargs={'mean_r2': {'max_distance': ...}} (or the 'max_dist' alias)."
+notes = "Distance defaults to ld_max_distance, overridable with custom_stat_kwargs={'mean_r2': {'max_distance': ...}}."
 
 [windowed.local_pca]
 scalar = "decomposition.local_pca"
