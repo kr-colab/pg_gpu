@@ -210,8 +210,8 @@ def test_from_vcf_with_several_contigs_raises(two_contig_vcf, cls):
 
 
 def test_from_vcf_without_region_raises_for_several_contigs(two_contig_vcf):
-    # No accessible_bed at all: this used to load silently, concatenating
-    # both contigs' positions into one coordinate axis.
+    # No accessible_bed at all: a VCF with several contigs and no region=
+    # must still raise; otherwise LD pairs sites across contigs.
     vcf, _ = two_contig_vcf
     with pytest.raises(ValueError, match="variants on 2 contigs"):
         HaplotypeMatrix.from_vcf(vcf)

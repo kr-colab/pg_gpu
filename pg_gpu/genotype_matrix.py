@@ -478,6 +478,11 @@ class GenotypeMatrix:
         Returns
         -------
         GenotypeMatrix
+
+        Raises
+        ------
+        ValueError
+            If ``path`` has variants on more than one contig.
         """
         import allel
         from .haplotype_matrix import (

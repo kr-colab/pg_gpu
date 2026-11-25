@@ -203,9 +203,8 @@ class TestVcfLoadingPath:
     @pytest.mark.parametrize("use_genotypes", [True, False],
                              ids=["genotype", "haplotype"])
     def test_vcf_with_several_contigs_raises(self, tmp_path, use_genotypes):
-        # A 2-contig VCF with no region= used to load silently, pairing
-        # contig 1's sites with contig 2's as if they were adjacent and
-        # linked; it must now raise instead of returning a bogus LD value.
+        # A VCF with several contigs and no region= must raise; otherwise
+        # LD pairs sites across contigs.
         vcf = tmp_path / "two.vcf"
         vcf.write_text(
             "##fileformat=VCFv4.2\n"
