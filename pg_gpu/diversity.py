@@ -16,7 +16,7 @@ from functools import lru_cache
 from .haplotype_matrix import HaplotypeMatrix
 from ._utils import _eager_only, population_rows
 from ._warnings import (_phase_dependent, _polar_depth, _polarization_dependent,
-                        _warn_unphased, _warn_unpolarized)
+                        _warn_biallelic_only, _warn_unphased, _warn_unpolarized)
 
 
 def _emptied_by_exclude(orig_num_variants, matrix, missing_data):
@@ -595,6 +595,13 @@ class FrequencySpectrum:
     which are faster. This class is for custom weight functions,
     SFS inspection, projection, and the general Achaz variance framework.
 
+    Achaz's framework assumes infinite sites: one mutation per site. A site
+    is kept only if the reference allele is present and at most one
+    alternate allele segregates; a site where the reference is absent with
+    two or more alternates present implies more than one mutation, the same
+    as a true 3+-allele site, so both kinds are dropped together with a
+    ``BiallelicOnlyWarning``.
+
     Parameters
     ----------
     haplotype_matrix : HaplotypeMatrix
@@ -630,15 +637,20 @@ class FrequencySpectrum:
             ac = ac[complete]
             n_valid = n_valid[complete]
 
-        # NOTE (issue #100): per-allele polarised SFS -- each derived allele
-        # contributes at its own frequency for 0 < count < n (both fixed classes,
-        # bin 0 and bin n, excluded, matching tskit). The SFS is marginal (it
-        # forgets which derived alleles co-occur at a site), so on MULTIALLELIC
-        # data the estimators that depend on co-occurrence diverge from the
-        # authoritative scalar functions (diversity.pi etc.): pi -- and hence
-        # Tajima's D and Fay-Wu H -- overcount, and Watterson (sum of xi) differs
-        # from the scalar distinct-alleles-1 at reference-absent sites.
-        # theta_h/theta_l and the eta-family are exact.
+        # A site survives only with the reference present and at most one
+        # alternate segregating; see the class docstring for why.
+        n_alt_present = (ac[:, 1:] > 0).sum(axis=1)
+        keep = n_alt_present <= 1
+        n_dropped = int(ac.shape[0] - int(keep.sum()))
+        if n_dropped:
+            _warn_biallelic_only(n_dropped, context="FrequencySpectrum")
+        ac = ac[keep]
+        n_valid = n_valid[keep]
+
+        # Each derived allele contributes at its own frequency for
+        # 0 < count < n (both fixed classes, bin 0 and bin n, excluded,
+        # matching tskit); the filter above leaves at most one derived
+        # allele per site, so this is unambiguous.
         self.sfs_by_n = {}
         # Sample size for the neutrality-test variance: the harmonic mean of
         # the per-site sample sizes over sites with n >= 2, as in
@@ -669,7 +681,9 @@ class FrequencySpectrum:
 
         self.n_total_sites = n_total_sites
         if n_total_sites is not None and self.n_max > 0:
-            n_invariant = n_total_sites - self.n_segregating
+            # A dropped site has 2+ alternates present, so it is segregating,
+            # not invariant, and must not inflate this count.
+            n_invariant = n_total_sites - n_dropped - self.n_segregating
             if n_invariant > 0 and self.n_max in self.sfs_by_n:
                 self.sfs_by_n[self.n_max][0] += n_invariant
 
@@ -772,8 +786,8 @@ class FrequencySpectrum:
         if dropped:
             warnings.warn(
                 f"FrequencySpectrum.project({target_n}): {dropped} segregating "
-                f"derived alleles are at sites with fewer than {target_n} valid "
-                f"haplotypes and are left out of the projected spectrum.",
+                f"sites have fewer than {target_n} valid haplotypes and are "
+                f"left out of the projected spectrum.",
                 UserWarning, stacklevel=2)
         result = object.__new__(FrequencySpectrum)
         result.sfs_by_n = {target_n: projected}

@@ -215,9 +215,6 @@ def test_windowed_name_warns_iff_value_changes(pair, stat):
 MULTIALLELIC_ONLY = {
     "scalar mu_sfs", "windowed mu_sfs",
     "diversity_stats eta1_star", "diversity_stats minus_eta1_star",
-    "FrequencySpectrum.theta eta1_star", "FrequencySpectrum.theta minus_eta1_star",
-    "FrequencySpectrum.theta pi", "FrequencySpectrum.theta theta_pi",
-    "FrequencySpectrum.tajimas_d",
 }
 # Its windows differ on the multiallelic pair by more than the tolerance
 # of this test; whether that is a dependence on code 0 is not established.

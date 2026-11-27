@@ -90,12 +90,16 @@ Which value to trust on multiallelic data
 The plain functions -- ``diversity.pi``, ``diversity.tajimas_d``, and
 friends -- are the ones to trust. They match ``tskit`` exactly.
 
-``FrequencySpectrum`` also offers :math:`\pi`, Tajima's D, and Fay-Wu's
-H, but on multiallelic data these are close approximations rather than
-exact. The reason is that a frequency spectrum records *how many* sites
-sit at each frequency, but not *which alleles came from the same site*,
-and you need that grouping to get :math:`\pi` exactly right. On
-two-allele data the two routes agree exactly.
+``FrequencySpectrum`` keeps only a site where the reference allele is
+present and at most one alternate segregates; see
+:ref:`fs-biallelic-only` for which sites that excludes and why. On the
+sites it keeps, :math:`\pi`, Watterson's theta, and
+``segregating_sites`` exactly match the scalar functions, and so do
+``theta_h``, ``theta_l``, and the eta estimators -- but unlike the
+scalar functions, which cover every site, ``FrequencySpectrum`` no
+longer covers a dropped one, so comparing it against a scalar function
+run on the full, undropped data will disagree whenever such sites are
+present.
 
 PCA and local PCA keep one column per allele
 --------------------------------------------
@@ -116,6 +120,8 @@ detection behave the same. ``pca_dosage`` is the classical diploid
 version and takes a ``GenotypeMatrix``, which only holds two-allele
 sites. See :doc:`features` for more on the two PCAs.
 
+.. _fs-biallelic-only:
+
 Statistics that only work on two-allele sites
 ---------------------------------------------
 
@@ -124,11 +130,21 @@ of them throws multiallelic sites away, it tells you how many with a
 ``BiallelicOnlyWarning``, so you do not mistake a partial answer for a
 complete one.
 
-That means ``admixture.patterson_d`` and the
+That means ``admixture.patterson_d``, ``FrequencySpectrum``, and the
 ``GenotypeMatrix`` loaders described below. If you want a statistic like
 Patterson's D that does handle multiallelic sites, use
 ``admixture.patterson_f4``, which measures the same thing without the
 restriction, at the expense of normalization (it is not bounded in [-1, 1]).
+
+``FrequencySpectrum``'s restriction is narrower than plain biallelic: a
+site survives only with the reference allele present and at most one
+alternate segregating. A site with the reference absent and two
+alternates present -- most often after subsetting to a population where
+the reference allele happens not to appear -- implies two mutations,
+the same as a true three-or-more-allele site, under the one-mutation-
+per-site assumption its Achaz-style variance framework depends on, so
+both kinds are dropped together into the same ``BiallelicOnlyWarning``
+count.
 
 To turn the warning off:
 
