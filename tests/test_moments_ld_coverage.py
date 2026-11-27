@@ -200,6 +200,29 @@ class TestVcfLoadingPath:
         assert res["pops"] == ["pop0"]
         assert f"Loading {sample_vcf}" in capsys.readouterr().out
 
+    @pytest.mark.parametrize("use_genotypes", [True, False],
+                             ids=["genotype", "haplotype"])
+    def test_vcf_with_several_contigs_raises(self, tmp_path, use_genotypes):
+        # A VCF with several contigs and no region= must raise; otherwise
+        # LD pairs sites across contigs.
+        vcf = tmp_path / "two.vcf"
+        vcf.write_text(
+            "##fileformat=VCFv4.2\n"
+            "##contig=<ID=1,length=1000>\n"
+            "##contig=<ID=2,length=1000>\n"
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">\n"
+            "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\ts1\ts2\ts3\ts4\n"
+            "1\t100\t.\tA\tT\t.\tPASS\t.\tGT\t0|1\t0|0\t1|1\t0|1\n"
+            "1\t200\t.\tA\tT\t.\tPASS\t.\tGT\t0|0\t0|1\t0|1\t1|1\n"
+            "2\t600\t.\tA\tT\t.\tPASS\t.\tGT\t1|1\t0|1\t0|0\t0|1\n"
+            "2\t700\t.\tA\tT\t.\tPASS\t.\tGT\t0|1\t1|1\t0|1\t0|0\n")
+        pop = tmp_path / "pops.tsv"
+        pop.write_text("sample\tpop\n" + "".join(f"s{i}\tpop0\n" for i in range(1, 5)))
+        with pytest.raises(ValueError, match="variants on 2 contigs"):
+            compute_ld_statistics(vcf_file=str(vcf), pop_file=str(pop),
+                                  pops=["pop0"], bp_bins=[0, 1000],
+                                  use_genotypes=use_genotypes, report=False)
+
 
 def _pop_file(tmp_path):
     """A pop file that puts the ten samples of the ``sample_vcf`` fixture

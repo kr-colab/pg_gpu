@@ -690,7 +690,8 @@ class HaplotypeMatrix:
             Genomic region to load: 'chrom', 'chrom:start', or
             'chrom:start-end', e.g. 'chr1:1000000-2000000'. Both ends
             are inclusive, as in samtools. Requires the VCF to be
-            bgzipped and tabix-indexed.
+            bgzipped and tabix-indexed. A VCF with more than one contig
+            raises ``ValueError`` unless this narrows it to one.
         samples : list of str, optional
             Subset of samples to load. If None, loads all samples.
         include_invariant : bool
@@ -737,6 +738,12 @@ class HaplotypeMatrix:
         -------
         HaplotypeMatrix
             Haplotype data with sample names stored.
+
+        Raises
+        ------
+        ValueError
+            If ``path`` has variants on more than one contig and
+            ``region`` does not narrow it to one.
         """
         from ._warnings import _maybe_memory_warn
         _maybe_memory_warn(path, region=region)
@@ -769,6 +776,10 @@ class HaplotypeMatrix:
             raise ValueError(f"No variants found in {path}"
                              + (f" for region {region}" if region else ""))
 
+        if region is None and 'variants/CHROM' in vcf:
+            chrom = _data_contig(_distinct_contigs(vcf['variants/CHROM']),
+                                 f"VCF {path}", "load one contig with region=")
+
         genotypes = allel.GenotypeArray(vcf['calldata/GT'])
         from ._warnings import check_diploid_encoding
         check_diploid_encoding(genotypes, sample_names=list(vcf['samples']),
@@ -796,9 +807,6 @@ class HaplotypeMatrix:
                 chrom_start = start
             if stop is not None:
                 chrom_end = stop - 1
-        elif accessible_bed is not None and 'variants/CHROM' in vcf:
-            chrom = _data_contig(_distinct_contigs(vcf['variants/CHROM']),
-                                 f"VCF {path}", "load one contig with region=")
 
         qc_fields = (_resolve_qc_fields_vcf(vcf, tag_to_path, unknown_tags)
                      if fields else {})

@@ -1090,6 +1090,20 @@ Bug fixes
   ``custom_stat_kwargs={'mean_r2' or 'ld_decay': {'max_distance': ...}}``.
   ``mean_r2``'s older ``max_dist`` spelling of this keyword is no longer
   accepted.
+* ``HaplotypeMatrix.from_vcf`` loaded a VCF spanning more than one contig
+  with no ``region=`` given, concatenating every contig's positions into
+  one coordinate axis with no record of where one contig ends and the
+  next begins. ``chrom_start``/``chrom_end`` then spanned the gap between
+  contigs as if it were real sequence, so distance- and span-based
+  statistics (pairwise LD, span-normalized rates, ``include_invariant``'s
+  accessible mask, windowed analysis) could pair or window sites from two
+  different chromosomes as if they were adjacent. It now raises
+  ``ValueError`` without ``region=``, the same as ``from_zarr``.
+* ``GenotypeMatrix.from_vcf`` had the same multi-contig gap, and has no
+  ``region=`` to select one contig with; it now raises the same
+  ``ValueError`` (the remedy is to subset the VCF first, e.g. with
+  ``bcftools view -r``), checked before the biallelic filtering and
+  dosage conversion so a rejected VCF does not pay for either.
 
 New warnings
 ~~~~~~~~~~~~

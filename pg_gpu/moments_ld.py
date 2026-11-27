@@ -105,6 +105,10 @@ def compute_ld_statistics(
     ----------
     vcf_file : str, optional
         Path to VCF file. Not needed if haplotype_matrix/genotype_matrix provided.
+        A VCF with more than one contig raises ``ValueError``: this function
+        has no ``region=`` of its own. Subset the VCF first (e.g. with
+        ``bcftools view -r``), or load a ``HaplotypeMatrix`` with ``region=``
+        yourself and pass it as ``haplotype_matrix=``.
     rec_map_file : str, optional
         Recombination map (tab-delimited: pos, Map(cM)). Required with r_bins.
     pop_file, pop_assignment : str, dict, numpy.ndarray, list, or False, optional
@@ -235,8 +239,22 @@ def _ld_statistics(vcf_file, rec_map_file, pop_file, pops, r_bins, bp_bins,
                 print(f"Loading {vcf_file} ...")
             # use_genotypes=False is the user's declaration that the data are
             # phased; load accordingly so the warning does not fire.
-            hm = HaplotypeMatrix.from_vcf(vcf_file, phased=True,
-                                         accessible_bed=accessible_bed)
+            try:
+                hm = HaplotypeMatrix.from_vcf(vcf_file, phased=True,
+                                             accessible_bed=accessible_bed)
+            except ValueError as e:
+                if "has variants on" not in str(e):
+                    raise
+                # HaplotypeMatrix.from_vcf's own message points to its
+                # region= kwarg, which compute_ld_statistics has no way
+                # to pass through.
+                raise ValueError(
+                    f"{str(e).split(';', 1)[0]}; compute_ld_statistics has "
+                    "no region= of its own to select one. Subset the VCF "
+                    f"first (e.g. `bcftools view -r <contig> {vcf_file} > "
+                    "sub.vcf.gz`), or load a HaplotypeMatrix with region= "
+                    "yourself and pass it as haplotype_matrix=."
+                ) from None
             hm.load_pop_file(pop_file, pops=pops)
             hm.transfer_to_gpu()
         mat = hm
